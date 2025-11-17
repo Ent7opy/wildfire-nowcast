@@ -42,3 +42,7 @@ We use **squash merges** into `main`:
   - `wn-7: implement FIRMS ingestion pipeline`
 
 This keeps `main` history linear, with one commit per issue, and makes it easy to track what changed for each ticket.
+
+## Development environment
+
+Use Python 3.11.x (aligned with `.python-version`) and `uv` for dependency management. See [docs/dev-python-env.md](docs/dev-python-env.md) for the exact commands to create `.venv`, install deps, and run the hello-world API and UI.

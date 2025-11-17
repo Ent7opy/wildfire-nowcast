@@ -1,0 +1,11 @@
+[project]
+name = "wildfire-nowcast-ml"
+version = "0.1.0"
+description = "ML & data utilities for Wildfire Nowcast & Forecast."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy>=1.26.0,<2.0",
+    "pandas>=2.1.0,<3.0",
+    "xarray>=2024.4.0,<2025.0",
+]
+
