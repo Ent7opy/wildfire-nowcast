@@ -1,0 +1,72 @@
+services:
+  api:
+    build:
+      context: ./api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app/api:delegated
+    environment:
+      APP_ENV: dev
+      WATCHFILES_FORCE_POLLING: "true"
+      UVICORN_RELOAD_DIRS: /app/api
+      POSTGRES_HOST: db
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-wildfire}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wildfire}
+      POSTGRES_DB: ${POSTGRES_DB:-wildfire}
+      REDIS_HOST: redis
+      REDIS_PORT: ${REDIS_PORT:-6379}
+    depends_on:
+      - db
+      - redis
+
+  ui:
+    build:
+      context: ./ui
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./ui:/app/ui:delegated
+    environment:
+      APP_ENV: dev
+      API_BASE_URL: http://api:8000
+      STREAMLIT_SERVER_RUN_ON_SAVE: "true"
+    depends_on:
+      - api
+
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wildfire}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wildfire}
+      POSTGRES_DB: ${POSTGRES_DB:-wildfire}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wildfire}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:
+  redis_data:
+
