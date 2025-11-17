@@ -270,6 +270,8 @@ This repository standardizes on **Python 3.11.x** (see `.python-version` at the 
 
 Before running these commands, follow the setup steps in [docs/dev-python-env.md](docs/dev-python-env.md) so Python 3.11.x and `uv` are installed consistently across systems. Both workflows rely on the documented `uv` commands; refer to the same doc for ML/ingest quickstarts and CI guidance.
 
+For a reproducible local stack (API, UI, Postgres+PostGIS, Redis) that matches the Docker Compose setup, see [infra/README.md](infra/README.md).
+
 ---
 
 ## 8. Work Structure: Epics & Labels

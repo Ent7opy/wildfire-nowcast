@@ -45,4 +45,4 @@ This keeps `main` history linear, with one commit per issue, and makes it easy t
 
 ## Development environment
 
-Use Python 3.11.x (aligned with `.python-version`) and `uv` for dependency management. See [docs/dev-python-env.md](docs/dev-python-env.md) for the exact commands to create `.venv`, install deps, and run the hello-world API and UI.
+Use Python 3.11.x (aligned with `.python-version`) and `uv` for dependency management. See [docs/dev-python-env.md](docs/dev-python-env.md) for the exact commands to create `.venv`, install deps, and run the hello-world API and UI. For the single-command Docker stack (API + UI + Postgres/PostGIS + Redis), follow the instructions in [infra/README.md](infra/README.md).
