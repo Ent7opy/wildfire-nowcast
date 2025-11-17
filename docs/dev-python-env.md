@@ -50,6 +50,21 @@ Do not commit `.venv/` — this directory is local only.
    ```
 3. Visit `http://localhost:8000/health` to see `{"status": "ok"}`.
 
+### Verifying the API surface
+
+Once the server is running, a quick smoke test is to hit the two builtin status endpoints:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/version
+```
+
+The `/version` endpoint returns the configured app version, git commit (when available), and environment. These endpoints exist in both the host workflow and the Docker Compose stack, so the same requests validate each runtime.
+
+### Adding new API routes
+
+New FastAPI routes belong under the `api/routes/` package. Each module should expose an `APIRouter` and be wired into `api/main.py` with `app.include_router(...)`. Domain-specific routers (e.g., `api/routes/fires.py`) can later register their own prefixes and tags while the `api/routes/internal.py` router keeps internal/operational endpoints centralized.
+
 ### UI
 
 1. Sync dependencies:
