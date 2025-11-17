@@ -20,7 +20,7 @@ def render_sidebar() -> str:
         "Select time range",
         options=TIME_WINDOW_OPTIONS,
         index=get_time_window_index(st.session_state.time_window),
-        key="time_window_select"
+        key="time_window"
     )
 
     st.divider()
