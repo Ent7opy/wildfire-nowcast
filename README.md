@@ -248,6 +248,28 @@ This repository is organized into top-level directories that separate concerns:
 
 For a quick overview, see [PROJECT.md](PROJECT.md). Each directory may contain its own README, requirements, and configuration files as components are developed.
 
+## 8. Development environment
+
+This repository standardizes on **Python 3.11.x** (see `.python-version` at the repo root) and uses [`uv`](https://pypi.org/project/uv/) for dependency and virtual environment management. The detailed workflow for `api/`, `ui/`, `ml/`, and the shared `ingest` tooling is documented in [docs/dev-python-env.md](docs/dev-python-env.md).
+
+### Quickstart
+
+1. **Run the API hello world**
+   ```bash
+   cd api
+   uv sync
+   uv run uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+
+2. **Run the UI hello world**
+   ```bash
+   cd ui
+   uv sync
+   uv run streamlit run app.py
+   ```
+
+Before running these commands, follow the setup steps in [docs/dev-python-env.md](docs/dev-python-env.md) so Python 3.11.x and `uv` are installed consistently across systems. Both workflows rely on the documented `uv` commands; refer to the same doc for ML/ingest quickstarts and CI guidance.
+
 ---
 
 ## 8. Work Structure: Epics & Labels

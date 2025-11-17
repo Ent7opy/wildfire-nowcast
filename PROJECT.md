@@ -20,3 +20,11 @@ This repository is organized into top-level directories that separate concerns:
 
 Each directory may contain its own README, requirements, and configuration files as components are developed.
 
+## Development environment
+
+This project targets Python **3.11.x** (see `.python-version`) and uses `uv` to manage dependencies in `api/`, `ui/`, and `ml/`. Refer to [docs/dev-python-env.md](docs/dev-python-env.md) for the canonical setup steps and quickstart commands.
+
+## Development environment
+
+This project targets Python 3.11.9 (see `.python-version`) and uses `uv` to manage dependencies in `api/`, `ui/`, and `ml/`. Refer to [docs/dev-python-env.md](docs/dev-python-env.md) for the canonical setup steps and quickstart commands.
+
