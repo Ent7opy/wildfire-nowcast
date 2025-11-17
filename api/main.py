@@ -1,10 +1,9 @@
 from fastapi import FastAPI
 
-app = FastAPI(title="Wildfire Nowcast API", version="0.1.0")
+from .config import settings
+from .routes import internal_router
 
+app = FastAPI(title=settings.app_name, version=settings.version)
 
-@app.get("/health", tags=["internal"])
-async def healthcheck():
-    """Simple health endpoint used by local dev and readiness checks."""
-    return {"status": "ok"}
+app.include_router(internal_router)
 
