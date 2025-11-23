@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint clean
+.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision
 
 help: ## Show this help message
 	@echo "Available commands:"
@@ -40,4 +40,21 @@ clean: ## Clean temporary files
 	find . -type d -name ".pytest_cache" -exec rm -r {} + 2>/dev/null || true
 	find . -type d -name ".mypy_cache" -exec rm -r {} + 2>/dev/null || true
 	@echo "Clean complete."
+
+db-up: ## Start the database service
+	@echo "Starting database service..."
+	docker compose up db -d
+
+db-down: ## Stop the database service
+	@echo "Stopping database service..."
+	docker compose stop db
+
+migrate: ## Run database migrations
+	@echo "Running database migrations..."
+	cd api && uv run alembic upgrade head
+
+revision: ## Create a new migration revision (usage: make revision msg="description")
+	@echo "Creating new migration revision..."
+	$(if $(msg),,$(error Please provide a message with msg='your message'))
+	cd api && uv run alembic revision -m "$(msg)"
 
