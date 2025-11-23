@@ -1,395 +1,90 @@
-# WILDFIRE_NOWCAST_101
+## Wildfire Nowcast & Forecast
 
-> **Read this first** before working on any task in this repo (human or AI).
+**Wildfire Nowcast & Forecast** is a small Python project to **watch active wildfires on a map** and eventually **predict short‑term spread (24–72 hours)** using open data (satellites, weather, terrain) and ML.
 
-This document is the **source-of-truth overview** for the Wildfire Nowcast & Forecast project.  
-It defines what we are building, for whom, with what data and stack, and how work in this repo should be structured.
+Right now the repo has:
+- **`api/`** – FastAPI backend with health/version endpoints and a Postgres/PostGIS connection wired up.
+- **`ui/`** – Streamlit map UI with placeholder layers (fires, forecast, risk) and simple controls.
+- **`ml/`** – Placeholder Python project for future models and experiments.
+- **`ingest/`** – Reserved for data ingest pipelines (FIRMS, weather, terrain, etc.).
+- **`infra/`** – Docker Compose and infra docs for running the full stack locally.
 
----
-
-## 1. Project in One Paragraph
-
-**Wildfire Nowcast & Forecast** is an **AI-first web application** for monitoring active wildfires and predicting short-term spread (roughly **24–72 hours**) using **open satellite data + weather + terrain + ML**.
-
-The app should let users:
-- See **recent active fires** on a map.
-- Inspect fires in context (time history, terrain, local weather).
-- View **probabilistic spread forecasts** with clear uncertainty.
-- Explore **risk maps** and simple history.
-- Get **short natural-language summaries** for a selected area.
-
-Target users: analysts, journalists, NGOs, and operational teams who need a **lightweight but serious** tool, not a toy demo.
-
-The project is a **3-month side project** for a small team (≈3–4 people), so **simplicity and focus** matter.
+If you want the deep product/ML vision and original longform overview, see `docs/WILDFIRE_NOWCAST_101.md`.
 
 ---
 
-## 2. Core User Capabilities
+## What the app will do (high level)
 
-At a high level, the app should support:
+The goal is a **map‑first web app** where users can:
+- Browse **recent fires** worldwide.
+- Click a fire/area to see **context** (time history, terrain, weather).
+- Toggle **forecast** and **risk** layers for the next 1–3 days.
+- Get a short **text summary** for a selected area, driven by model outputs.
 
-1. **Explore the map**
-   - Pan/zoom around a world map.
-   - Filter fires by **time window** (e.g. last 6–48h).
-   - See active fires as points or clusters.
-
-2. **Inspect a specific fire / cluster**
-   - Click to see:
-     - First/last detection time.
-     - Confidence / brightness / sensor.
-     - Simple recent history.
-   - Show **local context**: wind, humidity, temperature, terrain slope/elevation, maybe land cover.
-
-3. **View AI forecast (24–72h)**
-   - Toggle forecast overlays.
-   - View spread as **probability rasters / contours** at multiple horizons (T+6/12/24/48/72h).
-   - Show timestamps (when forecast was run, horizon) and an **uncertainty legend**.
-
-4. **Add context**
-   - Optional layers:
-     - Population density.
-     - Vegetation / land cover.
-     - Roads / infrastructure.
-   - At least rough visual impact context; simple metrics are a plus.
-
-5. **Look at history and risk**
-   - Historical fire patterns for a region (counts, simple charts, “season replay”).
-   - **Fire-risk heatmap**: areas where new fires are more likely given **current weather and fuels**.
-
-6. **Focused AI summary (LLM)**
-   - User draws or selects an **Area of Interest (AOI)**.
-   - System returns a **1–2 paragraph summary**:
-     - Current situation.
-     - Likely spread (24–72h).
-     - Confidence level & key drivers (wind, slope, dryness).
-     - Optionally population / infrastructure context.
-   - Summary must be **tied to numeric outputs**, not hallucinated.
-
-7. **Export & share**
-   - Export:
-     - **PNG** of current map view (with legend + timestamp).
-     - **CSV** of fire points / metrics in current filter/bbox.
-     - **GeoJSON** of forecast contours / AOIs.
-   - Optional: shareable links or simple API integration.
+The target users are analysts, journalists, NGOs, and operations teams who need a **simple but serious** tool, not a toy demo.
 
 ---
 
-## 3. Data Sources & Roles (What We Use, Why)
+## Quickstart (Python dev workflow)
 
-### 3.1 Core Data
+We standardize on **Python 3.11.x** and use [`uv`](https://pypi.org/project/uv/) in each subproject. The short version:
 
-- **Fire detections**
-  - Source: **NASA FIRMS** (e.g. VIIRS, MODIS).
-  - Role: ground truth for **where fires are now / recently**.
-  - Fields: lat, lon, timestamp, sensor, confidence, brightness-like metrics.
+- **API (FastAPI)**
+  ```bash
+  cd api
+  uv sync
+  uv run uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+  # then hit http://localhost:8000/health and /version
+  ```
 
-- **Weather**
-  - Short-term forecast (0–72h):
-    - Wind speed/direction, relative humidity, temperature.
-    - Optional: precipitation or dryness proxies.
-  - Role: **main driver** for forward spread.
-  - Additional reanalysis (e.g. ERA5):
-    - For **training**, evaluating, and bias-correcting forecasts.
+- **UI (Streamlit)**
+  ```bash
+  cd ui
+  uv sync
+  uv run streamlit run app.py
+  # then open the printed URL, usually http://localhost:8501/
+  ```
 
-- **Terrain**
-  - Source: **SRTM or similar DEM**.
-  - Role:
-    - Derive **slope** and **aspect** (slope direction).
-    - Influence spread (fires move faster upslope, etc.).
-
-### 3.2 Optional Context Layers
-
-- Land cover / vegetation type.
-- Population density.
-- Roads / infrastructure (e.g. from OSM).
-
-Role: **context for risk and impact**, not required for the core spread model.
+For more on `uv`, venvs, and CI conventions, see `docs/dev-python-env.md`.
 
 ---
 
-## 4. AI / ML Components (What “AI-first” Means Here)
+## Quickstart (Docker Compose stack)
 
-AI is not a garnish. It sits in the **core pipeline**.
+If you want the whole stack (API + UI + Postgres/PostGIS + Redis) with one command:
 
-Planned components:
+```bash
+docker compose up --build
+```
 
-1. **Hotspot denoiser (classification model)**
-   - Input: FIRMS detections + local context (spectral fields, neighborhood density, time pattern, maybe terrain/weather).
-   - Output: `P(real_fire)` vs `P(artefact/noise)`.
-   - Use: filter or downweight noisy detections before spread modeling.
+Key endpoints:
+- **API**: `http://localhost:8000/health`
+- **UI**: `http://localhost:8501/`
+- **Postgres**: `localhost:5432` (PostGIS enabled)
+- **Redis**: `localhost:6379`
 
-2. **Spread model (24–72h forecast)**
-   - Inputs:
-     - Clustered fire detections (local regions, e.g. 10×10 km).
-     - Weather forecast sequence (wind, RH, temperature).
-     - Terrain slope + aspect.
-   - Output:
-     - **Probability of fire presence** on a local grid for T+6/12/24/48/72h.
-     - Uncertainty estimates (ensembles / Monte Carlo).
-
-3. **Probability calibration**
-   - Learned from historical data:
-     - When the model says **30%**, events should occur ≈30% of the time.
-   - Output: calibration functions that post-process model probabilities.
-
-4. **Weather bias correction**
-   - Compare forecast weather to reanalysis/ground truth historically.
-   - Learn **local corrections** for wind, humidity, temperature, etc.
-   - Apply corrections to live forecasts to reduce systematic biases.
-
-5. **Fire-risk index (new-fire probability)**
-   - Combine:
-     - Static: vegetation, slope, historical fire frequency.
-     - Dynamic: temperature, RH, wind, recent rain.
-   - Output: normalized index / probability that **new fires** might start or spread more easily today.
-
-6. **LLM-based summaries (application-level AI)**
-   - Not the forecasting model itself.
-   - Takes structured outputs and generates:
-     - Human-readable summary of current fires + spread + risk.
-     - Explanation of **drivers and confidence**, using only provided data.
+More details and environment variables are in `infra/README.md`.
 
 ---
 
-## 5. System Flow (Conceptual Pipeline)
+## Architecture at a glance
 
-**Ingest → Validate/Denoise → Feature Build → Forecast → Calibrate → Store/Serve → UI & Summaries**
+High‑level flow:
+- **UI (`ui/`)** – Streamlit app using Folium to render a map and collect user input (time window, layer toggles, clicks).
+- **API (`api/`)** – FastAPI app that will expose fire, forecast, and risk endpoints; currently only internal health/version routes are implemented.
+- **Data & storage** – Postgres + PostGIS for vector data; raster storage and ML model outputs will be added later.
+- **ML & ingest (`ml/`, `ingest/`)** – Planned components for denoising detections, running spread models, and building risk indices.
 
-1. **Data ingest**
-   - Periodically pull:
-     - FIRMS detections.
-     - Weather forecasts (0–72h).
-     - Terrain (static DEM).
-   - Store in internal formats:
-     - Rasters: COG/Zarr/xarray.
-     - Vectors: Postgres/PostGIS.
-
-2. **Validation & denoising**
-   - Run hotspot denoiser + basic QC.
-   - Mark or drop suspicious points.
-
-3. **Feature building**
-   - Reproject to a **common grid**.
-   - Derive slope/aspect and other terrain metrics.
-   - Extract forecast weather features per time step.
-   - Aggregate detections into **fire clusters/ignition areas**.
-
-4. **AI forecasting**
-   - For each active cluster / AOI:
-     - Run spread model over 24–72h horizon.
-     - Use bias-corrected weather fields.
-     - Optionally generate ensembles to estimate uncertainty.
-
-5. **Calibration & product generation**
-   - Apply probability calibration.
-   - Produce:
-     - Probability rasters per time step.
-     - Probability contours / iso-lines for chosen thresholds.
-
-6. **Storage & tiling**
-   - Store rasters as **COGs/Zarr** suitable for tile serving.
-   - Store vectors (contours, AOIs, etc.) in **PostGIS**.
-
-7. **Serving (API layer)**
-   - Endpoints for:
-     - Fires in bbox/time window.
-     - Forecast products for AOI or cluster.
-     - Risk maps, historical metrics.
-     - Exports (PNG/CSV/GeoJSON).
-     - AOI text summaries.
-
-8. **UI (web app)**
-   - Map-based interface (Streamlit MVP).
-   - Tools: search, filters, layer toggles, click-to-inspect, history, exports.
-   - Button/flow for **“Summarize this area”**.
+For a short architecture + data‑flow walkthrough (including future ML pieces), see `docs/architecture.md`.
 
 ---
 
-## 6. Planned Tech Stack (Initial, Not Dogma)
+## Working on the repo
 
-> Agents: **do not change stack choices without an explicit issue / human approval.**  
-> Prefer integrating with what already exists.
+- **Issue organization** – Use simple labels by type (`type: feature`, `type: bug`, `type: docs`, etc.) and area (`area: api-backend`, `area: ui-map`, `area: ml-spread`, `area: ingest`, `area: infra-dev`, …) when filing work.
+- **Docs** – Keep this `README.md` short. Put deeper explanations in `docs/` (for example `docs/architecture.md`, `docs/dev-python-env.md`, `docs/db-migrations.md`, `docs/WILDFIRE_NOWCAST_101.md`).
+- **Testing & quality** – When adding non‑trivial code, add or update tests where it makes sense and update relevant docs.
 
-- **Language:** Python.
-- **Backend API:** FastAPI.
-- **UI (MVP):** Streamlit.
-- **Database:** Postgres + PostGIS.
-- **Caching & background work:** Redis + worker queue (RQ / Celery / similar).
-- **ML/AI libraries:**
-  - scikit-learn / simple gradient boosting, plus PyTorch-like if needed.
-  - xarray + dask for gridded climate/forecast data.
-  - External LLM API for AOI summaries.
-- **Geospatial:**
-  - Rasterio / GDAL for rasters and DEM handling.
-  - GeoPandas + Shapely for vector data and AOIs.
-- **Map serving:**
-  - Tile server like **TiTiler** for raster COG/Zarr tiles.
-  - Vector layers served via API from PostGIS.
-- **Packaging / deployment:**
-  - Docker / Docker Compose.
+If you’re unsure how a change fits into the bigger picture, start with `docs/architecture.md` and then check the open issues/epics.
 
-Stack is **tentative**, but any deviation should be **intentional and discussed**, not ad-hoc.
 
----
-
-## 7. Repository Structure
-
-This repository is organized into top-level directories that separate concerns:
-
-- **`api/`** – FastAPI backend application providing REST endpoints for fires, forecasts, risk maps, historical data, and AOI summaries.
-
-- **`ui/`** – Streamlit web application providing the map-based interface, layer controls, filters, inspection tools, and summary generation UI.
-
-- **`ml/`** – Machine learning models, training scripts, and experiments. Includes hotspot denoiser, spread forecasting model, probability calibration, weather bias correction, and fire-risk index components.
-
-- **`ingest/`** – Data ingestion pipelines for pulling and processing FIRMS fire detections, weather forecasts, terrain data (DEM), and optional context layers (land cover, population, infrastructure).
-
-- **`infra/`** – Infrastructure configuration including Docker/Docker Compose files, deployment scripts, CI/CD configs, and operational tooling.
-
-For a quick overview, see [PROJECT.md](PROJECT.md). Each directory may contain its own README, requirements, and configuration files as components are developed.
-
-## 8. Development environment
-
-This repository standardizes on **Python 3.11.x** (see `.python-version` at the repo root) and uses [`uv`](https://pypi.org/project/uv/) for dependency and virtual environment management. The detailed workflow for `api/`, `ui/`, `ml/`, and the shared `ingest` tooling is documented in [docs/dev-python-env.md](docs/dev-python-env.md).
-
-### Quickstart
-
-1. **Run the API hello world**
-   ```bash
-   cd api
-   uv sync
-   uv run uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-   ```
-
-2. **Run the UI hello world**
-   ```bash
-   cd ui
-   uv sync
-   uv run streamlit run app.py
-   ```
-
-Before running these commands, follow the setup steps in [docs/dev-python-env.md](docs/dev-python-env.md) so Python 3.11.x and `uv` are installed consistently across systems. Both workflows rely on the documented `uv` commands; refer to the same doc for ML/ingest quickstarts and CI guidance.
-
-For a reproducible local stack (API, UI, Postgres+PostGIS, Redis) that matches the Docker Compose setup, see [infra/README.md](infra/README.md).
-
----
-
-## 8. Work Structure: Epics & Labels
-
-### 8.1 Epics (high-level)
-
-Current high-level epics (each is an issue of `type: epic`):
-
-1. Project Setup & Architecture  
-2. Core Data Ingestion & Storage (FIRMS, Weather, Terrain)  
-3. Terrain & Grid Preprocessing  
-4. Hotspot Denoiser (ML v1)  
-5. Spread Forecasting Model (24–72h v1)  
-6. Probability Calibration & Weather Bias Correction  
-7. Spatial Serving Layer (API + Tiles)  
-8. Web App MVP: Fires Map & Inspection  
-9. Forecast Visualization, Risk Maps & Exports  
-10. Historical Explorer & Evaluation Views  
-11. LLM AOI Summaries & Explainability  
-12. Background Workers, Caching & Performance  
-13. Quality, Evaluation & Documentation  
-
-Each epic has a checklist that links to smaller issues.
-
-### 8.2 Labels
-
-We intentionally keep labels small and consistent.
-
-**Type labels** (exactly one per issue):
-
-- `type: epic`
-- `type: feature`
-- `type: task`
-- `type: bug`
-- `type: spike`
-- `type: docs`
-
-**Area labels** (one or more per issue):
-
-- `area: infra-dev`      – repo, tooling, Docker, CI, general infra
-- `area: ingest`         – FIRMS, weather, DEM, data pipelines
-- `area: data-store`     – Postgres/PostGIS, raster storage
-- `area: terrain-grid`   – DEM, slope/aspect, grid definition
-- `area: ml-denoiser`    – hotspot classification
-- `area: ml-spread`      – spread model, calibration, bias correction
-- `area: risk-index`     – new-fire probability, risk maps
-- `area: api-backend`    – FastAPI endpoints, schemas, routing
-- `area: tiles`          – tile server, raster/vector tiles
-- `area: ui-map`         – map UI, layers, filters, interactions
-- `area: ui-summary`     – AOI summary UI + LLM integration
-
-Agents should **apply or respect these labels** when suggesting or modifying issues.
-
----
-
-## 9. Guidelines for AI Agents Working on This Repo
-
-This section is specifically for any **AI agent** consuming this file.
-
-1. **Read before generating code**
-   - Check:
-     - The issue description.
-     - Linked epic.
-     - This `WILDFIRE_NOWCAST_101.md`.
-   - Make sure the change fits the overall architecture and stack.
-
-2. **Stay within the stack**
-   - Use the tools listed in §5.
-   - Do not introduce new heavy dependencies (frameworks, databases, services) unless the issue explicitly asks for it.
-   - Prefer minimal, composable utilities over big “magic” libraries.
-
-3. **Don’t break the pipeline concept**
-   - Keep the main flow as:
-     - Ingest → Denoise → Features → Forecast → Calibrate → Store/Serve → UI/Summaries.
-   - New code should slot into this flow, not work around it.
-
-4. **Be explicit about assumptions**
-   - If a requirement is ambiguous, **call it out in comments or PR description**.
-   - Prefer simple, testable decisions over clever but opaque solutions.
-
-5. **Testing and docs**
-   - For any non-trivial change:
-     - Add or update tests where reasonable.
-     - Update relevant docs (README, architecture notes, or module docstrings).
-
-6. **Uncertainty & honesty**
-   - This project is about **clear uncertainty communication**:
-     - Don’t claim deterministic accuracy where we only have probabilities.
-     - When adding UI/summary logic, always surface uncertainty and assumptions.
-
-7. **Performance and scale**
-   - This is a **side project**, not a hyperscale product.
-   - Prefer **clarity and maintainability** over premature optimization.
-   - But avoid obviously pathological patterns (e.g. per-tile DB queries when batching is easy).
-
----
-
-## 10. Non-goals / Scope Boundaries
-
-To keep the project focused:
-
-- We are **not** building a full incident management system (no tasking, SMS alerts, etc.).
-- We are **not** solving long-term fire behavior (multi-week growth, full fuel models).
-- We are **not** doing closed or proprietary data sources unless explicitly added.
-- We are **not** promising operational-grade reliability; this is a serious **but experimental** tool.
-
----
-
-## 11. Quick Glossary
-
-- **Nowcast** – Best estimate of the current state (fires right now).
-- **Forecast** – Predicted future fire spread (24–72h).
-- **AOI (Area of Interest)** – User-selected region (drawn polygon or pre-defined box).
-- **COG (Cloud-Optimized GeoTIFF)** – Raster format optimized for HTTP range requests and tiling.
-- **Reanalysis** – Consistent historical climate dataset (e.g. ERA5) used for training/evaluation.
-- **Calibration** – Adjusting predicted probabilities so they match observed frequencies.
-
----
-
-If something you’re about to build or change **contradicts** this document,  
-it probably needs a discussion and an explicit issue first.

@@ -1,30 +1,26 @@
-# Project Structure
+## Project structure
 
-**Wildfire Nowcast & Forecast** is an AI-first web application for monitoring active wildfires and predicting short-term spread (roughly 24–72 hours) using open satellite data, weather, terrain, and machine learning. The app enables users to explore active fires on a map, inspect fires in context, view probabilistic spread forecasts with uncertainty, explore risk maps, and get short natural-language summaries for selected areas.
+**Wildfire Nowcast & Forecast** is an AI‑first web app for monitoring active wildfires and short‑term spread using open satellite, weather, and terrain data.
 
-For detailed project information, architecture, and guidelines, see [README.md](README.md).
+For a friendly overview and quickstart, see `README.md`. For deeper architecture and pipeline notes, see `docs/architecture.md` and `docs/WILDFIRE_NOWCAST_101.md`.
 
-## Repository Structure
+---
 
-This repository is organized into top-level directories that separate concerns:
+## Repository layout
 
-- **`api/`** – FastAPI backend application providing REST endpoints for fires, forecasts, risk maps, historical data, and AOI summaries.
+- **`api/`** – FastAPI backend (currently health/version + DB wiring; future fire/forecast/risk endpoints).
+- **`ui/`** – Streamlit UI with a Folium map, sidebar controls, and placeholder layers.
+- **`ml/`** – Python project for models, training scripts, and experiments.
+- **`ingest/`** – Planned data ingestion pipelines (FIRMS, weather, DEM, context layers).
+- **`infra/`** – Docker Compose stack and infra docs (Postgres+PostGIS, Redis, API, UI).
 
-- **`ui/`** – Streamlit web application providing the map-based interface, layer controls, filters, inspection tools, and summary generation UI.
+Each area can grow its own README and configs as it matures.
 
-- **`ml/`** – Machine learning models, training scripts, and experiments. Includes hotspot denoiser, spread forecasting model, probability calibration, weather bias correction, and fire-risk index components.
+---
 
-- **`ingest/`** – Data ingestion pipelines for pulling and processing FIRMS fire detections, weather forecasts, terrain data (DEM), and optional context layers (land cover, population, infrastructure).
+## Development environment (short version)
 
-- **`infra/`** – Infrastructure configuration including Docker/Docker Compose files, deployment scripts, CI/CD configs, and operational tooling.
-
-Each directory may contain its own README, requirements, and configuration files as components are developed.
-
-## Development environment
-
-This project targets Python **3.11.x** (see `.python-version`) and uses `uv` to manage dependencies in `api/`, `ui/`, and `ml/`. Refer to [docs/dev-python-env.md](docs/dev-python-env.md) for the canonical setup steps and quickstart commands.
-
-## Development environment
-
-This project targets Python 3.11.9 (see `.python-version`) and uses `uv` to manage dependencies in `api/`, `ui/`, and `ml/`. Refer to [docs/dev-python-env.md](docs/dev-python-env.md) for the canonical setup steps and quickstart commands.
+- Python **3.11.x** (pinned in `.python-version`).
+- Dependencies managed with `uv` in `api/`, `ui/`, and `ml/`.
+- Canonical setup and examples live in `docs/dev-python-env.md`.
 
