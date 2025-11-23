@@ -51,10 +51,74 @@ These values can be overridden by defining them in a `.env` file (or your shell)
 | `API_BASE_URL` | Service name used by the UI | `http://api:8000` |
 | `APP_ENV` | Shared indicator for dev vs prod behaviors | `dev` |
 
+## Database & Migrations
+
+The application uses PostgreSQL with PostGIS for spatial data storage. Database schema changes are managed through Alembic migrations.
+
+### Starting the Database
+
+To start just the database service:
+
+```bash
+make db-up
+# or: docker compose up db -d
+```
+
+To stop the database:
+
+```bash
+make db-down
+# or: docker compose down db
+```
+
+### Running Migrations
+
+After starting the database, run migrations to set up the initial schema:
+
+```bash
+make migrate
+# or: cd api && uv run alembic upgrade head
+```
+
+This will:
+- Enable the PostGIS extension
+- Create a `schema_meta` table for tracking schema metadata
+- Apply any pending migrations
+
+### Creating New Migrations
+
+When you need to make schema changes:
+
+1. Modify your database models or write raw SQL in migration files
+2. Generate a new migration:
+
+```bash
+make revision msg="add user table"
+# or: cd api && uv run alembic revision -m "add user table"
+```
+
+3. Edit the generated migration file in `api/migrations/versions/`
+4. Run the migration: `make migrate`
+
+### Database Connection
+
+The API connects to PostgreSQL using these default environment variables:
+- `POSTGRES_HOST=db` (service name in Docker)
+- `POSTGRES_PORT=5432`
+- `POSTGRES_USER=wildfire`
+- `POSTGRES_PASSWORD=wildfire`
+- `POSTGRES_DB=wildfire`
+
+Override these in a `.env` file for custom configurations.
+
+### Local Development
+
+For local development outside Docker, set `POSTGRES_HOST=localhost` and ensure PostgreSQL is running on your host machine.
+
 ## Notes
 
 - Both the `api` and `ui` images install dependencies via `uv` and share the same `app/.venv` created during build.
-- The `api` service respects `UVICORN_RELOAD_DIRS=/app/api`, so code changes in `./api` reflected via the bind mount trigger FastAPI’s `--reload`.
+- The `api` service respects `UVICORN_RELOAD_DIRS=/app/api`, so code changes in `./api` reflected via the bind mount trigger FastAPI's `--reload`.
 - The `ui` service enables `STREAMLIT_SERVER_RUN_ON_SAVE` for rapid Streamlit feedback.
 - Postgres uses an official `postgis/postgis` image plus a named volume (`db_data`). Redis stores data in `redis_data`, keeping your cache state between restarts.
 - Use `docker compose logs -f api` (or any service name) to tail logs during development.
