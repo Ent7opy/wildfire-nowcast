@@ -3,19 +3,7 @@
 import streamlit as st
 from config.constants import TIME_WINDOW_OPTIONS
 
-# Initialize session state at module level before component imports
-if "time_window" not in st.session_state:
-    st.session_state.time_window = TIME_WINDOW_OPTIONS[0]
-if "show_fires" not in st.session_state:
-    st.session_state.show_fires = True
-if "show_forecast" not in st.session_state:
-    st.session_state.show_forecast = False
-if "show_risk" not in st.session_state:
-    st.session_state.show_risk = False
-if "last_click" not in st.session_state:
-    st.session_state.last_click = None
-
-# Import components after session state is initialized
+# Import components
 from components.sidebar import render_sidebar
 from components.map_view import render_map_view
 from components.legend import render_legend
@@ -23,8 +11,20 @@ from components.click_details import render_click_details
 
 def main() -> None:
     """Main application entry point."""
-    # Page configuration
+    # Page configuration - must be the first Streamlit command
     st.set_page_config(page_title="Wildfire Nowcast & Forecast", layout="wide")
+
+    # Initialize session state after set_page_config
+    if "time_window" not in st.session_state:
+        st.session_state.time_window = TIME_WINDOW_OPTIONS[0]
+    if "show_fires" not in st.session_state:
+        st.session_state.show_fires = True
+    if "show_forecast" not in st.session_state:
+        st.session_state.show_forecast = False
+    if "show_risk" not in st.session_state:
+        st.session_state.show_risk = False
+    if "last_click" not in st.session_state:
+        st.session_state.last_click = None
 
     # App identity - Title and subtitle
     st.title("Wildfire Nowcast & Forecast")
