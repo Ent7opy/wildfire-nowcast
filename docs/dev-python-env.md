@@ -1,8 +1,10 @@
-# Python & `uv` Development Environment
+## Python & `uv` Development Environment
 
-This repo standardizes on **Python 3.11.x** (pinned to `3.11.9` in `.python-version`) and uses `uv` for dependency management across `api/`, `ui/`, and `ml/`. `uv sync` will download the matching 3.11 interpreter automatically if your system default is newer; the `.python-version` file is the single source of truth for the patch-level constraint.
+This repo standardizes on **Python 3.11.x** (pinned in `.python-version`) and uses `uv` for dependency management across `api/`, `ui/`, and `ml/`. `uv sync` will download a matching 3.11 interpreter automatically if your system default is newer.
 
-## Prerequisites
+---
+
+## 1. Prerequisites
 
 1. Install Python 3.11 and confirm with `python --version`. The `.python-version` file shows the exact patch (e.g. `3.11.9`), but any `3.11.x` interpreter should work.
 2. Install `uv` (see https://pypi.org/project/uv/ for instructions):
@@ -12,7 +14,9 @@ This repo standardizes on **Python 3.11.x** (pinned to `3.11.9` in `.python-vers
    ```
 3. Clone the repo and `cd` into `wildfire-nowcast`.
 
-## Canonical workflow
+---
+
+## 2. Canonical workflow
 
 Each top-level project manages its own `.venv` under the directory. The pattern is identical for `api`, `ui`, and `ml`:
 
@@ -35,7 +39,9 @@ source .venv/bin/activate         # POSIX
 
 Do not commit `.venv/` — this directory is local only.
 
-## Hello-world flows
+---
+
+## 3. Hello-world flows
 
 ### API
 
@@ -89,7 +95,18 @@ New FastAPI routes belong under the `api/routes/` package. Each module should ex
 
 > **Note:** The `ingest/` code currently shares the `ml` environment. When ingest-specific dependencies become formalized, we will either extend the `ml` deps or give `ingest/` its own `pyproject.toml` and lockfile. The canonical `uv` workflow above still applies once that happens.
 
-## Testing & CI
+---
 
-CI should replicate this workflow: install Python 3.11.x, install `uv`, `cd` into each project, `uv sync`, and run `uv run <command>` for the relevant pipeline. This keeps local and CI environments in lockstep.
+## 4. Testing & CI
+
+CI should roughly:
+
+```bash
+python3 -m pip install --upgrade uv
+cd api && uv sync && uv run <tests/linters>
+cd ui  && uv sync && uv run <tests/linters>
+cd ml  && uv sync && uv run <tests/linters>
+```
+
+This mirrors the local workflow and keeps environments in lockstep.
 
