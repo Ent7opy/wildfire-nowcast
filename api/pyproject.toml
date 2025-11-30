@@ -23,7 +23,6 @@ dev = [
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-src = ["api", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
