@@ -1,0 +1,2 @@
+"""Wildfire Nowcast API package."""
+
