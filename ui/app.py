@@ -36,7 +36,7 @@ def main() -> None:
 
     # Sidebar controls
     with st.sidebar:
-        selected_time = render_sidebar()
+        render_sidebar()
 
     # Main content area - Map and indicators
     # Time window indicator

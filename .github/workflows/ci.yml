@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  api-and-ui:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project:
+          - api
+          - ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: python -m pip install --upgrade uv
+
+      - name: Sync ${{ matrix.project }} dependencies
+        working-directory: ${{ matrix.project }}
+        run: uv sync --dev
+
+      - name: Ruff ${{ matrix.project }}
+        working-directory: ${{ matrix.project }}
+        run: uv run ruff check .
+
+      - name: Pytest ${{ matrix.project }}
+        working-directory: ${{ matrix.project }}
+        run: uv run pytest
+

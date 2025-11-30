@@ -99,14 +99,30 @@ New FastAPI routes belong under the `api/routes/` package. Each module should ex
 
 ## 4. Testing & CI
 
-CI should roughly:
+GitHub Actions runs `.github/workflows/ci.yml` on every push or pull request to `master`. The workflow
+uses a simple matrix to run the same checks for `api/` and `ui/`:
+
+1. Install Python 3.11 and `uv`.
+2. `uv sync --dev` to create/update the per-project virtual environment (pulls runtime + dev deps).
+3. `uv run ruff check .` for linting.
+4. `uv run pytest` to execute the suite (`api/tests/test_health.py` exercises the FastAPI `/health`
+   endpoint, while `ui/tests/test_app_imports.py` ensures the Streamlit app imports cleanly).
+
+Running the same checks locally keeps CI green:
 
 ```bash
-python3 -m pip install --upgrade uv
-cd api && uv sync && uv run <tests/linters>
-cd ui  && uv sync && uv run <tests/linters>
-cd ml  && uv sync && uv run <tests/linters>
+# API
+cd api
+uv sync --dev
+uv run ruff check .
+uv run pytest
+
+# UI
+cd ../ui
+uv sync --dev
+uv run ruff check .
+uv run pytest
 ```
 
-This mirrors the local workflow and keeps environments in lockstep.
+Re-run these commands after touching either codebase (or before pushing) to match the CI behaviour.
 

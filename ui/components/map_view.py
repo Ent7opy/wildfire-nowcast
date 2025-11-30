@@ -3,7 +3,7 @@
 import folium
 import streamlit as st
 from streamlit_folium import st_folium
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 from config.constants import (
     DEFAULT_MAP_CENTER, DEFAULT_ZOOM_LEVEL, MAP_HEIGHT,
     PLACEHOLDER_FIRE_LOCATIONS, PLACEHOLDER_FORECAST_POLYGON, PLACEHOLDER_RISK_POLYGON

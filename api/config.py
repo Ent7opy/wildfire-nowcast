@@ -6,7 +6,7 @@ from importlib import metadata
 from pathlib import Path
 
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _get_project_version() -> str:
@@ -21,7 +21,7 @@ def _get_git_commit() -> str:
         return value
 
     repo_root = Path(__file__).resolve().parent.parent
-    if (git_dir := repo_root / ".git").exists():
+    if (repo_root / ".git").exists():
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -38,17 +38,19 @@ def _get_git_commit() -> str:
 
 
 class AppSettings(BaseSettings):
+    model_config = SettingsConfigDict(case_sensitive=False)
+
     app_name: str = "Wildfire Nowcast API"
     version: str = Field(default_factory=_get_project_version)
-    environment: str = Field(default="dev", env="APP_ENV")
-    git_commit: str = Field(default_factory=_get_git_commit, env="GIT_COMMIT")
+    environment: str = Field(default="dev", validation_alias="APP_ENV")
+    git_commit: str = Field(default_factory=_get_git_commit, validation_alias="GIT_COMMIT")
 
     # Database settings
-    postgres_host: str = Field(default="localhost", env="POSTGRES_HOST")
-    postgres_port: int = Field(default=5432, env="POSTGRES_PORT")
-    postgres_user: str = Field(default="wildfire", env="POSTGRES_USER")
-    postgres_password: str = Field(default="wildfire", env="POSTGRES_PASSWORD")
-    postgres_db: str = Field(default="wildfire", env="POSTGRES_DB")
+    postgres_host: str = Field(default="localhost", validation_alias="POSTGRES_HOST")
+    postgres_port: int = Field(default=5432, validation_alias="POSTGRES_PORT")
+    postgres_user: str = Field(default="wildfire", validation_alias="POSTGRES_USER")
+    postgres_password: str = Field(default="wildfire", validation_alias="POSTGRES_PASSWORD")
+    postgres_db: str = Field(default="wildfire", validation_alias="POSTGRES_DB")
 
     @property
     def database_url(self) -> str:
@@ -57,9 +59,6 @@ class AppSettings(BaseSettings):
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
-
-    class Config:
-        case_sensitive = False
 
 
 settings = AppSettings()
