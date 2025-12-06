@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-weather
+.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-weather ingest-dem
 
 PYTHON ?= python
 UV ?= uv
@@ -57,4 +57,7 @@ ingest-firms: ## Run NASA FIRMS ingestion (pass ARGS="--day-range 3")
 
 ingest-weather: ## Run NOAA GFS weather ingestion (pass ARGS="--run-time 2025-12-06T00:00Z")
 	$(UV) run --project ingest -m ingest.weather_ingest $(ARGS)
+
+ingest-dem: ## Run Copernicus DEM preprocessing (pass ARGS="--cog")
+	$(UV) run --project ingest -m ingest.dem_preprocess $(ARGS)
 
