@@ -2,9 +2,9 @@
 
 ### What it does
 - Stitches Copernicus GLO-30 tiles for a configured bbox.
-- Reprojects/resamples to the target CRS/resolution (default EPSG:4326, 1 km).
+- Reprojects/resamples to the canonical analysis grid (EPSG:4326, 0.01° lat/lon).
 - Writes GeoTIFF (and optional Cloud Optimized GeoTIFF).
-- Stores a `terrain_metadata` row with bbox, CRS, resolution, and raster path.
+- Stores a `terrain_metadata` row with bbox, CRS, grid definition (cell size, origin, grid shape), and raster path.
 
 ### Configuration
 - Environment variables (env-var overrides):
@@ -12,13 +12,9 @@
   - `DEM_REGION_NAME` (default: `test_region`)
   - `DEM_SOURCE` (default: `copernicus_glo30`)
   - `DEM_BBOX` (`min_lon,min_lat,max_lon,max_lat`) or individual `DEM_BBOX_*`
-  - `DEM_TARGET_CRS` (default: `4326`; accepts `EPSG:XXXX`)
-  - `DEM_TARGET_RES_M` (default: `1000`)
 - CLI overrides (take precedence when provided):
   - `--bbox MIN_LON MIN_LAT MAX_LON MAX_LAT`
   - `--region-name NAME`
-  - `--target-res-m METERS`
-  - `--target-crs EPSG`
   - `--cog` (also write COG)
 
 ### How to run
@@ -32,8 +28,8 @@
   ```
 
 ### Outputs
-- File: `data/dem/{region}/dem_{region}_epsg{crs}_{res_m}m.tif` (and `_cog.tif` if selected)
-- Metadata: row in `terrain_metadata` with region, source, bbox, CRS, resolution, and raster path.
+- File: `data/dem/{region}/dem_{region}_epsg4326_0p01deg.tif` (and `_cog.tif` if selected)
+- Metadata: row in `terrain_metadata` with region, source, bbox, CRS, grid origin, grid shape, cell size (deg), resolution_m (approx km), and raster path.
 
 ### Demo / sampling
 - Example script: `examples/demo_dem_query.py`

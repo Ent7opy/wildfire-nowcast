@@ -61,3 +61,6 @@ ingest-weather: ## Run NOAA GFS weather ingestion (pass ARGS="--run-time 2025-12
 ingest-dem: ## Run Copernicus DEM preprocessing (pass ARGS="--cog")
 	$(UV) run --project ingest -m ingest.dem_preprocess $(ARGS)
 
+smoke-grid: ## Run DEM + weather smoke check for grid alignment (pass ARGS="--bbox 5.1 35.4 6.0 36.0")
+	$(UV) run --project ingest scripts/smoke_grid_alignment.py $(ARGS)
+

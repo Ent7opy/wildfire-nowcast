@@ -20,8 +20,8 @@ payload = dto.model_dump()
 ## Weather forecast grids
 - **Source**: NOAA GFS 0.25° via `ingest.weather_ingest`.
 - **Canonical variables**: `u10`, `v10`, `t2m`, `rh2m`; optional `tp` (precipitation) when `WEATHER_INCLUDE_PRECIP=true` or `--include-precip`.
-- **Dimensions/coords**: `time`, `lat`, `lon`; plus coordinates `forecast_reference_time` (scalar) and `lead_time_hours` (aligned with `time`). Dataset is transposed to `("time", "lat", "lon")`, lat is sorted ascending, lon is wrapped to `[-180, 180]` when needed.
-- **Storage layout**: `data/weather/{model}/{YYYY}/{MM}/{DD}/{HH}/{model}_{YYYYMMDDTHHZ}_0-{horizon}h_<region>.nc` where `<region>` is `global` or `bbox_<min_lon>_<min_lat>_<max_lon>_<max_lat>`.
+- **Dimensions/coords**: `time`, `lat`, `lon`; plus coordinates `forecast_reference_time` (scalar) and `lead_time_hours` (aligned with `time`). Dataset is transposed to `("time", "lat", "lon")`, lat is sorted ascending, lon is wrapped to `[-180, 180]` when needed, and the grid is interpolated to the 0.01° EPSG:4326 analysis grid with attributes `crs`, `cell_size_deg`, `origin_lat`, `origin_lon`, `n_lat`, `n_lon`.
+- **Storage layout**: `data/weather/{model}/{YYYY}/{MM}/{DD}/{HH}/{model}_{YYYYMMDDTHHZ}_0-{horizon}h_<region>.nc` where `<region>` is `global` or `bbox_<min_lon>_<min_lat>_<max_lon>_<max_lat>`. NetCDF stores the interpolated analysis grid, not the native GFS grid.
 
 Example: opening a run and selecting a slice
 ```python
@@ -33,10 +33,10 @@ ds["u10"].sel(time=ds.time[0], lat=40.0, lon=10.0, method="nearest")
 
 ## DEM (terrain)
 - **Source**: Copernicus GLO-30 stitched via `ingest.dem_preprocess`.
-- **Target CRS/resolution**: default EPSG:4326 and 1000 m unless overridden; stored as GeoTIFF (optionally COG).
-- **File pattern**: `data/dem/{region}/dem_{region}_epsg{crs}_{resolution_m}m.tif` (or `_cog.tif` when `--cog` is used).
-- **Metadata table**: `terrain_metadata` columns `id, region_name, dem_source, crs_epsg, resolution_m, bbox (POLYGON EPSG:4326), raster_path, created_at`.
-- **Consumer dims**: raster is opened with `x`/`y` coordinates (renamed from `lon`/`lat` when needed) in `api.terrain.dem_loader`.
+- **Target CRS/resolution**: canonical EPSG:4326 with 0.01° cell size (~1 km) aligned via `GridSpec`.
+- **File pattern**: `data/dem/{region}/dem_{region}_epsg4326_0p01deg.tif` (or `_cog.tif` when `--cog` is used).
+- **Metadata table**: `terrain_metadata` columns now include grid fields: `id, region_name, dem_source, crs_epsg, resolution_m, cell_size_deg, origin_lat, origin_lon, grid_n_lat, grid_n_lon, bbox (POLYGON EPSG:4326), raster_path, created_at`.
+- **Consumer dims**: raster is opened with `x`/`y` coordinates (renamed from `lon`/`lat` when needed) in `api.terrain.dem_loader`, which can reconstruct the `GridSpec` from metadata.
 
 Example: clip the latest DEM for a region
 ```python
@@ -48,7 +48,7 @@ elev = dem.sel(x=10.0, y=40.0, method="nearest").item()
 
 ## Ingestion alignment checklist
 - FIRMS: `ingest.firms_client.parse_detection_rows` → `DetectionRecord` → `insert_detections` writes directly to the standardized columns (including `dedupe_hash`). See `../ingest/ingest_firms.md` for configuration, validation, and run commands.
-- Weather: `ingest.weather_ingest.build_weather_dataset` enforces variable names (`u10`, `v10`, `t2m`, `rh2m`, `tp`), coordinate names (`time`, `lat`, `lon`, `forecast_reference_time`, `lead_time_hours`), and NetCDF layout under `data/weather/`.
-- DEM: `ingest.dem_preprocess` outputs GeoTIFF/COG using the filename pattern above and stores bbox/CRS/resolution in `terrain_metadata`; `api.terrain.dem_loader` exposes clipped `x`/`y` rasters for downstream use.
+- Weather: `ingest.weather_ingest` enforces canonical variable names (`u10`, `v10`, `t2m`, `rh2m`, `tp`), coordinate names (`time`, `lat`, `lon`, `forecast_reference_time`, `lead_time_hours`), and NetCDF layout under `data/weather/`, and it interpolates onto the shared 0.01° EPSG:4326 grid with grid metadata attributes.
+- DEM: `ingest.dem_preprocess` outputs GeoTIFF/COG on the shared 0.01° EPSG:4326 grid using the filename pattern above and stores bbox/CRS/grid metadata in `terrain_metadata`; `api.terrain.dem_loader` exposes clipped `x`/`y` rasters for downstream use.
 
 

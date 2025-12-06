@@ -11,7 +11,7 @@ from sqlalchemy import text
 from api.db import get_engine
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class TerrainMetadataCreate:
     region_name: str
     dem_source: str
@@ -19,9 +19,14 @@ class TerrainMetadataCreate:
     resolution_m: float
     bbox: tuple[float, float, float, float]
     raster_path: str
+    cell_size_deg: float | None = None
+    origin_lat: float | None = None
+    origin_lon: float | None = None
+    grid_n_lat: int | None = None
+    grid_n_lon: int | None = None
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, kw_only=True)
 class TerrainMetadata(TerrainMetadataCreate):
     id: int
     created_at: datetime
@@ -41,6 +46,11 @@ def _row_to_metadata(row: dict) -> TerrainMetadata:
             float(row["bbox_max_lat"]),
         ),
         raster_path=row["raster_path"],
+        cell_size_deg=(float(row["cell_size_deg"]) if row.get("cell_size_deg") is not None else None),
+        origin_lat=(float(row["origin_lat"]) if row.get("origin_lat") is not None else None),
+        origin_lon=(float(row["origin_lon"]) if row.get("origin_lon") is not None else None),
+        grid_n_lat=(int(row["grid_n_lat"]) if row.get("grid_n_lat") is not None else None),
+        grid_n_lon=(int(row["grid_n_lon"]) if row.get("grid_n_lon") is not None else None),
         created_at=row["created_at"],
     )
 
@@ -55,7 +65,12 @@ def insert_terrain_metadata(metadata: TerrainMetadataCreate) -> TerrainMetadata:
             crs_epsg,
             resolution_m,
             bbox,
-            raster_path
+            raster_path,
+            cell_size_deg,
+            origin_lat,
+            origin_lon,
+            grid_n_lat,
+            grid_n_lon
         )
         VALUES (
             :region_name,
@@ -63,7 +78,12 @@ def insert_terrain_metadata(metadata: TerrainMetadataCreate) -> TerrainMetadata:
             :crs_epsg,
             :resolution_m,
             ST_SetSRID(ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat), 4326),
-            :raster_path
+            :raster_path,
+            :cell_size_deg,
+            :origin_lat,
+            :origin_lon,
+            :grid_n_lat,
+            :grid_n_lon
         )
         RETURNING
             id,
@@ -72,6 +92,11 @@ def insert_terrain_metadata(metadata: TerrainMetadataCreate) -> TerrainMetadata:
             crs_epsg,
             resolution_m,
             raster_path,
+            cell_size_deg,
+            origin_lat,
+            origin_lon,
+            grid_n_lat,
+            grid_n_lon,
             created_at,
             ST_XMin(bbox) AS bbox_min_lon,
             ST_YMin(bbox) AS bbox_min_lat,
@@ -94,6 +119,11 @@ def insert_terrain_metadata(metadata: TerrainMetadataCreate) -> TerrainMetadata:
                 "max_lon": bbox_max_lon,
                 "max_lat": bbox_max_lat,
                 "raster_path": metadata.raster_path,
+                "cell_size_deg": metadata.cell_size_deg,
+                "origin_lat": metadata.origin_lat,
+                "origin_lon": metadata.origin_lon,
+                "grid_n_lat": metadata.grid_n_lat,
+                "grid_n_lon": metadata.grid_n_lon,
             },
         )
         row = result.mappings().one()
@@ -111,6 +141,11 @@ def get_latest_dem_metadata_for_region(region_name: str) -> Optional[TerrainMeta
             crs_epsg,
             resolution_m,
             raster_path,
+            cell_size_deg,
+            origin_lat,
+            origin_lon,
+            grid_n_lat,
+            grid_n_lon,
             created_at,
             ST_XMin(bbox) AS bbox_min_lon,
             ST_YMin(bbox) AS bbox_min_lat,
