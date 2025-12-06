@@ -9,7 +9,7 @@ Right now the repo has:
 - **`ingest/`** – Reserved for data ingest pipelines (FIRMS, weather, terrain, etc.).
 - **`infra/`** – Docker Compose and infra docs for running the full stack locally.
 
-If you want the deep product/ML vision and original longform overview, see `docs/WILDFIRE_NOWCAST_101.md`. For a full from-scratch setup (prerequisites, `.env`, `make` workflows) see [`docs/SETUP.md`](docs/SETUP.md).
+If you want the deep product/ML vision and original longform overview, see `docs/WILDFIRE_NOWCAST_101.md`. For a full from-scratch setup (prerequisites, `.env`, `make` workflows) see [`docs/SETUP.md`](docs/SETUP.md). For navigation to all docs, start at [`docs/README.md`](docs/README.md).
 
 ---
 
@@ -38,6 +38,7 @@ make dev-ui           # http://localhost:8501
 # optional ingests
 make ingest-firms     # NASA FIRMS fire detections
 make ingest-weather   # NOAA GFS weather (pass ARGS="--run-time 2025-12-06T00:00Z")
+make ingest-dem       # Copernicus DEM preprocessing (pass ARGS="--cog")
 ```
 
 For platform specifics (.env template, Docker stack, troubleshooting), use [`docs/SETUP.md`](docs/SETUP.md).
@@ -108,6 +109,8 @@ make ingest-weather ARGS="--run-time 2025-12-06T00:00Z"
 
 FIRMS hits NASA FIRMS and logs an `ingest_batches` row per source with deduped inserts into `fire_detections`. Weather ingest downloads NOAA GFS GRIB, writes NetCDF under `data/weather/...`, and tracks runs in `weather_runs`.
 
+See `docs/ingest/data_quality.md` for the quick reference on ingest validation checks and how to read the tagged log messages.
+
 
 For a short architecture + data‑flow walkthrough (including future ML pieces), see `docs/architecture.md`. For setup specifics and day-to-day commands, see `docs/SETUP.md`.
 
@@ -116,7 +119,7 @@ For a short architecture + data‑flow walkthrough (including future ML pieces),
 ## Working on the repo
 
 - **Issue organization** – Use simple labels by type (`type: feature`, `type: bug`, `type: docs`, etc.) and area (`area: api-backend`, `area: ui-map`, `area: ml-spread`, `area: ingest`, `area: infra-dev`, …) when filing work.
-- **Docs** – Keep this `README.md` short. Put deeper explanations in `docs/` (for example `docs/architecture.md`, `docs/dev-python-env.md`, `docs/db-migrations.md`, `docs/WILDFIRE_NOWCAST_101.md`).
+- **Docs** – Keep this `README.md` short. Put deeper explanations in `docs/` (see `docs/README.md` for the map; examples: `docs/architecture.md`, `docs/dev-python-env.md`, `docs/data/db-migrations.md`, `docs/WILDFIRE_NOWCAST_101.md`).
 - **Testing & quality** – When adding non‑trivial code, add or update tests where it makes sense and update relevant docs.
 
 If you’re unsure how a change fits into the bigger picture, start with `docs/architecture.md` and then check the open issues/epics.

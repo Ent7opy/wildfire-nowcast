@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from hashlib import sha1
 from typing import Any, Dict, Mapping
 
+from pydantic import BaseModel, ConfigDict, Field
+
 
 def compute_dedupe_hash(source: str, lat: float, lon: float, acq_time: datetime) -> str:
     """Create a deterministic hash for deduplication."""
@@ -57,4 +59,48 @@ class DetectionRecord:
             "dedupe_hash": self.dedupe_hash,
         }
 
+
+class FireDetection(BaseModel):
+    """Standard API/ML representation of a fire detection record."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int | None = None
+    lat: float
+    lon: float
+    acq_time: datetime
+    sensor: str | None = None
+    source: str
+    confidence: float | None = None
+    brightness: float | None = None
+    bright_t31: float | None = None
+    frp: float | None = None
+    scan: float | None = None
+    track: float | None = None
+    raw_properties: Mapping[str, Any] = Field(default_factory=dict)
+    ingest_batch_id: int | None = None
+    dedupe_hash: str | None = None
+    denoised_score: float | None = None
+    is_noise: bool | None = None
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_record(cls, record: DetectionRecord) -> "FireDetection":
+        """Lift an ingest DetectionRecord into the standard shape."""
+        return cls(
+            lat=record.lat,
+            lon=record.lon,
+            acq_time=record.acq_time,
+            sensor=record.sensor,
+            source=record.source,
+            confidence=record.confidence,
+            brightness=record.brightness,
+            bright_t31=record.bright_t31,
+            frp=record.frp,
+            scan=record.scan,
+            track=record.track,
+            raw_properties=record.raw_properties,
+            ingest_batch_id=record.ingest_batch_id,
+            dedupe_hash=record.dedupe_hash,
+        )
 

@@ -10,10 +10,12 @@ from typing import List, Optional
 from ingest import repository
 from ingest.config import settings as ingest_settings
 from ingest.firms_client import (
+    FirmsValidationSummary,
     build_firms_url,
     fetch_csv_rows,
     parse_detection_rows,
 )
+from ingest.logging_utils import log_event
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,8 +61,9 @@ def run_firms_ingest(
                 timeout_seconds=config.request_timeout_seconds,
             )
             fetched_count = len(csv_rows)
-            detections = parse_detection_rows(csv_rows, source, batch_id)
+            detections, validation = parse_detection_rows(csv_rows, source, batch_id)
             parsed_count = len(detections)
+            _log_firms_validation(source, batch_id, validation)
             inserted = repository.insert_detections(detections)
             skipped_duplicates = parsed_count - inserted
 
@@ -105,6 +108,29 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     if not value:
         return None
     return [segment.strip() for segment in value.split(",") if segment.strip()]
+
+
+def _log_firms_validation(
+    source: str, batch_id: int, summary: FirmsValidationSummary
+) -> None:
+    """Emit a structured summary of FIRMS validation results."""
+    log_event(
+        LOGGER,
+        "firms.validation_summary",
+        "FIRMS validation summary",
+        source=source,
+        batch_id=batch_id,
+        total_rows=summary.total_rows,
+        parsed_rows=summary.parsed_rows,
+        skipped_invalid_coord=summary.skipped_invalid_coord,
+        skipped_invalid_time=summary.skipped_invalid_time,
+        missing_confidence=summary.missing_confidence,
+        confidence_out_of_range=summary.confidence_out_of_range,
+        brightness_missing=summary.brightness_missing,
+        brightness_out_of_range=summary.brightness_out_of_range,
+        sensors=dict(summary.sensor_counts),
+        confidence_buckets=dict(summary.confidence_buckets),
+    )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

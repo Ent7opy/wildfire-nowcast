@@ -1,6 +1,6 @@
 ## Fire Detection Data Schema
 
-This document describes the relational + spatial schema backing fire detections in Postgres/PostGIS. It complements `docs/db-migrations.md` and should be the reference for API, ML, and UI contributors who need to understand how detection data is stored and queried.
+This document describes the relational + spatial schema backing fire detections in Postgres/PostGIS. It complements `db-migrations.md` and should be the reference for API, ML, and UI contributors who need to understand how detection data is stored and queried.
 
 ---
 
