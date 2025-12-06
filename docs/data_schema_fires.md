@@ -16,7 +16,10 @@ Tracks each source import (e.g., FIRMS VIIRS daily file).
 | `source_uri` | `TEXT` | Original file path/URL for traceability. |
 | `started_at` / `completed_at` | `TIMESTAMPTZ` | Optional timestamps for ingest lifecycle. |
 | `status` | `VARCHAR(32)` | Optional ingest pipeline state (`pending`, `succeeded`, `failed`, ...). |
-| `record_count` | `INTEGER` | Number of detections loaded in this batch. |
+| `record_count` | `INTEGER` | Number of detections loaded in this batch (mirrors `records_inserted`). |
+| `records_fetched` | `INTEGER` | Raw CSV rows retrieved from the provider. |
+| `records_inserted` | `INTEGER` | Rows that landed in `fire_detections`. |
+| `records_skipped_duplicates` | `INTEGER` | Rows skipped because they already existed for the same source/time/location. |
 | `metadata` | `JSONB` | Free-form details (e.g., processing options, checksum). |
 | `created_at` | `TIMESTAMPTZ` | Defaults to `now()` for auditing. |
 
@@ -31,6 +34,7 @@ Stores every detection point with the key FIRMS-style attributes plus ML/ingest 
 | `acq_time` | `TIMESTAMPTZ` | Combined acquisition timestamp (UTC). |
 | `sensor` | `VARCHAR(32)` | Sensor family identifier (e.g., `VIIRS`). |
 | `source` | `VARCHAR(64)` | Dataset variant or provider label. |
+| `dedupe_hash` | `VARCHAR(64)` | Rounded lat/lon + timestamp hash; unique per `source` for idempotent ingest. |
 | `confidence`, `brightness`, `bright_t31`, `frp`, `scan`, `track` | `DOUBLE PRECISION` | High-value FIRMS metrics stored directly for filtering/sorting. |
 | `raw_properties` | `JSONB` | All other raw fields (e.g., `satellite`, `daynight`, collection flags). Keeps ingestion lossless without inflating columns. |
 | `denoised_score` | `DOUBLE PRECISION` | Output of hotspot denoiser (`0–1`). |
@@ -44,6 +48,7 @@ Stores every detection point with the key FIRMS-style attributes plus ML/ingest 
 
 - **Spatial**: `ix_fire_detections_geom` (GiST on `geom`) accelerates bbox/contains/intersects filters coming from the API/UI map and ML AOIs.
 - **Temporal**: `ix_fire_detections_acq_time` (B-tree) supports recent-history queries (`WHERE acq_time BETWEEN ...`).
+- **Deduplication**: `uq_fire_detections_source_dedupe_hash` enforces uniqueness for a `(source, rounded lat/lon, acq_time)` tuple so the FIRMS importer can safely re-request overlapping windows.
 - Combined filters (time window + bbox) leverage both indexes via PostgreSQL's bitmap index scans; keep predicates sargable to benefit (no `date_trunc` on the column, for example).
 
 Example query for API/UI:

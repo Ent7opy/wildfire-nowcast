@@ -51,10 +51,7 @@ This is the **high‑level mental model** for the project. It intentionally skip
 
 - **ML & ingest (`ml/`, `ingest/`)**
   - `ml/` has its own `pyproject.toml` for model and experiment code.
-  - `ingest/` is currently empty and reserved for:
-    - Pulling **FIRMS** fire detections.
-    - Pulling **weather** and **terrain** data.
-    - Preparing training/eval datasets and live features.
+  - `ingest/` now contains the FIRMS ingestion CLI that backfills `fire_detections` via the FIRMS API plus room for other sources (weather, terrain, etc.).
 
 For the longer product + ML concept (pipeline, glossary, non‑goals), see `docs/WILDFIRE_NOWCAST_101.md`.
 

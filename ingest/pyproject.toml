@@ -1,0 +1,19 @@
+[project]
+name = "wildfire-nowcast-ingest"
+version = "0.1.0"
+description = "NASA FIRMS ingestion utilities for Wildfire Nowcast."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pydantic>=2.8.2,<2.9.0",
+    "pydantic-settings>=2.0.0,<3.0.0",
+    "sqlalchemy>=2.0.0,<3.0.0",
+    "psycopg2-binary>=2.9.0,<3.0.0",
+    "httpx>=0.27.0,<0.28.0",
+    "python-dotenv>=1.0.0,<2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+]
+
