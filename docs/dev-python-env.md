@@ -1,6 +1,8 @@
 ## Python & `uv` Development Environment
 
-This repo standardizes on **Python 3.11.x** (pinned in `.python-version`) and uses `uv` for dependency management across `api/`, `ui/`, and `ml/`. `uv sync` will download a matching 3.11 interpreter automatically if your system default is newer.
+This repo standardizes on **Python 3.11.x** (pinned in `.python-version`) and uses `uv` for dependency management across `api/`, `ui/`, `ml/`, and `ingest/`. `uv sync` will download a matching 3.11 interpreter automatically if your system default is newer.
+
+For a complete from-scratch setup (tool installation, `.env`, Docker, `make` workflows), see [`docs/SETUP.md`](./SETUP.md). This document dives deeper into the Python/`uv` flows that `make` ultimately calls.
 
 ---
 
@@ -12,13 +14,24 @@ This repo standardizes on **Python 3.11.x** (pinned in `.python-version`) and us
    python3 -m pip install --upgrade uv    # POSIX
    py -3 -m pip install --upgrade uv       # Windows (uses the launcher’s 3.11)
    ```
-3. Clone the repo and `cd` into `wildfire-nowcast`.
+3. Install Docker Desktop / Engine and confirm `docker compose version` works.
+4. Install GNU `make` if your OS does not include it:
+   - macOS: `brew install make` (exposes `gmake`; symlink as `make` if desired).
+   - Windows: `choco install make` (restart terminal afterwards).
+   - Linux: `sudo apt-get install build-essential` (or distro equivalent).
+5. Clone the repo and `cd` into `wildfire-nowcast`.
 
 ---
 
 ## 2. Canonical workflow
 
-Each top-level project manages its own `.venv` under the directory. The pattern is identical for `api`, `ui`, and `ml`:
+Each top-level project manages its own `.venv` under the directory. The easiest way to sync everything (runtime + dev dependencies) is:
+
+```bash
+make install
+```
+
+Under the hood, each directory runs `uv sync --dev`. If you prefer to manage environments manually, the pattern is identical for `api`, `ui`, `ml`, and `ingest`:
 
 ```bash
 cd <project>            # e.g. cd api
@@ -45,7 +58,7 @@ Do not commit `.venv/` — this directory is local only.
 
 ### API
 
-1. Sync the dependencies:
+1. Sync the dependencies (or rely on `make install`):
    ```bash
    cd api
    uv sync
@@ -55,6 +68,8 @@ Do not commit `.venv/` — this directory is local only.
    uv run uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
    ```
 3. Visit `http://localhost:8000/health` to see `{"status": "ok"}`.
+
+**Shortcut:** `make dev-api` will execute the same command (after `make install`).
 
 ### Verifying the API surface
 
@@ -84,16 +99,21 @@ New FastAPI routes belong under the `api/routes/` package. Each module should ex
    ```
 3. Open the URL printed by Streamlit (typically `http://localhost:8501/`).
 
+**Shortcut:** `make dev-ui` handles the sync/run combo once environments exist.
+
 ### ML & ingest scripts
 
-1. The same workflow applies under `ml`:
-   ```bash
-   cd ml
-   uv sync
-   ```
-2. Use `uv run python <script>.py` or a REPL to iterate on models, data prep, or ingestion logic.
+- **ML (`ml/`)**
+  1. `cd ml`
+  2. `uv sync`
+  3. `uv run python <script>.py`
 
-> **Note:** The `ingest/` code currently shares the `ml` environment. When ingest-specific dependencies become formalized, we will either extend the `ml` deps or give `ingest/` its own `pyproject.toml` and lockfile. The canonical `uv` workflow above still applies once that happens.
+- **FIRMS ingestion (`ingest/`)**
+  1. `cd ingest`
+  2. `uv sync`
+  3. `uv run -m ingest.firms_ingest --day-range 1 --area world`
+
+  The ingestion project has its own `pyproject.toml`, so dependencies (HTTP client, SQLAlchemy, etc.) stay isolated from the API/UI. Shortcut: `make ingest-firms ARGS="--day-range 3"` runs the same module with optional arguments.
 
 ---
 
@@ -108,7 +128,7 @@ uses a simple matrix to run the same checks for `api/` and `ui/`:
 4. `uv run pytest` to execute the suite (`api/tests/test_health.py` exercises the FastAPI `/health`
    endpoint, while `ui/tests/test_app_imports.py` ensures the Streamlit app imports cleanly).
 
-Running the same checks locally keeps CI green:
+Running the same checks locally keeps CI green. You can either call the commands below directly or rely on `make test` / `make lint` which wrap the same invocations.
 
 ```bash
 # API
@@ -125,4 +145,20 @@ uv run pytest
 ```
 
 Re-run these commands after touching either codebase (or before pushing) to match the CI behaviour.
+
+---
+
+## 5. Makefile helpers
+
+All common workflows are exposed through the root `Makefile`. Use `make help` to list them. Key targets:
+
+- `make install` – sync dependencies for every subproject.
+- `make db-up` / `make db-down` – manage the Postgres/PostGIS container.
+- `make migrate` – run Alembic migrations from the `api` project.
+- `make dev-api`, `make dev-ui` – start dev servers.
+- `make test`, `make lint` – run pytest / Ruff for API + UI.
+- `make ingest-firms ARGS="..."` – run the FIRMS ingestion CLI.
+- `make clean` – remove Python caches and build artifacts via `scripts/clean.py`.
+
+These targets work cross-platform as long as GNU `make`, `uv`, Python 3.11, and Docker are installed (see `docs/SETUP.md` for installation details).
 

@@ -9,7 +9,7 @@ Right now the repo has:
 - **`ingest/`** – Reserved for data ingest pipelines (FIRMS, weather, terrain, etc.).
 - **`infra/`** – Docker Compose and infra docs for running the full stack locally.
 
-If you want the deep product/ML vision and original longform overview, see `docs/WILDFIRE_NOWCAST_101.md`.
+If you want the deep product/ML vision and original longform overview, see `docs/WILDFIRE_NOWCAST_101.md`. For a full from-scratch setup (prerequisites, `.env`, `make` workflows) see [`docs/SETUP.md`](docs/SETUP.md).
 
 ---
 
@@ -22,6 +22,22 @@ The goal is a **map‑first web app** where users can:
 - Get a short **text summary** for a selected area, driven by model outputs.
 
 The target users are analysts, journalists, NGOs, and operations teams who need a **simple but serious** tool, not a toy demo.
+
+---
+
+## Quickstart (Make workflow)
+
+```bash
+make install      # sync deps for api/ui/ml/ingest
+make db-up        # start Postgres/PostGIS
+make migrate      # apply Alembic migrations
+make dev-api      # http://localhost:8000
+make dev-ui       # http://localhost:8501
+# optional data load
+make ingest-firms # run NASA FIRMS ingestion
+```
+
+See [`docs/SETUP.md`](docs/SETUP.md) for platform-specific tooling install steps, `.env` template, Docker instructions, and troubleshooting tips.
 
 ---
 
@@ -73,9 +89,21 @@ High‑level flow:
 - **UI (`ui/`)** – Streamlit app using Folium to render a map and collect user input (time window, layer toggles, clicks).
 - **API (`api/`)** – FastAPI app that will expose fire, forecast, and risk endpoints; currently only internal health/version routes are implemented.
 - **Data & storage** – Postgres + PostGIS for vector data; raster storage and ML model outputs will be added later.
-- **ML & ingest (`ml/`, `ingest/`)** – Planned components for denoising detections, running spread models, and building risk indices.
+- **ML & ingest (`ml/`, `ingest/`)** – ML experiments plus the FIRMS ingestion pipeline that populates `fire_detections` in Postgres.
+### FIRMS ingestion quickstart
 
-For a short architecture + data‑flow walkthrough (including future ML pieces), see `docs/architecture.md`.
+```bash
+cd ingest
+uv sync
+uv run -m ingest.firms_ingest --day-range 1 --area world
+# or use the shortcut
+make ingest-firms ARGS="--day-range 3 --sources VIIRS_SNPP_NRT"
+```
+
+The script hits the NASA FIRMS API, logs an `ingest_batches` row per source, and deduplicates inserts via a `(source, rounded lat/lon, acq_time)` hash so re-running the same window is safe.
+
+
+For a short architecture + data‑flow walkthrough (including future ML pieces), see `docs/architecture.md`. For setup specifics and day-to-day commands, see `docs/SETUP.md`.
 
 ---
 
