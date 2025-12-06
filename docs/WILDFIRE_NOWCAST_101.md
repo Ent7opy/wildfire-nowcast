@@ -1,9 +1,10 @@
 ## WILDFIRE_NOWCAST_101
 
-> **Read this first** before working on any task in this repo (human or AI).
+> **Read this first** before working on any task in this repo (human or AI). See `docs/README.md` for navigation to the rest of the docs set.
 
 This document is the **source-of-truth overview** for the Wildfire Nowcast & Forecast project.  
-It defines what we are building, for whom, with what data and stack, and how work in this repo should be structured.
+It defines what we are building, for whom, with what data and stack, and how work in this repo should be structured.  
+It describes the **target system**; for what is implemented today, see `docs/architecture.md`.
 
 ---
 
@@ -155,6 +156,11 @@ Planned components:
 
 **Ingest → Validate/Denoise → Feature Build → Forecast → Calibrate → Store/Serve → UI & Summaries**
 
+As of late 2025, only some parts of this pipeline are implemented in code; others are still design targets.  
+For a current-status walkthrough (what exists vs planned), see `docs/architecture.md`. Roughly:
+- **Implemented**: FIRMS fire detection ingest + dedupe (`fire_detections`, `ingest_batches`), GFS 0.25° weather ingest + `weather_runs`, DEM stitching + `terrain_metadata`, basic FastAPI API with DB wiring, and a Streamlit UI with placeholder layers.
+- **Not yet implemented**: spread and risk models, probability calibration and weather bias correction, tile serving/COGs, LLM AOI summaries, and background workers/caching.
+
 1. **Data ingest**
    - Periodically pull:
      - FIRMS detections.
@@ -223,8 +229,8 @@ Planned components:
   - Rasterio / GDAL for rasters and DEM handling.
   - GeoPandas + Shapely for vector data and AOIs.
 - **Map serving:**
-  - Tile server like **TiTiler** for raster COG/Zarr tiles.
-  - Vector layers served via API from PostGIS.
+  - **Planned**: tile server like **TiTiler** for raster COG/Zarr tiles, vector layers served via API from PostGIS.
+  - **Today**: weather grids are stored as NetCDF under `data/weather/`; map tiles are not yet served directly.
 - **Packaging / deployment:**
   - Docker / Docker Compose.
 
@@ -242,9 +248,9 @@ This repository is organized into top-level directories that separate concerns:
 
 - **`ml/`** – Machine learning models, training scripts, and experiments. Includes hotspot denoiser, spread forecasting model, probability calibration, weather bias correction, and fire-risk index components.
 
-- **`ingest/`** – Data ingestion pipelines for pulling and processing FIRMS fire detections, weather forecasts, terrain data (DEM), and optional context layers (land cover, population, infrastructure).
+- **`ingest/`** – Data ingestion pipelines for pulling and processing FIRMS fire detections, GFS weather forecasts, terrain data (DEM), and optional context layers (land cover, population, infrastructure).
 
-- **`infra/`** – Infrastructure configuration including Docker/Docker Compose files, deployment scripts, CI/CD configs, and operational tooling.
+- **`infra/`** – Infrastructure configuration (alongside the root `docker-compose.yml`) including deployment notes, CI/CD stubs, and operational tooling.
 
 For a quick overview, see `PROJECT.md`. Each directory may contain its own README, requirements, and configuration files as components are developed.
 
@@ -315,7 +321,7 @@ This section is specifically for any **AI agent** consuming this file.
    - Make sure the change fits the overall architecture and stack.
 
 2. **Stay within the stack**
-   - Use the tools listed in §5.
+   - Use the tools listed in §6.
    - Do not introduce new heavy dependencies (frameworks, databases, services) unless the issue explicitly asks for it.
    - Prefer minimal, composable utilities over big “magic” libraries.
 

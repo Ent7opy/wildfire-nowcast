@@ -22,6 +22,7 @@ from rasterio.warp import (
 )
 
 from ingest.config import REPO_ROOT, WeatherIngestSettings
+from ingest.logging_utils import log_event
 
 # Ensure the API modules (and config.py) are importable when running from ingest/.
 sys.path.append(str(REPO_ROOT / "api"))
@@ -181,6 +182,47 @@ def reproject_and_resample_to_project_grid(
     return destination, dst_profile
 
 
+def _summarize_dem(data: np.ndarray, settings: DemIngestSettings) -> None:
+    """Log DEM coverage and elevation sanity checks."""
+    array = np.asarray(data)
+    finite_mask = np.isfinite(array)
+    if not finite_mask.any():
+        log_event(
+            LOGGER,
+            "dem.validation",
+            "DEM contains no finite elevation values",
+            level="warning",
+            region=settings.region_name,
+            bbox=settings.bbox,
+        )
+        return
+
+    coverage = float(finite_mask.mean())
+    min_val = float(np.nanmin(array))
+    max_val = float(np.nanmax(array))
+
+    log_event(
+        LOGGER,
+        "dem.stats",
+        "DEM coverage and elevation stats",
+        region=settings.region_name,
+        coverage=coverage,
+        min_elevation=min_val,
+        max_elevation=max_val,
+    )
+
+    if coverage < 0.9:
+        log_event(
+            LOGGER,
+            "dem.validation",
+            "DEM coverage below expected threshold",
+            level="warning",
+            coverage=coverage,
+            gap_fraction=float(1.0 - coverage),
+            bbox=settings.bbox,
+        )
+
+
 def save_dem_to_geotiff(
     data: np.ndarray, profile: dict, settings: DemIngestSettings
 ) -> Path:
@@ -273,6 +315,7 @@ def main(argv: list[str] | None = None) -> None:
     warped_data, warped_profile = reproject_and_resample_to_project_grid(
         raw_data, raw_profile, settings
     )
+    _summarize_dem(warped_data, settings)
     geotiff_path = save_dem_to_geotiff(warped_data, warped_profile, settings)
     final_path = convert_to_cog(geotiff_path) if args.cog else geotiff_path
 

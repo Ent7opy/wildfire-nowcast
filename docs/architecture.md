@@ -1,6 +1,6 @@
 ## Architecture & Data Flow
 
-This is the **high‑level mental model** for the project. It intentionally skips low‑level details and focuses on how the pieces fit together.
+This is the **high‑level mental model** for the project. It intentionally skips low‑level details and focuses on how the pieces fit together. See `docs/README.md` for the full doc map.
 
 ---
 
@@ -12,7 +12,7 @@ This is the **high‑level mental model** for the project. It intentionally skip
 - **Status today**:  
   - API has **health/version** endpoints and database wiring.  
   - UI has a **map with placeholder layers** and controls.  
-  - ML and ingest are **planned**, not wired into the API yet.
+  - Ingest pipelines exist for FIRMS fire detections, GFS 0.25° weather, and DEMs (terrain), but are not yet wired into the API or ML models.
 
 ---
 
@@ -51,7 +51,7 @@ This is the **high‑level mental model** for the project. It intentionally skip
 
 - **ML & ingest (`ml/`, `ingest/`)**
   - `ml/` has its own `pyproject.toml` for model and experiment code.
-  - `ingest/` now contains the FIRMS ingestion CLI that backfills `fire_detections` via the FIRMS API plus room for other sources (weather, terrain, etc.).
+  - `ingest/` now contains ingestion CLIs for FIRMS fire detections (`fire_detections` + `ingest_batches`), GFS 0.25° weather runs (`weather_runs` + NetCDF on disk), and DEM preprocessing (`terrain_metadata` + GeoTIFF/COG).
 
 For the longer product + ML concept (pipeline, glossary, non‑goals), see `docs/WILDFIRE_NOWCAST_101.md`.
 

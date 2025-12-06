@@ -1,0 +1,44 @@
+# FIRMS Ingestion (NASA active fire detections)
+
+## What it does
+- Pulls the NASA FIRMS **area CSV API** for a configured bounding box and day range (1–10 days).
+- Defaults to VIIRS NRT sources and accepts any FIRMS source key supported by the API.
+- Validates/normalizes rows, inserts into Postgres `fire_detections` with dedupe on `(source, dedupe_hash)`, and records an `ingest_batches` entry per source.
+
+## Inputs & validation
+- Endpoint pattern: `https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/{source}/{west,south,east,north}/{day_range}[/YYYY-MM-DD]`
+- Required: `FIRMS_MAP_KEY` (API token from NASA FIRMS).
+- Validation rules before insert:
+  - Drop rows with missing, non-numeric, or out-of-range coordinates (lat ∈ [-90, 90], lon ∈ [-180, 180]).
+  - Parse `acq_date` + `acq_time` into UTC timestamps.
+  - Confidence: use numeric when present; otherwise map `confidence_text` (`high/nominal/low` or `h/n/l`) to 90/50/10; values outside 0–100 are nulled.
+  - Brightness kept only when 200–500; otherwise nulled. Other numeric fields (`bright_t31`, `frp`, `scan`, `track`) kept when parseable.
+  - Every raw row is preserved in `raw_properties`; validation counts are logged via `firms.validation_summary`.
+
+## Configuration
+- Environment variables (defaults in parentheses):
+  - `FIRMS_MAP_KEY` – required.
+  - `FIRMS_SOURCES` – comma list (default `VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT`).
+  - `FIRMS_AREA` – `world` (→ `-180,-90,180,90`) or `west,south,east,north` bbox string.
+  - `FIRMS_DAY_RANGE` – past days window, `1–10` (default `1`).
+  - `FIRMS_REQUEST_TIMEOUT_SECONDS` – HTTP timeout (default `30`).
+- CLI overrides (highest precedence):
+  - `--day-range N`
+  - `--area "w,s,e,n"` or `world`
+  - `--sources "SRC1,SRC2"`
+- Common FIRMS source keys: `VIIRS_SNPP_NRT`, `VIIRS_NOAA20_NRT`, `MODIS_TERRA_NRT`, `MODIS_AQUA_NRT` (any FIRMS area API key is accepted).
+
+## How to run
+- Prereqs: Postgres/PostGIS running (API `.env` loaded for DB URL) and `.env` contains `FIRMS_MAP_KEY`.
+- Recommended: `make ingest-firms ARGS="--day-range 3 --area -125,32,-114,43"`
+- Direct: `uv run --project ingest -m ingest.firms_ingest --sources VIIRS_SNPP_NRT,VIIRS_NOAA20_NRT`
+
+## Outputs & persistence
+- Inserts rows into `fire_detections` (geom Point 4326 + key FIRMS metrics) and keeps the full CSV row in `raw_properties`.
+- Creates `ingest_batches` rows per source with `area`/`day_range` metadata and fetched/inserted/duplicate counters.
+- Deduplication: `dedupe_hash = sha1(source|lat_rounded_4dp|lon_rounded_4dp|acq_time_utc)`; inserts use `ON CONFLICT (source, dedupe_hash) DO NOTHING` for idempotent re-runs.
+
+## Notes
+- BBox uses degrees (W,S,E,N); `world` ingests globally and is the largest download.
+- Validation warnings are emitted as structured logs (`firms.validation*`); check logs when records look low.
+

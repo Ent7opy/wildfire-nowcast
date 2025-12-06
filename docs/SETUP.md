@@ -71,9 +71,12 @@ This runs `uv sync --dev` in `api/`, `ui/`, `ml/`, and `ingest/`.
 
 ## 6. References
 
+- [`docs/README.md`](./README.md) – Docs hub and navigation.
 - [`README.md`](../README.md) – Single-source quickstart and make commands.
 - [`Makefile`](../Makefile) – Run `make help` for all targets.
 - [`docs/dev-python-env.md`](./dev-python-env.md) – Python/uv details.
 - [`infra/README.md`](../infra/README.md) – Docker/infra specifics.
-- [`docs/ingest_weather.md`](./ingest_weather.md) – Weather ingest details.
+- [`docs/ingest/ingest_firms.md`](./ingest/ingest_firms.md) – NASA FIRMS fire detection ingest.
+- [`docs/ingest/ingest_weather.md`](./ingest/ingest_weather.md) – Weather ingest details.
+- [`docs/ingest/ingest_dem.md`](./ingest/ingest_dem.md) – Copernicus DEM preprocessing.
 

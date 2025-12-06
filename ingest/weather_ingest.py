@@ -17,6 +17,7 @@ import numpy as np
 import xarray as xr
 
 from ingest.config import WeatherIngestSettings, weather_settings
+from ingest.logging_utils import log_event
 from ingest.weather_repository import (
     create_weather_run_record,
     finalize_weather_run_record,
@@ -401,6 +402,100 @@ def save_dataset_to_netcdf(
     return target_path
 
 
+def _compute_field_stats(ds: xr.Dataset, variables: Sequence[str]) -> dict:
+    """Calculate min/max/mean for selected variables."""
+    stats: dict[str, dict[str, float]] = {}
+    for var in variables:
+        if var not in ds:
+            continue
+        arr = np.asarray(ds[var].values, dtype=float)
+        stats[var] = {
+            "min": float(np.nanmin(arr)),
+            "max": float(np.nanmax(arr)),
+            "mean": float(np.nanmean(arr)),
+        }
+    return stats
+
+
+def _validate_weather_dataset(
+    ds: xr.Dataset, settings: WeatherIngestSettings, variables: Sequence[str]
+) -> None:
+    """Log validation details for weather datasets."""
+    missing_vars = sorted([v for v in variables if v not in ds.data_vars])
+    if missing_vars:
+        log_event(
+            LOGGER,
+            "weather.validation",
+            "Missing expected variables",
+            level="warning",
+            missing_vars=missing_vars,
+        )
+
+    missing_dims = sorted([dim for dim in ("time", "lat", "lon") if dim not in ds.dims])
+    if missing_dims:
+        log_event(
+            LOGGER,
+            "weather.validation",
+            "Dataset missing expected dimensions",
+            level="warning",
+            missing_dims=missing_dims,
+        )
+
+    if "time" not in ds or "lead_time_hours" not in ds:
+        log_event(
+            LOGGER,
+            "weather.validation",
+            "Dataset missing time coverage metadata",
+            level="warning",
+        )
+        return
+
+    time_values = ds["time"].values
+    lead_values = ds["lead_time_hours"].values
+    lead_min = int(np.nanmin(lead_values))
+    lead_max = int(np.nanmax(lead_values))
+    expected_max = min(settings.horizon_hours, 72)
+    expected_count = (settings.horizon_hours // settings.step_hours) + 1
+    time_count = int(ds.dims.get("time", 0))
+
+    if lead_min > 0 or lead_max < expected_max or time_count < expected_count:
+        log_event(
+            LOGGER,
+            "weather.validation",
+            "Time dimension does not fully cover requested horizon",
+            level="warning",
+            lead_min=lead_min,
+            lead_max=lead_max,
+            expected_max=expected_max,
+            time_count=time_count,
+            expected_count=expected_count,
+        )
+
+    if lead_max > 72:
+        log_event(
+            LOGGER,
+            "weather.validation",
+            "Lead time exceeds 72h sanity window",
+            level="warning",
+            lead_max=lead_max,
+        )
+
+    field_stats = _compute_field_stats(ds, variables)
+    log_event(
+        LOGGER,
+        "weather.stats",
+        "Weather dataset stats",
+        time_range={
+            "start": str(time_values.min()),
+            "end": str(time_values.max()),
+        },
+        lead_time_hours={"min": lead_min, "max": lead_max, "expected_max": expected_max},
+        field_stats=field_stats,
+        time_count=time_count,
+        dims={k: int(v) for k, v in ds.dims.items()},
+    )
+
+
 def _resolve_run_time(cli_value: str | None, configured: datetime | None) -> datetime:
     """Pick run_time from CLI, config, or latest 6h cycle."""
     if cli_value:
@@ -524,6 +619,7 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
                 include_precip=settings.include_precipitation,
             )
             dataset = crop_to_bbox(dataset, settings)
+            _validate_weather_dataset(dataset, settings, canonical_variables)
             storage_path = str(save_dataset_to_netcdf(dataset, settings, selected_run_time))
             finalize_weather_run_record(
                 run_id=run_id,
