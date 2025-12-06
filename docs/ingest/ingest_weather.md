@@ -1,11 +1,11 @@
 # Weather Ingestion (GFS 0.25°)
 
-This pipeline downloads NOAA NOMADS GFS 0.25° forecasts (0–72h, 3h steps), subsets to a configurable bounding box, and stores the result as NetCDF for downstream ML and API usage.
+This pipeline downloads NOAA NOMADS GFS 0.25° forecasts (0–72h, 3h steps), subsets to a configurable bounding box (snapped to the analysis grid), interpolates onto the canonical 0.01° EPSG:4326 grid, and stores the result as NetCDF for downstream ML and API usage.
 
 ## Data and Variables
 - Model: `gfs_0p25` (public HTTP, no API key).
 - Variables: `u10`, `v10`, `t2m`, `rh2m` (always), `tp` (optional precipitation).
-- Coordinates: `time`, `lat`, `lon` plus `forecast_reference_time` and `lead_time_hours`.
+- Coordinates: `time`, `lat`, `lon` plus `forecast_reference_time` and `lead_time_hours`. The saved NetCDF is on the shared 0.01° EPSG:4326 analysis grid with attributes `crs`, `cell_size_deg`, `origin_lat`, `origin_lon`, `n_lat`, `n_lon`.
 
 ## Storage Layout
 ```

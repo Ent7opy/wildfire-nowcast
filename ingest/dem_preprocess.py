@@ -13,20 +13,16 @@ from dem_stitcher import stitch_dem
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from rasterio.crs import CRS
-from rasterio.transform import array_bounds
-from rasterio.warp import (
-    Resampling,
-    calculate_default_transform,
-    reproject,
-    transform_bounds,
-)
+from rasterio.transform import from_origin
+from rasterio.warp import Resampling, reproject
 
 from ingest.config import REPO_ROOT, WeatherIngestSettings
 from ingest.logging_utils import log_event
 
 # Ensure the API modules (and config.py) are importable when running from ingest/.
-sys.path.append(str(REPO_ROOT / "api"))
+sys.path.append(str(REPO_ROOT))
 
+from api.core.grid import DEFAULT_CELL_SIZE_DEG, DEFAULT_CRS, GridSpec, grid_bounds
 from api.terrain.repo import TerrainMetadataCreate, insert_terrain_metadata
 
 logging.basicConfig(
@@ -35,10 +31,11 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("dem_preprocess")
 
-# Ensure the API modules (and config.py) are importable when running from ingest/.
-sys.path.append(str(REPO_ROOT / "api"))
-
-DEG_PER_METER = 1 / 111_320.0  # Rough conversion at the equator
+CANONICAL_CRS = DEFAULT_CRS
+CANONICAL_CELL_SIZE_DEG = DEFAULT_CELL_SIZE_DEG
+METERS_PER_DEG_AT_EQUATOR = 111_320.0  # Rough conversion at the equator
+CANONICAL_RESOLUTION_M = CANONICAL_CELL_SIZE_DEG * METERS_PER_DEG_AT_EQUATOR
+CANONICAL_EPSG = 4326
 _weather_defaults = WeatherIngestSettings()
 
 
@@ -76,7 +73,7 @@ class DemIngestSettings(BaseSettings):
     bbox_override: str | None = Field(default=None, validation_alias="DEM_BBOX")
     target_crs_epsg: int = Field(default=4326, validation_alias="DEM_TARGET_CRS")
     target_resolution_m: float = Field(
-        default=1000.0,
+        default=CANONICAL_RESOLUTION_M,
         validation_alias="DEM_TARGET_RES_M",
     )
 
@@ -117,6 +114,18 @@ class DemIngestSettings(BaseSettings):
             float(self.bbox_max_lat),
         )
 
+    @property
+    def grid_spec(self) -> GridSpec:
+        min_lon, min_lat, max_lon, max_lat = self.bbox
+        return GridSpec.from_bbox(
+            lat_min=min_lat,
+            lat_max=max_lat,
+            lon_min=min_lon,
+            lon_max=max_lon,
+            cell_size_deg=CANONICAL_CELL_SIZE_DEG,
+            crs=CANONICAL_CRS,
+        )
+
 
 def load_raw_dem(bounds: tuple[float, float, float, float]) -> tuple[np.ndarray, dict]:
     """Fetch Copernicus GLO-30 DEM tiles for the requested bounds."""
@@ -130,45 +139,37 @@ def load_raw_dem(bounds: tuple[float, float, float, float]) -> tuple[np.ndarray,
     return np.asarray(data), profile
 
 
-def _target_resolution_deg(settings: DemIngestSettings) -> float:
-    return float(settings.target_resolution_m) * DEG_PER_METER
-
-
-def reproject_and_resample_to_project_grid(
-    data: np.ndarray, profile: dict, settings: DemIngestSettings
-) -> tuple[np.ndarray, dict]:
-    """Reproject DEM into target CRS and resolution."""
-    src_crs = CRS.from_user_input(profile["crs"])
-    dst_crs = CRS.from_epsg(settings.target_crs_epsg)
-    src_bounds = array_bounds(profile["height"], profile["width"], profile["transform"])
-
-    res = None
-    if dst_crs.is_geographic:
-        deg_res = _target_resolution_deg(settings)
-        res = (deg_res, deg_res)
-
-    transform, width, height = calculate_default_transform(
-        src_crs,
-        dst_crs,
-        profile["width"],
-        profile["height"],
-        *src_bounds,
-        resolution=res,
+def _grid_transform(grid: GridSpec):
+    north = grid.origin_lat + grid.n_lat * grid.cell_size_deg
+    return from_origin(
+        west=grid.origin_lon,
+        north=north,
+        xsize=grid.cell_size_deg,
+        ysize=grid.cell_size_deg,
     )
 
+
+def resample_to_grid(
+    data: np.ndarray, profile: dict, grid: GridSpec
+) -> tuple[np.ndarray, dict]:
+    """Reproject and resample DEM into the canonical analysis grid."""
+    src_crs = CRS.from_user_input(profile["crs"])
+    dst_crs = CRS.from_string(grid.crs)
+
+    transform = _grid_transform(grid)
     dst_profile = profile.copy()
     dst_profile.update(
         {
             "driver": "GTiff",
             "crs": dst_crs,
             "transform": transform,
-            "width": width,
-            "height": height,
+            "width": grid.n_lon,
+            "height": grid.n_lat,
             "count": 1,
         }
     )
 
-    destination = np.empty((height, width), dtype=data.dtype)
+    destination = np.empty((grid.n_lat, grid.n_lon), dtype=data.dtype)
     reproject(
         source=data,
         destination=destination,
@@ -226,13 +227,10 @@ def _summarize_dem(data: np.ndarray, settings: DemIngestSettings) -> None:
 def save_dem_to_geotiff(
     data: np.ndarray, profile: dict, settings: DemIngestSettings
 ) -> Path:
-    """Persist the DEM to GeoTIFF: dem_{region}_epsg{crs}_{res_m}m.tif."""
+    """Persist the DEM to GeoTIFF: dem_{region}_epsg{crs}_0p01deg.tif."""
     out_dir = settings.data_dir / settings.region_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    filename = (
-        f"dem_{settings.region_name}_epsg{settings.target_crs_epsg}_"
-        f"{int(settings.target_resolution_m)}m.tif"
-    )
+    filename = f"dem_{settings.region_name}_epsg{CANONICAL_EPSG}_0p01deg.tif"
     out_path = out_dir / filename
 
     write_profile = profile.copy()
@@ -272,8 +270,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override bounding box (lon/lat, EPSG:4326).",
     )
     parser.add_argument("--region-name", type=str, default=None, help="Region label override.")
-    parser.add_argument("--target-res-m", type=float, default=None, help="Target resolution in meters.")
-    parser.add_argument("--target-crs", type=int, default=None, help="Target CRS EPSG code.")
     parser.add_argument(
         "--cog",
         action="store_true",
@@ -293,40 +289,36 @@ def _apply_cli_overrides(
         updates["bbox_max_lat"] = args.bbox[3]
     if args.region_name:
         updates["region_name"] = args.region_name
-    if args.target_res_m is not None:
-        updates["target_resolution_m"] = args.target_res_m
-    if args.target_crs is not None:
-        updates["target_crs_epsg"] = args.target_crs
     if not updates:
         return settings
     return settings.model_copy(update=updates)
 
 
-def _bounds_to_epsg4326(profile: dict) -> tuple[float, float, float, float]:
-    dst_bounds = array_bounds(profile["height"], profile["width"], profile["transform"])
-    return transform_bounds(profile["crs"], "EPSG:4326", *dst_bounds, densify_pts=21)
-
-
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     settings = _apply_cli_overrides(DemIngestSettings(), args)
+    grid = settings.grid_spec
 
-    raw_data, raw_profile = load_raw_dem(settings.bbox)
-    warped_data, warped_profile = reproject_and_resample_to_project_grid(
-        raw_data, raw_profile, settings
-    )
+    raw_data, raw_profile = load_raw_dem(grid_bounds(grid))
+    warped_data, warped_profile = resample_to_grid(raw_data, raw_profile, grid)
     _summarize_dem(warped_data, settings)
     geotiff_path = save_dem_to_geotiff(warped_data, warped_profile, settings)
     final_path = convert_to_cog(geotiff_path) if args.cog else geotiff_path
 
-    bbox_4326 = _bounds_to_epsg4326(warped_profile)
+    bbox_4326 = grid_bounds(grid)
+    resolution_m = grid.cell_size_deg * METERS_PER_DEG_AT_EQUATOR
     metadata = TerrainMetadataCreate(
         region_name=settings.region_name,
         dem_source=settings.source,
-        crs_epsg=settings.target_crs_epsg,
-        resolution_m=float(settings.target_resolution_m),
+        crs_epsg=CANONICAL_EPSG,
+        resolution_m=float(resolution_m),
         bbox=bbox_4326,
         raster_path=str(final_path),
+        cell_size_deg=grid.cell_size_deg,
+        origin_lat=grid.origin_lat,
+        origin_lon=grid.origin_lon,
+        grid_n_lat=grid.n_lat,
+        grid_n_lon=grid.n_lon,
     )
     inserted = insert_terrain_metadata(metadata)
 

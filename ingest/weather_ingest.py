@@ -16,11 +16,22 @@ import httpx
 import numpy as np
 import xarray as xr
 
-from ingest.config import WeatherIngestSettings, weather_settings
+from ingest.config import REPO_ROOT, WeatherIngestSettings, weather_settings
 from ingest.logging_utils import log_event
 from ingest.weather_repository import (
     create_weather_run_record,
     finalize_weather_run_record,
+)
+
+# Ensure the API modules (and config.py) are importable when running from ingest/.
+sys.path.append(str(REPO_ROOT))
+
+from api.core.grid import (
+    DEFAULT_CELL_SIZE_DEG,
+    DEFAULT_CRS,
+    GridSpec,
+    grid_bounds,
+    grid_coords,
 )
 
 logging.basicConfig(
@@ -51,6 +62,61 @@ SHORT_NAME_MAP = {
     "rh2m": "2r",
     "tp": "tp",
 }
+
+ANALYSIS_CRS = DEFAULT_CRS
+ANALYSIS_CELL_SIZE_DEG = DEFAULT_CELL_SIZE_DEG
+
+
+def build_grid_spec(settings: WeatherIngestSettings) -> GridSpec:
+    """Build the canonical analysis grid snapped to 0.01°."""
+    min_lon, min_lat, max_lon, max_lat = settings.bbox
+    return GridSpec.from_bbox(
+        lat_min=min_lat,
+        lat_max=max_lat,
+        lon_min=min_lon,
+        lon_max=max_lon,
+        cell_size_deg=ANALYSIS_CELL_SIZE_DEG,
+        crs=ANALYSIS_CRS,
+    )
+
+
+def regrid_to_analysis_grid(ds: xr.Dataset, grid: GridSpec) -> xr.Dataset:
+    """Interpolate dataset onto the canonical analysis grid."""
+    target_lat, target_lon = grid_coords(grid)
+    return ds.interp(lat=target_lat, lon=target_lon)
+
+
+def attach_grid_metadata(ds: xr.Dataset, grid: GridSpec) -> xr.Dataset:
+    """Attach grid attributes for downstream reconstruction."""
+    grid_meta = {
+        "crs": grid.crs,
+        "cell_size_deg": grid.cell_size_deg,
+        "origin_lat": grid.origin_lat,
+        "origin_lon": grid.origin_lon,
+        "n_lat": grid.n_lat,
+        "n_lon": grid.n_lon,
+    }
+    ds = ds.assign_attrs(**grid_meta)
+    return ds
+
+
+def grid_metadata_dict(grid: GridSpec) -> dict:
+    """Return a serializable grid metadata dictionary."""
+    min_lon, min_lat, max_lon, max_lat = grid_bounds(grid)
+    return {
+        "crs": grid.crs,
+        "cell_size_deg": grid.cell_size_deg,
+        "origin_lat": grid.origin_lat,
+        "origin_lon": grid.origin_lon,
+        "n_lat": grid.n_lat,
+        "n_lon": grid.n_lon,
+        "bbox": {
+            "min_lon": min_lon,
+            "min_lat": min_lat,
+            "max_lon": max_lon,
+            "max_lat": max_lat,
+        },
+    }
 
 
 def _response_snippet(response: httpx.Response, limit: int = 400) -> str:
@@ -347,14 +413,19 @@ def build_weather_dataset(
     return ds
 
 
-def crop_to_bbox(ds: xr.Dataset, settings: WeatherIngestSettings) -> xr.Dataset:
+def crop_to_bbox(
+    ds: xr.Dataset, settings: WeatherIngestSettings, *, target_bbox: tuple[float, float, float, float] | None = None
+) -> xr.Dataset:
     """Enforce bbox subset to keep stored NetCDF aligned with metadata."""
-    min_lon, min_lat, max_lon, max_lat = (
-        settings.bbox_min_lon,
-        settings.bbox_min_lat,
-        settings.bbox_max_lon,
-        settings.bbox_max_lat,
-    )
+    if target_bbox is None:
+        min_lon, min_lat, max_lon, max_lat = (
+            settings.bbox_min_lon,
+            settings.bbox_min_lat,
+            settings.bbox_max_lon,
+            settings.bbox_max_lat,
+        )
+    else:
+        min_lon, min_lat, max_lon, max_lat = target_bbox
 
     lon = ds["lon"]
     if float(lon.max()) > 180:
@@ -369,19 +440,21 @@ def save_dataset_to_netcdf(
     ds: xr.Dataset,
     settings: WeatherIngestSettings,
     run_time: datetime,
+    *,
+    region_bbox: tuple[float, float, float, float] | None = None,
 ) -> Path:
     """Persist dataset to NetCDF following the directory layout."""
+    bbox = region_bbox or (
+        settings.bbox_min_lon,
+        settings.bbox_min_lat,
+        settings.bbox_max_lon,
+        settings.bbox_max_lat,
+    )
+    min_lon, min_lat, max_lon, max_lat = bbox
+
     region_label = "global"
-    if not (
-        settings.bbox_min_lon == -180
-        and settings.bbox_max_lon == 180
-        and settings.bbox_min_lat == -90
-        and settings.bbox_max_lat == 90
-    ):
-        region_label = (
-            f"bbox_{settings.bbox_min_lon}_{settings.bbox_min_lat}_"
-            f"{settings.bbox_max_lon}_{settings.bbox_max_lat}"
-        )
+    if not (min_lon == -180 and max_lon == 180 and min_lat == -90 and max_lat == 90):
+        region_label = f"bbox_{min_lon}_{min_lat}_{max_lon}_{max_lat}"
 
     target_dir = (
         Path(settings.base_dir)
@@ -397,7 +470,6 @@ def save_dataset_to_netcdf(
         f"0-{settings.horizon_hours}h_{region_label}.nc"
     )
     target_path = target_dir / filename
-
     ds.to_netcdf(target_path, engine="h5netcdf")
     return target_path
 
@@ -567,6 +639,8 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
     args = parse_args(argv)
     settings = _apply_overrides(weather_settings, args)
     run_time = _resolve_run_time(args.run_time, settings.run_time)
+    grid_spec = build_grid_spec(settings)
+    grid_meta = grid_metadata_dict(grid_spec)
 
     canonical_variables = ["u10", "v10", "t2m", "rh2m"]
     if settings.include_precipitation:
@@ -585,6 +659,7 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
             "horizon_hours": settings.horizon_hours,
             "step_hours": settings.step_hours,
             "include_precipitation": settings.include_precipitation,
+        "grid": grid_meta,
         },
     )
 
@@ -618,9 +693,18 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
                 selected_run_time,
                 include_precip=settings.include_precipitation,
             )
-            dataset = crop_to_bbox(dataset, settings)
+            dataset = crop_to_bbox(dataset, settings, target_bbox=grid_bounds(grid_spec))
+            dataset = regrid_to_analysis_grid(dataset, grid_spec)
+            dataset = attach_grid_metadata(dataset, grid_spec)
             _validate_weather_dataset(dataset, settings, canonical_variables)
-            storage_path = str(save_dataset_to_netcdf(dataset, settings, selected_run_time))
+            storage_path = str(
+                save_dataset_to_netcdf(
+                    dataset,
+                    settings,
+                    selected_run_time,
+                    region_bbox=grid_bounds(grid_spec),
+                )
+            )
             finalize_weather_run_record(
                 run_id=run_id,
                 storage_path=storage_path,
@@ -630,6 +714,7 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
                     "variables": list(dataset.data_vars.keys()),
                     "dimensions": {k: int(v) for k, v in dataset.dims.items()},
                     "run_time": selected_run_time.isoformat(),
+                    "grid": grid_meta,
                 },
             )
         return 0
