@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms
+.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-weather
 
 PYTHON ?= python
 UV ?= uv
@@ -54,4 +54,7 @@ revision: ## Create a new migration revision (usage: make revision msg="descript
 
 ingest-firms: ## Run NASA FIRMS ingestion (pass ARGS="--day-range 3")
 	$(UV) run --project ingest -m ingest.firms_ingest $(ARGS)
+
+ingest-weather: ## Run NOAA GFS weather ingestion (pass ARGS="--run-time 2025-12-06T00:00Z")
+	$(UV) run --project ingest -m ingest.weather_ingest $(ARGS)
 

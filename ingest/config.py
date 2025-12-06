@@ -1,9 +1,10 @@
-"""Configuration helpers for FIRMS ingestion."""
+"""Configuration helpers for ingestion pipelines."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
@@ -79,5 +80,56 @@ class FIRMSIngestSettings(BaseSettings):
 
 
 settings = FIRMSIngestSettings()
+
+
+class WeatherIngestSettings(BaseSettings):
+    """Environment-driven configuration for weather ingestion."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    model_name: str = Field(default="gfs_0p25", validation_alias="WEATHER_MODEL")
+    gfs_base_url_primary: str = Field(
+        default="https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl",
+        validation_alias="WEATHER_GFS_BASE_URL",
+    )
+    gfs_base_url_fallback: Optional[str] = Field(
+        default=None,
+        validation_alias="WEATHER_GFS_FALLBACK_URL",
+    )
+    base_dir: Path = Field(
+        default=REPO_ROOT / "data" / "weather",
+        validation_alias="WEATHER_BASE_DIR",
+    )
+    bbox_min_lon: float = Field(default=5.0, validation_alias="WEATHER_BBOX_MIN_LON")
+    bbox_max_lon: float = Field(default=20.0, validation_alias="WEATHER_BBOX_MAX_LON")
+    bbox_min_lat: float = Field(default=35.0, validation_alias="WEATHER_BBOX_MIN_LAT")
+    bbox_max_lat: float = Field(default=47.0, validation_alias="WEATHER_BBOX_MAX_LAT")
+    horizon_hours: int = Field(default=24, validation_alias="WEATHER_HORIZON_HOURS")
+    step_hours: int = Field(default=6, validation_alias="WEATHER_STEP_HOURS")
+    run_time: Optional[datetime] = Field(default=None, validation_alias="WEATHER_RUN_TIME")
+    request_timeout_seconds: int = Field(
+        default=60,
+        validation_alias="WEATHER_REQUEST_TIMEOUT_SECONDS",
+    )
+    include_precipitation: bool = Field(
+        default=False,
+        validation_alias="WEATHER_INCLUDE_PRECIP",
+    )
+
+    @property
+    def bbox(self) -> Tuple[float, float, float, float]:
+        return (
+            float(self.bbox_min_lon),
+            float(self.bbox_min_lat),
+            float(self.bbox_max_lon),
+            float(self.bbox_max_lat),
+        )
+
+
+weather_settings = WeatherIngestSettings()
 
 
