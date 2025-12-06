@@ -25,19 +25,22 @@ The target users are analysts, journalists, NGOs, and operations teams who need 
 
 ---
 
-## Quickstart (Make workflow)
+## Quickstart (Make workflow) (RECOMMENDED)
+
+Most day-to-day tasks are one-liners; see `make help` for the full list:
 
 ```bash
-make install      # sync deps for api/ui/ml/ingest
-make db-up        # start Postgres/PostGIS
-make migrate      # apply Alembic migrations
-make dev-api      # http://localhost:8000
-make dev-ui       # http://localhost:8501
-# optional data load
-make ingest-firms # run NASA FIRMS ingestion
+make install          # sync deps for api/ui/ml/ingest
+make db-up            # start Postgres/PostGIS
+make migrate          # apply Alembic migrations
+make dev-api          # http://localhost:8000
+make dev-ui           # http://localhost:8501
+# optional ingests
+make ingest-firms     # NASA FIRMS fire detections
+make ingest-weather   # NOAA GFS weather (pass ARGS="--run-time 2025-12-06T00:00Z")
 ```
 
-See [`docs/SETUP.md`](docs/SETUP.md) for platform-specific tooling install steps, `.env` template, Docker instructions, and troubleshooting tips.
+For platform specifics (.env template, Docker stack, troubleshooting), use [`docs/SETUP.md`](docs/SETUP.md).
 
 ---
 
@@ -88,9 +91,9 @@ More details and environment variables are in `infra/README.md`.
 High‑level flow:
 - **UI (`ui/`)** – Streamlit app using Folium to render a map and collect user input (time window, layer toggles, clicks).
 - **API (`api/`)** – FastAPI app that will expose fire, forecast, and risk endpoints; currently only internal health/version routes are implemented.
-- **Data & storage** – Postgres + PostGIS for vector data; raster storage and ML model outputs will be added later.
-- **ML & ingest (`ml/`, `ingest/`)** – ML experiments plus the FIRMS ingestion pipeline that populates `fire_detections` in Postgres.
-### FIRMS ingestion quickstart
+- **Data & storage** – Postgres + PostGIS for vector data; NetCDF on disk for weather forecasts.
+- **ML & ingest (`ml/`, `ingest/`)** – ML experiments plus ingestion pipelines (FIRMS fire detections, GFS weather).
+### Ingestion quickstart (FIRMS + weather)
 
 ```bash
 cd ingest
@@ -98,9 +101,12 @@ uv sync
 uv run -m ingest.firms_ingest --day-range 1 --area world
 # or use the shortcut
 make ingest-firms ARGS="--day-range 3 --sources VIIRS_SNPP_NRT"
+
+# weather ingest (requires ecCodes for cfgrib)
+make ingest-weather ARGS="--run-time 2025-12-06T00:00Z"
 ```
 
-The script hits the NASA FIRMS API, logs an `ingest_batches` row per source, and deduplicates inserts via a `(source, rounded lat/lon, acq_time)` hash so re-running the same window is safe.
+FIRMS hits NASA FIRMS and logs an `ingest_batches` row per source with deduped inserts into `fire_detections`. Weather ingest downloads NOAA GFS GRIB, writes NetCDF under `data/weather/...`, and tracks runs in `weather_runs`.
 
 
 For a short architecture + data‑flow walkthrough (including future ML pieces), see `docs/architecture.md`. For setup specifics and day-to-day commands, see `docs/SETUP.md`.
