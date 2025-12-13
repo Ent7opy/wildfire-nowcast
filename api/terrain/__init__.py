@@ -2,6 +2,7 @@
 
 from .dem_loader import grid_spec_from_metadata, load_dem_for_bbox
 from .features_loader import load_slope_aspect_for_bbox
+from .window import TerrainWindow, load_terrain_for_aoi, load_terrain_window
 from .features_repo import (
     TerrainFeaturesMetadata,
     TerrainFeaturesMetadataCreate,
@@ -27,5 +28,8 @@ __all__ = [
     "get_latest_terrain_features_metadata_for_region",
     "insert_terrain_features_metadata",
     "load_slope_aspect_for_bbox",
+    "TerrainWindow",
+    "load_terrain_window",
+    "load_terrain_for_aoi",
 ]
 
