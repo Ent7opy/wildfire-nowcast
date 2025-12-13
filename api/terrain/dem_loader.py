@@ -21,6 +21,20 @@ def _ensure_xy(da: DataArray) -> DataArray:
     return da
 
 
+def _to_analysis_convention(da: DataArray) -> DataArray:
+    """Normalize DEM output to analysis convention: dims (lat, lon), ascending coords."""
+    da = _ensure_xy(da)
+    # Rename to canonical dim names
+    da = da.rename({"y": "lat", "x": "lon"})
+    # Ensure monotonic increasing lat/lon (south→north, west→east)
+    if "lat" in da.coords:
+        da = da.sortby("lat")
+    if "lon" in da.coords:
+        da = da.sortby("lon")
+    # Ensure canonical dim order for consumers (lat, lon)
+    return da.transpose("lat", "lon")
+
+
 def grid_spec_from_metadata(metadata: TerrainMetadata) -> GridSpec:
     """Reconstruct a GridSpec from stored terrain metadata."""
     cell_size = metadata.cell_size_deg or DEFAULT_CELL_SIZE_DEG
@@ -68,5 +82,5 @@ def load_dem_for_bbox(
 
     min_lon, min_lat, max_lon, max_lat = bbox
     clipped = da.rio.clip_box(minx=min_lon, miny=min_lat, maxx=max_lon, maxy=max_lat, crs="EPSG:4326")
-    return _ensure_xy(clipped)
+    return _to_analysis_convention(clipped)
 

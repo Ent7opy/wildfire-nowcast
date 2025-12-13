@@ -1,4 +1,21 @@
-"""Canonical analysis grid specification helpers."""
+"""Canonical analysis grid specification helpers.
+
+Conventions (analysis order)
+- **CRS**: EPSG:4326 (WGS84).
+- **Resolution**: fixed `0.01°` in both latitude and longitude (by default).
+- **Indexing**: array indices are `(i, j) = (lat_index, lon_index)`.
+- **Coordinate order**: `lat` and `lon` are 1D arrays that are *monotonic increasing*
+  (south → north, west → east).
+- **Origin fields**: `origin_lat` and `origin_lon` represent the *southern*/*western*
+  cell **edges**. Coordinate outputs (`grid_coords`, `index_to_latlon`,
+  `window_coords`) return **cell centers**.
+
+Note on GeoTIFFs
+GeoTIFF rasters are commonly stored “north-up” where row 0 corresponds to the
+northernmost pixels (i.e., latitude decreases with increasing row index).
+Downstream loaders (e.g. DEM) must normalize to the analysis convention before
+returning arrays to ML/analysis consumers.
+"""
 
 from __future__ import annotations
 
@@ -71,4 +88,68 @@ def latlon_to_index(grid: GridSpec, lat: np.ndarray | float, lon: np.ndarray | f
     i = np.floor((np.asarray(lat) - grid.origin_lat) / cell).astype(int)
     j = np.floor((np.asarray(lon) - grid.origin_lon) / cell).astype(int)
     return i, j
+
+
+def index_to_latlon(
+    grid: GridSpec, i: np.ndarray | int, j: np.ndarray | int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Map integer grid indices to lat/lon cell-center coordinates.
+
+    Parameters
+    - **i**: latitude index/indices (0-based, south → north)
+    - **j**: longitude index/indices (0-based, west → east)
+
+    Returns
+    - **lat**: latitude center(s)
+    - **lon**: longitude center(s)
+    """
+    cell = grid.cell_size_deg
+    lat = grid.origin_lat + (np.asarray(i) + 0.5) * cell
+    lon = grid.origin_lon + (np.asarray(j) + 0.5) * cell
+    return lat, lon
+
+
+def bbox_to_window(
+    grid: GridSpec,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    *,
+    clip: bool = True,
+) -> Tuple[int, int, int, int]:
+    """Convert a lon/lat bbox to a half-open index window on the grid.
+
+    The returned window is **half-open** (Python slicing style):
+    - `i0:i1` spans latitude indices (south → north)
+    - `j0:j1` spans longitude indices (west → east)
+
+    Edge behavior
+    - `i0`/`j0` use `floor` (snap down) so a bbox that starts inside a cell includes it.
+    - `i1`/`j1` use `ceil` (snap up) so a bbox that ends inside a cell includes it.
+    - If `clip=True`, indices are clamped to the grid extent `[0, n_lat]` / `[0, n_lon]`.
+      If the bbox lies completely outside, the result may be empty (e.g. `i0 == i1`).
+    """
+    cell = grid.cell_size_deg
+
+    i0 = int(math.floor((min_lat - grid.origin_lat) / cell))
+    i1 = int(math.ceil((max_lat - grid.origin_lat) / cell))
+    j0 = int(math.floor((min_lon - grid.origin_lon) / cell))
+    j1 = int(math.ceil((max_lon - grid.origin_lon) / cell))
+
+    if clip:
+        i0 = max(0, min(grid.n_lat, i0))
+        i1 = max(0, min(grid.n_lat, i1))
+        j0 = max(0, min(grid.n_lon, j0))
+        j1 = max(0, min(grid.n_lon, j1))
+
+    return i0, i1, j0, j1
+
+
+def window_coords(grid: GridSpec, i0: int, i1: int, j0: int, j1: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Return 1D arrays of lat/lon cell centers for a `(i0:i1, j0:j1)` window."""
+    cell = grid.cell_size_deg
+    lat = grid.origin_lat + (np.arange(i0, i1) + 0.5) * cell
+    lon = grid.origin_lon + (np.arange(j0, j1) + 0.5) * cell
+    return lat, lon
 
