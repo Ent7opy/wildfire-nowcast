@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-weather ingest-dem
+.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-weather ingest-dem smoke-grid smoke-terrain-features
 
 PYTHON ?= python
 UV ?= uv
@@ -63,4 +63,7 @@ ingest-dem: ## Run Copernicus DEM preprocessing (pass ARGS="--cog")
 
 smoke-grid: ## Run DEM + weather smoke check for grid alignment (pass ARGS="--bbox 5.1 35.4 6.0 36.0")
 	$(UV) run --project ingest scripts/smoke_grid_alignment.py $(ARGS)
+
+smoke-terrain-features: ## Run DEM + slope/aspect smoke check (pass ARGS="--bbox ... --region smoke_grid")
+	$(UV) run --project ingest scripts/smoke_terrain_features.py $(ARGS)
 
