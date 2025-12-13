@@ -120,7 +120,9 @@ def main() -> None:
     aspect_path = out_dir / f"aspect_{args.region}_epsg4326_0p01deg.tif"
 
     print("\n======== Terrain features ingest (run 1) ========")
-    _run_features(args.region, recompute=True if args.recompute else False)
+    # Always recompute for determinism testing; otherwise stale outputs from previous
+    # runs can cause a misleading "not deterministic" hash mismatch.
+    _run_features(args.region, recompute=True)
     if not slope_path.exists() or not aspect_path.exists():
         raise FileNotFoundError("Expected slope/aspect outputs, but files were not found.")
 
