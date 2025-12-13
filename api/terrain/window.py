@@ -83,7 +83,10 @@ def _read_window_as_analysis_array(
 
     # Fill nodata with NaN (mirrors rioxarray.open_rasterio(masked=True)).
     if isinstance(band, np.ma.MaskedArray):
-        valid = ~np.asarray(band.mask)
+        # NOTE: `band.mask` can be `np.ma.nomask` (a scalar False) when there is no
+        # nodata/mask information. `np.ma.getmaskarray(...)` always returns an array
+        # shaped like the data, which keeps downstream operations (e.g. flipud) safe.
+        valid = ~np.ma.getmaskarray(band)
         data = np.asarray(band.filled(np.nan), dtype=np.float32)
     else:  # pragma: no cover (rasterio returns masked arrays for masked=True)
         data = np.asarray(band, dtype=np.float32)
@@ -95,18 +98,19 @@ def _read_window_as_analysis_array(
     return data, valid
 
 
-def load_terrain_window(
+def _load_terrain_window_from_features_md(
     region_name: str,
+    features_md: features_repo.TerrainFeaturesMetadata,
     bbox: BBox,
     *,
-    include_dem: bool = False,
-    clip: bool = True,
-) -> TerrainWindow:
-    """Load slope/aspect (and optionally DEM) cut to a grid-aligned window for bbox."""
-    features_md = features_repo.get_latest_terrain_features_metadata_for_region(region_name)
-    if features_md is None:
-        raise ValueError(f"No terrain features metadata found for region '{region_name}'.")
+    include_dem: bool,
+    clip: bool,
+) -> tuple[TerrainWindow, GridSpec, Path]:
+    """Internal helper to ensure a single metadata/grid is used end-to-end.
 
+    Returns `(terrain_window, grid, slope_path)` where `grid` is the grid used to compute
+    `terrain_window.window` and read the raster data.
+    """
     grid = _grid_spec_from_features_metadata(features_md)
     win = get_grid_window_for_bbox(grid, bbox, clip=clip)
 
@@ -146,13 +150,38 @@ def load_terrain_window(
 
     # For empty windows we keep masks as empty arrays (not None) to preserve shapes.
     valid_mask = valid.astype(bool) if valid.size else valid
-    return TerrainWindow(
-        window=win,
-        slope=slope,
-        aspect=aspect,
-        elevation=elevation,
-        valid_data_mask=valid_mask,
+    return (
+        TerrainWindow(
+            window=win,
+            slope=slope,
+            aspect=aspect,
+            elevation=elevation,
+            valid_data_mask=valid_mask,
+        ),
+        grid,
+        slope_path,
     )
+
+
+def load_terrain_window(
+    region_name: str,
+    bbox: BBox,
+    *,
+    include_dem: bool = False,
+    clip: bool = True,
+) -> TerrainWindow:
+    """Load slope/aspect (and optionally DEM) cut to a grid-aligned window for bbox."""
+    features_md = features_repo.get_latest_terrain_features_metadata_for_region(region_name)
+    if features_md is None:
+        raise ValueError(f"No terrain features metadata found for region '{region_name}'.")
+    tw, _grid, _slope_path = _load_terrain_window_from_features_md(
+        region_name,
+        features_md,
+        bbox,
+        include_dem=include_dem,
+        clip=clip,
+    )
+    return tw
 
 
 def load_terrain_for_aoi(
@@ -173,9 +202,19 @@ def load_terrain_for_aoi(
         return load_terrain_window(region_name, aoi, include_dem=include_dem, clip=clip)
 
     # Shapely geometry path (polygon or any geometry with bounds).
+    features_md = features_repo.get_latest_terrain_features_metadata_for_region(region_name)
+    if features_md is None:
+        raise ValueError(f"No terrain features metadata found for region '{region_name}'.")
+
     bounds = aoi.bounds  # (minx, miny, maxx, maxy)
     bbox = (float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3]))
-    tw = load_terrain_window(region_name, bbox, include_dem=include_dem, clip=clip)
+    tw, grid, slope_path = _load_terrain_window_from_features_md(
+        region_name,
+        features_md,
+        bbox,
+        include_dem=include_dem,
+        clip=clip,
+    )
     if not return_mask:
         return tw
 
@@ -192,11 +231,6 @@ def load_terrain_for_aoi(
         )
 
     # Rasterize polygon onto the *raster* window grid (north-up), then flip to analysis.
-    features_md = features_repo.get_latest_terrain_features_metadata_for_region(region_name)
-    if features_md is None:
-        raise ValueError(f"No terrain features metadata found for region '{region_name}'.")
-    slope_path = Path(features_md.slope_path)
-    grid = _grid_spec_from_features_metadata(features_md)
     row_off = grid.n_lat - tw.window.i1
     col_off = tw.window.j0
     rio_win = Window(col_off=col_off, row_off=row_off, width=width, height=height)

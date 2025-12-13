@@ -20,7 +20,7 @@ def _write_test_geotiff(
     *,
     grid: GridSpec,
     data_latlon: np.ndarray,
-    nodata: float = -9999.0,
+    nodata: float | None = -9999.0,
 ) -> None:
     """Write a north-up GeoTIFF for a grid-aligned array.
 
@@ -44,8 +44,9 @@ def _write_test_geotiff(
         "dtype": "float32",
         "crs": grid.crs,
         "transform": transform,
-        "nodata": float(nodata),
     }
+    if nodata is not None:
+        profile["nodata"] = float(nodata)
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(raster_data, 1)
 
@@ -130,6 +131,51 @@ def test_load_terrain_window_reads_by_window_and_normalizes(monkeypatch: pytest.
     assert np.allclose(tw.slope, slope[tw.window.i0 : tw.window.i1, tw.window.j0 : tw.window.j1])
     assert np.allclose(tw.aspect, aspect[tw.window.i0 : tw.window.i1, tw.window.j0 : tw.window.j1])
     assert np.allclose(tw.elevation, dem[tw.window.i0 : tw.window.i1, tw.window.j0 : tw.window.j1])
+
+
+def test_load_terrain_window_with_no_nodata_does_not_crash_and_valid_is_true(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    grid = GridSpec(crs="EPSG:4326", cell_size_deg=0.1, origin_lat=0.0, origin_lon=0.0, n_lat=6, n_lon=8)
+    min_lon, min_lat, max_lon, max_lat = grid_bounds(grid)
+
+    slope = (np.arange(grid.n_lat)[:, None] * 10 + np.arange(grid.n_lon)[None, :]).astype(np.float32)
+    aspect = (slope + 1.0).astype(np.float32)
+
+    slope_path = tmp_path / "slope_no_nodata.tif"
+    aspect_path = tmp_path / "aspect_no_nodata.tif"
+    _write_test_geotiff(slope_path, grid=grid, data_latlon=slope, nodata=None)
+    _write_test_geotiff(aspect_path, grid=grid, data_latlon=aspect, nodata=None)
+
+    features_md = TerrainFeaturesMetadata(
+        id=1,
+        created_at=datetime.now(timezone.utc),
+        region_name="test",
+        source_dem_metadata_id=1,
+        slope_path=str(slope_path),
+        aspect_path=str(aspect_path),
+        crs_epsg=4326,
+        cell_size_deg=grid.cell_size_deg,
+        origin_lat=grid.origin_lat,
+        origin_lon=grid.origin_lon,
+        grid_n_lat=grid.n_lat,
+        grid_n_lon=grid.n_lon,
+        bbox=(min_lon, min_lat, max_lon, max_lat),
+    )
+
+    from api.terrain import window as window_mod
+
+    monkeypatch.setattr(
+        window_mod.features_repo,
+        "get_latest_terrain_features_metadata_for_region",
+        lambda region_name: features_md,
+    )
+
+    bbox = (0.15, 0.15, 0.55, 0.45)
+    tw = load_terrain_window("test", bbox, include_dem=False)
+    assert tw.valid_data_mask is not None
+    assert tw.valid_data_mask.shape == tw.slope.shape
+    assert bool(tw.valid_data_mask.all()) is True
 
 
 def test_load_terrain_window_clips_partial_outside(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
