@@ -37,7 +37,10 @@ def _load_feature_raster(path: Path) -> DataArray:
     da = rioxarray.open_rasterio(path, masked=True)
     if "band" in da.dims:
         da = da.squeeze("band", drop=True)
-    return _to_analysis_convention(da)
+    # Keep spatial dimension names as x/y here so rioxarray can reliably
+    # identify spatial axes for operations like rio.clip_box. We convert to
+    # analysis convention (lat/lon) after clipping, mirroring dem_loader.py.
+    return _ensure_xy(da)
 
 
 def _require_latest_metadata(region_name: str) -> TerrainFeaturesMetadata:
@@ -66,5 +69,5 @@ def load_slope_aspect_for_bbox(
     min_lon, min_lat, max_lon, max_lat = bbox
     slope_clip = slope.rio.clip_box(minx=min_lon, miny=min_lat, maxx=max_lon, maxy=max_lat, crs="EPSG:4326")
     aspect_clip = aspect.rio.clip_box(minx=min_lon, miny=min_lat, maxx=max_lon, maxy=max_lat, crs="EPSG:4326")
-    return slope_clip, aspect_clip
+    return _to_analysis_convention(slope_clip), _to_analysis_convention(aspect_clip)
 
