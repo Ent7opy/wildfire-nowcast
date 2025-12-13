@@ -67,6 +67,25 @@ class GridSpec:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class GridWindow:
+    """A grid-aligned half-open window with 1D cell-center coordinates.
+
+    Conventions:
+    - Indices are half-open (Python slicing): `(i0:i1, j0:j1)`.
+    - `i` increases south → north (latitude increases).
+    - `j` increases west → east (longitude increases).
+    - `lat`/`lon` are **cell centers** and are monotonic increasing.
+    """
+
+    i0: int
+    i1: int
+    j0: int
+    j1: int
+    lat: np.ndarray
+    lon: np.ndarray
+
+
 def grid_bounds(grid: GridSpec) -> Tuple[float, float, float, float]:
     """Return (min_lon, min_lat, max_lon, max_lat) bounds for a grid."""
     max_lat = grid.origin_lat + grid.n_lat * grid.cell_size_deg
@@ -152,4 +171,32 @@ def window_coords(grid: GridSpec, i0: int, i1: int, j0: int, j1: int) -> Tuple[n
     lat = grid.origin_lat + (np.arange(i0, i1) + 0.5) * cell
     lon = grid.origin_lon + (np.arange(j0, j1) + 0.5) * cell
     return lat, lon
+
+
+def get_grid_window_for_bbox(
+    grid: GridSpec,
+    bbox: tuple[float, float, float, float],
+    *,
+    clip: bool = True,
+) -> GridWindow:
+    """Compute a grid-aligned window for a lon/lat bbox.
+
+    Parameters
+    - **bbox**: `(min_lon, min_lat, max_lon, max_lat)` in EPSG:4326.
+    - **clip**: if True, clamp indices to `[0..n_lat]` / `[0..n_lon]`.
+
+    Returns
+    - A `GridWindow` with half-open indices and cell-center `lat`/`lon` arrays.
+    """
+    min_lon, min_lat, max_lon, max_lat = bbox
+    i0, i1, j0, j1 = bbox_to_window(
+        grid,
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        clip=clip,
+    )
+    lat, lon = window_coords(grid, i0, i1, j0, j1)
+    return GridWindow(i0=i0, i1=i1, j0=j0, j1=j1, lat=lat, lon=lon)
 
