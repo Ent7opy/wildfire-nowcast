@@ -251,13 +251,25 @@ def aggregate_to_grid(
         raise TypeError("fires_with_indices must be a pandas.DataFrame or a Sequence[Mapping].")
     rows: Sequence[Mapping[str, Any]] = fires_with_indices
     if len(rows) == 0:
-        return np.zeros((grid.n_lat, grid.n_lon), dtype=(dtype or np.int32))
+        return aggregate_indices_to_grid(
+            i=np.asarray([], dtype=int),
+            j=np.asarray([], dtype=int),
+            shape=(grid.n_lat, grid.n_lon),
+            mode=mode,
+            dtype=dtype,
+        )
 
     # Filter using in_bounds if present, otherwise assume already filtered.
     if drop_outside and "in_bounds" in rows[0]:
         rows = [r for r in rows if bool(r.get("in_bounds"))]
         if len(rows) == 0:
-            return np.zeros((grid.n_lat, grid.n_lon), dtype=(dtype or np.int32))
+            return aggregate_indices_to_grid(
+                i=np.asarray([], dtype=int),
+                j=np.asarray([], dtype=int),
+                shape=(grid.n_lat, grid.n_lon),
+                mode=mode,
+                dtype=dtype,
+            )
 
     i = _as_numpy_column(rows, "i", dtype=int)
     j = _as_numpy_column(rows, "j", dtype=int)

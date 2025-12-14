@@ -66,8 +66,10 @@ def get_fire_cells_heatmap(
 
     grid = get_region_grid_spec(region_name)
     win = get_grid_window_for_bbox(grid, bbox, clip=clip)
-    height = win.i1 - win.i0
-    width = win.j1 - win.j0
+    # Derive dimensions from the coordinate arrays to guarantee consistency even if
+    # window indices are degenerate (e.g. i0 == i1) or otherwise inconsistent.
+    height = int(win.lat.size)
+    width = int(win.lon.size)
 
     # Query only what aggregation needs.
     cols: list[str] = ["lat", "lon"]
@@ -75,6 +77,17 @@ def get_fire_cells_heatmap(
         if not value_col:
             raise ValueError(f"mode='{mode}' requires value_col.")
         cols.append(value_col)
+
+    # If the AOI window is empty in either dimension, return a correctly-shaped empty
+    # heatmap that matches (len(window.lat), len(window.lon)) and avoid a DB query.
+    if height == 0 or width == 0:
+        heatmap = aggregate_indices_to_grid(
+            i=np.asarray([], dtype=int),
+            j=np.asarray([], dtype=int),
+            shape=(height, width),
+            mode=mode,
+        )
+        return FireHeatmapWindow(grid=grid, window=win, heatmap=heatmap, points=([] if include_points else None))
 
     detections = list_fire_detections_bbox_time(
         bbox=bbox,
@@ -86,12 +99,13 @@ def get_fire_cells_heatmap(
     )
     mapped = fires_to_indices(detections, grid, drop_outside=True)
 
-    if height <= 0 or width <= 0:
-        empty = np.zeros((0, 0), dtype=(np.int32 if mode == "count" else np.float32))
-        return FireHeatmapWindow(grid=grid, window=win, heatmap=empty, points=([] if include_points else None))
-
     if not mapped:
-        heatmap = np.zeros((height, width), dtype=(np.int32 if mode == "count" else np.float32))
+        heatmap = aggregate_indices_to_grid(
+            i=np.asarray([], dtype=int),
+            j=np.asarray([], dtype=int),
+            shape=(height, width),
+            mode=mode,
+        )
         return FireHeatmapWindow(grid=grid, window=win, heatmap=heatmap, points=([] if include_points else None))
 
     i = np.asarray([r["i"] for r in mapped], dtype=int)
