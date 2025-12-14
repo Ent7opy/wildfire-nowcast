@@ -5,6 +5,8 @@ Key conventions (must match `api.core.grid`):
 - Indices: half-open windows `(i0:i1, j0:j1)`.
 - Returned arrays: dims `(lat, lon)` with **lat increasing** and **lon increasing**.
 
+Contributor docs: see `docs/terrain_grid.md`.
+
 Important: GeoTIFFs are typically stored north-up (row 0 is north). We read GeoTIFF
 windows using rasterio and then flip rows once to match the analysis convention.
 """
@@ -23,7 +25,7 @@ from rasterio.windows import Window
 
 from api.core.grid import GridSpec, GridWindow, get_grid_window_for_bbox
 from api.terrain import features_repo, repo
-from api.terrain.dem_loader import grid_spec_from_metadata
+from api.terrain.validate import validate_terrain_stack
 
 if TYPE_CHECKING:  # pragma: no cover
     from shapely.geometry.base import BaseGeometry
@@ -121,30 +123,24 @@ def _load_terrain_window_from_features_md(
     if not aspect_path.exists():
         raise FileNotFoundError(f"Aspect raster not found at {aspect_path}")
 
+    # Fail fast if slope/aspect (and optional DEM) are not exactly aligned to the grid.
+    dem_path: Path | None = None
+    if include_dem:
+        dem_md = repo.get_latest_dem_metadata_for_region(region_name)
+        if dem_md is None:
+            raise ValueError(f"No DEM metadata found for region '{region_name}'.")
+        dem_path = Path(dem_md.raster_path)
+        if not dem_path.exists():
+            raise FileNotFoundError(f"DEM raster not found at {dem_path}")
+    validate_terrain_stack(dem_path, slope_path, aspect_path, grid, strict=True)
+
     slope, slope_valid = _read_window_as_analysis_array(slope_path, grid, win)
     aspect, aspect_valid = _read_window_as_analysis_array(aspect_path, grid, win)
     valid = slope_valid & aspect_valid
 
     elevation = None
     if include_dem:
-        dem_md = repo.get_latest_dem_metadata_for_region(region_name)
-        if dem_md is None:
-            raise ValueError(f"No DEM metadata found for region '{region_name}'.")
-        dem_grid = grid_spec_from_metadata(dem_md)
-        if (
-            dem_grid.origin_lat != grid.origin_lat
-            or dem_grid.origin_lon != grid.origin_lon
-            or dem_grid.cell_size_deg != grid.cell_size_deg
-            or dem_grid.n_lat != grid.n_lat
-            or dem_grid.n_lon != grid.n_lon
-        ):
-            raise ValueError(
-                "DEM grid does not match terrain features grid for region "
-                f"'{region_name}'."
-            )
-        dem_path = Path(dem_md.raster_path)
-        if not dem_path.exists():
-            raise FileNotFoundError(f"DEM raster not found at {dem_path}")
+        assert dem_path is not None  # for type checkers
         elevation, dem_valid = _read_window_as_analysis_array(dem_path, grid, win)
         valid = valid & dem_valid
 

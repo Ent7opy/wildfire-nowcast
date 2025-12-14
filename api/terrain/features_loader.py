@@ -1,4 +1,7 @@
-"""Helpers to read slope/aspect rasters for downstream consumers."""
+"""Helpers to read slope/aspect rasters for downstream consumers.
+
+Conventions and alignment: see `docs/terrain_grid.md`.
+"""
 
 from __future__ import annotations
 
@@ -8,10 +11,12 @@ from typing import Tuple
 import rioxarray  # type: ignore
 from xarray import DataArray
 
+from api.core.grid import GridSpec
 from api.terrain.features_repo import (
     TerrainFeaturesMetadata,
     get_latest_terrain_features_metadata_for_region,
 )
+from api.terrain.validate import validate_terrain_stack
 
 
 def _ensure_xy(da: DataArray) -> DataArray:
@@ -62,6 +67,17 @@ def load_slope_aspect_for_bbox(
         raise FileNotFoundError(f"Slope raster not found at {slope_path}")
     if not aspect_path.exists():
         raise FileNotFoundError(f"Aspect raster not found at {aspect_path}")
+
+    # Fail fast if the stored rasters do not match the stored grid contract.
+    grid = GridSpec(
+        crs=f"EPSG:{metadata.crs_epsg}",
+        cell_size_deg=float(metadata.cell_size_deg),
+        origin_lat=float(metadata.origin_lat),
+        origin_lon=float(metadata.origin_lon),
+        n_lat=int(metadata.grid_n_lat),
+        n_lon=int(metadata.grid_n_lon),
+    )
+    validate_terrain_stack(None, slope_path, aspect_path, grid, strict=True)
 
     slope = _load_feature_raster(slope_path)
     aspect = _load_feature_raster(aspect_path)

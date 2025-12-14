@@ -1,4 +1,7 @@
-"""Helpers to read DEM rasters for downstream consumers."""
+"""Helpers to read DEM rasters for downstream consumers.
+
+Conventions and alignment: see `docs/terrain_grid.md`.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ from xarray import DataArray
 
 from api.core.grid import DEFAULT_CELL_SIZE_DEG, GridSpec
 from api.terrain.repo import TerrainMetadata, get_latest_dem_metadata_for_region
+from api.terrain.validate import validate_raster_matches_grid
 
 
 def _ensure_xy(da: DataArray) -> DataArray:
@@ -74,6 +78,10 @@ def load_dem_for_bbox(
     raster_path = Path(metadata.raster_path)
     if not raster_path.exists():
         raise FileNotFoundError(f"DEM raster not found at {raster_path}")
+
+    # Fail fast if the raster is misaligned with the stored grid.
+    grid = grid_spec_from_metadata(metadata)
+    validate_raster_matches_grid(raster_path, grid, strict=True)
 
     da = rioxarray.open_rasterio(raster_path, masked=True)
     if "band" in da.dims:

@@ -9,7 +9,7 @@ Right now the repo has:
 - **`ingest/`** – Reserved for data ingest pipelines (FIRMS, weather, terrain, etc.).
 - **`infra/`** – Docker Compose and infra docs for running the full stack locally.
 
-If you want the deep product/ML vision and original longform overview, see `docs/WILDFIRE_NOWCAST_101.md`. For a full from-scratch setup (prerequisites, `.env`, `make` workflows) see [`docs/SETUP.md`](docs/SETUP.md). For navigation to all docs, start at [`docs/README.md`](docs/README.md).
+If you want the deep product/ML vision and original longform overview, see `docs/WILDFIRE_NOWCAST_101.md`. For grid/terrain conventions and alignment guarantees, see [`docs/terrain_grid.md`](docs/terrain_grid.md) (and `docs/grid_choice.md`). For a full from-scratch setup (prerequisites, `.env`, `make` workflows) see [`docs/SETUP.md`](docs/SETUP.md). For navigation to all docs, start at [`docs/README.md`](docs/README.md).
 
 ---
 

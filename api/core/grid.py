@@ -10,6 +10,10 @@ Conventions (analysis order)
   cell **edges**. Coordinate outputs (`grid_coords`, `index_to_latlon`,
   `window_coords`) return **cell centers**.
 
+Contributor docs
+- See `docs/grid_choice.md` (why EPSG:4326 @ 0.01°) and `docs/terrain_grid.md`
+  (full grid + terrain alignment contract, pitfalls, usage recipes).
+
 Note on GeoTIFFs
 GeoTIFF rasters are commonly stored “north-up” where row 0 corresponds to the
 northernmost pixels (i.e., latitude decreases with increasing row index).
