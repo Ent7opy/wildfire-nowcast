@@ -97,6 +97,7 @@ At a high level, the app should support:
   - Role:
     - Derive **slope** and **aspect** (slope direction).
     - Influence spread (fires move faster upslope, etc.).
+  - Conventions: see `docs/grid_choice.md` and `docs/terrain_grid.md` (grid + terrain alignment contract).
 
 ### 3.2 Optional Context Layers
 

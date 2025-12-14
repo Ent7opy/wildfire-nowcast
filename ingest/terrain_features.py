@@ -26,6 +26,7 @@ from api.terrain.features_repo import (  # noqa: E402
     insert_terrain_features_metadata,
 )
 from api.terrain.repo import get_latest_dem_metadata_for_region  # noqa: E402
+from api.terrain.validate import validate_raster_matches_grid, validate_terrain_stack  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -218,6 +219,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     grid_spec = grid_spec_from_metadata(dem_metadata)
+    # Fail fast if the DEM is not exactly on the expected grid.
+    validate_raster_matches_grid(dem_path, grid_spec, strict=True)
     with rasterio.open(dem_path) as src:
         z_ma = src.read(1, masked=True)
         z = np.asarray(z_ma.filled(np.nan), dtype=float)
@@ -258,6 +261,9 @@ def main(argv: list[str] | None = None) -> None:
 
         final_slope_path = _convert_to_cog(slope_path) if emit_cog else slope_path
         final_aspect_path = _convert_to_cog(aspect_path) if emit_cog else aspect_path
+
+        # Fail fast if outputs are misaligned with DEM/grid.
+        validate_terrain_stack(dem_path, final_slope_path, final_aspect_path, grid_spec, strict=True)
 
         s_min, s_max, s_mean, coverage = _compute_stats(slope_out, settings.nodata_value)
         a_min, a_max, _a_mean, _a_cov = _compute_stats(aspect_out, settings.nodata_value)
