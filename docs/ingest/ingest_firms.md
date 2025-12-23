@@ -42,3 +42,10 @@
 - BBox uses degrees (W,S,E,N); `world` ingests globally and is the largest download.
 - Validation warnings are emitted as structured logs (`firms.validation*`); check logs when records look low.
 
+## NRT vs historical data (important)
+- The default sources (`*_NRT`) are **Near Real-Time** feeds. In practice they typically only retain the most recent **~7 days** of detections.
+  - If you request a larger window, you may receive **0 rows** even though fires happened earlier.
+- The FIRMS **area CSV API** day-range parameter is limited to **1–10 days**. For training workflows that need months/years of data:
+  - Use **non-NRT archive sources** (if available for your AOI/use case), and/or
+  - Use an **offline export** workflow (download historical data from FIRMS, then bulk load into `fire_detections`).
+

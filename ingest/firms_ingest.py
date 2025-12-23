@@ -23,6 +23,9 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("firms_ingest")
 
+MAX_FIRMS_DAY_RANGE = 10
+NRT_RETENTION_DAYS_HINT = 7
+
 
 def run_firms_ingest(
     day_range: Optional[int],
@@ -34,6 +37,26 @@ def run_firms_ingest(
     bbox = _resolve_area(area) if area else config.resolved_area
     effective_day_range = day_range if day_range is not None else config.day_range
     source_list = _resolve_sources(sources) or config.sources
+
+    if not 1 <= int(effective_day_range) <= MAX_FIRMS_DAY_RANGE:
+        LOGGER.error(
+            "Invalid day_range=%s. FIRMS area CSV API supports 1-%s days (NRT sources are typically ~%s days).",
+            effective_day_range,
+            MAX_FIRMS_DAY_RANGE,
+            NRT_RETENTION_DAYS_HINT,
+        )
+        return 2
+
+    if effective_day_range > NRT_RETENTION_DAYS_HINT and any(
+        str(s).upper().endswith("_NRT") for s in source_list
+    ):
+        LOGGER.warning(
+            "Requested day_range=%s with NRT sources. FIRMS NRT feeds typically retain ~%s days; "
+            "older ranges may return 0 rows. For historical training data, use non-NRT archive sources "
+            "or an offline export flow.",
+            effective_day_range,
+            NRT_RETENTION_DAYS_HINT,
+        )
 
     LOGGER.info(
         "Starting FIRMS ingestion",
@@ -139,7 +162,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--day-range",
         type=int,
         default=None,
-        help="Override FIRMS_DAY_RANGE (number of past days).",
+        help="Override FIRMS_DAY_RANGE (number of past days; FIRMS area API supports 1-10).",
     )
     parser.add_argument(
         "--area",
