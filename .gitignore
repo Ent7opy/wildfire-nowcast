@@ -99,6 +99,11 @@ logs/
 # models/
 # checkpoints/
 
+# Local outputs / downloaded datasets (keep repo clean)
+data/ingest/
+data/denoiser/snapshots/
+data/denoiser/*.parquet
+
 # Temporary files
 *.tmp
 *.temp

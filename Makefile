@@ -67,3 +67,12 @@ smoke-grid: ## Run DEM + weather smoke check for grid alignment (pass ARGS="--bb
 smoke-terrain-features: ## Run DEM + slope/aspect smoke check (pass ARGS="--bbox ... --region smoke_grid")
 	$(UV) run --project ingest scripts/smoke_terrain_features.py $(ARGS)
 
+ingest-industrial: ## Ingest industrial sources (pass ARGS="--wri --bbox ...")
+	$(UV) run --project ingest -m ingest.industrial_sources_ingest $(ARGS)
+
+denoiser-label: ## Run heuristic labeling (pass ARGS="--bbox ... --start ... --end ...")
+	$(UV) run --project ml -m ml.denoiser.label_v1 $(ARGS)
+
+denoiser-snapshot: ## Export training snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
+	$(UV) run --project ml -m ml.denoiser.export_snapshot $(ARGS)
+
