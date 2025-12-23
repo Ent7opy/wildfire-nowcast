@@ -5,6 +5,7 @@ import numpy as np
 from typing import Tuple, Optional
 from sqlalchemy import text, Engine
 from .features import add_firms_features, add_time_features, add_spatiotemporal_context, add_terrain_features
+from .sql_safety import validate_table_reference
 
 def load_labeled_data(
     engine: Engine,
@@ -15,6 +16,8 @@ def load_labeled_data(
 ) -> pd.DataFrame:
     """Load detections joined with labels for a given time window."""
     
+    safe_label_table = validate_table_reference(label_table)
+
     # We assume the labels table has fire_detection_id and label (POS/NEG/UNKNOWN)
     query = text(f"""
         SELECT 
@@ -23,7 +26,7 @@ def load_labeled_data(
             d.raw_properties,
             l.label
         FROM fire_detections d
-        JOIN {label_table} l ON d.id = l.fire_detection_id
+        JOIN {safe_label_table} l ON d.id = l.fire_detection_id
         WHERE d.acq_time BETWEEN :start AND :end
     """)
     

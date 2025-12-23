@@ -13,7 +13,12 @@ def main():
     parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--aoi", type=str, required=True, help="Region name for terrain features")
     parser.add_argument("--out", type=str, default="data/denoiser/features.parquet", help="Output path")
-    parser.add_argument("--label-table", type=str, default="fire_labels", help="Table containing labels")
+    parser.add_argument(
+        "--label-table",
+        type=str,
+        default="fire_labels",
+        help="Labels table to join (identifier only: <table> or <schema>.<table>)",
+    )
     
     args = parser.parse_args()
     
