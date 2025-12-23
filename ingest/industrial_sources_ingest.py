@@ -70,6 +70,16 @@ def ingest_industrial_sources(
     # Prepare batch
     batch = []
     for _, row in df.iterrows():
+        # IMPORTANT: pass a Python dict to SQLAlchemy's JSON binder.
+        # Using row.to_json() would double-serialize (JSON string -> JSON), storing a quoted string.
+        meta = row.where(pd.notnull(row), None).to_dict()
+        # Normalize numpy/pandas scalars to plain Python types for JSON serialization.
+        for k, v in list(meta.items()):
+            if hasattr(v, "item"):
+                try:
+                    meta[k] = v.item()
+                except Exception:
+                    pass
         batch.append({
             "name": str(row[name_col]),
             "type": str(row[type_col]),
@@ -77,7 +87,7 @@ def ingest_industrial_sources(
             "source_version": source_version,
             "lat": float(row[lat_col]),
             "lon": float(row[lon_col]),
-            "meta": row.to_json()
+            "meta": meta
         })
 
     insert_stmt = text("""
