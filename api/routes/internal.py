@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from config import settings
+from api.config import settings
 
 internal_router = APIRouter(tags=["internal"])
 

@@ -7,11 +7,8 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# Add the parent directory to sys.path to import our config
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
 # Import our settings to get the database URL
-from config import settings
+from api.config import settings
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
