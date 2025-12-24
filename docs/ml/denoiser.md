@@ -47,3 +47,31 @@ The snapshot exporter enforces a **temporal split**:
 
 This prevents leakage from the same fire events across multiple days.
 
+## 5. Evaluation + default thresholds
+
+Use the evaluation script to compute ROC/PR curves, threshold sweeps, and (optional) a calibration plot, and to auto-pick default operating thresholds:
+
+```bash
+# Example (from repo root)
+make denoiser-eval MODEL_RUN="models/denoiser_v1/<run_id>" SNAPSHOT="data/denoiser/snapshots/run_<timestamp>"
+```
+
+You can tune the auto-picking behavior via `ARGS`, e.g.:
+- `ARGS="--target_precision 0.95"` for a stricter strong filter.
+- `ARGS="--target_recall 0.95"` for a more recall-preserving downweight split.
+- `ARGS="--min_downweight_rate 0.02"` to avoid a degenerate downweight threshold (ensure at least ~2% are in the downweighted bucket).
+
+Artifacts are written to `reports/denoiser_v1/<run_id>/`:
+- `roc_curve.png`, `pr_curve.png`, `calibration.png`
+- `threshold_sweep.csv` (precision/recall/F1 across thresholds)
+- `metrics_summary.json`
+- `thresholds.md` (**chosen thresholds + rationale + downstream interpretation contract**)
+
+### Downstream interpretation (drop vs weight)
+
+The evaluation report (`thresholds.md`) defines two intended operating modes:
+- **Drop mode (precision-first)**: drop detections with \(p < \text{strong_filter_threshold}\).
+- **Weight mode (coverage-first)**: keep all detections, but downweight those with \(p < \text{downweight_threshold}\).
+
+Important: threshold stability depends on the eval set having enough positives and negatives; small/imbalanced eval splits are explicitly called out in `thresholds.md` under **Warnings**.
+

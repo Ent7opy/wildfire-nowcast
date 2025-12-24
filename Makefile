@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train
+.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval
 
 PYTHON ?= python
 UV ?= uv
@@ -81,4 +81,9 @@ denoiser-snapshot: ## Export training snapshot (pass ARGS="--bbox ... --start ..
 
 denoiser-train: ## Train denoiser baseline (pass CONFIG="configs/denoiser_train_v1.yaml")
 	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v1.yaml)
+
+denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="models/denoiser_v1/<run_id>" SNAPSHOT="data/denoiser/snapshots/<run>" OUT="reports/denoiser_v1/<run_id>" ARGS="--target_precision 0.95 ...")
+	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v1/<run_id>"))
+	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT="data/denoiser/snapshots/<run>" or a labeled parquet))
+	$(UV) run --project ml -m ml.eval_denoiser --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) $(if $(OUT),--out $(OUT),) $(ARGS)
 
