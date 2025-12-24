@@ -13,6 +13,7 @@ Purpose: give newcomers and contributors a single navigation point, reduce dupli
 - System architecture: `architecture.md`
 - Setup & tooling: `SETUP.md`, `dev-python-env.md`
 - Ingestion (pipelines): `ingest/ingest_firms.md`, `ingest/ingest_weather.md`, `ingest/ingest_dem.md`, `ingest/data_quality.md`
+- ML: `denoiser.md`, `ml/denoiser.md`
 - Terrain + grid contract: `terrain_grid.md`
 - Data & schema: `data/data_formats.md`, `data/data_schema_fires.md`, `data/db-migrations.md`
 - Scripts/helpers: `scripts/` are lightly documented inline; ingestion make targets in `Makefile`
