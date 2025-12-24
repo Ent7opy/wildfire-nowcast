@@ -22,6 +22,12 @@
   - `FIRMS_AREA` – `world` (→ `-180,-90,180,90`) or `west,south,east,north` bbox string.
   - `FIRMS_DAY_RANGE` – past days window, `1–10` (default `1`).
   - `FIRMS_REQUEST_TIMEOUT_SECONDS` – HTTP timeout (default `30`).
+- Denoiser integration (optional):
+  - `DENOISER_ENABLED` – Set to `true` to run ML denoiser inference after ingest.
+  - `DENOISER_MODEL_RUN_DIR` – Path to a trained model run directory (e.g., `models/denoiser_v1/20251224_120000_abc123`).
+  - `DENOISER_THRESHOLD` – Score threshold (0-1) for marking detections as noise (default `0.5`).
+  - `DENOISER_BATCH_SIZE` – Batch size for inference (default `500`).
+  - `DENOISER_REGION` – Optional region name for terrain features.
 - CLI overrides (highest precedence):
   - `--day-range N`
   - `--area "w,s,e,n"` or `world`
@@ -35,6 +41,9 @@
 
 ## Outputs & persistence
 - Inserts rows into `fire_detections` (geom Point 4326 + key FIRMS metrics) and keeps the full CSV row in `raw_properties`.
+- If denoiser is enabled, each new detection is scored and results are stored in:
+  - `denoised_score`: Probability the detection is a real fire (0–1).
+  - `is_noise`: Boolean flag (`true` if `denoised_score < DENOISER_THRESHOLD`).
 - Creates `ingest_batches` rows per source with `area`/`day_range` metadata and fetched/inserted/duplicate counters.
 - Deduplication: `dedupe_hash = sha1(source|lat_rounded_4dp|lon_rounded_4dp|acq_time_utc)`; inserts use `ON CONFLICT (source, dedupe_hash) DO NOTHING` for idempotent re-runs.
 

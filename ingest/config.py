@@ -36,6 +36,15 @@ class FIRMSIngestSettings(BaseSettings):
         validation_alias="FIRMS_REQUEST_TIMEOUT_SECONDS",
     )
 
+    # Denoiser settings
+    denoiser_enabled: bool = Field(default=False, validation_alias="DENOISER_ENABLED")
+    denoiser_model_run_dir: Optional[str] = Field(
+        default=None, validation_alias="DENOISER_MODEL_RUN_DIR"
+    )
+    denoiser_threshold: float = Field(default=0.5, validation_alias="DENOISER_THRESHOLD")
+    denoiser_batch_size: int = Field(default=500, validation_alias="DENOISER_BATCH_SIZE")
+    denoiser_region: Optional[str] = Field(default=None, validation_alias="DENOISER_REGION")
+
     @field_validator("sources", mode="before")
     @classmethod
     def _split_sources(cls, value: object) -> List[str]:

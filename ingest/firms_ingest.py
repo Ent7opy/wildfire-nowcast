@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import subprocess
 import sys
 from typing import List, Optional
 
@@ -99,6 +101,9 @@ def run_firms_ingest(
             inserted = repository.insert_detections(detections)
             skipped_duplicates = parsed_count - inserted
 
+            if config.denoiser_enabled and inserted > 0:
+                _run_denoiser_inference(batch_id, config)
+
             repository.finalize_ingest_batch(
                 batch_id,
                 status="succeeded",
@@ -140,6 +145,70 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     if not value:
         return None
     return [segment.strip() for segment in value.split(",") if segment.strip()]
+
+
+def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> None:
+    """Trigger denoiser inference via subprocess."""
+    if not config.denoiser_model_run_dir:
+        LOGGER.warning(
+            "Denoiser is enabled but DENOISER_MODEL_RUN_DIR is not set. Skipping inference."
+        )
+        return
+
+    LOGGER.info("Starting denoiser inference for batch %s", batch_id)
+
+    cmd = [
+        "uv",
+        "run",
+        "--project",
+        "ml",
+        "-m",
+        "ml.denoiser_inference",
+        "--batch-id",
+        str(batch_id),
+        "--model-run",
+        config.denoiser_model_run_dir,
+        "--threshold",
+        str(config.denoiser_threshold),
+        "--batch-size",
+        str(config.denoiser_batch_size),
+    ]
+
+    if config.denoiser_region:
+        cmd.extend(["--region", config.denoiser_region])
+
+    try:
+        # We capture output to get the JSON summary
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # The module prints JSON to stdout as its last line
+        output = result.stdout.strip()
+        last_line = output.splitlines()[-1] if output else ""
+        if last_line.startswith("{") and last_line.endswith("}"):
+            stats = json.loads(last_line)
+            log_event(
+                LOGGER,
+                "firms.denoiser_inference",
+                "Denoiser inference complete",
+                **stats,
+            )
+        else:
+            LOGGER.warning("Denoiser inference finished but no JSON summary found in stdout.")
+
+    except subprocess.CalledProcessError as e:
+        LOGGER.error(
+            "Denoiser inference failed for batch %s: %s\nStdout: %s\nStderr: %s",
+            batch_id,
+            e,
+            e.stdout,
+            e.stderr,
+        )
+        raise RuntimeError(f"Denoiser inference failed for batch {batch_id}") from e
 
 
 def _log_firms_validation(
