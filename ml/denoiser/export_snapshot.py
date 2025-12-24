@@ -81,13 +81,19 @@ def export_training_snapshot(
     full_df = pd.concat([X, meta], axis=1)
     full_df["label_numeric"] = y
 
-    # 3. Create temporal split (11 months train, 1 month eval)
-    # We find the min/max time and split at 11/12ths point or just last month
+    # 3. Create temporal split.
+    # Default: percentile-based time split. This is robust for short windows (e.g., <= 1 month),
+    # where a "last month" split would otherwise yield an empty train set.
     full_df["acq_time"] = pd.to_datetime(full_df["acq_time"])
+    min_time = full_df["acq_time"].min()
     max_time = full_df["acq_time"].max()
-    # Split point: start of the last month of data
-    split_date = max_time - pd.DateOffset(months=1)
-    split_date = split_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    split_percentile = 0.8
+    split_date = full_df["acq_time"].quantile(split_percentile)
+
+    # Safety clamp: ensure split_date is inside the observed range
+    if split_date <= min_time or split_date >= max_time:
+        split_percentile = 0.7
+        split_date = full_df["acq_time"].quantile(split_percentile)
     
     train_df = full_df[full_df["acq_time"] < split_date].copy()
     eval_df = full_df[full_df["acq_time"] >= split_date].copy()
@@ -116,7 +122,13 @@ def export_training_snapshot(
             "positive": int((full_df["label"] == "POSITIVE").sum()),
             "negative": int((full_df["label"] == "NEGATIVE").sum()),
         },
-        "split_date": split_date.isoformat(),
+        "split": {
+            "strategy": "time_percentile",
+            "percentile": split_percentile,
+            "split_date": split_date.isoformat(),
+            "min_time": min_time.isoformat(),
+            "max_time": max_time.isoformat(),
+        },
         "features": list(X.columns),
         "paths": {
             "train": train_path,

@@ -1,0 +1,64 @@
+# Baseline Denoiser Training Config
+seed: 42
+model_output_root: "models/denoiser_v1"
+
+# Input data
+# snapshot_path can be a single parquet or a directory containing train.parquet/eval.parquet
+snapshot_path: "data/denoiser/snapshots/run_20251223_212616"
+
+# Feature selection
+features:
+  - "confidence_norm"
+  - "frp"
+  - "brightness"
+  - "bright_t31"
+  - "brightness_minus_t31"
+  - "scan"
+  - "track"
+  - "sin_hour"
+  - "cos_hour"
+  - "sin_doy"
+  - "cos_doy"
+  - "n_2km_6h"
+  - "n_2km_24h"
+  - "n_5km_24h"
+  - "n_same_cell_24h"
+  - "n_same_cell_7d"
+  - "dist_nn_24h_km"
+  - "seen_same_cell_past_3d"
+  - "days_with_detection_past_30d_in_cell"
+  - "elevation_m"
+  - "slope_deg"
+  - "aspect_sin"
+  - "aspect_cos"
+
+# Split policy (only used if snapshot_path is a single file or if pre-split is empty)
+split_percentile: 0.8
+gap_hours: 0
+split_strategy: "time"              # "time" or "stratified_random"
+fallback_split_strategy: "stratified_random"
+eval_size: 0.2                      # only used for stratified_random
+
+# Model parameters (HistGradientBoostingClassifier)
+model_params:
+  max_iter: 100
+  learning_rate: 0.1
+  max_depth: 5
+  l2_regularization: 0.01
+  random_state: 42
+
+# Imbalance handling
+handle_imbalance: true
+
+# Evaluation
+eval_thresholds: [0.2, 0.5, 0.8]
+
+# Simple heuristic baselines to compare against (single-feature scorers).
+# This is intentionally "weaker" than the full v1 heuristics pipeline; it helps validate the ML model adds signal.
+baseline_models:
+  - name: "confidence_norm"
+    column: "confidence_norm"
+    normalize: true
+  - name: "frp"
+    column: "frp"
+    normalize: true

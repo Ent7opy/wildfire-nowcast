@@ -27,6 +27,11 @@ class FIRMSClientError(RuntimeError):
     """Raised when the FIRMS API request fails."""
 
 
+def redact_firms_url(url: str, map_key: str) -> str:
+    """Remove the API key from a FIRMS URL for safe logging/storage."""
+    return url.replace(f"/{map_key}/", "/<redacted>/")
+
+
 @dataclass
 class FirmsValidationSummary:
     """Capture FIRMS validation results for logging."""
@@ -59,7 +64,9 @@ def fetch_csv_rows(
 ) -> List[Dict[str, str]]:
     """Download FIRMS CSV rows."""
     url = build_firms_url(map_key, source, bbox, day_range, date=date)
-    LOGGER.info("Requesting FIRMS CSV", extra={"source": source, "url": url})
+    # Avoid logging sensitive API tokens.
+    safe_url = redact_firms_url(url, map_key)
+    LOGGER.info("Requesting FIRMS CSV", extra={"source": source, "url": safe_url})
     try:
         response = httpx.get(url, timeout=timeout_seconds)
         response.raise_for_status()

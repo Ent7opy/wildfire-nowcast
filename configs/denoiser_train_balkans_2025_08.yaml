@@ -1,0 +1,63 @@
+# Denoiser Training Config (Balkans, Aug 2025) - built from historical backfill + heuristic labels.
+seed: 42
+model_output_root: "models/denoiser_v1"
+
+# Input data
+snapshot_path: "data/denoiser/snapshots/run_20251224_151731"
+
+# Feature selection
+features:
+  - "confidence_norm"
+  - "frp"
+  - "brightness"
+  - "bright_t31"
+  - "brightness_minus_t31"
+  - "scan"
+  - "track"
+  - "sin_hour"
+  - "cos_hour"
+  - "sin_doy"
+  - "cos_doy"
+  - "n_2km_6h"
+  - "n_2km_24h"
+  - "n_5km_24h"
+  - "n_same_cell_24h"
+  - "n_same_cell_7d"
+  - "dist_nn_24h_km"
+  - "seen_same_cell_past_3d"
+  - "days_with_detection_past_30d_in_cell"
+  - "elevation_m"
+  - "slope_deg"
+  - "aspect_sin"
+  - "aspect_cos"
+
+# Split policy
+# This snapshot contains train.parquet/eval.parquet already. Training will keep the pre-split if eval has both classes.
+split_strategy: "time"
+fallback_split_strategy: "stratified_random"
+eval_size: 0.2
+
+# Model parameters (HistGradientBoostingClassifier)
+model_params:
+  max_iter: 200
+  learning_rate: 0.1
+  max_depth: 6
+  l2_regularization: 0.01
+  random_state: 42
+
+# Imbalance handling
+handle_imbalance: true
+
+# Evaluation
+eval_thresholds: [0.2, 0.5, 0.8]
+
+# Heuristic baselines to compare against (single-feature scorers, normalized to [0,1])
+baseline_models:
+  - name: "confidence_norm"
+    column: "confidence_norm"
+    normalize: true
+  - name: "frp"
+    column: "frp"
+    normalize: true
+
+
