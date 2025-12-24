@@ -68,6 +68,8 @@ def get_fire_cells_heatmap(
     Weighting:
     - If `weight_by_denoised_score` is True, `mode` defaults to "sum" and `value_col`
       defaults to "denoised_score" (unless explicitly provided).
+    - Unscored detections may have NULL `denoised_score`; when weighting by denoised
+      score, those are treated as full-weight (1.0) to avoid NaN poisoning.
     """
 
     grid = get_region_grid_spec(region_name)
@@ -132,7 +134,17 @@ def get_fire_cells_heatmap(
 
     vals = None
     if mode in ("sum", "max"):
-        vals_all = np.asarray([r[value_col] for r in mapped], dtype=float)  # type: ignore[index]
+        # NOTE: SQL NULL → Python None → numpy NaN when dtype=float. If we pass NaNs into
+        # np.add.at (used by aggregation), a single NaN can poison an entire cell and
+        # silently corrupt downstream calculations.
+        #
+        # For denoiser weighting, treat unscored detections (NULL denoised_score) as
+        # full-weight (1.0) rather than producing NaNs.
+        if weight_by_denoised_score and value_col == "denoised_score":
+            vals_all = np.asarray([(r[value_col] if r[value_col] is not None else 1.0) for r in mapped], dtype=float)  # type: ignore[index]
+            vals_all = np.nan_to_num(vals_all, nan=1.0, posinf=1.0, neginf=1.0)
+        else:
+            vals_all = np.asarray([r[value_col] for r in mapped], dtype=float)  # type: ignore[index]
         vals = vals_all[in_win]
 
     heatmap = aggregate_indices_to_grid(

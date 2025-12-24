@@ -67,3 +67,31 @@ def test_get_fire_cells_heatmap_weighting_shortcut(monkeypatch):
     # Should have switched to sum of denoised_score
     assert "denoised_score" in kwargs["columns"]
 
+
+def test_get_fire_cells_heatmap_weighting_null_scores_do_not_produce_nan(monkeypatch):
+    """Regression: NULL denoised_score must not poison heatmap with NaNs."""
+    grid = _dummy_grid()
+    win = _dummy_window()
+
+    monkeypatch.setattr(fires_service, "get_region_grid_spec", lambda _: grid)
+    monkeypatch.setattr(fires_service, "get_grid_window_for_bbox", lambda *_, **__: win)
+
+    # One unscored detection (denoised_score=None) and one scored detection in same cell.
+    detections = [
+        {"lat": 0.05, "lon": 0.05, "denoised_score": None},
+        {"lat": 0.05, "lon": 0.05, "denoised_score": 0.2},
+    ]
+    monkeypatch.setattr(fires_service, "list_fire_detections_bbox_time", lambda **_: detections)
+
+    out = fires_service.get_fire_cells_heatmap(
+        region_name="test",
+        bbox=(0, 0, 1, 1),
+        start_time=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        end_time=datetime(2025, 1, 2, tzinfo=timezone.utc),
+        weight_by_denoised_score=True,
+    )
+
+    assert np.isfinite(out.heatmap).all()
+    # Unscored detection defaults to 1.0 weight, so expected sum is 1.2 in that cell.
+    assert np.isclose(out.heatmap[0, 0], 1.2)
+
