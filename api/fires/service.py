@@ -57,15 +57,29 @@ def get_fire_cells_heatmap(
     clip: bool = True,
     include_points: bool = False,
     limit: int | None = None,
+    include_noise: bool = False,
+    weight_by_denoised_score: bool = False,
 ) -> FireHeatmapWindow:
     """Return a bbox-windowed fire heatmap on the region analysis grid.
 
     Mapping is always performed on the **region** GridSpec (stable origin/extent). The
     output heatmap is then computed on the **AOI window** to keep arrays small.
+
+    Weighting:
+    - If `weight_by_denoised_score` is True, `mode` defaults to "sum" and `value_col`
+      defaults to "denoised_score" (unless explicitly provided).
     """
 
     grid = get_region_grid_spec(region_name)
     win = get_grid_window_for_bbox(grid, bbox, clip=clip)
+
+    # Handle weighting shortcut.
+    if weight_by_denoised_score:
+        if mode == "count":
+            mode = "sum"
+        if value_col is None:
+            value_col = "denoised_score"
+
     # Derive dimensions from the coordinate arrays to guarantee consistency even if
     # window indices are degenerate (e.g. i0 == i1) or otherwise inconsistent.
     height = int(win.lat.size)
@@ -96,6 +110,7 @@ def get_fire_cells_heatmap(
         columns=cols,
         limit=limit,
         order="asc",
+        include_noise=include_noise,
     )
     mapped = fires_to_indices(detections, grid, drop_outside=True)
 
