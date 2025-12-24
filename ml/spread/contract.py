@@ -57,9 +57,32 @@ class SpreadForecast:
                 f"len(horizons_hours)={len(self.horizons_hours)} time={int(self.probabilities.sizes['time'])}"
             )
         
-        # 2. Time coordinate
-        if "time" not in self.probabilities.coords:
-            raise ValueError("Missing 'time' coordinate.")
+        # 2. Required coordinates
+        #
+        # Note: In xarray, an array can have named dimensions without explicit
+        # coordinate variables (xarray will use implicit integer indices).
+        # The spread forecast contract requires explicit cell-center coordinates.
+        required_coords = ("time", "lat", "lon")
+        missing_coords = [c for c in required_coords if c not in self.probabilities.coords]
+        if missing_coords:
+            missing_str = ", ".join(repr(c) for c in missing_coords)
+            raise ValueError(
+                f"Missing required coordinate(s): {missing_str}. "
+                "SpreadForecast.probabilities must include explicit 'time', 'lat', and 'lon' "
+                "cell-center coordinates matching the input window."
+            )
+
+        # 2b. Coordinate shape sanity (must align with their dimension)
+        lat = self.probabilities.coords["lat"]
+        lon = self.probabilities.coords["lon"]
+        if tuple(lat.dims) != ("lat",):
+            raise ValueError("Expected 'lat' coordinate to have dims ('lat',).")
+        if tuple(lon.dims) != ("lon",):
+            raise ValueError("Expected 'lon' coordinate to have dims ('lon',).")
+        if int(lat.sizes["lat"]) != int(self.probabilities.sizes["lat"]):
+            raise ValueError("Expected 'lat' coordinate length to match probabilities.lat length.")
+        if int(lon.sizes["lon"]) != int(self.probabilities.sizes["lon"]):
+            raise ValueError("Expected 'lon' coordinate length to match probabilities.lon length.")
         
         # 3. Lead time (optional but recommended)
         if "lead_time_hours" not in self.probabilities.coords:

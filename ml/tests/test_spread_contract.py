@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 import xarray as xr
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Sequence
 
 from ml.spread.contract import (
@@ -9,10 +10,6 @@ from ml.spread.contract import (
     SpreadModel, 
     SpreadModelInput,
 )
-
-from api.core.grid import GridSpec, GridWindow
-from api.fires.service import FireHeatmapWindow
-from api.terrain.window import TerrainWindow
 
 def create_mock_forecast(
     horizons: Sequence[int], 
@@ -90,6 +87,35 @@ def test_spread_forecast_validation_invalid_values():
     with pytest.raises(ValueError, match="Probabilities out of range"):
         forecast.validate()
 
+def test_spread_forecast_validation_requires_lat_lon_coords():
+    """A forecast with lat/lon dims but no explicit coords must fail validation."""
+    horizons = [24, 48]
+    ref_time = datetime.now(timezone.utc)
+
+    nt, ny, nx = len(horizons), 3, 4
+    data = np.zeros((nt, ny, nx), dtype=np.float32)
+    times = [ref_time + timedelta(hours=h) for h in horizons]
+
+    # Intentionally omit lat/lon coords: xarray will treat them as implicit indices.
+    da = xr.DataArray(
+        data,
+        coords={
+            "time": times,
+            "lead_time_hours": ("time", horizons),
+        },
+        dims=("time", "lat", "lon"),
+        name="spread_probability",
+    )
+
+    forecast = SpreadForecast(
+        probabilities=da,
+        forecast_reference_time=ref_time,
+        horizons_hours=horizons,
+    )
+
+    with pytest.raises(ValueError, match="Missing required coordinate\\(s\\).*'lat'.*'lon'"):
+        forecast.validate()
+
 def test_spread_model_protocol_dummy():
     """Verify that a dummy class satisfying the Protocol works."""
     class DummyModel:
@@ -103,36 +129,25 @@ def test_spread_model_protocol_dummy():
     # Check if DummyModel implements SpreadModel Protocol
     model: SpreadModel = DummyModel()
     
-    # Create minimal real inputs (avoid MagicMock tricks; ensure contract stays concrete)
-    grid = GridSpec(origin_lat=0.0, origin_lon=0.0, n_lat=5, n_lon=5)
-    window = GridWindow(
-        i0=0,
-        i1=5,
-        j0=0,
-        j1=5,
+    # Create minimal concrete inputs without importing the full API package
+    # (the dataclass does not enforce runtime types; annotations are deferred).
+    @dataclass(frozen=True)
+    class DummyWindow:
+        lat: np.ndarray
+        lon: np.ndarray
+
+    window = DummyWindow(
         lat=np.arange(5, dtype=float),
         lon=np.arange(5, dtype=float),
     )
-    active_fires = FireHeatmapWindow(grid=grid, window=window, heatmap=np.zeros((5, 5), dtype=np.float32))
-    terrain = TerrainWindow(
-        window=window,
-        slope=np.zeros((5, 5), dtype=np.float32),
-        aspect=np.zeros((5, 5), dtype=np.float32),
-        elevation=None,
-    )
-    weather = xr.Dataset(
-        coords={
-            "time": [datetime.now(timezone.utc)],
-            "lat": window.lat,
-            "lon": window.lon,
-        }
-    )
+
+    weather = xr.Dataset(coords={"time": [datetime.now(timezone.utc)], "lat": window.lat, "lon": window.lon})
     inputs = SpreadModelInput(
-        grid=grid,
+        grid=object(),
         window=window,
-        active_fires=active_fires,
+        active_fires=object(),
         weather_cube=weather,
-        terrain=terrain,
+        terrain=object(),
         forecast_reference_time=datetime.now(timezone.utc),
         horizons_hours=[24, 48],
     )
