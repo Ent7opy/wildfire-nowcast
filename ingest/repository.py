@@ -26,9 +26,12 @@ def create_ingest_batch(
     source_uri: str,
     area: str,
     day_range: int,
+    metadata_extra: dict | None = None,
 ) -> int:
     """Insert a new ingest batch row and return its ID."""
     metadata = {"area": area, "day_range": day_range}
+    if metadata_extra:
+        metadata.update(metadata_extra)
     stmt = text(
         """
         INSERT INTO ingest_batches (

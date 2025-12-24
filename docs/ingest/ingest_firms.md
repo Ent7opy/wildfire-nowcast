@@ -49,3 +49,18 @@
   - Use **non-NRT archive sources** (if available for your AOI/use case), and/or
   - Use an **offline export** workflow (download historical data from FIRMS, then bulk load into `fire_detections`).
 
+## Historical backfill (date-walk)
+
+This repo includes a simple backfill tool that walks a date range backwards in <=10-day chunks using the
+optional `/YYYY-MM-DD` "as-of date" suffix supported by the FIRMS area CSV endpoint.
+
+- QA example (backfill 10 days):
+  - `make ingest-firms-backfill ARGS="--start 2025-08-10 --end 2025-08-10 --area 13,40,23,49 --sources VIIRS_SNPP_SP,VIIRS_NOAA20_SP --chunk-days 1 --sleep-seconds 0.2 --max-chunks 1"`
+- Full backfill example (months):
+  - `make ingest-firms-backfill ARGS="--start 2025-01-01 --end 2025-12-31 --area 13,40,23,49 --sources VIIRS_SNPP_SP,VIIRS_NOAA20_SP --chunk-days 10 --sleep-seconds 0.2"`
+
+Notes:
+- You may need to choose **archive (non-NRT)** sources to access older dates; NRT sources often return 0 rows beyond ~7 days retention.
+- For VIIRS, the archive sources that work well for historical backfill are typically `VIIRS_SNPP_SP` and `VIIRS_NOAA20_SP`.
+- The backfill is idempotent thanks to dedupe on `(source, dedupe_hash)`.
+

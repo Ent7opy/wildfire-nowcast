@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-weather ingest-dem smoke-grid smoke-terrain-features
+.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train
 
 PYTHON ?= python
 UV ?= uv
@@ -55,6 +55,9 @@ revision: ## Create a new migration revision (usage: make revision msg="descript
 ingest-firms: ## Run NASA FIRMS ingestion (pass ARGS="--day-range 3")
 	$(UV) run --project ingest -m ingest.firms_ingest $(ARGS)
 
+ingest-firms-backfill: ## Backfill historical FIRMS detections (pass ARGS="--start YYYY-MM-DD --end YYYY-MM-DD --area w,s,e,n --sources ...")
+	$(UV) run --project ingest -m ingest.firms_backfill $(ARGS)
+
 ingest-weather: ## Run NOAA GFS weather ingestion (pass ARGS="--run-time 2025-12-06T00:00Z")
 	$(UV) run --project ingest -m ingest.weather_ingest $(ARGS)
 
@@ -75,4 +78,7 @@ denoiser-label: ## Run heuristic labeling (pass ARGS="--bbox ... --start ... --e
 
 denoiser-snapshot: ## Export training snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
 	$(UV) run --project ml -m ml.denoiser.export_snapshot $(ARGS)
+
+denoiser-train: ## Train denoiser baseline (pass CONFIG="configs/denoiser_train_v1.yaml")
+	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v1.yaml)
 

@@ -12,6 +12,7 @@ from ingest.config import settings as ingest_settings
 from ingest.firms_client import (
     FirmsValidationSummary,
     build_firms_url,
+    redact_firms_url,
     fetch_csv_rows,
     parse_detection_rows,
 )
@@ -22,6 +23,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("firms_ingest")
+# httpx logs include full request URLs; avoid leaking FIRMS API keys.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 MAX_FIRMS_DAY_RANGE = 10
 NRT_RETENTION_DAYS_HINT = 7
@@ -69,7 +73,12 @@ def run_firms_ingest(
 
     for source in source_list:
         source_uri = build_firms_url(config.map_key, source, bbox, effective_day_range)
-        batch_id = repository.create_ingest_batch(source, source_uri, bbox, effective_day_range)
+        batch_id = repository.create_ingest_batch(
+            source,
+            redact_firms_url(source_uri, config.map_key),
+            bbox,
+            effective_day_range,
+        )
         LOGGER.info("Created ingest batch %s for %s", batch_id, source)
 
         fetched_count = 0
