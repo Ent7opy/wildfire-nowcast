@@ -103,6 +103,7 @@ logs/
 data/ingest/
 data/denoiser/snapshots/
 data/denoiser/*.parquet
+models/
 
 # Temporary files
 *.tmp
