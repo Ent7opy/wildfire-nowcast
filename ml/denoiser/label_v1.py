@@ -141,12 +141,14 @@ def label_detections_v1(
     low_conf_mask = (df["label"] == "UNKNOWN") & (df["confidence"] < p["low_conf_threshold"])
     if low_conf_mask.any():
         low_conf_ids = df.loc[low_conf_mask, "id"].tolist()
-        singleton_ids = []
+        singleton_ids: List[int] = []
+        # Set-based SQL (batched) instead of one query per detection id.
         with engine.connect() as conn:
             singleton_query = text("""
                 SELECT d.id
                 FROM fire_detections d
-                WHERE d.id = :id
+                WHERE d.id = ANY(:ids)
+                  AND d.confidence < :conf
                   AND NOT EXISTS (
                     SELECT 1 FROM fire_detections d2
                     WHERE d2.id != d.id
@@ -154,14 +156,20 @@ def label_detections_v1(
                       AND ST_DWithin(d.geom::geography, d2.geom::geography, :r_m)
                   )
             """)
-            for det_id in low_conf_ids:
-                res = conn.execute(singleton_query, {
-                    "id": det_id,
-                    "h": p["singleton_time_hours"],
-                    "r_m": p["singleton_dist_km"] * 1000
-                }).scalar()
-                if res:
-                    singleton_ids.append(res)
+            for i in range(0, len(low_conf_ids), batch_size):
+                batch_ids = [int(x) for x in low_conf_ids[i : i + batch_size]]
+                if not batch_ids:
+                    continue
+                res = conn.execute(
+                    singleton_query,
+                    {
+                        "ids": batch_ids,
+                        "conf": float(p["low_conf_threshold"]),
+                        "h": p["singleton_time_hours"],
+                        "r_m": p["singleton_dist_km"] * 1000,
+                    },
+                )
+                singleton_ids.extend([row[0] for row in res])
         
         df.loc[df["id"].isin(singleton_ids), "label"] = "NEGATIVE"
         df.loc[df["id"].isin(singleton_ids), "rule_applied"] = "Low-Conf Singleton"
