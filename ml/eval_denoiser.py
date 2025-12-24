@@ -65,6 +65,45 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _json_default(o: Any) -> Any:
+    """
+    JSON serializer for objects produced by pandas/numpy.
+
+    `pandas.Series.to_dict()` / `DataFrame.to_dict()` can contain NumPy scalars
+    (e.g., `np.int64`, `np.float64`) which the stdlib `json` module cannot
+    serialize by default.
+    """
+    # NumPy scalars / arrays
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+
+    # pandas missing values / timestamps
+    # Note: `pd.isna(...)` returns arrays for array-likes; only call it for
+    # scalars via the try/except guard below.
+    if o is pd.NA:
+        return None
+    if isinstance(o, pd.Timestamp):
+        return o.isoformat()
+
+    # datetime-like
+    if isinstance(o, datetime):
+        return o.isoformat()
+
+    try:
+        if pd.isna(o):
+            return None
+    except Exception:
+        pass
+
+    raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
 def _load_feature_list(model_run_dir: str) -> List[str]:
     fp = os.path.join(model_run_dir, "feature_list.json")
     if os.path.exists(fp):
@@ -638,7 +677,7 @@ def evaluate(
     for t in key_thresholds:
         confusion_at[f"{t:.2f}"] = _metrics_at_threshold(sweep, float(t))
     with open(os.path.join(out_dir, "confusion_at_thresholds.json"), "w", encoding="utf-8") as f:
-        json.dump(confusion_at, f, indent=2, allow_nan=False)
+        json.dump(confusion_at, f, indent=2, allow_nan=False, default=_json_default)
 
     # Errors: top-K FP / FN.
     fp_df = eval_df[(eval_df["label_numeric"] == 0) & np.isfinite(eval_df["p_real_fire"])].sort_values("p_real_fire", ascending=False).head(top_k_errors)
@@ -726,7 +765,7 @@ def evaluate(
         },
     }
     with open(os.path.join(out_dir, "metrics_summary.json"), "w", encoding="utf-8") as f:
-        json.dump(metrics_summary, f, indent=2, allow_nan=False)
+        json.dump(metrics_summary, f, indent=2, allow_nan=False, default=_json_default)
 
     _write_thresholds_md(
         out_dir=out_dir,
