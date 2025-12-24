@@ -57,15 +57,31 @@ def get_fire_cells_heatmap(
     clip: bool = True,
     include_points: bool = False,
     limit: int | None = None,
+    include_noise: bool = False,
+    weight_by_denoised_score: bool = False,
 ) -> FireHeatmapWindow:
     """Return a bbox-windowed fire heatmap on the region analysis grid.
 
     Mapping is always performed on the **region** GridSpec (stable origin/extent). The
     output heatmap is then computed on the **AOI window** to keep arrays small.
+
+    Weighting:
+    - If `weight_by_denoised_score` is True, `mode` defaults to "sum" and `value_col`
+      defaults to "denoised_score" (unless explicitly provided).
+    - Unscored detections may have NULL `denoised_score`; when weighting by denoised
+      score, those are treated as full-weight (1.0) to avoid NaN poisoning.
     """
 
     grid = get_region_grid_spec(region_name)
     win = get_grid_window_for_bbox(grid, bbox, clip=clip)
+
+    # Handle weighting shortcut.
+    if weight_by_denoised_score:
+        if mode == "count":
+            mode = "sum"
+        if value_col is None:
+            value_col = "denoised_score"
+
     # Derive dimensions from the coordinate arrays to guarantee consistency even if
     # window indices are degenerate (e.g. i0 == i1) or otherwise inconsistent.
     height = int(win.lat.size)
@@ -96,6 +112,7 @@ def get_fire_cells_heatmap(
         columns=cols,
         limit=limit,
         order="asc",
+        include_noise=include_noise,
     )
     mapped = fires_to_indices(detections, grid, drop_outside=True)
 
@@ -117,7 +134,17 @@ def get_fire_cells_heatmap(
 
     vals = None
     if mode in ("sum", "max"):
-        vals_all = np.asarray([r[value_col] for r in mapped], dtype=float)  # type: ignore[index]
+        # NOTE: SQL NULL → Python None → numpy NaN when dtype=float. If we pass NaNs into
+        # np.add.at (used by aggregation), a single NaN can poison an entire cell and
+        # silently corrupt downstream calculations.
+        #
+        # For denoiser weighting, treat unscored detections (NULL denoised_score) as
+        # full-weight (1.0) rather than producing NaNs.
+        if weight_by_denoised_score and value_col == "denoised_score":
+            vals_all = np.asarray([(r[value_col] if r[value_col] is not None else 1.0) for r in mapped], dtype=float)  # type: ignore[index]
+            vals_all = np.nan_to_num(vals_all, nan=1.0, posinf=1.0, neginf=1.0)
+        else:
+            vals_all = np.asarray([r[value_col] for r in mapped], dtype=float)  # type: ignore[index]
         vals = vals_all[in_win]
 
     heatmap = aggregate_indices_to_grid(

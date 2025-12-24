@@ -69,9 +69,21 @@ Artifacts are written to `reports/denoiser_v1/<run_id>/`:
 
 ### Downstream interpretation (drop vs weight)
 
-The evaluation report (`thresholds.md`) defines two intended operating modes:
-- **Drop mode (precision-first)**: drop detections with \(p < \text{strong_filter_threshold}\).
-- **Weight mode (coverage-first)**: keep all detections, but downweight those with \(p < \text{downweight_threshold}\).
+The evaluation report (`thresholds.md`) defines two intended operating modes, now supported by the API and DB helpers:
 
-Important: threshold stability depends on the eval set having enough positives and negatives; small/imbalanced eval splits are explicitly called out in `thresholds.md` under **Warnings**.
+1.  **Drop mode (Precision-first)**:
+    - **Intent**: Only show detections that are highly likely to be real fires.
+    - **Implementation**: The API and DB helpers filter out noise by default (`is_noise IS NOT TRUE`).
+    - **Usage**: Use the default settings in `api.fires.repo.list_fire_detections_bbox_time` or the API `/fires/detections`.
+
+2.  **Weight mode (Coverage-first)**:
+    - **Intent**: Keep all detections but reduce the influence of likely noise.
+    - **Implementation**: Request all detections and use `denoised_score` as a weighting factor.
+    - **Usage**: 
+        - **API**: Pass `include_noise=true` and `include_denoiser_fields=true`.
+        - **Service**: In `api.fires.service.get_fire_cells_heatmap`, set `weight_by_denoised_score=True` to automatically aggregate the sum of scores per grid cell.
+
+#### Database Field Semantics
+- `is_noise` (`BOOLEAN`): `TRUE` if the detection is classified as noise. `NULL` means the detection hasn't been scored yet (treated as non-noise by default filters).
+- `denoised_score` (`FLOAT`): Probability [0-1] that the detection is a real fire.
 

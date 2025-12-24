@@ -38,6 +38,7 @@ def list_fire_detections_bbox_time(
     columns: Iterable[str] = ("lat", "lon", "acq_time"),
     limit: int | None = None,
     order: Literal["asc", "desc"] = "asc",
+    include_noise: bool = False,
 ) -> list[dict]:
     """List fire detections in a lon/lat bbox and acquisition time window.
 
@@ -45,6 +46,7 @@ def list_fire_detections_bbox_time(
     - Time filter uses `BETWEEN` (inclusive bounds).
     - Spatial filter uses GiST index-friendly predicates:
       `geom && envelope` plus `ST_Intersects(geom, envelope)`.
+    - Denoiser: By default, filters out rows where `is_noise` is TRUE.
     """
 
     min_lon, min_lat, max_lon, max_lat = bbox
@@ -63,6 +65,12 @@ def list_fire_detections_bbox_time(
 
     if order not in ("asc", "desc"):
         raise ValueError("order must be 'asc' or 'desc'.")
+
+    # Noise filter: default to excluding detections explicitly marked as noise.
+    # We use "IS NOT TRUE" to include NULLs (detections not yet scored).
+    noise_predicate = ""
+    if not include_noise:
+        noise_predicate = "AND is_noise IS NOT TRUE"
 
     limit_sql = ""
     params: dict[str, object] = {
@@ -87,6 +95,7 @@ def list_fire_detections_bbox_time(
         WHERE acq_time BETWEEN :start_time AND :end_time
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
+          {noise_predicate}
         ORDER BY acq_time {order}
         {limit_sql}
         """
