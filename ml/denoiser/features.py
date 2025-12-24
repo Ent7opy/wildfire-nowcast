@@ -5,7 +5,8 @@ import pandas as pd
 import xarray as xr
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from sqlalchemy import text, Engine
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 from api.core.grid import DEFAULT_CELL_SIZE_DEG
 from api.terrain.dem_loader import load_dem_for_bbox
 from api.terrain.features_loader import load_slope_aspect_for_bbox
@@ -39,7 +40,9 @@ def add_firms_features(df: pd.DataFrame) -> pd.DataFrame:
     # instrument/satellite
     for col in ["instrument", "satellite"]:
         if col not in df.columns and "raw_properties" in df.columns:
-             df[col] = df["raw_properties"].apply(lambda x: x.get(col) if isinstance(x, dict) else None)
+            df[col] = df["raw_properties"].apply(
+                lambda x: x.get(col) if isinstance(x, dict) else None
+            )
              
         if col in df.columns:
             df[f"{col}_code"] = df[col].astype("category").cat.codes
@@ -202,6 +205,141 @@ def add_spatiotemporal_context(
     
     context_df = pd.DataFrame(results)
     return pd.concat([df.reset_index(drop=True), context_df], axis=1)
+
+def add_spatiotemporal_context_batch(
+    df: pd.DataFrame,
+    engine: Engine,
+    radii_km: List[float] = [2.0, 5.0],
+    windows_hours: List[int] = [6, 24],
+    grid_size: float = DEFAULT_CELL_SIZE_DEG,
+) -> pd.DataFrame:
+    """
+    Add local spatiotemporal context using past-only detections.
+    Uses set-based SQL for efficiency on larger batches.
+    """
+    if df.empty:
+        return df
+
+    # We need 'id', 'lat', 'lon', 'acq_time' to compute features
+    required = {"id", "lat", "lon", "acq_time"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns for spatiotemporal context: {missing}")
+
+    df = df.copy()
+    df["acq_time"] = pd.to_datetime(df["acq_time"])
+
+    # For small batches, we could still use the per-row one, but let's stick to set-based.
+    # We'll build a temporary table or a large CTE with the batch IDs/coords.
+    # To keep it simple and portable without temp tables, we'll use a JOIN with a VALUES list.
+
+    # 1. Prepare the values list for SQL
+    # We use numeric lats/lons and timestamps
+    values_list = []
+    for idx, row in df.iterrows():
+        values_list.append(
+            f"({row['id']}, {row['lat']}, {row['lon']}, '{row['acq_time'].isoformat()}'::timestamptz)"
+        )
+    values_sql = ",\n".join(values_list)
+
+    # 2. Build the big query.
+    # We'll compute counts and distances for all points in the batch in a single pass.
+    # This uses a lateral join to compute local stats per input point.
+
+    # Build parts of the query for each radius/window combination
+    count_cols = []
+    for r_km in radii_km:
+        for w_h in windows_hours:
+            col_name = f"n_{int(r_km)}km_{w_h}h"
+            count_cols.append(f"""
+                (
+                    SELECT COUNT(*)
+                    FROM fire_detections fd
+                    WHERE fd.acq_time <= b.acq_time
+                      AND fd.acq_time >= b.acq_time - interval '{w_h} hours'
+                      AND fd.id != b.id
+                      AND ST_DWithin(
+                          fd.geom,
+                          ST_SetSRID(ST_MakePoint(b.lon, b.lat), 4326)::geography,
+                          {r_km * 1000}
+                      )
+                ) AS {col_name}
+            """)
+
+    # Grid-based counts
+    for w_d, label in [(1, "24h"), (7, "7d")]:
+        col_name = f"n_same_cell_{label}"
+        count_cols.append(f"""
+            (
+                SELECT COUNT(*)
+                FROM fire_detections fd
+                WHERE fd.acq_time <= b.acq_time
+                  AND fd.acq_time >= b.acq_time - interval '{w_d} days'
+                  AND fd.id != b.id
+                  AND floor(fd.lat / {grid_size}) = floor(b.lat / {grid_size})
+                  AND floor(fd.lon / {grid_size}) = floor(b.lon / {grid_size})
+            ) AS {col_name}
+        """)
+
+    # dist_nn_24h_km
+    count_cols.append(f"""
+        COALESCE(
+            (
+                SELECT ST_Distance(
+                    fd.geom,
+                    ST_SetSRID(ST_MakePoint(b.lon, b.lat), 4326)::geography
+                ) / 1000.0
+                FROM fire_detections fd
+                WHERE fd.acq_time <= b.acq_time
+                  AND fd.acq_time >= b.acq_time - interval '24 hours'
+                  AND fd.id != b.id
+                ORDER BY fd.geom <-> ST_SetSRID(ST_MakePoint(b.lon, b.lat), 4326)
+                LIMIT 1
+            ),
+            999.0
+        ) AS dist_nn_24h_km
+    """)
+
+    # seen_same_cell_past_3d
+    count_cols.append(f"""
+        (
+            SELECT EXISTS (
+                SELECT 1 FROM fire_detections fd
+                WHERE fd.acq_time < b.acq_time
+                  AND fd.acq_time >= b.acq_time - interval '3 days'
+                  AND floor(fd.lat / {grid_size}) = floor(b.lat / {grid_size})
+                  AND floor(fd.lon / {grid_size}) = floor(b.lon / {grid_size})
+            )
+        )::int AS seen_same_cell_past_3d
+    """)
+
+    # days_with_detection_past_30d_in_cell
+    count_cols.append(f"""
+        (
+            SELECT COUNT(DISTINCT date(fd.acq_time))
+            FROM fire_detections fd
+            WHERE fd.acq_time < b.acq_time
+              AND fd.acq_time >= b.acq_time - interval '30 days'
+              AND floor(fd.lat / {grid_size}) = floor(b.lat / {grid_size})
+              AND floor(fd.lon / {grid_size}) = floor(b.lon / {grid_size})
+        ) AS days_with_detection_past_30d_in_cell
+    """)
+
+    count_cols_sql = ",\n            ".join(count_cols)
+    query = text(f"""
+        WITH batch(id, lat, lon, acq_time) AS (
+            VALUES {values_sql}
+        )
+        SELECT
+            b.id,
+            {count_cols_sql}
+        FROM batch b
+    """)
+
+    with engine.connect() as conn:
+        context_df = pd.read_sql(query, conn)
+
+    return pd.merge(df, context_df, on="id", how="left")
 
 def add_terrain_features(df: pd.DataFrame, region_name: str) -> pd.DataFrame:
     """Add terrain features (elevation, slope)."""

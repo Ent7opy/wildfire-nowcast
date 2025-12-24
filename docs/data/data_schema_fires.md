@@ -26,6 +26,13 @@ Tracks each source import (e.g., FIRMS VIIRS daily file).
 #### `fire_detections`
 Stores every detection point with the key FIRMS-style attributes plus ML/ingest metadata.
 
+**Naming note (important)**  
+Some tickets/notes may refer to these denoiser outputs as `denoiser_score` and `is_denoised_noise`. In this repo’s
+database schema and API contract, the canonical field names are:
+
+- `denoised_score` (float, 0–1)
+- `is_noise` (bool)
+
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `BIGSERIAL` | Primary key. |

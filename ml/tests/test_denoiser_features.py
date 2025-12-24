@@ -51,8 +51,7 @@ class TestDenoiserFeatures(unittest.TestCase):
         self.assertAlmostEqual(df_feat["sin_hour"].iloc[1], 0.0, places=5)
         self.assertAlmostEqual(df_feat["cos_hour"].iloc[1], 1.0, places=5)
 
-    @patch("sqlalchemy.Engine")
-    def test_leakage_guard(self, mock_engine):
+    def test_leakage_guard(self):
         # Create two detections: one at T, one at T+1 hour.
         # When computing features for T, T+1 should NOT be counted.
         t0 = datetime(2024, 1, 1, 10, 0)
@@ -65,6 +64,7 @@ class TestDenoiserFeatures(unittest.TestCase):
             "acq_time": [t0, t1]
         })
         
+        mock_engine = MagicMock()
         mock_conn = mock_engine.connect.return_value.__enter__.return_value
         # Total queries per row: 4 (radii/windows) + 2 (grid) + 1 (NN) + 1 (seen) + 1 (days) = 9
         # For 2 rows, we need 18 values.

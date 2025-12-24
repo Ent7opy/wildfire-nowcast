@@ -71,8 +71,10 @@ This is the target flow; only pieces in **bold** exist in code today.
      - Vectors (Postgres/PostGIS) for points, contours, AOIs.
 
 2. **Validate & denoise**
+   - **Implemented (optional)**:
+     - Hotspot denoiser inference can run after FIRMS ingest (behind `DENOISER_ENABLED`) and writes
+       `fire_detections.denoised_score` + `fire_detections.is_noise`.
    - **Planned ML**:
-     - Hotspot denoiser model to down‑weight noisy detections.
      - Basic QC rules to drop impossible points.
 
 3. **Feature build**
