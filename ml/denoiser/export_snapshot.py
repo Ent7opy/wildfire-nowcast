@@ -92,7 +92,8 @@ def export_training_snapshot(
 
     # Safety clamp: ensure split_date is inside the observed range
     if split_date <= min_time or split_date >= max_time:
-        split_date = full_df["acq_time"].quantile(0.7)
+        split_percentile = 0.7
+        split_date = full_df["acq_time"].quantile(split_percentile)
     
     train_df = full_df[full_df["acq_time"] < split_date].copy()
     eval_df = full_df[full_df["acq_time"] >= split_date].copy()
