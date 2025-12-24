@@ -13,7 +13,7 @@ import numpy as np
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple, Optional
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix, classification_report
+from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 import sklearn
 
@@ -293,6 +293,25 @@ def _compute_baseline_metrics(df_eval: pd.DataFrame, y_true: np.ndarray, thresho
         out[name]["normalize"] = bool(b.get("normalize", True))
     return out
 
+def _balanced_sample_weight(y: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Compute per-sample weights to approximately balance classes.
+
+    We use sample_weight (supported by HistGradientBoostingClassifier.fit) instead of
+    passing class_weight as an init param (not consistently supported across sklearn versions).
+    """
+    y = np.asarray(y).astype(int)
+    n = int(y.size)
+    if n == 0:
+        return None
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    if n_pos == 0 or n_neg == 0:
+        return None
+    w_pos = n / (2.0 * n_pos)
+    w_neg = n / (2.0 * n_neg)
+    return np.where(y == 1, w_pos, w_neg).astype(float)
+
 def train_baseline(config: Dict[str, Any]):
     # 1. Setup run directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -358,11 +377,16 @@ def train_baseline(config: Dict[str, Any]):
     # Default seeds and class_weight for imbalance
     if "random_state" not in model_params:
         model_params["random_state"] = config.get("seed", 42)
-    if "class_weight" not in model_params and config.get("handle_imbalance", True):
-        model_params["class_weight"] = "balanced"
         
     clf = HistGradientBoostingClassifier(**model_params)
-    clf.fit(X_train, y_train)
+    sample_weight = None
+    if config.get("handle_imbalance", True):
+        sample_weight = _balanced_sample_weight(y_train.to_numpy())
+        if sample_weight is not None:
+            LOGGER.info("Using balanced sample_weight for training (pos/neg reweighting).")
+        else:
+            LOGGER.info("Not using sample_weight (missing a class or empty training set).")
+    clf.fit(X_train, y_train, sample_weight=sample_weight)
     
     # 4. Predict and evaluate
     if eval_df.empty:
@@ -435,6 +459,10 @@ def train_baseline(config: Dict[str, Any]):
             "train_pos_rate": float(y_train.mean()) if len(y_train) else None,
             "eval_pos_rate": float(y_eval.mean()) if len(y_eval) else None,
             "details": split_meta,
+        },
+        "training": {
+            "handle_imbalance": bool(config.get("handle_imbalance", True)),
+            "used_sample_weight": bool(sample_weight is not None),
         },
         "snapshot": snapshot_fingerprint,
         "package_versions": {
