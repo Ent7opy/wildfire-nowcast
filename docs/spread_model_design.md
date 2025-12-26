@@ -100,3 +100,30 @@ forecast.validate()
 - **Raster**: Forecast probability grids should be stored as **Cloud-Optimized GeoTIFFs (COGs)** or **Zarr** in `data/forecasts/`.
 - **Vector**: Iso-probability contours (isochrones) can be extracted using `skimage.measure.find_contours` or similar and stored in PostGIS for fast UI rendering.
 
+## 6. Training Pipeline (v1)
+
+The training pipeline for learned spread models uses a **hindcast** approach, where historical FIRMS detections are used to build both features (at T=0) and labels (at T+24/48/72h).
+
+### 6.1 Building the Dataset
+
+The script `ml/spread/hindcast_dataset.py` assembles a tabular dataset by:
+1. Sampling historical reference times with sufficient fire activity.
+2. Building `SpreadInputs` for each time using the canonical feature pipeline.
+3. Extracting future fire presence from the DB as the target label.
+4. Flattening grid cells into rows with spatial and weather features.
+5. Applying negative sampling to manage the extreme sparsity of fire spread.
+
+### 6.2 Training
+
+Use the `ml/train_spread_v1.py` script with a YAML config:
+
+```bash
+uv run --project ml -m ml.train_spread_v1 --config configs/spread_train_v1.yaml
+```
+
+This trains an ensemble of `HistGradientBoostingClassifier` models (one per horizon) and saves them to `models/spread_v1/<run_id>/`.
+
+### 6.3 Inference
+
+The `LearnedSpreadModelV1` class (`ml/spread/learned_v1.py`) implements the `SpreadModel` protocol and can be initialized from a trained run directory to produce forecasts.
+
