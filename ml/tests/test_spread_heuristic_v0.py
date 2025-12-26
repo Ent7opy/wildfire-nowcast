@@ -392,3 +392,66 @@ def test_heuristic_v0_upslope_bias_no_wind():
     west_mass = float(probs[:, :cj].sum())
     east_mass = float(probs[:, (cj + 1) :].sum())
     assert west_mass > east_mass, f"Expected upslope mass to dominate: west={west_mass} east={east_mass}"
+
+
+def test_heuristic_v0_upslope_bias_aspect_wraparound_uses_circular_mean():
+    """Aspect is circular; window mean must handle 0/360 wrap.
+
+    We create a window with aspects split between 350° and 10° (both ~North downslope).
+    The correct circular mean downslope direction is ~0° (North), so upslope should be ~180°
+    (South). A naive arithmetic mean would give 180° (South) and flip upslope to North.
+    """
+    ny, nx = 41, 41
+    lat = np.arange(ny) * 0.01 + 35.0
+    lon = np.arange(nx) * 0.01 + 5.0
+    window = MockWindow(lat=lat, lon=lon, i1=ny, j1=nx)
+
+    heatmap = np.zeros((ny, nx))
+    ci, cj = ny // 2, nx // 2
+    heatmap[ci, cj] = 1.0
+    fires = MockFireHeatmap(heatmap=heatmap)
+
+    # No wind; isolate slope/aspect effect.
+    weather = xr.Dataset(
+        data_vars={
+            "u10": (("lat", "lon"), np.zeros((ny, nx))),
+            "v10": (("lat", "lon"), np.zeros((ny, nx))),
+        },
+        coords={"lat": lat, "lon": lon},
+    )
+
+    slope = np.ones((ny, nx), dtype=float) * 30.0
+    aspect = np.ones((ny, nx), dtype=float) * 10.0
+    aspect[:, ::2] = 350.0  # mix values across the 0/360 boundary
+    terrain = MockTerrain(slope=slope, aspect=aspect)
+
+    grid = MockGrid(
+        crs="EPSG:4326",
+        cell_size_deg=0.01,
+        origin_lat=35.0,
+        origin_lon=5.0,
+        n_lat=100,
+        n_lon=100,
+    )
+
+    inputs = SpreadModelInput(
+        grid=grid,
+        window=window,
+        active_fires=fires,
+        weather_cube=weather,
+        terrain=terrain,
+        forecast_reference_time=datetime.now(timezone.utc),
+        horizons_hours=[24],
+    )
+
+    model = HeuristicSpreadModelV0(
+        HeuristicSpreadV0Config(enable_slope_bias=True, slope_influence=0.6, slope_reference_deg=30.0)
+    )
+    forecast = model.predict(inputs)
+    probs = forecast.probabilities.isel(time=0).values
+
+    # With increasing i being "north" in these tests, upslope ~= South means the
+    # southern half (lower i) should get more mass.
+    north_mass = float(probs[(ci + 1) :, :].sum())
+    south_mass = float(probs[:ci, :].sum())
+    assert south_mass > north_mass, f"Expected upslope mass to dominate south: south={south_mass} north={north_mass}"

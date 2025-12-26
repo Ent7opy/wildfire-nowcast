@@ -64,6 +64,31 @@ class HeuristicSpreadModelV0(SpreadModel):
     def __init__(self, config: HeuristicSpreadV0Config | None = None):
         self.config = config or HeuristicSpreadV0Config()
 
+    @staticmethod
+    def _circular_mean_deg(values: np.ndarray) -> float:
+        """Compute the circular mean for angles in degrees.
+
+        This is appropriate for azimuth-like quantities where 0° ≡ 360°.
+        Returns NaN if there are no finite samples or the mean direction is undefined
+        (e.g., perfectly opposing directions cancel out).
+        """
+        arr = np.asarray(values, dtype=float).ravel()
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return float("nan")
+
+        # Normalize into [0, 360) so wrap-around is handled consistently.
+        arr = np.mod(arr, 360.0)
+        theta = np.deg2rad(arr)
+
+        sin_mean = float(np.mean(np.sin(theta)))
+        cos_mean = float(np.mean(np.cos(theta)))
+        if np.hypot(sin_mean, cos_mean) < 1e-12:
+            return float("nan")
+
+        mean_rad = np.arctan2(sin_mean, cos_mean)
+        return float(np.mod(np.rad2deg(mean_rad), 360.0))
+
     def predict(self, inputs: SpreadModelInput) -> SpreadForecast:
         """Predict fire spread probability over the requested horizons."""
         LOGGER.info(
@@ -104,8 +129,10 @@ class HeuristicSpreadModelV0(SpreadModel):
             slope = getattr(inputs.terrain, "slope", None)
             aspect = getattr(inputs.terrain, "aspect", None)
             if slope is not None and aspect is not None:
-                slope_deg = float(np.nanmean(np.asarray(slope, dtype=float))) if np.size(slope) else None
-                aspect_deg = float(np.nanmean(np.asarray(aspect, dtype=float))) if np.size(aspect) else None
+                slope_arr = np.asarray(slope, dtype=float)
+                aspect_arr = np.asarray(aspect, dtype=float)
+                slope_deg = float(np.nanmean(slope_arr)) if np.size(slope_arr) else None
+                aspect_deg = self._circular_mean_deg(aspect_arr) if np.size(aspect_arr) else None
             else:
                 LOGGER.warning(
                     "enable_slope_bias=True but terrain slope/aspect unavailable; ignoring slope bias"
