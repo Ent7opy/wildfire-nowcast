@@ -7,7 +7,11 @@ from ml.spread.contract import (
     SpreadModelInput,
 )
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0, HeuristicSpreadV0Config
-from ml.spread.learned_v1 import LearnedSpreadModelV1
+try:
+    # Optional dependency: learned model may require extra packages.
+    from ml.spread.learned_v1 import LearnedSpreadModelV1
+except Exception:  # pragma: no cover
+    LearnedSpreadModelV1 = None  # type: ignore[assignment]
 
 __all__ = [
     "DEFAULT_HORIZONS_HOURS",
@@ -16,6 +20,8 @@ __all__ = [
     "SpreadModelInput",
     "HeuristicSpreadModelV0",
     "HeuristicSpreadV0Config",
-    "LearnedSpreadModelV1",
 ]
+
+if LearnedSpreadModelV1 is not None:  # pragma: no cover
+    __all__.append("LearnedSpreadModelV1")
 

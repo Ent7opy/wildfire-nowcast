@@ -30,6 +30,10 @@ def mock_spread_inputs(mock_grid, mock_window):
     mock = MagicMock()
     mock.grid = mock_grid
     mock.window = mock_window
+    # Service code logs `float(inputs_package.active_fires.heatmap.sum())`.
+    # Use a real numeric array to avoid `float(MagicMock)` TypeError.
+    mock.active_fires = MagicMock()
+    mock.active_fires.heatmap = np.zeros((1, 1), dtype=float)
     mock.to_model_input.return_value = MagicMock(spec=SpreadModelInput)
     return mock
 
@@ -43,6 +47,8 @@ def test_run_spread_forecast_success(mock_spread_inputs):
     )
     
     mock_forecast = MagicMock(spec=SpreadForecast)
+    # Service code logs `float(forecast.probabilities.min()/max())`.
+    mock_forecast.probabilities = np.zeros((1, 1, 1), dtype=float)
     mock_model = MagicMock()
     mock_model.predict.return_value = mock_forecast
     
@@ -64,6 +70,9 @@ def test_run_spread_forecast_aoi_too_large(mock_grid):
     
     mock_inputs = MagicMock()
     mock_inputs.window = large_window
+    # Service logs active fire count before AOI size check.
+    mock_inputs.active_fires = MagicMock()
+    mock_inputs.active_fires.heatmap = np.zeros((1, 1), dtype=float)
     
     ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
     request = SpreadForecastRequest(
@@ -100,6 +109,9 @@ def test_run_spread_forecast_default_model(mock_spread_inputs):
     with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
         with patch("ml.spread.service.HeuristicSpreadModelV0") as mock_heuristic_cls:
             mock_model = mock_heuristic_cls.return_value
+            mock_forecast = MagicMock(spec=SpreadForecast)
+            mock_forecast.probabilities = np.zeros((1, 1, 1), dtype=float)
+            mock_model.predict.return_value = mock_forecast
             run_spread_forecast(request)
             mock_model.predict.assert_called_once()
 

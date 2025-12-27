@@ -10,7 +10,10 @@ from typing import Sequence
 
 from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadForecast, SpreadModel
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0
-from ml.spread_features import build_spread_inputs
+
+# Lazily imported to avoid pulling heavy DB/raster deps at module import time.
+# Kept as a module attribute so tests can patch `ml.spread.service.build_spread_inputs`.
+build_spread_inputs = None  # type: ignore[assignment]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +76,14 @@ def run_spread_forecast(
 
     # 1. Resolve inputs
     # This involves DB queries and raster I/O.
+    global build_spread_inputs
+    if build_spread_inputs is None:
+        # Import lazily to avoid pulling heavy optional dependencies during module import
+        # (and to make unit tests easier to run with mocks).
+        from ml.spread_features import build_spread_inputs as _build_spread_inputs
+
+        build_spread_inputs = _build_spread_inputs
+
     inputs_package = build_spread_inputs(
         region_name=request.region_name,
         bbox=request.bbox,
