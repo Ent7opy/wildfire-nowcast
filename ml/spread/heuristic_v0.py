@@ -216,11 +216,12 @@ class HeuristicSpreadModelV0(SpreadModel):
     ) -> SpreadForecast:
         # 7. Package results
         times = [inputs.forecast_reference_time + timedelta(hours=h) for h in horizons]
+        times_64 = [HeuristicSpreadModelV0._as_datetime64_utc_naive(t) for t in times]
 
         da = xr.DataArray(
             np.stack(forecast_grids).astype(np.float32, copy=False),
             coords={
-                "time": times,
+                "time": times_64,
                 "lat": inputs.window.lat,
                 "lon": inputs.window.lon,
                 "lead_time_hours": ("time", list(horizons)),
