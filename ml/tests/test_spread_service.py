@@ -48,7 +48,9 @@ def test_run_spread_forecast_success(mock_spread_inputs):
     
     mock_forecast = MagicMock(spec=SpreadForecast)
     # Service code logs `float(forecast.probabilities.min()/max())`.
-    mock_forecast.probabilities = np.zeros((1, 1, 1), dtype=float)
+    mock_forecast.probabilities = MagicMock()
+    mock_forecast.probabilities.min.return_value = 0.0
+    mock_forecast.probabilities.max.return_value = 0.0
     mock_model = MagicMock()
     mock_model.predict.return_value = mock_forecast
     
@@ -110,7 +112,10 @@ def test_run_spread_forecast_default_model(mock_spread_inputs):
         with patch("ml.spread.service.HeuristicSpreadModelV0") as mock_heuristic_cls:
             mock_model = mock_heuristic_cls.return_value
             mock_forecast = MagicMock(spec=SpreadForecast)
-            mock_forecast.probabilities = np.zeros((1, 1, 1), dtype=float)
+            # Service code logs `float(forecast.probabilities.min()/max())`.
+            mock_forecast.probabilities = MagicMock()
+            mock_forecast.probabilities.min.return_value = 0.0
+            mock_forecast.probabilities.max.return_value = 0.0
             mock_model.predict.return_value = mock_forecast
             run_spread_forecast(request)
             mock_model.predict.assert_called_once()
