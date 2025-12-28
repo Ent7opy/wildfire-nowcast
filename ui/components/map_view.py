@@ -74,13 +74,24 @@ def add_forecast_layers(map_obj: folium.Map) -> None:
         r = sorted(forecast_data["rasters"], key=lambda x: x["horizon_hours"])[-1]
         tilejson_url = r["tilejson_url"]
         try:
-            # We need to resolve TileJSON to get the actual tile template for Leaflet
-            resp = httpx.get(tilejson_url, timeout=5.0)
+            # We need to resolve TileJSON to get the actual tile template for Leaflet.
+            # The URL from the API is external (e.g. localhost:8080), but we are inside Docker
+            # so we need to use the internal service name.
+            # TODO: Make these hostnames configurable via env vars
+            internal_url = tilejson_url.replace("localhost:8080", "titiler:8000")
+
+            resp = httpx.get(internal_url, timeout=5.0)
             if resp.status_code == 200:
                 tj = resp.json()
                 tile_url = tj["tiles"][0]
+
+                # The tile URL returned by TiTiler will likely be internal (titiler:8000)
+                # because we accessed it via that hostname. We need to convert it back
+                # to external for the browser.
+                tile_url_external = tile_url.replace("titiler:8000", "localhost:8080")
+
                 folium.TileLayer(
-                    tiles=tile_url,
+                    tiles=tile_url_external,
                     attr="TiTiler",
                     name=f"Spread Probability (T+{r['horizon_hours']}h)",
                     overlay=True,

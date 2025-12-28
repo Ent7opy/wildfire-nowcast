@@ -11,8 +11,9 @@ services:
       WATCHFILES_FORCE_POLLING: "true"
       UVICORN_RELOAD_DIRS: /app/api
       # When running in Compose, other containers (e.g. UI) must reach TiTiler via service DNS,
-      # not via localhost.
-      TITILER_PUBLIC_BASE_URL: http://titiler:8000
+      # not via localhost. However, the API generates URLs for the browser, so we set this to the
+      # public URL. The UI will handle the internal resolution.
+      TITILER_PUBLIC_BASE_URL: http://localhost:8080
       POSTGRES_HOST: db
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-wildfire}
