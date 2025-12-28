@@ -12,7 +12,7 @@ root_path = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(root_path))
 
 # Import our settings to get the database URL
-from api.config import settings
+from api.config import settings  # noqa: E402
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

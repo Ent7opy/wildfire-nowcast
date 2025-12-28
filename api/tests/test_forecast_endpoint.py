@@ -1,11 +1,10 @@
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routes.forecast import forecast_router
-from api.config import settings
 
 # Create a test app
 app = FastAPI()
@@ -91,7 +90,6 @@ def test_get_forecast_success():
         raster = data["rasters"][0]
         # Check TiTiler URL enrichment
         assert "tilejson_url" in raster
-        expected_url_part = f"url={settings.titiler_public_base_url}/data/forecasts/balkans/run_101/spread_h024_cog.tif"
         # URL encoding might affect slashes, so let's just check the presence of the path
         assert "tilejson.json" in raster["tilejson_url"]
         
