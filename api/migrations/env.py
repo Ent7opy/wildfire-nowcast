@@ -1,9 +1,15 @@
+import sys
+from pathlib import Path
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
+
+# Add the project root to sys.path so we can import 'api'
+root_path = Path(__file__).resolve().parent.parent.parent
+sys.path.append(str(root_path))
 
 # Import our settings to get the database URL
 from api.config import settings
