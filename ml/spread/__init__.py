@@ -6,7 +6,13 @@ from ml.spread.contract import (
     SpreadModel,
     SpreadModelInput,
 )
-from ml.spread.heuristic_v0 import HeuristicSpreadModelV0, HeuristicSpreadV0Config
+
+try:
+    # Optional dependency: heuristic model uses scipy for fast convolution.
+    from ml.spread.heuristic_v0 import HeuristicSpreadModelV0, HeuristicSpreadV0Config
+except Exception:  # pragma: no cover
+    HeuristicSpreadModelV0 = None  # type: ignore[assignment]
+    HeuristicSpreadV0Config = None  # type: ignore[assignment]
 try:
     # Optional dependency: learned model may require extra packages.
     from ml.spread.learned_v1 import LearnedSpreadModelV1
@@ -18,9 +24,12 @@ __all__ = [
     "SpreadForecast",
     "SpreadModel",
     "SpreadModelInput",
-    "HeuristicSpreadModelV0",
-    "HeuristicSpreadV0Config",
 ]
+
+if HeuristicSpreadModelV0 is not None:  # pragma: no cover
+    __all__.append("HeuristicSpreadModelV0")
+if HeuristicSpreadV0Config is not None:  # pragma: no cover
+    __all__.append("HeuristicSpreadV0Config")
 
 if LearnedSpreadModelV1 is not None:  # pragma: no cover
     __all__.append("LearnedSpreadModelV1")

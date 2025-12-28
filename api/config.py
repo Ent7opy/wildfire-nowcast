@@ -60,6 +60,16 @@ class AppSettings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
+    # TiTiler settings
+    titiler_public_base_url: str = Field(
+        default="http://localhost:8080", validation_alias="TITILER_PUBLIC_BASE_URL"
+    )
+    # Mapping for DB paths -> TiTiler container paths.
+    # e.g., "data/forecasts/run_1/spread_h024_cog.tif" -> "/data/forecasts/run_1/spread_h024_cog.tif"
+    # TiTiler then accesses it via filesystem.
+    data_dir_local_prefix: str = Field(default="data/", validation_alias="DATA_DIR_LOCAL_PREFIX")
+    data_dir_titiler_mount: str = Field(default="/data/", validation_alias="DATA_DIR_TITILER_MOUNT")
+
 
 settings = AppSettings()
 

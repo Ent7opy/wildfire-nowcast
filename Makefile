@@ -70,6 +70,9 @@ smoke-grid: ## Run DEM + weather smoke check for grid alignment (pass ARGS="--bb
 smoke-terrain-features: ## Run DEM + slope/aspect smoke check (pass ARGS="--bbox ... --region smoke_grid")
 	$(UV) run --project ingest scripts/smoke_terrain_features.py $(ARGS)
 
+ingest-forecast: ## Run spread forecast and persist (pass ARGS="--region ... --bbox ...")
+	$(UV) run --project ingest -m ingest.spread_forecast $(ARGS)
+
 ingest-industrial: ## Ingest industrial sources (pass ARGS="--wri --bbox ...")
 	$(UV) run --project ingest -m ingest.industrial_sources_ingest $(ARGS)
 
