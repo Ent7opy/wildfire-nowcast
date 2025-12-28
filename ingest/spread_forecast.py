@@ -28,7 +28,7 @@ from ingest.spread_repository import (
 
 # Ensure the API modules are importable
 sys.path.append(str(REPO_ROOT))
-from api.core.grid import GridSpec
+from api.core.grid import GridSpec, GridWindow, get_grid_window_for_bbox
 from api.fires.service import get_region_grid_spec
 
 logging.basicConfig(
@@ -131,31 +131,90 @@ def generate_contours(
     return all_contours
 
 
+def _transform_for_grid_window(grid: GridSpec, window: GridWindow) -> rasterio.Affine:
+    """Return a north-up raster transform for a bbox-window on the region grid.
+
+    Notes
+    -----
+    - `GridSpec.origin_lat/origin_lon` are the **southern/western cell edges**.
+    - `GridWindow` indices are half-open `(i0:i1, j0:j1)` in analysis order.
+    - GeoTIFF expects north-up with origin at the **north-west cell edge**.
+    """
+    cell = float(grid.cell_size_deg)
+    west = float(grid.origin_lon + window.j0 * cell)
+    north = float(grid.origin_lat + window.i1 * cell)
+    return from_origin(west=west, north=north, xsize=cell, ysize=cell)
+
+
+def _transform_from_latlon_centers(
+    lat_centers: np.ndarray, lon_centers: np.ndarray, *, fallback_cell_size_deg: float
+) -> rasterio.Affine:
+    """Derive a north-up transform from 1D cell-center coordinates."""
+    lat = np.asarray(lat_centers, dtype=float)
+    lon = np.asarray(lon_centers, dtype=float)
+    if lat.size == 0 or lon.size == 0:
+        # Degenerate; caller should avoid writing rasters for empty windows.
+        return from_origin(west=0.0, north=0.0, xsize=float(fallback_cell_size_deg), ysize=float(fallback_cell_size_deg))
+
+    # Prefer coord-derived cell sizes (robust if the window is clipped/snapped differently),
+    # but fall back to the grid cell size for 1-pixel edges.
+    dx = float(np.median(np.diff(lon))) if lon.size > 1 else float(fallback_cell_size_deg)
+    dy = float(np.median(np.diff(lat))) if lat.size > 1 else float(fallback_cell_size_deg)
+
+    # Sanity: use absolute sizes; sign is handled by north-up convention.
+    dx = abs(dx) if dx else float(fallback_cell_size_deg)
+    dy = abs(dy) if dy else float(fallback_cell_size_deg)
+
+    west_edge = float(lon.min() - dx / 2.0)
+    north_edge = float(lat.max() + dy / 2.0)
+    return from_origin(west=west_edge, north=north_edge, xsize=dx, ysize=dy)
+
+
 def save_forecast_rasters(
-    forecast: SpreadForecast, grid: GridSpec, run_dir: Path, emit_cog: bool = True
+    forecast: SpreadForecast,
+    grid: GridSpec,
+    window: GridWindow,
+    run_dir: Path,
+    emit_cog: bool = True,
 ) -> list[dict]:
     """Save probability grids as (COG) GeoTIFFs."""
     run_dir.mkdir(parents=True, exist_ok=True)
 
     raster_records = []
 
-    # GeoTIFF transform: north-up (origin is top-left)
-    # Analysis grid origin is bottom-left (southern/western edges).
-    north = grid.origin_lat + grid.n_lat * grid.cell_size_deg
-    transform = from_origin(
-        west=grid.origin_lon,
-        north=north,
-        xsize=grid.cell_size_deg,
-        ysize=grid.cell_size_deg,
-    )
+    # IMPORTANT: forecast.probabilities is computed on the bbox-window, not the full region grid.
+    # Therefore, both `transform` and `profile.height/width` must be window-shaped.
+    height = int(window.lat.size)
+    width = int(window.lon.size)
+
+    # Prefer an exact grid-index-derived transform (stable + snapped), but fall back to
+    # forecast coords if anything seems inconsistent.
+    transform = _transform_for_grid_window(grid, window)
+    try:
+        f_lat = np.asarray(forecast.probabilities.coords["lat"].values)
+        f_lon = np.asarray(forecast.probabilities.coords["lon"].values)
+        if int(f_lat.size) != height or int(f_lon.size) != width:
+            raise ValueError("forecast coord lengths do not match window shape")
+        if not np.allclose(f_lat, window.lat, rtol=0.0, atol=1e-12) or not np.allclose(
+            f_lon, window.lon, rtol=0.0, atol=1e-12
+        ):
+            raise ValueError("forecast coords do not match window coords")
+    except Exception:
+        # Derive transform from the forecast's own cell-center coordinates.
+        # This avoids corrupt georeferencing if the AOI windowing differs for any reason.
+        transform = _transform_from_latlon_centers(
+            np.asarray(forecast.probabilities.coords["lat"].values),
+            np.asarray(forecast.probabilities.coords["lon"].values),
+            fallback_cell_size_deg=float(grid.cell_size_deg),
+        )
 
     profile = {
         "driver": "GTiff",
-        "height": grid.n_lat,
-        "width": grid.n_lon,
+        "height": height,
+        "width": width,
         "count": 1,
         "dtype": "float32",
-        "crs": "EPSG:4326",
+        "crs": grid.crs,
         "transform": transform,
         "nodata": -1.0,
     }
@@ -233,20 +292,17 @@ def main():
 
         # 3. Persist rasters
         grid = get_region_grid_spec(args.region)
+        window = get_grid_window_for_bbox(grid, bbox, clip=True)
 
         run_dir = REPO_ROOT / "data" / "forecasts" / args.region / f"run_{run_id}"
-        raster_records = save_forecast_rasters(forecast, grid, run_dir, emit_cog=not args.no_cog)
+        raster_records = save_forecast_rasters(
+            forecast, grid, window, run_dir, emit_cog=not args.no_cog
+        )
         insert_spread_forecast_rasters(run_id, raster_records)
 
         # 4. Generate and persist contours
-        # We need the transform for contours too
-        north = grid.origin_lat + grid.n_lat * grid.cell_size_deg
-        transform = from_origin(
-            west=grid.origin_lon,
-            north=north,
-            xsize=grid.cell_size_deg,
-            ysize=grid.cell_size_deg,
-        )
+        # We need the *windowed* transform for contours too.
+        transform = _transform_for_grid_window(grid, window)
 
         contour_records = []
         for h in args.horizons:
