@@ -103,6 +103,12 @@ def run_spread_forecast(
         }
     )
 
+    if n_cells == 0:
+        raise ValueError(
+            f"AOI produces an empty window for region {request.region_name!r} and bbox {request.bbox}. "
+            "Ensure the bbox overlaps with the region's extent."
+        )
+
     if n_cells > MAX_AOI_CELLS:
         raise ValueError(
             f"AOI too large: {n_cells} cells (max {MAX_AOI_CELLS}). "
