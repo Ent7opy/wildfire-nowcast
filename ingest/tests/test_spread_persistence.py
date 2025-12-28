@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,7 +9,12 @@ from rasterio.transform import from_origin
 from shapely.geometry import MultiPolygon, shape
 import xarray as xr
 
-from ingest.spread_forecast import generate_contours, save_forecast_rasters
+from ingest.spread_forecast import (
+    _select_probability_slice_by_horizon,
+    build_contour_records,
+    generate_contours,
+    save_forecast_rasters,
+)
 from api.core.grid import GridSpec, GridWindow
 
 
@@ -180,4 +186,71 @@ def test_save_forecast_rasters_uses_forecast_coord_transform_fallback(mock_conve
         # dx=dy=1.0, west_edge=lon.min()-0.5, north_edge=lat.max()+0.5
         expected = from_origin(west=float(forecast_lon.min() - 0.5), north=float(forecast_lat.max() + 0.5), xsize=1.0, ysize=1.0)
         assert transform == expected
+
+
+def test_select_probability_slice_by_horizon_fallback_exact_match():
+    """Fallback path (time-based) should select an exact time match."""
+    ref_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    # time coordinate is naive UTC (matches helper behavior)
+    t24 = np.datetime64(datetime(2025, 1, 2), "ns")
+
+    forecast = MagicMock()
+    forecast.forecast_reference_time = ref_time
+    forecast.probabilities = xr.DataArray(
+        np.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={"time": [t24], "lat": [0.5, 1.5], "lon": [10.5, 11.5]},
+    )
+
+    out = _select_probability_slice_by_horizon(forecast, 24)
+    assert out.shape == (2, 2)
+    assert np.allclose(out, np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))
+
+
+def test_select_probability_slice_by_horizon_fallback_raises_on_missing_horizon():
+    """Regression: never silently snap to nearest time for missing horizons."""
+    ref_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    t24 = np.datetime64(datetime(2025, 1, 2), "ns")
+
+    forecast = MagicMock()
+    forecast.forecast_reference_time = ref_time
+    forecast.probabilities = xr.DataArray(
+        np.zeros((1, 2, 2), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={"time": [t24], "lat": [0.5, 1.5], "lon": [10.5, 11.5]},
+    )
+
+    with pytest.raises(ValueError, match=r"Requested horizon_hours=25"):
+        _select_probability_slice_by_horizon(forecast, 25)
+
+
+def test_build_contour_records_uses_forecast_horizons_only():
+    forecast = MagicMock()
+    forecast.horizons_hours = [24]  # model output horizons
+    forecast.forecast_reference_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    lat = (np.arange(2, dtype=float) + 0.5).astype(np.float64)
+    lon = (np.arange(2, dtype=float) + 0.5).astype(np.float64)
+    forecast.probabilities = xr.DataArray(
+        np.zeros((1, 2, 2), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0], "lat": lat, "lon": lon},
+    )
+
+    grid = GridSpec(origin_lat=0, origin_lon=0, n_lat=2, n_lon=2, cell_size_deg=1.0)
+    window = GridWindow(i0=0, i1=2, j0=0, j1=2, lat=lat, lon=lon)
+
+    with patch("ingest.spread_forecast._select_probability_slice_by_horizon") as mock_select, patch(
+        "ingest.spread_forecast.generate_contours"
+    ) as mock_gen:
+        mock_select.return_value = np.zeros((2, 2), dtype=np.float32)
+        mock_gen.return_value = [{"threshold": 0.5, "geom_geojson": '{"type":"MultiPolygon","coordinates":[]}'}]
+
+        records = build_contour_records(
+            forecast=forecast, grid=grid, window=window, thresholds=[0.5]
+        )
+
+    assert len(records) == 1
+    assert records[0]["horizon_hours"] == 24
+    assert records[0]["threshold"] == 0.5
 

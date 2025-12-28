@@ -57,8 +57,42 @@ def _select_probability_slice_by_horizon(
 
     # Fallback: select by absolute time.
     target = forecast.forecast_reference_time + timedelta(hours=int(horizon_hours))
-    target64 = _as_datetime64_utc_naive(target)
-    return np.asarray(da.sel(time=target64, method="nearest").values)
+    time_coord = np.asarray(da.coords["time"].values)
+    if time_coord.dtype.kind != "M":
+        raise ValueError(
+            "Cannot select probability slice by horizon: `time` coord is not datetime64 "
+            f"(dtype={time_coord.dtype!s})."
+        )
+
+    # Ensure target has same unit as time coordinate to avoid unit-mismatch surprises.
+    time_unit = np.datetime_data(time_coord.dtype)[0]
+    target64 = np.datetime64(_as_datetime64_utc_naive(target), time_unit)
+
+    matches = np.where(time_coord == target64)[0]
+    if matches.size:
+        return np.asarray(da.isel(time=int(matches[0])).values)
+
+    # Never silently "snap" to a nearby horizon; this can generate incorrect rasters/contours.
+    # Provide a helpful error message for debugging / CLI usage.
+    available_h = None
+    if "lead_time_hours" in da.coords:
+        try:
+            available_h = [int(x) for x in np.asarray(da.coords["lead_time_hours"].values).astype(int)]
+        except Exception:
+            available_h = None
+    if available_h is None:
+        try:
+            # Derive lead times from time coordinate.
+            ref64 = np.datetime64(_as_datetime64_utc_naive(forecast.forecast_reference_time), time_unit)
+            delta_hours = (time_coord - ref64).astype("timedelta64[h]").astype(int)
+            available_h = [int(x) for x in delta_hours.tolist()]
+        except Exception:
+            available_h = None
+
+    raise ValueError(
+        f"Requested horizon_hours={int(horizon_hours)} does not exist in forecast output. "
+        + (f"Available horizons: {sorted(set(available_h))}." if available_h is not None else "")
+    )
 
 
 def convert_to_cog(in_path: Path) -> Path:
@@ -263,6 +297,32 @@ def save_forecast_rasters(
     return raster_records
 
 
+def build_contour_records(
+    *,
+    forecast: SpreadForecast,
+    grid: GridSpec,
+    window: GridWindow,
+    thresholds: Sequence[float],
+) -> list[dict]:
+    """Generate contour records for the model's actual output horizons.
+
+    Important: this intentionally iterates over `forecast.horizons_hours` (not a user-supplied
+    horizon list) to prevent producing contours for horizons that do not exist.
+    """
+    # IMPORTANT: Contours must use the *same* transform as the saved rasters.
+    transform = _effective_transform_for_forecast_window(forecast, grid, window)
+
+    contour_records: list[dict] = []
+    for h in forecast.horizons_hours:
+        data = _select_probability_slice_by_horizon(forecast, int(h))
+        data_flipped = np.flipud(data)
+        contours = generate_contours(data_flipped, transform, thresholds)
+        for c in contours:
+            c["horizon_hours"] = int(h)
+            contour_records.append(c)
+    return contour_records
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run spread forecast and persist products.")
     parser.add_argument("--region", type=str, required=True, help="Region name.")
@@ -330,17 +390,15 @@ def main():
         insert_spread_forecast_rasters(run_id, raster_records)
 
         # 4. Generate and persist contours
-        # IMPORTANT: Contours must use the *same* transform as the saved rasters.
-        transform = _effective_transform_for_forecast_window(forecast, grid, window)
-
-        contour_records = []
-        for h in args.horizons:
-            data = _select_probability_slice_by_horizon(forecast, int(h))
-            data_flipped = np.flipud(data)
-            contours = generate_contours(data_flipped, transform, args.thresholds)
-            for c in contours:
-                c["horizon_hours"] = h
-                contour_records.append(c)
+        if sorted(set(args.horizons)) != sorted(set(forecast.horizons_hours)):
+            LOGGER.warning(
+                "Requested horizons %s were adjusted by the model to %s; generating contours for model outputs only.",
+                sorted(set(args.horizons)),
+                sorted(set(forecast.horizons_hours)),
+            )
+        contour_records = build_contour_records(
+            forecast=forecast, grid=grid, window=window, thresholds=args.thresholds
+        )
 
         insert_spread_forecast_contours(run_id, contour_records)
 
