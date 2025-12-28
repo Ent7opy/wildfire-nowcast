@@ -66,6 +66,22 @@ services:
       timeout: 5s
       retries: 5
 
+  titiler:
+    image: ghcr.io/developmentseed/titiler:latest
+    ports:
+      - "8080:8000"
+    environment:
+      - TITILER_CORS_ORIGIN=*
+      # TiTiler needs to access the same data folder as api/ingest
+      - GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR
+    volumes:
+      - ./data:/data:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   db_data:
   redis_data:
