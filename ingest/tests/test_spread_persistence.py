@@ -6,9 +6,10 @@ import numpy as np
 import pytest
 from rasterio.transform import from_origin
 from shapely.geometry import MultiPolygon, shape
+import xarray as xr
 
 from ingest.spread_forecast import generate_contours, save_forecast_rasters
-from api.core.grid import GridSpec
+from api.core.grid import GridSpec, GridWindow
 
 
 def test_generate_contours_simple_square():
@@ -70,18 +71,17 @@ def test_save_forecast_rasters(mock_convert, mock_open):
     # Mock inputs
     forecast = MagicMock()
     forecast.horizons_hours = [24]
-    # Mock probability data
-    forecast.probabilities.sel.return_value.values = np.zeros((10, 10))
-    # We also need to mock the _select_probability_slice_by_horizon call
-    # Since it's an internal function, we can mock it inside the test or rely on the mock of .sel/.isel
-    # But wait, save_forecast_rasters calls _select_probability_slice_by_horizon.
-    # Let's mock _select_probability_slice_by_horizon directly if possible, or just mock the forecast object enough.
-    
-    # The function uses:
-    # data = _select_probability_slice_by_horizon(forecast, int(h))
-    # which uses forecast.probabilities.coords...
-    
-    # Simpler: mock ingest.spread_forecast._select_probability_slice_by_horizon
+
+    # Provide minimal, contract-like lat/lon coordinates (cell centers) on the window.
+    lat = (np.arange(10, dtype=float) + 0.5).astype(np.float64)
+    lon = (np.arange(10, dtype=float) + 0.5).astype(np.float64)
+    forecast.probabilities = xr.DataArray(
+        np.zeros((1, 10, 10), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0], "lat": lat, "lon": lon},
+    )
+
+    # Mock the internal selector so we don't depend on time/lead_time selection logic.
     with patch("ingest.spread_forecast._select_probability_slice_by_horizon") as mock_select:
         mock_select.return_value = np.zeros((10, 10), dtype=np.float32)
         
@@ -92,9 +92,11 @@ def test_save_forecast_rasters(mock_convert, mock_open):
             n_lon=10,
             cell_size_deg=1.0
         )
+        window = GridWindow(i0=0, i1=10, j0=0, j1=10, lat=lat, lon=lon)
         
         # Use a Mock for run_dir so we don't hit the filesystem
         run_dir = MagicMock()
+        run_dir.mkdir.return_value = None
         
         # Mock the path division operator /
         out_path_mock = MagicMock()
@@ -113,7 +115,7 @@ def test_save_forecast_rasters(mock_convert, mock_open):
         mock_dst = MagicMock()
         mock_open.return_value.__enter__.return_value = mock_dst
         
-        results = save_forecast_rasters(forecast, grid, run_dir, emit_cog=True)
+        results = save_forecast_rasters(forecast, grid, window, run_dir, emit_cog=True)
         
         assert len(results) == 1
         assert results[0]["horizon_hours"] == 24
