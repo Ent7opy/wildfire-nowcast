@@ -25,6 +25,8 @@ def main() -> None:
         st.session_state.show_risk = False
     if "last_click" not in st.session_state:
         st.session_state.last_click = None
+    if "map_bounds" not in st.session_state:
+        st.session_state.map_bounds = None
 
     # App identity - Title and subtitle
     st.title("Wildfire Nowcast & Forecast")
