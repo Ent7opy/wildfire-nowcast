@@ -126,3 +126,58 @@ def test_save_forecast_rasters(mock_convert, mock_open):
         # Verify unlink was called on the intermediate file
         out_path_mock.unlink.assert_called_once()
 
+
+@patch("rasterio.open")
+@patch("ingest.spread_forecast.convert_to_cog")
+def test_save_forecast_rasters_uses_forecast_coord_transform_fallback(mock_convert, mock_open):
+    """Regression: if raster saving falls back to forecast-coord transform, contours must too.
+
+    We assert the *raster* path uses the fallback transform when forecast coords differ
+    from the requested window coords, which is the precondition for the raster/contour
+    misalignment bug.
+    """
+    forecast = MagicMock()
+    forecast.horizons_hours = [24]
+
+    # Window coordinates (cell centers)
+    window_lat = (np.arange(10, dtype=float) + 0.5).astype(np.float64)
+    window_lon = (np.arange(10, dtype=float) + 0.5).astype(np.float64)
+
+    # Forecast coordinates are slightly shifted (same shape, but not allclose at atol=1e-12)
+    eps = 1e-6
+    forecast_lat = window_lat + eps
+    forecast_lon = window_lon + eps
+
+    forecast.probabilities = xr.DataArray(
+        np.zeros((1, 10, 10), dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0], "lat": forecast_lat, "lon": forecast_lon},
+    )
+
+    with patch("ingest.spread_forecast._select_probability_slice_by_horizon") as mock_select:
+        mock_select.return_value = np.zeros((10, 10), dtype=np.float32)
+
+        grid = GridSpec(origin_lat=0, origin_lon=0, n_lat=10, n_lon=10, cell_size_deg=1.0)
+        window = GridWindow(i0=0, i1=10, j0=0, j1=10, lat=window_lat, lon=window_lon)
+
+        run_dir = MagicMock()
+        run_dir.mkdir.return_value = None
+        out_path_mock = MagicMock()
+        run_dir.__truediv__.return_value = out_path_mock
+        out_path_mock.unlink.return_value = None
+
+        final_path_mock = MagicMock()
+        final_path_mock.relative_to.return_value = Path("data/forecasts/run_1/spread_h024_cog.tif")
+        mock_convert.return_value = final_path_mock
+
+        save_forecast_rasters(forecast, grid, window, run_dir, emit_cog=True)
+
+        # The call is: rasterio.open(out_path, "w", **profile)
+        _, _, kwargs = mock_open.mock_calls[0]
+        transform = kwargs["transform"]
+
+        # Expected fallback transform derived from forecast coords:
+        # dx=dy=1.0, west_edge=lon.min()-0.5, north_edge=lat.max()+0.5
+        expected = from_origin(west=float(forecast_lon.min() - 0.5), north=float(forecast_lat.max() + 0.5), xsize=1.0, ysize=1.0)
+        assert transform == expected
+

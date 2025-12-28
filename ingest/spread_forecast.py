@@ -18,18 +18,10 @@ from shapely.ops import unary_union
 
 from ingest.config import REPO_ROOT
 from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadForecast
-from ml.spread.service import SpreadForecastRequest, run_spread_forecast
-from ingest.spread_repository import (
-    create_spread_forecast_run,
-    finalize_spread_forecast_run,
-    insert_spread_forecast_contours,
-    insert_spread_forecast_rasters,
-)
 
 # Ensure the API modules are importable
 sys.path.append(str(REPO_ROOT))
 from api.core.grid import GridSpec, GridWindow, get_grid_window_for_bbox
-from api.fires.service import get_region_grid_spec
 
 logging.basicConfig(
     level=logging.INFO,
@@ -170,6 +162,48 @@ def _transform_from_latlon_centers(
     return from_origin(west=west_edge, north=north_edge, xsize=dx, ysize=dy)
 
 
+def _effective_transform_for_forecast_window(
+    forecast: SpreadForecast,
+    grid: GridSpec,
+    window: GridWindow,
+    *,
+    atol: float = 1e-12,
+) -> rasterio.Affine:
+    """Choose the transform that should be used for both rasters and contours.
+
+    We *prefer* the grid-index-derived transform (stable + snapped), but if the forecast's
+    lat/lon coordinates don't match the requested window (even slightly), we must derive a
+    transform from the forecast coordinates to avoid georeferencing drift.
+
+    This function exists so that raster saving and contour generation cannot diverge.
+    """
+    height = int(np.asarray(window.lat).size)
+    width = int(np.asarray(window.lon).size)
+
+    grid_transform = _transform_for_grid_window(grid, window)
+
+    try:
+        f_lat = np.asarray(forecast.probabilities.coords["lat"].values)
+        f_lon = np.asarray(forecast.probabilities.coords["lon"].values)
+        if int(f_lat.size) != height or int(f_lon.size) != width:
+            raise ValueError("forecast coord lengths do not match window shape")
+
+        w_lat = np.asarray(window.lat)
+        w_lon = np.asarray(window.lon)
+        if not np.allclose(f_lat, w_lat, rtol=0.0, atol=float(atol)) or not np.allclose(
+            f_lon, w_lon, rtol=0.0, atol=float(atol)
+        ):
+            raise ValueError("forecast coords do not match window coords")
+    except Exception:
+        return _transform_from_latlon_centers(
+            np.asarray(forecast.probabilities.coords["lat"].values),
+            np.asarray(forecast.probabilities.coords["lon"].values),
+            fallback_cell_size_deg=float(grid.cell_size_deg),
+        )
+
+    return grid_transform
+
+
 def save_forecast_rasters(
     forecast: SpreadForecast,
     grid: GridSpec,
@@ -187,26 +221,7 @@ def save_forecast_rasters(
     height = int(window.lat.size)
     width = int(window.lon.size)
 
-    # Prefer an exact grid-index-derived transform (stable + snapped), but fall back to
-    # forecast coords if anything seems inconsistent.
-    transform = _transform_for_grid_window(grid, window)
-    try:
-        f_lat = np.asarray(forecast.probabilities.coords["lat"].values)
-        f_lon = np.asarray(forecast.probabilities.coords["lon"].values)
-        if int(f_lat.size) != height or int(f_lon.size) != width:
-            raise ValueError("forecast coord lengths do not match window shape")
-        if not np.allclose(f_lat, window.lat, rtol=0.0, atol=1e-12) or not np.allclose(
-            f_lon, window.lon, rtol=0.0, atol=1e-12
-        ):
-            raise ValueError("forecast coords do not match window coords")
-    except Exception:
-        # Derive transform from the forecast's own cell-center coordinates.
-        # This avoids corrupt georeferencing if the AOI windowing differs for any reason.
-        transform = _transform_from_latlon_centers(
-            np.asarray(forecast.probabilities.coords["lat"].values),
-            np.asarray(forecast.probabilities.coords["lon"].values),
-            fallback_cell_size_deg=float(grid.cell_size_deg),
-        )
+    transform = _effective_transform_for_forecast_window(forecast, grid, window)
 
     profile = {
         "driver": "GTiff",
@@ -263,6 +278,20 @@ def main():
 
     args = parser.parse_args()
 
+    # Import the model runner lazily so importing this module for utility functions
+    # (e.g. contour generation / raster persistence) doesn't require optional ML deps.
+    from ml.spread.service import SpreadForecastRequest, run_spread_forecast
+
+    # Import persistence layer lazily to avoid requiring DB deps in unit tests
+    # that only exercise contours/rasters.
+    from ingest.spread_repository import (
+        create_spread_forecast_run,
+        finalize_spread_forecast_run,
+        insert_spread_forecast_contours,
+        insert_spread_forecast_rasters,
+    )
+    from api.fires.service import get_region_grid_spec
+
     ref_time = datetime.fromisoformat(args.time) if args.time else datetime.now(timezone.utc)
     if ref_time.tzinfo is None:
         ref_time = ref_time.replace(tzinfo=timezone.utc)
@@ -301,8 +330,8 @@ def main():
         insert_spread_forecast_rasters(run_id, raster_records)
 
         # 4. Generate and persist contours
-        # We need the *windowed* transform for contours too.
-        transform = _transform_for_grid_window(grid, window)
+        # IMPORTANT: Contours must use the *same* transform as the saved rasters.
+        transform = _effective_transform_for_forecast_window(forecast, grid, window)
 
         contour_records = []
         for h in args.horizons:
