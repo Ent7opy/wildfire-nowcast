@@ -171,7 +171,8 @@ def check_wind_elongation(
     
     # We only care about cells with significant probability
     mask = probs > 0.05
-    if not mask.any():
+    # Need at least 2 points to calculate covariance
+    if mask.sum() < 2:
         return
         
     w = probs[mask]
