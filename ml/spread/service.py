@@ -125,8 +125,11 @@ def run_spread_forecast(
 
     # 3. Predict
     forecast = model.predict(inputs_package.to_model_input())
+
+    # 4. Validate output contract
+    forecast.validate()
     
-    # 4. Finalize and log
+    # 5. Finalize and log
     duration = time.perf_counter() - start_time
     LOGGER.info(
         "Spread forecast completed",
