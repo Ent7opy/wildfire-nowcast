@@ -189,6 +189,76 @@ def test_run_hindcast_builder(
         assert manifest["cases"][0]["event_id"] == "event_000"
 
 
+@patch("ml.spread.hindcast_builder.sample_fire_reference_times")
+@patch("ml.spread.hindcast_builder.build_hindcast_case")
+@patch("ml.spread.hindcast_builder.get_engine")
+def test_run_hindcast_builder_relative_output_root(
+    mock_get_engine, mock_build_case, mock_sample, tmp_path, mock_window, monkeypatch
+):
+    """
+    Regression: when output_root is relative, manifest path computation must not raise
+    ValueError by mixing relative/absolute paths in Path.relative_to().
+    """
+    # Run from an absolute cwd, but use a relative output_root.
+    monkeypatch.chdir(tmp_path)
+
+    ref_time = datetime(2025, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
+    mock_sample.return_value = [ref_time]
+
+    # Suppress the DeprecationWarning about parsing timezone aware datetimes
+    warnings.filterwarnings(
+        "ignore",
+        category=DeprecationWarning,
+        message="parsing timezone aware datetimes is deprecated",
+    )
+
+    # Mock Case
+    ds = xr.Dataset(
+        data_vars={
+            "y_pred": (["time", "lat", "lon"], np.zeros((1, 10, 10))),
+            "y_obs": (["time", "lat", "lon"], np.zeros((1, 10, 10))),
+            "fire_t0": (["lat", "lon"], np.ones((10, 10))),
+            "slope": (["lat", "lon"], np.zeros((10, 10))),
+            "aspect": (["lat", "lon"], np.zeros((10, 10))),
+        },
+        coords={
+            "time": [np.datetime64(ref_time + timedelta(hours=24), "ns")],
+            "lat": mock_window.lat,
+            "lon": mock_window.lon,
+        },
+    )
+    mock_build_case.return_value = ds
+
+    config = {
+        "region_name": "smoke_grid",
+        "bbox": [22.0, 40.0, 24.0, 42.0],
+        "start_time": "2025-07-01",
+        "end_time": "2025-08-31",
+        "horizons_hours": [24],
+        # Intentionally relative (matches real default patterns).
+        "output_root": "data/hindcasts/smoke_grid",
+        "min_detections": 1,
+        "interval_hours": 6,
+        "min_active_cells_t0": 1,
+        "min_event_buckets": 1,
+    }
+
+    run_hindcast_builder(config)
+
+    # Check output exists under tmp_path/cwd
+    runs = list((tmp_path / "data" / "hindcasts" / "smoke_grid").glob("run_*"))
+    assert len(runs) == 1
+    run_dir = runs[0]
+
+    manifest_path = run_dir / "index.json"
+    assert manifest_path.exists()
+    with open(manifest_path, "r") as f:
+        manifest = json.load(f)
+    assert len(manifest["cases"]) == 1
+    # Manifest path should be a relative path string (not absolute).
+    assert manifest["cases"][0]["path"].startswith("data/hindcasts/smoke_grid/")
+
+
 @patch("ml.spread.hindcast_builder.get_spread_model")
 @patch("ml.spread.hindcast_builder.sample_fire_reference_times")
 @patch("ml.spread.hindcast_builder.build_hindcast_case")

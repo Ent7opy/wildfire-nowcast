@@ -190,11 +190,26 @@ def run_hindcast_builder(config: Dict[str, Any]):
                 out_path = event_dir / filename
                 ds.to_netcdf(out_path)
 
+                # Make manifest paths robust for both relative/absolute output roots.
+                # Path.relative_to() cannot mix relative and absolute paths, so normalize first.
+                manifest_base = (
+                    output_root.parent.parent if output_root.is_absolute() else Path.cwd()
+                )
+                out_path_abs = (
+                    out_path.resolve() if out_path.is_absolute() else (Path.cwd() / out_path).resolve()
+                )
+                manifest_base_abs = manifest_base.resolve()
+                try:
+                    manifest_rel_path = out_path_abs.relative_to(manifest_base_abs).as_posix()
+                except ValueError:
+                    # If outputs land outside the chosen base, fall back to a stable absolute path.
+                    manifest_rel_path = out_path_abs.as_posix()
+
                 # Add to manifest
                 manifest.append({
                     "event_id": event_id,
                     "ref_time": ref_time.isoformat(),
-                    "path": str(out_path.relative_to(output_root.parent.parent if output_root.is_absolute() else Path.cwd())),
+                    "path": manifest_rel_path,
                     "n_active_t0": int(n_active_t0),
                     "n_obs_positive": int((ds.y_obs > 0).sum().item()),
                 })
