@@ -1,4 +1,7 @@
-"""CLI for running wildfire spread forecasts and persisting products."""
+"""CLI for running wildfire spread forecasts and persisting products.
+
+See `docs/spread_model_design.md` for what the spread models do today and their limitations.
+"""
 
 from __future__ import annotations
 

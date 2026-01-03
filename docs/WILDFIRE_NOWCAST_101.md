@@ -128,6 +128,7 @@ Planned components:
    - Output:
      - **Probability of fire presence** on a local grid for T+6/12/24/48/72h.
      - Uncertainty estimates (ensembles / Monte Carlo).
+   - Details / assumptions / limitations: see `docs/spread_model_design.md`.
 
 3. **Probability calibration**
    - Learned from historical data:
@@ -160,7 +161,8 @@ Planned components:
 As of late 2025, only some parts of this pipeline are implemented in code; others are still design targets.  
 For a current-status walkthrough (what exists vs planned), see `docs/architecture.md`. Roughly:
 - **Implemented**: FIRMS fire detection ingest + dedupe (`fire_detections`, `ingest_batches`), GFS 0.25° weather ingest + `weather_runs`, DEM stitching + `terrain_metadata`, basic FastAPI API with DB wiring, and a Streamlit UI with placeholder layers.
-- **Not yet implemented**: spread and risk models, probability calibration and weather bias correction, tile serving/COGs, LLM AOI summaries, and background workers/caching.
+- **Partially implemented**: spread model (heuristic v0 + learned v1 baseline). See `docs/spread_model_design.md` for what is implemented today and its limitations.
+- **Not yet implemented**: risk models, probability calibration and weather bias correction, tile serving for UI consumption, LLM AOI summaries, and background workers/caching.
 
 1. **Data ingest**
    - Periodically pull:

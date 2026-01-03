@@ -2,6 +2,8 @@
 
 This model implements a simple rule-based spread using wind direction and speed
 to produce a downwind-biased probability footprint.
+
+See `docs/spread_model_design.md` for a higher-level description, assumptions, and limitations.
 """
 
 from __future__ import annotations

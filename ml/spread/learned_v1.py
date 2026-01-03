@@ -1,4 +1,7 @@
-"""Learned spread model (v1) inference implementation."""
+"""Learned spread model (v1) inference implementation.
+
+See `docs/spread_model_design.md` for training/inference details and evaluation notes.
+"""
 
 import logging
 import os
