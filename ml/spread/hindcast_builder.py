@@ -16,7 +16,7 @@ import yaml
 from api.db import get_engine
 from api.fires.service import get_fire_cells_heatmap
 from ml.spread.contract import SpreadModel
-from ml.spread.heuristic_v0 import HeuristicSpreadModelV0, HeuristicSpreadV0Config
+from ml.spread.factory import get_spread_model
 from ml.spread.hindcast_dataset import sample_fire_reference_times
 from ml.spread_features import build_spread_inputs
 
@@ -160,24 +160,11 @@ def run_hindcast_builder(config: Dict[str, Any]):
     LOGGER.info(f"Filtered to {len(filtered_events)} events meeting min_event_buckets={min_event_buckets}.")
 
     # 6. Build model
-    # For now, only support HeuristicSpreadModelV0
-    # In the future we can add model loading logic if needed
-    model_name = config.get("model_name", "HeuristicSpreadModelV0")
-    model_params = config.get("model_params", {})
-
-    if model_name == "HeuristicSpreadModelV0":
-        # Check for unknown params to avoid silent failures
-        valid_fields = set(HeuristicSpreadV0Config.__annotations__.keys())
-        unknown = set(model_params.keys()) - valid_fields
-        if unknown:
-            LOGGER.warning(f"Ignoring unknown model_params for HeuristicSpreadModelV0: {unknown}")
-        
-        # Filter params
-        valid_params = {k: v for k, v in model_params.items() if k in valid_fields}
-        model_config = HeuristicSpreadV0Config(**valid_params)
-        model = HeuristicSpreadModelV0(config=model_config)
-    else:
-        raise ValueError(f"Unsupported model: {model_name}")
+    # Use the factory to load the requested model
+    model = get_spread_model(
+        config.get("model_name", "HeuristicSpreadModelV0"),
+        config.get("model_params", {})
+    )
 
     manifest = []
 

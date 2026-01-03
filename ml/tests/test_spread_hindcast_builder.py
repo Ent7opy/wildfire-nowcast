@@ -186,19 +186,19 @@ def test_run_hindcast_builder(
         assert manifest["cases"][0]["event_id"] == "event_000"
 
 
-@patch("ml.spread.hindcast_builder.HeuristicSpreadModelV0")
+@patch("ml.spread.hindcast_builder.get_spread_model")
 @patch("ml.spread.hindcast_builder.sample_fire_reference_times")
 @patch("ml.spread.hindcast_builder.build_hindcast_case")
 @patch("ml.spread.hindcast_builder.get_engine")
 def test_run_hindcast_builder_with_params(
-    mock_get_engine, mock_build_case, mock_sample, mock_model_cls, tmp_path, mock_window
+    mock_get_engine, mock_build_case, mock_sample, mock_get_model, tmp_path, mock_window
 ):
     ref_time = datetime(2025, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
     mock_sample.return_value = [ref_time]
 
     # Mock Model Instance
     mock_model_instance = MagicMock()
-    mock_model_cls.return_value = mock_model_instance
+    mock_get_model.return_value = mock_model_instance
 
     config = {
         "region_name": "smoke_grid",
@@ -217,11 +217,9 @@ def test_run_hindcast_builder_with_params(
 
     run_hindcast_builder(config)
 
-    # Verify model init with params
-    assert mock_model_cls.call_count == 1
-    call_args = mock_model_cls.call_args
-    # The first arg or 'config' kwarg should be the config object
-    model_config = call_args.kwargs.get('config')
-    assert model_config is not None
-    assert model_config.base_spread_km_h == 0.1
-    assert model_config.wind_influence_km_h_per_ms == 0.2
+    # Verify factory call
+    mock_get_model.assert_called_once()
+    args = mock_get_model.call_args[0]
+    assert args[0] == "HeuristicSpreadModelV0"
+    assert args[1]["base_spread_km_h"] == 0.1
+    assert args[1]["wind_influence_km_h_per_ms"] == 0.2
