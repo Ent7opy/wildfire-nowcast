@@ -130,8 +130,9 @@ class SpreadProbabilityCalibrator:
         if cfg_path.exists():
             with open(cfg_path, "r") as f:
                 cfg = yaml.safe_load(f)
-                method = cfg.get("method", method)
-                p_min = cfg.get("p_min", p_min)
+                if cfg:
+                    method = cfg.get("method", method)
+                    p_min = cfg.get("p_min", p_min)
 
         return cls(
             method=method,
@@ -203,7 +204,7 @@ def fit_from_hindcast_run(
         case_path = Path(case_meta["path"])
         # Handle relative paths in manifest if needed
         if not case_path.is_absolute():
-            case_path = REPO_ROOT / case_path
+            case_path = hindcast_run_dir / case_path
 
         if not case_path.exists():
             LOGGER.warning(f"Case file not found: {case_path}; skipping.")
