@@ -1,6 +1,7 @@
 """Tests for hindcast builder."""
 
 import json
+import warnings
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -132,6 +133,9 @@ def test_run_hindcast_builder(
 ):
     ref_time = datetime(2025, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
     mock_sample.return_value = [ref_time]
+
+    # Suppress the DeprecationWarning about parsing timezone aware datetimes
+    warnings.filterwarnings("ignore", category=DeprecationWarning, message="parsing timezone aware datetimes is deprecated")
 
     # Mock Case
     ds = xr.Dataset(
