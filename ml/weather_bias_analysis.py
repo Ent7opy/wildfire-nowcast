@@ -61,9 +61,8 @@ def compute_metrics(forecast: np.ndarray, truth: np.ndarray) -> Dict[str, float]
     }
 
 
-def normalize_truth(ds: xr.Dataset, var_mapping: Dict[str, str]) -> xr.Dataset:
-    """Normalize truth dataset: rename variables and coordinates, sort by coords."""
-    # Rename coordinates to canonical time, lat, lon
+def normalize_coords(ds: xr.Dataset) -> xr.Dataset:
+    """Rename coordinates to canonical names and sort them."""
     rename_coords = {}
     if "latitude" in ds.coords:
         rename_coords["latitude"] = "lat"
@@ -72,10 +71,6 @@ def normalize_truth(ds: xr.Dataset, var_mapping: Dict[str, str]) -> xr.Dataset:
     if rename_coords:
         ds = ds.rename(rename_coords)
 
-    # Rename variables based on mapping
-    if var_mapping:
-        ds = ds.rename({v: k for k, v in var_mapping.items() if v in ds.data_vars})
-
     # Ensure monotonic increasing lat/lon
     if "lat" in ds.coords:
         ds = ds.sortby("lat")
@@ -83,6 +78,17 @@ def normalize_truth(ds: xr.Dataset, var_mapping: Dict[str, str]) -> xr.Dataset:
         ds = ds.sortby("lon")
     if "time" in ds.coords:
         ds = ds.sortby("time")
+
+    return ds
+
+
+def normalize_truth(ds: xr.Dataset, var_mapping: Dict[str, str]) -> xr.Dataset:
+    """Normalize truth dataset: rename variables and coordinates, sort by coords."""
+    ds = normalize_coords(ds)
+
+    # Rename variables based on mapping
+    if var_mapping:
+        ds = ds.rename({v: k for k, v in var_mapping.items() if v in ds.data_vars})
 
     return ds
 
@@ -261,7 +267,13 @@ def run_analysis(args: argparse.Namespace) -> None:
 
     LOGGER.info("Loading forecast: %s", args.forecast_nc)
     ds_forecast = xr.open_dataset(args.forecast_nc)
-    
+    ds_forecast = normalize_coords(ds_forecast)
+
+    if args.bbox:
+        min_lon, min_lat, max_lon, max_lat = args.bbox
+        LOGGER.info("Subsetting forecast to user bbox: %s", args.bbox)
+        ds_forecast = ds_forecast.sel(lat=slice(min_lat, max_lat), lon=slice(min_lon, max_lon))
+
     # Check truth path existence (handling globs)
     truth_path = Path(args.truth_nc)
     if "*" not in str(args.truth_nc) and not truth_path.exists():
