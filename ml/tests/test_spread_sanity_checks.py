@@ -3,6 +3,7 @@ import numpy as np
 import xarray as xr
 from datetime import datetime, timezone
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 from ml.spread.sanity_checks import (
     check_nonempty_when_fires_present,
@@ -106,6 +107,4 @@ def test_check_wind_elongation():
     data[0, 9:12, 9:12] = 0.5
     forecast = create_mock_forecast([24], lat, lon, data)
     check_wind_elongation(inputs, forecast, min_anisotropy=1.5)
-
-from unittest.mock import MagicMock
 

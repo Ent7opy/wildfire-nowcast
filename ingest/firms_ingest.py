@@ -10,7 +10,7 @@ import sys
 from typing import List, Optional
 
 from ingest import repository
-from ingest.config import settings as ingest_settings
+from ingest.config import FIRMSIngestSettings, settings as ingest_settings
 from ingest.firms_client import (
     FirmsValidationSummary,
     build_firms_url,

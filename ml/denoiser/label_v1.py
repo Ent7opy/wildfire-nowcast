@@ -2,11 +2,9 @@
 
 import argparse
 import logging
-import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 from sqlalchemy import text, Engine
 from api.db import get_engine

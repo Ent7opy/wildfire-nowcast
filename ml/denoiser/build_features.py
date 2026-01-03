@@ -3,7 +3,6 @@
 import argparse
 import sys
 import pandas as pd
-from datetime import datetime
 from api.db import get_engine
 from .dataset import load_labeled_data, build_dataset
 

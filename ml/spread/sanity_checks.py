@@ -10,7 +10,6 @@ import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
-import xarray as xr
 
 if TYPE_CHECKING:
     from ml.spread.contract import SpreadForecast, SpreadModelInput
