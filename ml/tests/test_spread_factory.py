@@ -1,7 +1,6 @@
 """Tests for the spread model factory."""
 
 import logging
-from unittest.mock import MagicMock
 
 import pytest
 

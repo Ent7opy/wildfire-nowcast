@@ -4,7 +4,7 @@ import argparse
 import logging
 import os
 import sys
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import pandas as pd
 import httpx

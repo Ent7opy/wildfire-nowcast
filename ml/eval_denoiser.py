@@ -12,7 +12,7 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -460,10 +460,10 @@ def _write_thresholds_md(
     lines.append("## Downstream interpretation contract")
     lines.append("")
     lines.append("### Drop mode (precision-first)")
-    lines.append(f"- If `p < strong_filter_threshold` then **drop** the detection from downstream.")
+    lines.append("- If `p < strong_filter_threshold` then **drop** the detection from downstream.")
     lines.append("")
     lines.append("### Weight mode (recall/coverage-first)")
-    lines.append(f"- Keep all detections, but if `p < downweight_threshold` apply a **weight**.")
+    lines.append("- Keep all detections, but if `p < downweight_threshold` apply a **weight**.")
     lines.append("")
     lines.append("#### Default weight mapping")
     lines.append("- Proposed default:")

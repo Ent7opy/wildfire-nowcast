@@ -3,8 +3,7 @@
 import numpy as np
 import pandas as pd
 import xarray as xr
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import List
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from api.core.grid import DEFAULT_CELL_SIZE_DEG
@@ -167,7 +166,7 @@ def add_spatiotemporal_context(
             row_context["dist_nn_24h_km"] = dist_nn if dist_nn is not None else 999.0
             
             # seen_same_cell_past_3d
-            query_seen = text(f"""
+            query_seen = text("""
                 SELECT EXISTS (
                     SELECT 1 FROM fire_detections 
                     WHERE acq_time < :ts 
@@ -185,7 +184,7 @@ def add_spatiotemporal_context(
             row_context["seen_same_cell_past_3d"] = int(seen)
             
             # days_with_detection_past_30d_in_cell
-            query_days = text(f"""
+            query_days = text("""
                 SELECT COUNT(DISTINCT date(acq_time))
                 FROM fire_detections 
                 WHERE acq_time < :ts 
@@ -282,7 +281,7 @@ def add_spatiotemporal_context_batch(
         """)
 
     # dist_nn_24h_km
-    count_cols.append(f"""
+    count_cols.append("""
         COALESCE(
             (
                 SELECT ST_Distance(

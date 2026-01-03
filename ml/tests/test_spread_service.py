@@ -2,7 +2,6 @@ import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 import numpy as np
-import xarray as xr
 
 from ml.spread.service import run_spread_forecast, SpreadForecastRequest, MAX_AOI_CELLS
 from ml.spread.contract import SpreadForecast, SpreadModelInput
