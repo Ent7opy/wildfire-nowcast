@@ -101,27 +101,67 @@ def run_inspection():
         forecast = model.predict(inputs)
         
         # Plot
-        fig, axes = plt.subplots(1, len(horizons), figsize=(15, 5), sharex=True, sharey=True)
-        fig.suptitle(f"Heuristic Spread v0: {name} (u={u}m/s, v={v}m/s)")
+        fig, axes = plt.subplots(1, len(horizons), figsize=(18, 6), sharex=True, sharey=True)
+        fig.suptitle(f"Heuristic Spread v0: {name} (u={u}m/s, v={v}m/s)", fontsize=16)
         
         for i, h in enumerate(horizons):
             ax = axes[i]
-            probs = forecast.probabilities.isel(time=i)
-            im = ax.imshow(probs, origin="lower", extent=[lon[0], lon[-1], lat[0], lat[-1]], cmap="YlOrRd", vmin=0, vmax=1)
-            ax.set_title(f"T+{h}h")
+            probs_da = forecast.probabilities.isel(time=i)
+            probs = probs_da.values
+            
+            # 1. Plot probability heatmap
+            im = ax.imshow(
+                probs, 
+                origin="lower", 
+                extent=[lon[0], lon[-1], lat[0], lat[-1]], 
+                cmap="YlOrRd", 
+                vmin=0, 
+                vmax=1,
+                alpha=0.8
+            )
+            
+            # 2. Add contour lines for specific thresholds
+            thresholds = [0.3, 0.5, 0.7]
+            if probs.max() > thresholds[0]:
+                ax.contour(
+                    lon, lat, probs, 
+                    levels=thresholds, 
+                    colors=['black'], 
+                    linewidths=0.5,
+                    alpha=0.5
+                )
+            
+            # 3. Plot ignition points (where input heatmap > 0)
+            fire_y, fire_x = np.where(fires.heatmap > 0)
+            if len(fire_x) > 0:
+                ax.scatter(
+                    lon[fire_x], lat[fire_y], 
+                    marker='*', color='blue', s=100, label='Ignition' if i == 0 else ""
+                )
+            
+            # 4. Draw wind vector field (quiver)
+            # Plot a small grid of arrows to show wind direction
+            skip = 20
+            q_lon, q_lat = np.meshgrid(lon[::skip], lat[::skip])
+            if u**2 + v**2 > 0:
+                ax.quiver(
+                    q_lon, q_lat, 
+                    np.ones_like(q_lon) * u, np.ones_like(q_lat) * v,
+                    color='blue', alpha=0.3, scale=500, width=0.005
+                )
+
+            ax.set_title(f"T+{h}h", fontsize=14)
             ax.set_xlabel("Lon")
             if i == 0:
                 ax.set_ylabel("Lat")
-            
-            # Draw wind arrow in the corner of first plot
-            if i == 0 and (u**2 + v**2 > 0):
-                ax.arrow(lon[10], lat[10], u*0.005, v*0.005, head_width=0.005, head_length=0.005, fc='blue', ec='blue')
-                ax.text(lon[10], lat[15], "wind", color='blue')
+                ax.legend(loc='upper left')
 
-        plt.colorbar(im, ax=axes.ravel().tolist())
+        # Add a single colorbar for all subplots
+        cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+        fig.colorbar(im, cax=cbar_ax, label="Probability")
         
         save_path = f"{output_dir}/spread_{name}.png"
-        plt.savefig(save_path, bbox_inches="tight")
+        plt.savefig(save_path, bbox_inches="tight", dpi=150)
         plt.close()
         print(f"Saved plot to {save_path}")
 

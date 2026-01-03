@@ -455,3 +455,209 @@ def test_heuristic_v0_upslope_bias_aspect_wraparound_uses_circular_mean():
     north_mass = float(probs[(ci + 1) :, :].sum())
     south_mass = float(probs[:ci, :].sum())
     assert south_mass > north_mass, f"Expected upslope mass to dominate south: south={south_mass} north={north_mass}"
+
+
+def test_heuristic_v0_coordinate_consistency():
+    """Verify that output coordinates match input window exactly."""
+    ny, nx = 15, 15
+    lat = np.linspace(35.0, 35.14, ny)
+    lon = np.linspace(5.0, 5.14, nx)
+    window = MockWindow(lat=lat, lon=lon, i1=ny, j1=nx)
+
+    fires = MockFireHeatmap(heatmap=np.zeros((ny, nx)))
+    weather = xr.Dataset(
+        data_vars={
+            "u10": (("lat", "lon"), np.zeros((ny, nx))),
+            "v10": (("lat", "lon"), np.zeros((ny, nx))),
+        },
+        coords={"lat": lat, "lon": lon},
+    )
+    grid = MockGrid(
+        crs="EPSG:4326", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=100, n_lon=100
+    )
+    
+    inputs = SpreadModelInput(
+        grid=grid,
+        window=window,
+        active_fires=fires,
+        weather_cube=weather,
+        terrain=MockTerrain(),
+        forecast_reference_time=datetime.now(timezone.utc),
+        horizons_hours=[24]
+    )
+    
+    model = HeuristicSpreadModelV0()
+    forecast = model.predict(inputs)
+    
+    np.testing.assert_allclose(forecast.probabilities.coords["lat"].values, lat)
+    np.testing.assert_allclose(forecast.probabilities.coords["lon"].values, lon)
+
+
+def test_heuristic_v0_monotonic_footprint_behavior():
+    """Verify monotonic footprint via the sanity check helper."""
+    from ml.spread.sanity_checks import check_monotonic_footprint
+
+    ny, nx = 51, 51
+    lat = np.arange(ny) * 0.01 + 35.0
+    lon = np.arange(nx) * 0.01 + 5.0
+    window = MockWindow(lat=lat, lon=lon, i1=ny, j1=nx)
+
+    heatmap = np.zeros((ny, nx))
+    heatmap[ny // 2, nx // 2] = 1.0
+    fires = MockFireHeatmap(heatmap=heatmap)
+
+    weather = xr.Dataset(
+        data_vars={
+            "u10": (("lat", "lon"), np.ones((ny, nx)) * 2.0),
+            "v10": (("lat", "lon"), np.ones((ny, nx)) * 2.0),
+        },
+        coords={"lat": lat, "lon": lon},
+    )
+    grid = MockGrid(
+        crs="EPSG:4326", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=100, n_lon=100
+    )
+    
+    inputs = SpreadModelInput(
+        grid=grid,
+        window=window,
+        active_fires=fires,
+        weather_cube=weather,
+        terrain=MockTerrain(),
+        forecast_reference_time=datetime.now(timezone.utc),
+        horizons_hours=[24, 48, 72]
+    )
+    
+    model = HeuristicSpreadModelV0()
+    forecast = model.predict(inputs)
+    
+    # Should not raise
+    check_monotonic_footprint(forecast)
+
+
+def test_heuristic_v0_wind_behavior():
+    """Verify wind-driven behavior (displacement) via the sanity check helper."""
+    from ml.spread.sanity_checks import check_wind_displacement
+
+    ny, nx = 81, 81
+    lat = np.arange(ny) * 0.01 + 35.0
+    lon = np.arange(nx) * 0.01 + 5.0
+    window = MockWindow(lat=lat, lon=lon, i1=ny, j1=nx)
+
+    heatmap = np.zeros((ny, nx))
+    heatmap[ny // 2, nx // 2] = 1.0
+    fires = MockFireHeatmap(heatmap=heatmap)
+
+    # Strong North wind (v > 0, u = 0)
+    weather = xr.Dataset(
+        data_vars={
+            "u10": (("lat", "lon"), np.zeros((ny, nx))),
+            "v10": (("lat", "lon"), np.ones((ny, nx)) * 12.0),
+        },
+        coords={"lat": lat, "lon": lon},
+    )
+    grid = MockGrid(
+        crs="EPSG:4326", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=100, n_lon=100
+    )
+    
+    inputs = SpreadModelInput(
+        grid=grid,
+        window=window,
+        active_fires=fires,
+        weather_cube=weather,
+        terrain=MockTerrain(),
+        forecast_reference_time=datetime.now(timezone.utc),
+        horizons_hours=[6]
+    )
+    
+    model = HeuristicSpreadModelV0()
+    forecast = model.predict(inputs)
+    
+    # Should not raise for North wind
+    check_wind_displacement(inputs, forecast, min_wind_speed_ms=10.0, min_displacement_px=0.5)
+
+
+def test_heuristic_v0_nonempty_check():
+    """Verify check_nonempty_when_fires_present."""
+    from ml.spread.sanity_checks import check_nonempty_when_fires_present
+
+    ny, nx = 20, 20
+    lat = np.arange(ny) * 0.01 + 35.0
+    lon = np.arange(nx) * 0.01 + 5.0
+    window = MockWindow(lat=lat, lon=lon, i1=ny, j1=nx)
+
+    # Fires present
+    heatmap = np.zeros((ny, nx))
+    heatmap[ny // 2, nx // 2] = 1.0
+    fires = MockFireHeatmap(heatmap=heatmap)
+
+    weather = xr.Dataset(
+        data_vars={
+            "u10": (("lat", "lon"), np.zeros((ny, nx))),
+            "v10": (("lat", "lon"), np.zeros((ny, nx))),
+        },
+        coords={"lat": lat, "lon": lon},
+    )
+    grid = MockGrid(
+        crs="EPSG:4326", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=100, n_lon=100
+    )
+
+    inputs = SpreadModelInput(
+        grid=grid,
+        window=window,
+        active_fires=fires,
+        weather_cube=weather,
+        terrain=MockTerrain(),
+        forecast_reference_time=datetime.now(timezone.utc),
+        horizons_hours=[24],
+    )
+
+    model = HeuristicSpreadModelV0()
+    forecast = model.predict(inputs)
+
+    # Should not raise
+    check_nonempty_when_fires_present(inputs, forecast)
+
+
+def test_heuristic_v0_wind_elongation():
+    """Verify check_wind_elongation."""
+    from ml.spread.sanity_checks import check_wind_elongation
+
+    # Need a larger grid for PCA to be stable and clear
+    ny, nx = 101, 101
+    lat = np.arange(ny) * 0.01 + 35.0
+    lon = np.arange(nx) * 0.01 + 5.0
+    window = MockWindow(lat=lat, lon=lon, i1=ny, j1=nx)
+
+    heatmap = np.zeros((ny, nx))
+    heatmap[ny // 2, nx // 2] = 1.0
+    fires = MockFireHeatmap(heatmap=heatmap)
+
+    # Strong East wind
+    weather = xr.Dataset(
+        data_vars={
+            "u10": (("lat", "lon"), np.ones((ny, nx)) * 15.0),
+            "v10": (("lat", "lon"), np.zeros((ny, nx))),
+        },
+        coords={"lat": lat, "lon": lon},
+    )
+    grid = MockGrid(
+        crs="EPSG:4326", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=100, n_lon=100
+    )
+
+    inputs = SpreadModelInput(
+        grid=grid,
+        window=window,
+        active_fires=fires,
+        weather_cube=weather,
+        terrain=MockTerrain(),
+        forecast_reference_time=datetime.now(timezone.utc),
+        horizons_hours=[24],
+    )
+
+    model = HeuristicSpreadModelV0(
+        HeuristicSpreadV0Config(wind_elongation_factor=2.0, wind_influence_km_h_per_ms=0.2)
+    )
+    forecast = model.predict(inputs)
+
+    # Should not raise
+    check_wind_elongation(inputs, forecast, min_wind_speed_ms=10.0, min_anisotropy=1.2)

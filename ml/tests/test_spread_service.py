@@ -61,6 +61,7 @@ def test_run_spread_forecast_success(mock_spread_inputs):
         # Verify
         assert result == mock_forecast
         mock_model.predict.assert_called_once()
+        mock_forecast.validate.assert_called_once()
 
 def test_run_spread_forecast_aoi_too_large(mock_grid):
     # Setup - Window that exceeds MAX_AOI_CELLS
@@ -119,4 +120,5 @@ def test_run_spread_forecast_default_model(mock_spread_inputs):
             mock_model.predict.return_value = mock_forecast
             run_spread_forecast(request)
             mock_model.predict.assert_called_once()
+            mock_forecast.validate.assert_called_once()
 
