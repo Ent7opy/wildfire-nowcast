@@ -1,4 +1,7 @@
-"""Spread forecast service for orchestrating model execution."""
+"""Spread forecast service for orchestrating model execution.
+
+See `docs/spread_model_design.md` for model behavior, assumptions, and limitations.
+"""
 
 from __future__ import annotations
 
