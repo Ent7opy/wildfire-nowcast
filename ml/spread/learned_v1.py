@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from ml.calibration import SpreadProbabilityCalibrator
 from ml.spread.contract import SpreadForecast, SpreadModel, SpreadModelInput
 
 LOGGER = logging.getLogger(__name__)
@@ -20,10 +21,12 @@ LOGGER = logging.getLogger(__name__)
 class LearnedSpreadModelV1(SpreadModel):
     """Learned spread model using an ensemble of per-horizon classifiers."""
 
-    def __init__(self, model_run_dir: str):
+    def __init__(self, model_run_dir: str, calibrator_run_dir: str | None = None):
         self.model_run_dir = model_run_dir
+        self.calibrator_run_dir = calibrator_run_dir
         self.models: Dict[int, Any] = {}
         self.feature_list: List[str] = []
+        self.calibrator: SpreadProbabilityCalibrator | None = None
         self._load_artifacts()
 
     def _load_artifacts(self):
@@ -41,6 +44,17 @@ class LearnedSpreadModelV1(SpreadModel):
         import json
         with open(features_path, "r") as f:
             self.feature_list = json.load(f)
+
+        if self.calibrator_run_dir:
+            LOGGER.info(f"Loading calibrator from {self.calibrator_run_dir}")
+            try:
+                self.calibrator = SpreadProbabilityCalibrator.load(self.calibrator_run_dir)
+            except Exception as e:
+                LOGGER.error(f"Failed to load calibrator: {e}")
+                # We don't raise here to allow model to run without calibration if it fails?
+                # Actually, if config requests it, we should probably warn or raise.
+                # Let's raise to be safe, or just log error.
+                raise
 
     def _build_tabular_features(self, inputs: SpreadModelInput, horizon_idx: int) -> pd.DataFrame:
         """Extract features from SpreadModelInput for a specific horizon."""
@@ -109,6 +123,11 @@ class LearnedSpreadModelV1(SpreadModel):
             
             # Predict probabilities
             probs = clf.predict_proba(X)[:, 1]
+
+            # Apply calibration if available
+            if self.calibrator:
+                probs = self.calibrator.calibrate_probs(probs, h)
+
             prob_grid = probs.reshape((ny, nx)).astype(np.float32)
             
             # Apply terrain masks if present (mirroring heuristic_v0)

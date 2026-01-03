@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Type
 
 from ml.spread.contract import SpreadModel
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0, HeuristicSpreadV0Config
+from ml.spread.learned_v1 import LearnedSpreadModelV1
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LearnedSpreadV1Config:
+    """Configuration for LearnedSpreadModelV1."""
+    model_run_dir: str
+    calibrator_run_dir: str | None = None
+
 
 # Registry mapping model names to (ModelClass, ConfigClass)
 MODEL_REGISTRY: dict[str, tuple[Type[SpreadModel], Type[Any]]] = {
     "HeuristicSpreadModelV0": (HeuristicSpreadModelV0, HeuristicSpreadV0Config),
+    "LearnedSpreadModelV1": (LearnedSpreadModelV1, LearnedSpreadV1Config),
 }
 
 
@@ -57,8 +68,15 @@ def get_spread_model(name: str, params: dict[str, Any] | None = None) -> SpreadM
 
     valid_params = {k: v for k, v in params.items() if k in valid_fields}
     model_config = config_cls(**valid_params)
-    
-    # We assume all spread models take a `config` argument in __init__
-    # or satisfy the instantiation pattern.
+
+    # Instantiate model based on its specific requirements
+    if name == "LearnedSpreadModelV1":
+        # LearnedSpreadModelV1 takes model_run_dir directly
+        return model_cls(
+            model_run_dir=model_config.model_run_dir,  # type: ignore
+            calibrator_run_dir=model_config.calibrator_run_dir,  # type: ignore
+        )
+
+    # Default: assume model_cls(config=model_config)
     return model_cls(config=model_config)  # type: ignore
 
