@@ -43,6 +43,40 @@ Notes:
 
 - `ml/denoiser/`: Feature engineering and labeling logic.
 - `ml/train_denoiser.py`: Training entrypoint.
+- `ml/weather_bias_analysis.py`: Systematic bias analysis script.
 - `configs/`: Training configuration files.
 - `models/`: Trained model artifacts.
+- `reports/`: Analysis outputs and reports.
+
+## Weather Bias Analysis
+
+Quantify systematic biases in weather fields (wind, temperature, humidity) by comparing forecasts with reanalysis or ground truth datasets (e.g., ERA5).
+
+### Usage
+
+```bash
+# Using make (from repo root)
+make weather-bias ARGS="--forecast-nc data/weather/gfs_0p25/2025/12/06/12/gfs_0p25_20251206T12Z_0-24h_bbox_5.0_35.0_20.0_47.0.nc --truth-nc path/to/YOUR_ERA5_FILE.nc"
+
+# Or using uv directly
+uv run --project ml -m ml.weather_bias_analysis \
+    --forecast-nc data/weather/gfs_0p25/2025/12/06/12/gfs_0p25_20251206T12Z_0-24h_bbox_5.0_35.0_20.0_47.0.nc \
+    --truth-nc path/to/YOUR_ERA5_FILE.nc \
+    --out-dir reports/weather_bias
+```
+
+> **Note**: `path/to/YOUR_ERA5_FILE.nc` is a placeholder. You must provide a path to a real NetCDF file containing reanalysis truth.
+
+Options:
+- `--variables`: Comma-separated mapping if truth variable names differ (e.g., `u10=u10_era,t2m=t2m_truth`).
+- `--dem-path`: Optional path to a DEM GeoTIFF for elevation-stratified bias analysis.
+
+### Artifacts
+
+Reports are saved to `reports/weather_bias/<timestamp>/`:
+- `summary.csv`: Per-variable bias, MAE, and RMSE.
+- `summary.json`: Comprehensive metrics including quadrant and elevation-binned stats.
+- `plots/`: Mean bias maps and time series plots.
+- `notes.md`: Template for documenting findings and observations.
+- `metadata.json` / `config_resolved.yaml`: Reproducibility metadata.
 
