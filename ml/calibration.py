@@ -73,15 +73,15 @@ class SpreadProbabilityCalibrator:
         orig_shape = raw_probs.shape
         flat_probs = raw_probs.ravel()
 
-        if self.method == "isotonic":
+        if isinstance(model, IsotonicRegression):
             # IsotonicRegression.predict supports out-of-bounds by clipping to boundary values
             calibrated = model.predict(flat_probs)
-        elif self.method == "platt":
+        elif hasattr(model, "predict_proba"):
             # LogisticRegression expects 2D input (n_samples, 1)
             # and returns [p(0), p(1)]
             calibrated = model.predict_proba(flat_probs.reshape(-1, 1))[:, 1]
         else:
-            raise ValueError(f"Unsupported calibration method: {self.method}")
+            raise ValueError(f"Unsupported calibration model type for horizon {horizon_hours}h: {type(model)}")
 
         return np.clip(calibrated.reshape(orig_shape), 0.0, 1.0)
 
@@ -265,20 +265,24 @@ def fit_from_hindcast_run(
         y_train = np.concatenate(train_cases["y_obs"].values)
         
         # 2a. Fit
-        LOGGER.info(f"Fitting {method} calibrator for T+{h}h on {len(X_train)} samples...")
-        
         # Check if we have both classes
+        effective_method = method
         if len(np.unique(y_train)) < 2:
-            LOGGER.warning(f"Only one class in training data for T+{h}h; using Platt/Logistic fallback.")
-            # Platt/Logistic might still fail, but scikit-learn LogisticRegression
-            # usually handles this better than Isotonic if forced.
-            # Actually, Isotonic just returns the constant value.
-            # We'll stick to a robust fallback if needed.
-            
-        if method == "isotonic":
+            if method == "platt":
+                LOGGER.warning(
+                    f"Only one class in training data for T+{h}h; "
+                    "falling back to Isotonic (constant) predictor as Platt scaling requires 2 classes."
+                )
+                effective_method = "isotonic"
+            else:
+                LOGGER.info(f"Only one class in training data for T+{h}h; Isotonic will predict constant value.")
+
+        LOGGER.info(f"Fitting {effective_method} calibrator for T+{h}h on {len(X_train)} samples...")
+        
+        if effective_method == "isotonic":
             model = IsotonicRegression(out_of_bounds="clip")
             model.fit(X_train, y_train)
-        elif method == "platt":
+        elif effective_method == "platt":
             model = LogisticRegression(solver="lbfgs")
             # X needs to be (n_samples, 1)
             model.fit(X_train.reshape(-1, 1), y_train)
@@ -293,7 +297,7 @@ def fit_from_hindcast_run(
             y_eval = np.concatenate(eval_cases["y_obs"].values)
             
             # Predict
-            if method == "isotonic":
+            if isinstance(model, IsotonicRegression):
                 y_cal = model.predict(X_eval)
             else:
                 y_cal = model.predict_proba(X_eval.reshape(-1, 1))[:, 1]
