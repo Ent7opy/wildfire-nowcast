@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval
+.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval hindcast-build
 
 PYTHON ?= python
 UV ?= uv
@@ -89,4 +89,7 @@ denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="model
 	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v1/<run_id>"))
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT="data/denoiser/snapshots/<run>" or a labeled parquet))
 	$(UV) run --project ml -m ml.eval_denoiser --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) $(if $(OUT),--out $(OUT),) $(ARGS)
+
+hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG="configs/hindcast_smoke_grid_balkans_mvp.yaml")
+	$(UV) run --project ml -m ml.spread.hindcast_builder --config $(if $(CONFIG),$(CONFIG),configs/hindcast_smoke_grid_balkans_mvp.yaml) $(ARGS)
 

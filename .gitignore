@@ -104,6 +104,9 @@ data/ingest/
 data/denoiser/snapshots/
 data/denoiser/*.parquet
 data/forecasts/
+data/hindcasts/
+data/dem/bulgaria/
+data/terrain/bulgaria/
 output.nc
 models/
 reports/
@@ -112,4 +115,3 @@ reports/
 *.tmp
 *.temp
 .cache/
-

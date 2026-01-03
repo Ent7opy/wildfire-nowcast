@@ -1,0 +1,32 @@
+# Spread Hindcast Builder MVP Config
+seed: 42
+output_root: "data/hindcasts/smoke_grid"
+
+# Data selection
+region_name: "smoke_grid"
+bbox: [22.0, 40.0, 24.0, 42.0]  # Balkans area
+start_time: "2025-07-01"
+end_time: "2025-08-31"
+
+# Horizons to reconstruct (requested: 6, 12, 24, 48, 72)
+horizons_hours: [6, 12, 24, 48, 72]
+
+# Selection criteria
+# min_detections: Minimum FIRMS detections in the bbox to consider a reference time
+min_detections: 10
+# interval_hours: Frequency of reference time sampling
+interval_hours: 6
+# label_window_hours: Half-width of the time window around target horizon for observations
+label_window_hours: 3
+
+# Event grouping
+# min_active_cells_t0: Minimum number of active fire cells at T=0 to keep a case
+min_active_cells_t0: 5
+# min_event_buckets: Minimum number of contiguous samples to call it an 'event'
+min_event_buckets: 4
+
+# Model settings
+model_name: "HeuristicSpreadModelV0"
+model_version: "v0"
+# Optional: model_params: {}
+
