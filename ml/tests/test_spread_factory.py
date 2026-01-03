@@ -4,8 +4,25 @@ import logging
 
 import pytest
 
+from unittest.mock import patch, MagicMock
 from ml.spread.factory import get_spread_model
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0
+from ml.spread.learned_v1 import LearnedSpreadModelV1
+
+
+def test_get_spread_model_learned_v1_success():
+    """Verify that we can instantiate the learned v1 model."""
+    params = {"model_run_dir": "/tmp/test_run"}
+    
+    # Mock the artifact loading to avoid FileNotFoundError and JSON errors
+    with patch("ml.spread.learned_v1.joblib.load", return_value={}), \
+         patch("ml.spread.learned_v1.os.path.exists", return_value=True), \
+         patch("builtins.open", MagicMock()), \
+         patch("json.load", return_value=["feature1", "feature2"]):
+        
+        model = get_spread_model("LearnedSpreadModelV1", params=params)
+        assert isinstance(model, LearnedSpreadModelV1)
+        assert model.model_run_dir == "/tmp/test_run"
 
 
 def test_get_spread_model_success():
