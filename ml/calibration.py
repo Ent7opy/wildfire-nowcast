@@ -8,13 +8,12 @@ Isotonic Regression (default) or Platt scaling (logistic regression).
 import argparse
 import json
 import logging
-import os
 import platform
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import joblib
 import numpy as np

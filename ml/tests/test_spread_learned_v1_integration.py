@@ -1,10 +1,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import numpy as np
-import xarray as xr
 from datetime import datetime
 from ml.spread.learned_v1 import LearnedSpreadModelV1
-from ml.spread.contract import SpreadModelInput, SpreadForecast
+from ml.spread.contract import SpreadModelInput
 
 class TestLearnedSpreadModelV1Integration(unittest.TestCase):
     @patch("ml.spread.learned_v1.joblib.load")
