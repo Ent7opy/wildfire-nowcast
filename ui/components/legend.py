@@ -7,9 +7,9 @@ def render_legend() -> None:
     with st.expander("Map Legend", expanded=False):
         legend_items = []
         if st.session_state.show_fires:
-            legend_items.append("🔴 **Active fires** (red markers) - Placeholder fire detections")
+            legend_items.append("🔴 **Active fires** (red markers/clusters) - Live detections")
         if st.session_state.show_forecast:
-            legend_items.append("🟠 **Forecast (24-72h)** (orange polygon) - Placeholder spread forecast")
+            legend_items.append("🟠 **Forecast (24-72h)** - Live (when available)")
         if st.session_state.show_risk:
             legend_items.append("🟣 **Risk index** (purple polygon) - Placeholder fire risk")
 

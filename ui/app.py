@@ -29,6 +29,8 @@ def main() -> None:
         st.session_state.show_risk = False
     if "last_click" not in st.session_state:
         st.session_state.last_click = None
+    if "fires_last_detections" not in st.session_state:
+        st.session_state.fires_last_detections = []
     if "map_bounds" not in st.session_state:
         st.session_state.map_bounds = None
 
@@ -52,16 +54,16 @@ def main() -> None:
         f"denoiser {denoiser_state}"
     )
 
-    # Render map and get click coordinates
-    click_coords = render_map_view()
-    if click_coords is not None:
-        st.session_state.last_click = click_coords
+    # Render map + details side-by-side
+    col_map, col_details = st.columns([3, 1], gap="large")
+    with col_map:
+        click_coords = render_map_view()
+        if click_coords is not None:
+            st.session_state.last_click = click_coords
 
-    # Render click details
-    render_click_details(st.session_state.last_click)
-
-    # Render legend
-    render_legend()
+    with col_details:
+        render_click_details(st.session_state.last_click)
+        render_legend()
 
 if __name__ == "__main__":
     main()

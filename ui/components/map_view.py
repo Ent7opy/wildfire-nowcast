@@ -263,9 +263,11 @@ def render_map_view() -> Optional[Dict[str, float]]:
                         "limit": FIRE_API_LIMIT,
                         "include_noise": include_noise,
                         "min_confidence": min_confidence,
+                        "include_denoiser_fields": True,
                     },
                 )
                 detections = fires_data.get("detections", [])
+                st.session_state.fires_last_detections = detections
                 if len(detections) >= FIRE_API_LIMIT:
                     st.warning(
                         f"Too many detections for the current view/time window. "
@@ -274,11 +276,13 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 add_fires_layer(m, detections)
             except ApiUnavailableError:
                 st.error("API unavailable — please start the backend")
+                st.session_state.fires_last_detections = []
             except ApiError as e:
                 details = f"(status={e.status_code})" if e.status_code is not None else ""
                 st.error(f"Fires API error {details}".strip())
                 if e.response_text:
                     st.caption(e.response_text[:300])
+                st.session_state.fires_last_detections = []
 
         if st.session_state.show_forecast:
             add_forecast_layers(m)

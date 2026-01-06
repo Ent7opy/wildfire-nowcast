@@ -21,7 +21,18 @@ def _list_detections(
     include_denoiser_fields: bool,
     limit: Optional[int],
 ):
-    columns = ["id", "lat", "lon", "acq_time", "confidence", "frp", "sensor", "source"]
+    columns = [
+        "id",
+        "lat",
+        "lon",
+        "acq_time",
+        "confidence",
+        "brightness",
+        "bright_t31",
+        "frp",
+        "sensor",
+        "source",
+    ]
     if include_denoiser_fields:
         columns.extend(["denoised_score", "is_noise"])
 
