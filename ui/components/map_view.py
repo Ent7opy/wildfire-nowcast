@@ -163,19 +163,23 @@ def add_forecast_layers(map_obj: folium.Map) -> None:
     bbox = _current_bbox()
 
     try:
-        forecast_data = get_forecast(bbox, horizons=[24, 48, 72])
+        with st.spinner("Loading forecast overlay…"):
+            forecast_data = get_forecast(bbox, horizons=[24, 48, 72])
     except ApiUnavailableError:
         st.error("API unavailable — please start the backend")
         return
     except ApiError as e:
         details = f"(status={e.status_code})" if e.status_code is not None else ""
-        st.error(f"Forecast API error {details}".strip())
+        st.error(f"Forecast unavailable {details}".strip())
         if e.response_text:
-            st.caption(e.response_text[:300])
+            st.caption(str(e.response_text)[:300])
         return
 
     if not forecast_data.get("run"):
-        st.info("No forecast available for the current view (try a different AOI).")
+        st.info(
+            "No forecast available for the current view. "
+            "Try panning/zooming to a different AOI."
+        )
         return
 
     def _contour_color(feature: Dict[str, Any]) -> str:
@@ -273,18 +277,24 @@ def render_map_view() -> Optional[Dict[str, float]]:
             try:
                 include_noise = not bool(getattr(st.session_state, "fires_apply_denoiser", True))
                 min_confidence = float(getattr(st.session_state, "fires_min_confidence", 0.0))
-                fires_data = get_fires(
-                    bbox=bbox,
-                    time_range=(start_time, end_time),
-                    filters={
-                        "limit": FIRE_API_LIMIT,
-                        "include_noise": include_noise,
-                        "min_confidence": min_confidence,
-                        "include_denoiser_fields": True,
-                    },
-                )
+                with st.spinner("Loading fires…"):
+                    fires_data = get_fires(
+                        bbox=bbox,
+                        time_range=(start_time, end_time),
+                        filters={
+                            "limit": FIRE_API_LIMIT,
+                            "include_noise": include_noise,
+                            "min_confidence": min_confidence,
+                            "include_denoiser_fields": True,
+                        },
+                    )
                 detections = fires_data.get("detections", [])
                 st.session_state.fires_last_detections = detections
+                if len(detections) == 0:
+                    st.info(
+                        "No fires found for the current filters. "
+                        "Try a wider time window, lower minimum confidence, or zoom out."
+                    )
                 if len(detections) >= FIRE_API_LIMIT:
                     st.warning(
                         f"Too many detections for the current view/time window. "
@@ -296,9 +306,9 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 st.session_state.fires_last_detections = []
             except ApiError as e:
                 details = f"(status={e.status_code})" if e.status_code is not None else ""
-                st.error(f"Fires API error {details}".strip())
+                st.error(f"Fires unavailable {details}".strip())
                 if e.response_text:
-                    st.caption(e.response_text[:300])
+                    st.caption(str(e.response_text)[:300])
                 st.session_state.fires_last_detections = []
 
         if st.session_state.show_forecast:

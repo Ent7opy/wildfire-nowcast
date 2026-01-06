@@ -103,7 +103,18 @@ def get_fires(
     if filters:
         params.update(dict(filters))
 
-    return _get_json("/fires", params=params)
+    data = _get_json("/fires", params=params)
+    if not isinstance(data, dict):
+        raise ApiError(message="API returned invalid fires payload (not a JSON object)", url=None)
+    detections = data.get("detections")
+    if detections is None or not isinstance(detections, list):
+        raise ApiError(
+            message="API returned invalid fires payload (missing 'detections')",
+            status_code=None,
+            url=None,
+            response_text=str(data)[:500],
+        )
+    return data
 
 
 def get_forecast(
@@ -132,5 +143,15 @@ def get_forecast(
         # Not currently consumed by the backend; safe to ignore server-side.
         params["horizons"] = ",".join(str(h) for h in horizons)
 
-    return _get_json("/forecast", params=params)
+    data = _get_json("/forecast", params=params)
+    if not isinstance(data, dict):
+        raise ApiError(message="API returned invalid forecast payload (not a JSON object)", url=None)
+    if "run" not in data:
+        raise ApiError(
+            message="API returned invalid forecast payload (missing 'run')",
+            status_code=None,
+            url=None,
+            response_text=str(data)[:500],
+        )
+    return data
 
