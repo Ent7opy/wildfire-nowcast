@@ -14,6 +14,23 @@ def main() -> None:
     # Page configuration - must be the first Streamlit command
     st.set_page_config(page_title="Wildfire Nowcast & Forecast", layout="wide")
 
+    # Minimal styling (Streamlit-supported CSS injection)
+    st.markdown(
+        """
+        <style>
+          /* Tighten overall top spacing a bit */
+          .block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
+
+          /* Make sidebars feel less “boilerplate” */
+          section[data-testid="stSidebar"] .block-container { padding-top: 1.25rem; }
+
+          /* Slightly tighten caption spacing */
+          div[data-testid="stCaptionContainer"] p { margin-bottom: 0.35rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     # Initialize session state after set_page_config
     if "time_window" not in st.session_state:
         st.session_state.time_window = TIME_WINDOW_OPTIONS[0]
@@ -34,19 +51,25 @@ def main() -> None:
     if "map_bounds" not in st.session_state:
         st.session_state.map_bounds = None
 
-    # App identity - Title and subtitle
+    # App identity
     st.title("Wildfire Nowcast & Forecast")
     st.caption(
-        "Monitor active wildfires and view short-term spread forecasts (24-72 hours) "
-        "using satellite data, weather, and terrain analysis. "
+        "Live satellite fire detections (FIRMS) with optional probabilistic spread overlays."
+    )
+    st.info(
+        "Forecast overlays are **experimental** and **probabilistic** (not deterministic). "
+        "Use them as situational awareness, not as operational guidance.",
+        icon="ℹ️",
     )
 
     # Sidebar controls
     with st.sidebar:
         render_sidebar()
 
-    # Main content area - Map and indicators
-    # Active filters indicator
+    # Main content area - Map and details
+    st.subheader("Map")
+
+    # Active filters summary
     denoiser_state = "on" if st.session_state.fires_apply_denoiser else "off"
     st.caption(
         f"**Fires filters:** {st.session_state.time_window}, "
@@ -62,6 +85,7 @@ def main() -> None:
             st.session_state.last_click = click_coords
 
     with col_details:
+        st.subheader("Details")
         render_click_details(st.session_state.last_click)
         render_legend()
 

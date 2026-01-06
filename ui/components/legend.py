@@ -4,7 +4,7 @@ import streamlit as st
 
 def render_legend() -> None:
     """Render the map legend based on active layers."""
-    with st.expander("Map Legend", expanded=False):
+    with st.expander("Legend", expanded=False):
         legend_items = []
         if st.session_state.show_fires:
             legend_items.append("🔴 **Active fires** (red markers/clusters) - Live detections")

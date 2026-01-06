@@ -14,10 +14,11 @@ def get_time_window_index(time_window: str) -> int:
 
 def render_sidebar() -> str:
     """Render the sidebar controls and return selected time window."""
-    st.header("Controls")
+    st.header("Filters & Controls")
 
     # Fires filters (debounced via Apply button)
-    st.subheader("Fires filters")
+    st.subheader("Filters")
+    st.caption("Adjust fires filters, then click **Apply filters**.")
     with st.form("fires_filters", clear_on_submit=False):
         pending_time_window = st.selectbox(
             "Time window",
@@ -77,17 +78,14 @@ def render_sidebar() -> str:
 
     st.divider()
 
-    # Region / AOI placeholder
-    st.subheader("Region / AOI")
-    st.info(
-        "Region selection will be available in a future version. "
-        "This will allow you to focus on specific areas of interest."
-    )
+    # AOI behavior (MVP)
+    st.subheader("AOI")
+    st.caption("Forecast AOI uses the current map viewport (bbox).")
 
     st.divider()
 
     # About / Data notice
-    st.subheader("About / Data")
+    st.subheader("About")
     st.caption(
         "**Data sources**\n\n"
         "- Fires and forecast layers are fetched live from the FastAPI backend.\n"
