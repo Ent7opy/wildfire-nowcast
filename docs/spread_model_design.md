@@ -175,3 +175,21 @@ It reports:
 - Uncertainty: ensembles, quantile regression, or Bayesian-ish approximations.
 - Probability calibration + reliability curves per region/horizon.
 - Better evaluation: spatial metrics (distance-to-fireline), event-based metrics, and calibration metrics (ECE/Brier).
+
+## 9. Calibration and weather bias correction (not magic)
+
+This repo includes two optional post-processing layers:
+- **Weather bias correction**: adjusts input weather fields to reduce systematic forecast error vs truth.
+- **Probability calibration**: adjusts output probabilities to better match observed frequencies in hindcast.
+
+These layers can improve operational usefulness, but they are not a substitute for:
+- better model structure/features,
+- physical fire behavior modeling,
+- rigorous region/season evaluation.
+
+Key points:
+- Calibration cannot “invent skill”; it only remaps scores.
+- Weather bias correction here is a global affine transform per variable; it will not fix spatially varying biases.
+- Heuristic v0 probabilities are normalized per AOI per horizon, so “probability” can be AOI-dependent even after calibration.
+
+See `docs/ml/calibration_and_weather_bias_correction.md` for details, artifacts, failure modes, and evaluation recipes.

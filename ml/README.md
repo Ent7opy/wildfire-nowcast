@@ -2,6 +2,9 @@
 
 This directory contains the machine learning pipelines for the Wildfire Nowcast project.
 
+> For a transparent explanation of post-processing layers (calibration and weather bias correction),
+> see `docs/ml/calibration_and_weather_bias_correction.md`.
+
 ## Denoiser Classifier
 
 The denoiser is a tabular classifier that distinguishes between real fires and noise (e.g., industrial heat sources, sensor noise) in FIRMS detections.
