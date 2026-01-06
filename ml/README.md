@@ -80,3 +80,27 @@ Reports are saved to `reports/weather_bias/<timestamp>/`:
 - `notes.md`: Template for documenting findings and observations.
 - `metadata.json` / `config_resolved.yaml`: Reproducibility metadata.
 
+## Weather Bias Correction (for Spread Inference)
+
+For spread inference, you can optionally apply a lightweight bias corrector to the weather cube.
+The corrector is a **per-variable affine transform** (truth \(\approx \alpha + \beta \cdot forecast\)) fit on aligned forecast vs truth data.
+
+### Training
+
+```bash
+python -m ml.train_weather_bias_corrector \
+  --forecast-nc path/to/forecast.nc \
+  --truth-nc path/to/truth.nc \
+  --out-dir models/weather_bias_corrector
+```
+
+This writes a run directory containing:
+- `weather_bias_corrector.json`: correction parameters (loadable in inference).
+- `metrics.json`: before/after validation metrics on a held-out time slice.
+
+### Using in spread code
+
+`ml.spread_features._load_weather_cube` will apply the corrector automatically if you provide a path:
+- pass `weather_bias_corrector_path=Path(".../weather_bias_corrector.json")` to `build_spread_inputs`, or
+- set `WEATHER_BIAS_CORRECTOR_PATH=/abs/path/to/weather_bias_corrector.json` in the environment.
+

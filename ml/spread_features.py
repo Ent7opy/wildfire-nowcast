@@ -17,6 +17,11 @@ from api.db import get_engine
 from api.fires.service import FireHeatmapWindow, get_fire_cells_heatmap, get_region_grid_spec
 from api.terrain.window import TerrainWindow, load_terrain_window
 from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadModelInput
+from ml.weather_bias_correction import (
+    WEATHER_BIAS_CORRECTOR_ENV,
+    resolve_weather_bias_corrector_path,
+    WeatherBiasCorrector,
+ )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,6 +126,8 @@ def _load_weather_cube(
     window: GridWindow,
     horizons_hours: Sequence[int],
     bbox: tuple[float, float, float, float],
+    *,
+    weather_bias_corrector_path: Path | None = None,
 ) -> xr.Dataset:
     """Load and align weather data for the requested window and horizons."""
     run = _get_latest_weather_run(ref_time, bbox)
@@ -198,6 +205,11 @@ def _load_weather_cube(
 
         # Ensure the caller doesn't hold an open file handle.
         ds_final = ds_final.load()
+
+        # Optional: apply global bias correction (if configured).
+        ds_final = _maybe_apply_weather_bias_correction(
+            ds_final, weather_bias_corrector_path=weather_bias_corrector_path
+        )
         return ds_final
     except Exception:
         LOGGER.exception("Failed to load/align weather dataset from %s; using fallback.", path)
@@ -238,6 +250,28 @@ def _create_fallback_weather(
         coords=coords
     )
 
+def _maybe_apply_weather_bias_correction(
+    ds: xr.Dataset, *, weather_bias_corrector_path: Path | None = None
+) -> xr.Dataset:
+    """Apply a bias corrector if configured by arg or env var."""
+    resolved = resolve_weather_bias_corrector_path(weather_bias_corrector_path, env_var=WEATHER_BIAS_CORRECTOR_ENV)
+    if resolved is None:
+        return ds
+    if not resolved.exists():
+        LOGGER.warning(
+            "Weather bias corrector path does not exist (%s=%s); skipping correction.",
+            WEATHER_BIAS_CORRECTOR_ENV,
+            resolved,
+        )
+        return ds
+
+    try:
+        corrector = WeatherBiasCorrector.load_json(resolved)
+        return corrector.apply(ds, inplace=False)
+    except Exception:
+        LOGGER.exception("Failed to load/apply weather bias corrector from %s; using uncorrected weather.", resolved)
+        return ds
+
 
 def build_spread_inputs(
     region_name: str,
@@ -248,6 +282,7 @@ def build_spread_inputs(
     fire_lookback_hours: int = 24,
     include_dem: bool = True,
     weight_by_denoised_score: bool = True,
+    weather_bias_corrector_path: Path | None = None,
 ) -> SpreadInputs:
     """Assemble all required inputs for a spread model prediction.
     
@@ -322,6 +357,7 @@ def build_spread_inputs(
         window=window,
         horizons_hours=horizons_hours,
         bbox=bbox,
+        weather_bias_corrector_path=weather_bias_corrector_path,
     )
     # Basic contract checks for downstream models.
     if not all(d in weather.dims for d in ("time", "lat", "lon")):
