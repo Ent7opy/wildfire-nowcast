@@ -104,3 +104,35 @@ This writes a run directory containing:
 - pass `weather_bias_corrector_path=Path(".../weather_bias_corrector.json")` to `build_spread_inputs`, or
 - set `WEATHER_BIAS_CORRECTOR_PATH=/abs/path/to/weather_bias_corrector.json` in the environment.
 
+## Evaluation: Calibration & Weather Bias Correction
+
+### Calibration evaluation (spread reliability)
+
+Given a hindcast run (predicted vs observed grids) and a calibrator run dir, generate a report with:
+- per-horizon **Brier score** and **ECE**
+- **reliability diagrams** (raw vs calibrated)
+
+```bash
+python -m ml.eval_spread_calibration \
+  --hindcast-run-dir path/to/hindcast_run \
+  --calibrator-run-dir models/spread_calibration/<run_id>
+```
+
+Outputs are written to `reports/spread_calibration_eval/<timestamp>_<run_id>/`.
+
+### Weather bias correction evaluation (systematic error reduction)
+
+Compare forecast vs truth (raw and corrected) and generate:
+- per-variable **bias/MAE/RMSE** tables (raw vs corrected)
+- mean bias maps + bias reduction maps
+- domain-mean bias time series overlays
+
+```bash
+python -m ml.eval_weather_bias_correction \
+  --forecast-nc path/to/forecast.nc \
+  --truth-nc path/to/truth.nc \
+  --corrector-json models/weather_bias_corrector/<run_id>/weather_bias_corrector.json
+```
+
+Outputs are written to `reports/weather_bias_correction_eval/<timestamp>/`.
+
