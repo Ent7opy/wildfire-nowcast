@@ -41,6 +41,29 @@ def test_get_detections_endpoint_basic(monkeypatch):
     assert "denoised_score" not in kwargs["columns"]
 
 
+def test_get_fires_endpoint_alias(monkeypatch):
+    """Test that the /fires endpoint aliases /fires/detections."""
+    mock_list = MagicMock(return_value=[])
+    monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
+
+    response = client.get(
+        "/fires",
+        params={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 22.0,
+            "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["count"] == 0
+    assert data["detections"] == []
+
+
 def test_get_detections_endpoint_with_denoiser_fields(monkeypatch):
     """Test that include_denoiser_fields adds columns."""
     mock_list = MagicMock(return_value=[])

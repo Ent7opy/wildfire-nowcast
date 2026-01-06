@@ -65,10 +65,10 @@ def render_sidebar() -> str:
     # About / Data notice
     st.subheader("About / Data")
     st.caption(
-        "⚠️ **Placeholder Data Notice**\n\n"
-        "All map data, fire detections, forecasts, and risk indices shown here are "
-        "placeholder demonstrations. Real satellite data (NASA FIRMS), weather forecasts, "
-        "and terrain analysis will be integrated in future versions."
+        "**Data sources**\n\n"
+        "- Fires and forecast layers are fetched live from the FastAPI backend.\n"
+        "- If the backend is stopped, the UI will show an API error message.\n"
+        "- The risk layer is still a placeholder."
     )
 
     return selected_time

@@ -8,6 +8,62 @@ from api.fires.repo import list_fire_detections_bbox_time
 fires_router = APIRouter(prefix="/fires", tags=["fires"])
 
 
+def _list_detections(
+    *,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    start_time: datetime,
+    end_time: datetime,
+    include_noise: bool,
+    include_denoiser_fields: bool,
+    limit: Optional[int],
+):
+    columns = ["id", "lat", "lon", "acq_time", "confidence", "frp", "sensor", "source"]
+    if include_denoiser_fields:
+        columns.extend(["denoised_score", "is_noise"])
+
+    detections = list_fire_detections_bbox_time(
+        bbox=(min_lon, min_lat, max_lon, max_lat),
+        start_time=start_time,
+        end_time=end_time,
+        columns=columns,
+        include_noise=include_noise,
+        limit=limit,
+    )
+
+    return {"count": len(detections), "detections": detections}
+
+
+@fires_router.get("")
+async def get_fires(
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    start_time: datetime,
+    end_time: datetime,
+    include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
+    include_denoiser_fields: bool = Query(
+        False, description="Include denoised_score and is_noise in response."
+    ),
+    limit: Optional[int] = Query(None, gt=0, le=10000),
+):
+    """Alias for `/fires/detections` (kept for UI/backward compatibility)."""
+    return _list_detections(
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        start_time=start_time,
+        end_time=end_time,
+        include_noise=include_noise,
+        include_denoiser_fields=include_denoiser_fields,
+        limit=limit,
+    )
+
+
 @fires_router.get("/detections")
 async def get_detections(
     min_lon: float,
@@ -27,18 +83,15 @@ async def get_detections(
     
     By default, only non-noise detections (or those not yet scored) are returned.
     """
-    columns = ["id", "lat", "lon", "acq_time", "confidence", "frp", "sensor", "source"]
-    if include_denoiser_fields:
-        columns.extend(["denoised_score", "is_noise"])
-
-    detections = list_fire_detections_bbox_time(
-        bbox=(min_lon, min_lat, max_lon, max_lat),
+    return _list_detections(
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
         start_time=start_time,
         end_time=end_time,
-        columns=columns,
         include_noise=include_noise,
+        include_denoiser_fields=include_denoiser_fields,
         limit=limit,
     )
-
-    return {"count": len(detections), "detections": detections}
 

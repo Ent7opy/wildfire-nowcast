@@ -1,30 +1,73 @@
 """Map view component for wildfire dashboard."""
 
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 import folium
 import httpx
 import streamlit as st
 from streamlit_folium import st_folium
 
+from ui.api_client import ApiError, ApiUnavailableError, get_forecast, get_fires
 from ui.config.constants import (
     DEFAULT_MAP_CENTER,
     DEFAULT_ZOOM_LEVEL,
     MAP_HEIGHT,
-    PLACEHOLDER_FIRE_LOCATIONS,
     PLACEHOLDER_RISK_POLYGON,
 )
-from ui.services.api import get_latest_forecast
 
 
-def add_fire_markers(map_obj: folium.Map, locations: List[List[float]]) -> None:
-    """Add placeholder fire markers to the map."""
-    for loc in locations:
+def _current_bbox() -> tuple[float, float, float, float]:
+    """Return current bbox (min_lon, min_lat, max_lon, max_lat)."""
+    if "map_bounds" in st.session_state and st.session_state.map_bounds:
+        b = st.session_state.map_bounds
+        # st-folium bounds format: {'_southWest': {'lat': 41.0, 'lng': 22.0}, ...}
+        return (
+            b["_southWest"]["lng"],
+            b["_southWest"]["lat"],
+            b["_northEast"]["lng"],
+            b["_northEast"]["lat"],
+        )
+
+    # Default bbox around Bulgaria area
+    return (22.0, 41.0, 29.0, 44.5)
+
+
+def _current_time_range() -> tuple[datetime, datetime]:
+    """Return (start_time, end_time) based on selected time window."""
+    end = datetime.now(timezone.utc)
+    window = getattr(st.session_state, "time_window", "Last 24 hours")
+    hours = 24
+    if window == "Last 48 hours":
+        hours = 48
+    elif window == "Last 72 hours":
+        hours = 72
+    start = end - timedelta(hours=hours)
+    return start, end
+
+
+def add_fire_markers(map_obj: folium.Map, detections: List[Dict[str, Any]]) -> None:
+    """Add fire detection markers to the map."""
+    for det in detections:
+        lat = det.get("lat")
+        lon = det.get("lon")
+        if lat is None or lon is None:
+            continue
+
+        tooltip = "Active fire detection"
+        popup_parts = [
+            f"id: {det.get('id')}",
+            f"time: {det.get('acq_time')}",
+            f"confidence: {det.get('confidence')}",
+            f"frp: {det.get('frp')}",
+            f"sensor: {det.get('sensor')}",
+            f"source: {det.get('source')}",
+        ]
         folium.CircleMarker(
-            location=loc,
+            location=[lat, lon],
             radius=8,
-            popup="Placeholder fire detection",
-            tooltip="Active fire (placeholder)",
+            popup="<br/>".join(popup_parts),
+            tooltip=tooltip,
             color="red",
             fill=True,
             fillColor="red",
@@ -34,23 +77,18 @@ def add_fire_markers(map_obj: folium.Map, locations: List[List[float]]) -> None:
 
 def add_forecast_layers(map_obj: folium.Map) -> None:
     """Fetch and add real forecast layers to the map."""
-    # Use bounds from session state if available, otherwise default
-    if "map_bounds" in st.session_state and st.session_state.map_bounds:
-        b = st.session_state.map_bounds
-        # st-folium bounds format: {'_southWest': {'lat': 41.0, 'lng': 22.0}, ...}
-        bbox = (
-            b["_southWest"]["lng"],
-            b["_southWest"]["lat"],
-            b["_northEast"]["lng"],
-            b["_northEast"]["lat"],
-        )
-    else:
-        # Default bbox around Bulgaria area
-        bbox = (22.0, 41.0, 29.0, 44.5)
+    bbox = _current_bbox()
 
-    # For now we use a hardcoded region name. In the future this should be dynamic.
-    forecast_data = get_latest_forecast("smoke_grid", bbox)
-    if not forecast_data:
+    try:
+        forecast_data = get_forecast(bbox, horizons=[24, 48, 72])
+    except ApiUnavailableError:
+        st.error("API unavailable — please start the backend")
+        return
+    except ApiError as e:
+        details = f"(status={e.status_code})" if e.status_code is not None else ""
+        st.error(f"Forecast API error {details}".strip())
+        if e.response_text:
+            st.caption(e.response_text[:300])
         return
 
     # 1. Add contours
@@ -130,7 +168,22 @@ def render_map_view() -> Optional[Dict[str, float]]:
 
         # Add layers based on toggles
         if st.session_state.show_fires:
-            add_fire_markers(m, PLACEHOLDER_FIRE_LOCATIONS)
+            bbox = _current_bbox()
+            start_time, end_time = _current_time_range()
+            try:
+                fires_data = get_fires(
+                    bbox=bbox,
+                    time_range=(start_time, end_time),
+                    filters={"limit": 10000, "include_noise": False},
+                )
+                add_fire_markers(m, fires_data.get("detections", []))
+            except ApiUnavailableError:
+                st.error("API unavailable — please start the backend")
+            except ApiError as e:
+                details = f"(status={e.status_code})" if e.status_code is not None else ""
+                st.error(f"Fires API error {details}".strip())
+                if e.response_text:
+                    st.caption(e.response_text[:300])
 
         if st.session_state.show_forecast:
             add_forecast_layers(m)

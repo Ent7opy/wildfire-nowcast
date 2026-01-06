@@ -33,7 +33,6 @@ def main() -> None:
     st.caption(
         "Monitor active wildfires and view short-term spread forecasts (24-72 hours) "
         "using satellite data, weather, and terrain analysis. "
-        "Note: Current data and layers are placeholders for demonstration."
     )
 
     # Sidebar controls
@@ -42,7 +41,7 @@ def main() -> None:
 
     # Main content area - Map and indicators
     # Time window indicator
-    st.caption(f"**Current time window:** {st.session_state.time_window} (placeholder)")
+    st.caption(f"**Current time window:** {st.session_state.time_window}")
 
     # Render map and get click coordinates
     click_coords = render_map_view()
