@@ -174,53 +174,70 @@ def add_forecast_layers(map_obj: folium.Map) -> None:
             st.caption(e.response_text[:300])
         return
 
+    if not forecast_data.get("run"):
+        st.info("No forecast available for the current view (try a different AOI).")
+        return
+
+    def _contour_color(feature: Dict[str, Any]) -> str:
+        props = feature.get("properties") or {}
+        h = props.get("horizon_hours")
+        if h == 24:
+            return "#2b83ba"  # blue
+        if h == 48:
+            return "#fdae61"  # orange
+        if h == 72:
+            return "#d7191c"  # red
+        return "#984ea3"  # purple fallback
+
     # 1. Add contours
     if forecast_data.get("contours") and forecast_data["contours"].get("features"):
         folium.GeoJson(
             forecast_data["contours"],
             name="Forecast Contours",
-            style_function=lambda x: {
-                "color": "orange",
+            style_function=lambda feature: {
+                "color": _contour_color(feature),
                 "weight": 2,
-                "fillOpacity": 0.1,
+                "fillOpacity": 0.05,
             },
             tooltip=folium.GeoJsonTooltip(
                 fields=["horizon_hours", "threshold"], aliases=["Horizon (h)", "Probability"]
             ),
         ).add_to(map_obj)
 
-    # 2. Add raster tiles (latest horizon)
+    # 2. Add raster tiles (one per horizon if available)
     if forecast_data.get("rasters"):
-        # Show the longest horizon by default for visual impact
-        r = sorted(forecast_data["rasters"], key=lambda x: x["horizon_hours"])[-1]
-        tilejson_url = r["tilejson_url"]
-        try:
-            # We need to resolve TileJSON to get the actual tile template for Leaflet.
-            # The URL from the API is external (e.g. localhost:8080), but we are inside Docker
-            # so we need to use the internal service name.
-            # TODO: Make these hostnames configurable via env vars
-            internal_url = tilejson_url.replace("localhost:8080", "titiler:8000")
+        rasters = sorted(forecast_data["rasters"], key=lambda x: x.get("horizon_hours", 0))
+        for r in rasters:
+            tilejson_url = r.get("tilejson_url")
+            if not tilejson_url:
+                continue
+            try:
+                # We need to resolve TileJSON to get the actual tile template for Leaflet.
+                # The URL from the API is external (e.g. localhost:8080), but we are inside Docker
+                # so we need to use the internal service name.
+                # TODO: Make these hostnames configurable via env vars
+                internal_url = tilejson_url.replace("localhost:8080", "titiler:8000")
 
-            resp = httpx.get(internal_url, timeout=5.0)
-            if resp.status_code == 200:
+                resp = httpx.get(internal_url, timeout=5.0)
+                if resp.status_code != 200:
+                    continue
                 tj = resp.json()
                 tile_url = tj["tiles"][0]
 
-                # The tile URL returned by TiTiler will likely be internal (titiler:8000)
-                # because we accessed it via that hostname. We need to convert it back
-                # to external for the browser.
+                # Convert internal hostname back to external for the browser.
                 tile_url_external = tile_url.replace("titiler:8000", "localhost:8080")
+                horizon = r.get("horizon_hours")
 
                 folium.TileLayer(
                     tiles=tile_url_external,
                     attr="TiTiler",
-                    name=f"Spread Probability (T+{r['horizon_hours']}h)",
+                    name=f"Spread Probability (T+{horizon}h)",
                     overlay=True,
-                    opacity=0.5,
+                    opacity=0.45,
                     control=True,
                 ).add_to(map_obj)
-        except Exception as e:
-            st.warning(f"Could not load raster tiles: {e}")
+            except Exception as e:
+                st.warning(f"Could not load raster tiles: {e}")
 
 
 def add_risk_polygon(map_obj: folium.Map, polygon: List[List[float]]) -> None:

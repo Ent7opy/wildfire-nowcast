@@ -57,7 +57,7 @@ def render_sidebar() -> str:
         key="fires_checkbox"
     )
     st.session_state.show_forecast = st.checkbox(
-        "Forecast (24–72h)",
+        "Show forecast overlay",
         value=st.session_state.show_forecast,
         key="forecast_checkbox"
     )
