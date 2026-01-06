@@ -7,6 +7,7 @@ import folium
 import httpx
 import streamlit as st
 from streamlit_folium import st_folium
+from folium.plugins import HeatMap, MarkerCluster
 
 from ui.api_client import ApiError, ApiUnavailableError, get_forecast, get_fires
 from ui.config.constants import (
@@ -15,6 +16,10 @@ from ui.config.constants import (
     MAP_HEIGHT,
     PLACEHOLDER_RISK_POLYGON,
 )
+
+FIRE_MARKER_SIMPLE_THRESHOLD = 300
+FIRE_HEATMAP_THRESHOLD = 2000
+FIRE_API_LIMIT = 5000
 
 
 def _current_bbox() -> tuple[float, float, float, float]:
@@ -48,28 +53,104 @@ def _current_time_range() -> tuple[datetime, datetime]:
     return start, end
 
 
-def add_fire_markers(map_obj: folium.Map, detections: List[Dict[str, Any]]) -> None:
-    """Add fire detection markers to the map."""
+def _fire_tooltip(det: Dict[str, Any]) -> str:
+    t = det.get("acq_time")
+    conf = det.get("confidence")
+    sensor = det.get("sensor")
+    parts = []
+    if t is not None:
+        parts.append(str(t))
+    if conf is not None:
+        try:
+            parts.append(f"conf={float(conf):.0f}")
+        except (TypeError, ValueError):
+            parts.append(f"conf={conf}")
+    if sensor:
+        parts.append(str(sensor))
+    return " | ".join(parts) if parts else "Fire detection"
+
+
+def _fire_popup(det: Dict[str, Any]) -> str:
+    popup_parts = [
+        f"id: {det.get('id')}",
+        f"time: {det.get('acq_time')}",
+        f"confidence: {det.get('confidence')}",
+        f"frp: {det.get('frp')}",
+        f"sensor: {det.get('sensor')}",
+        f"source: {det.get('source')}",
+    ]
+    return "<br/>".join(popup_parts)
+
+
+def add_fires_layer(map_obj: folium.Map, detections: List[Dict[str, Any]]) -> None:
+    """Add fire detections with density handling (markers / clusters / heatmap)."""
+    n = len(detections)
+    if n == 0:
+        return
+
+    # Heatmap layer for very dense situations (keeps map usable).
+    if n >= FIRE_HEATMAP_THRESHOLD:
+        heat_points = []
+        for det in detections:
+            lat = det.get("lat")
+            lon = det.get("lon")
+            if lat is None or lon is None:
+                continue
+            heat_points.append([lat, lon, 1.0])
+        if heat_points:
+            HeatMap(heat_points, name="Fires (density)", radius=12, blur=16).add_to(map_obj)
+
+        # Still add clustered markers so users can inspect individual detections.
+        cluster = MarkerCluster(name="Fires (clusters)").add_to(map_obj)
+        for det in detections:
+            lat = det.get("lat")
+            lon = det.get("lon")
+            if lat is None or lon is None:
+                continue
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=5,
+                popup=_fire_popup(det),
+                tooltip=_fire_tooltip(det),
+                color="red",
+                fill=True,
+                fillColor="red",
+                fillOpacity=0.6,
+            ).add_to(cluster)
+        return
+
+    # Cluster markers once we get beyond a small number of points.
+    if n > FIRE_MARKER_SIMPLE_THRESHOLD:
+        cluster = MarkerCluster(name="Fires (clusters)").add_to(map_obj)
+        for det in detections:
+            lat = det.get("lat")
+            lon = det.get("lon")
+            if lat is None or lon is None:
+                continue
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=6,
+                popup=_fire_popup(det),
+                tooltip=_fire_tooltip(det),
+                color="red",
+                fill=True,
+                fillColor="red",
+                fillOpacity=0.7,
+            ).add_to(cluster)
+        return
+
+    # Simple markers for small counts.
     for det in detections:
         lat = det.get("lat")
         lon = det.get("lon")
         if lat is None or lon is None:
             continue
 
-        tooltip = "Active fire detection"
-        popup_parts = [
-            f"id: {det.get('id')}",
-            f"time: {det.get('acq_time')}",
-            f"confidence: {det.get('confidence')}",
-            f"frp: {det.get('frp')}",
-            f"sensor: {det.get('sensor')}",
-            f"source: {det.get('source')}",
-        ]
         folium.CircleMarker(
             location=[lat, lon],
             radius=8,
-            popup="<br/>".join(popup_parts),
-            tooltip=tooltip,
+            popup=_fire_popup(det),
+            tooltip=_fire_tooltip(det),
             color="red",
             fill=True,
             fillColor="red",
@@ -179,12 +260,18 @@ def render_map_view() -> Optional[Dict[str, float]]:
                     bbox=bbox,
                     time_range=(start_time, end_time),
                     filters={
-                        "limit": 10000,
+                        "limit": FIRE_API_LIMIT,
                         "include_noise": include_noise,
                         "min_confidence": min_confidence,
                     },
                 )
-                add_fire_markers(m, fires_data.get("detections", []))
+                detections = fires_data.get("detections", [])
+                if len(detections) >= FIRE_API_LIMIT:
+                    st.warning(
+                        f"Too many detections for the current view/time window. "
+                        f"Showing the first {FIRE_API_LIMIT}. Zoom in or narrow the time window."
+                    )
+                add_fires_layer(m, detections)
             except ApiUnavailableError:
                 st.error("API unavailable — please start the backend")
             except ApiError as e:
