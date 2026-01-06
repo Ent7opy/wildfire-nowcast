@@ -50,11 +50,13 @@ class LearnedSpreadModelV1(SpreadModel):
             try:
                 self.calibrator = SpreadProbabilityCalibrator.load(self.calibrator_run_dir)
             except Exception as e:
-                LOGGER.error(f"Failed to load calibrator: {e}")
-                # We don't raise here to allow model to run without calibration if it fails?
-                # Actually, if config requests it, we should probably warn or raise.
-                # Let's raise to be safe, or just log error.
-                raise
+                # Operational behavior: calibration is optional. If artifacts are missing or
+                # fail to load, we log and continue with raw probabilities.
+                LOGGER.warning(
+                    "Failed to load calibrator; continuing without calibration: %s",
+                    e,
+                )
+                self.calibrator = None
 
     def _build_tabular_features(self, inputs: SpreadModelInput, horizon_idx: int) -> pd.DataFrame:
         """Extract features from SpreadModelInput for a specific horizon."""

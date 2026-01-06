@@ -267,7 +267,23 @@ def _maybe_apply_weather_bias_correction(
 
     try:
         corrector = WeatherBiasCorrector.load_json(resolved)
-        return corrector.apply(ds, inplace=False)
+        LOGGER.info(
+            "Applied weather bias correction",
+            extra={
+                "corrector_path": str(resolved),
+                "format_version": int(corrector.to_dict().get("format_version", -1)),
+                "variables": sorted(list(getattr(corrector, "corrections", {}).keys())),
+            },
+        )
+        out = corrector.apply(ds, inplace=False)
+        # Attach lightweight provenance for downstream logging/persistence.
+        try:
+            out.attrs = dict(out.attrs or {})
+            out.attrs["weather_bias_corrected"] = True
+            out.attrs["weather_bias_corrector_path"] = str(resolved)
+        except Exception:  # pragma: no cover
+            pass
+        return out
     except Exception:
         LOGGER.exception("Failed to load/apply weather bias corrector from %s; using uncorrected weather.", resolved)
         return ds

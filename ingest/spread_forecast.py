@@ -382,6 +382,23 @@ def main():
         LOGGER.info(f"Running forecast for run_id={run_id}...")
         forecast = run_spread_forecast(request)
 
+        # Capture operational metadata from the forecast output (set by the service).
+        extra_meta: dict[str, object] = {}
+        try:
+            attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+            for k in (
+                "weather_bias_corrected",
+                "weather_bias_corrector_path",
+                "calibration_applied",
+                "calibration_source",
+                "calibration_run_id",
+                "calibration_run_dir",
+            ):
+                if k in attrs:
+                    extra_meta[k] = attrs.get(k)
+        except Exception:
+            extra_meta = {}
+
         # 3. Persist rasters
         grid = get_region_grid_spec(args.region)
         window = get_grid_window_for_bbox(grid, bbox, clip=True)
@@ -406,7 +423,7 @@ def main():
         insert_spread_forecast_contours(run_id, contour_records)
 
         # 5. Finalize
-        finalize_spread_forecast_run(run_id, status="completed")
+        finalize_spread_forecast_run(run_id, status="completed", extra_metadata=extra_meta)
         LOGGER.info(f"Forecast run_id={run_id} completed successfully.")
 
     except Exception as e:
