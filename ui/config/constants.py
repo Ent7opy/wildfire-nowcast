@@ -7,8 +7,8 @@ DEFAULT_MAP_CENTER = [42.7, 25.5]  # Bulgaria, Southeast Europe
 DEFAULT_ZOOM_LEVEL = 6
 MAP_HEIGHT = 600
 
-# Time windows
-TIME_WINDOW_OPTIONS = ["Last 24 hours", "Last 48 hours", "Last 72 hours"]
+# Time windows (used for fires filtering)
+TIME_WINDOW_OPTIONS = ["Last 6 hours", "Last 12 hours", "Last 24 hours", "Last 48 hours"]
 
 # Placeholder data
 PLACEHOLDER_FIRE_LOCATIONS: List[List[float]] = [

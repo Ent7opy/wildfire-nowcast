@@ -17,6 +17,10 @@ def main() -> None:
     # Initialize session state after set_page_config
     if "time_window" not in st.session_state:
         st.session_state.time_window = TIME_WINDOW_OPTIONS[0]
+    if "fires_min_confidence" not in st.session_state:
+        st.session_state.fires_min_confidence = 0.0
+    if "fires_apply_denoiser" not in st.session_state:
+        st.session_state.fires_apply_denoiser = True
     if "show_fires" not in st.session_state:
         st.session_state.show_fires = True
     if "show_forecast" not in st.session_state:
@@ -40,8 +44,13 @@ def main() -> None:
         render_sidebar()
 
     # Main content area - Map and indicators
-    # Time window indicator
-    st.caption(f"**Current time window:** {st.session_state.time_window}")
+    # Active filters indicator
+    denoiser_state = "on" if st.session_state.fires_apply_denoiser else "off"
+    st.caption(
+        f"**Fires filters:** {st.session_state.time_window}, "
+        f"min confidence ≥ {st.session_state.fires_min_confidence:.0f}, "
+        f"denoiser {denoiser_state}"
+    )
 
     # Render map and get click coordinates
     click_coords = render_map_view()

@@ -81,6 +81,7 @@ def get_fires(
     Backend contract: GET /fires (alias for /fires/detections)
       - min_lon, min_lat, max_lon, max_lat (float)
       - start_time, end_time (datetime)
+      - min_confidence (float, optional)
       - include_noise (bool, optional)
       - include_denoiser_fields (bool, optional)
       - limit (int, optional)

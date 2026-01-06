@@ -16,6 +16,7 @@ def _list_detections(
     max_lat: float,
     start_time: datetime,
     end_time: datetime,
+    min_confidence: Optional[float],
     include_noise: bool,
     include_denoiser_fields: bool,
     limit: Optional[int],
@@ -31,6 +32,7 @@ def _list_detections(
         columns=columns,
         include_noise=include_noise,
         limit=limit,
+        min_confidence=min_confidence,
     )
 
     return {"count": len(detections), "detections": detections}
@@ -44,6 +46,7 @@ async def get_fires(
     max_lat: float,
     start_time: datetime,
     end_time: datetime,
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
     include_denoiser_fields: bool = Query(
         False, description="Include denoised_score and is_noise in response."
@@ -61,6 +64,7 @@ async def get_fires(
         include_noise=include_noise,
         include_denoiser_fields=include_denoiser_fields,
         limit=limit,
+        min_confidence=min_confidence,
     )
 
 
@@ -72,6 +76,7 @@ async def get_detections(
     max_lat: float,
     start_time: datetime,
     end_time: datetime,
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
     include_denoiser_fields: bool = Query(
         False, description="Include denoised_score and is_noise in response."
@@ -93,5 +98,6 @@ async def get_detections(
         include_noise=include_noise,
         include_denoiser_fields=include_denoiser_fields,
         limit=limit,
+        min_confidence=min_confidence,
     )
 

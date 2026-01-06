@@ -3,6 +3,7 @@
 import streamlit as st
 from config.constants import TIME_WINDOW_OPTIONS
 
+
 def get_time_window_index(time_window: str) -> int:
     """Get the index of the time window in the options list, defaulting to 0 if not found."""
     try:
@@ -10,18 +11,41 @@ def get_time_window_index(time_window: str) -> int:
     except ValueError:
         return 0
 
+
 def render_sidebar() -> str:
     """Render the sidebar controls and return selected time window."""
     st.header("Controls")
 
-    # Time window section
-    st.subheader("Time window")
-    selected_time = st.selectbox(
-        "Select time range",
-        options=TIME_WINDOW_OPTIONS,
-        index=get_time_window_index(st.session_state.time_window),
-        key="time_window"
-    )
+    # Fires filters (debounced via Apply button)
+    st.subheader("Fires filters")
+    with st.form("fires_filters", clear_on_submit=False):
+        pending_time_window = st.selectbox(
+            "Time window",
+            options=TIME_WINDOW_OPTIONS,
+            index=get_time_window_index(st.session_state.time_window),
+            key="pending_time_window",
+        )
+
+        pending_min_confidence = st.slider(
+            "Minimum confidence",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(st.session_state.fires_min_confidence),
+            step=5.0,
+            key="pending_min_confidence",
+        )
+
+        pending_apply_denoiser = st.checkbox(
+            "Apply denoiser filter (exclude noise)",
+            value=bool(st.session_state.fires_apply_denoiser),
+            key="pending_apply_denoiser",
+        )
+
+        applied = st.form_submit_button("Apply filters", type="primary")
+        if applied:
+            st.session_state.time_window = pending_time_window
+            st.session_state.fires_min_confidence = float(pending_min_confidence)
+            st.session_state.fires_apply_denoiser = bool(pending_apply_denoiser)
 
     st.divider()
 
@@ -71,4 +95,4 @@ def render_sidebar() -> str:
         "- The risk layer is still a placeholder."
     )
 
-    return selected_time
+    return st.session_state.time_window

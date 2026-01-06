@@ -39,6 +39,7 @@ def list_fire_detections_bbox_time(
     limit: int | None = None,
     order: Literal["asc", "desc"] = "asc",
     include_noise: bool = False,
+    min_confidence: float | None = None,
 ) -> list[dict]:
     """List fire detections in a lon/lat bbox and acquisition time window.
 
@@ -72,6 +73,10 @@ def list_fire_detections_bbox_time(
     if not include_noise:
         noise_predicate = "AND is_noise IS NOT TRUE"
 
+    confidence_predicate = ""
+    if min_confidence is not None:
+        confidence_predicate = "AND confidence >= :min_confidence"
+
     limit_sql = ""
     params: dict[str, object] = {
         "start_time": start_time,
@@ -81,6 +86,8 @@ def list_fire_detections_bbox_time(
         "max_lon": float(max_lon),
         "max_lat": float(max_lat),
     }
+    if min_confidence is not None:
+        params["min_confidence"] = float(min_confidence)
     if limit is not None:
         if limit <= 0:
             raise ValueError("limit must be positive.")
@@ -96,6 +103,7 @@ def list_fire_detections_bbox_time(
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
           {noise_predicate}
+          {confidence_predicate}
         ORDER BY acq_time {order}
         {limit_sql}
         """

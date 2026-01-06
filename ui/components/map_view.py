@@ -38,10 +38,12 @@ def _current_time_range() -> tuple[datetime, datetime]:
     end = datetime.now(timezone.utc)
     window = getattr(st.session_state, "time_window", "Last 24 hours")
     hours = 24
-    if window == "Last 48 hours":
+    if window == "Last 6 hours":
+        hours = 6
+    elif window == "Last 12 hours":
+        hours = 12
+    elif window == "Last 48 hours":
         hours = 48
-    elif window == "Last 72 hours":
-        hours = 72
     start = end - timedelta(hours=hours)
     return start, end
 
@@ -171,10 +173,16 @@ def render_map_view() -> Optional[Dict[str, float]]:
             bbox = _current_bbox()
             start_time, end_time = _current_time_range()
             try:
+                include_noise = not bool(getattr(st.session_state, "fires_apply_denoiser", True))
+                min_confidence = float(getattr(st.session_state, "fires_min_confidence", 0.0))
                 fires_data = get_fires(
                     bbox=bbox,
                     time_range=(start_time, end_time),
-                    filters={"limit": 10000, "include_noise": False},
+                    filters={
+                        "limit": 10000,
+                        "include_noise": include_noise,
+                        "min_confidence": min_confidence,
+                    },
                 )
                 add_fire_markers(m, fires_data.get("detections", []))
             except ApiUnavailableError:
