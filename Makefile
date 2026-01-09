@@ -14,7 +14,7 @@ install: ## Install dependencies for all subprojects (with dev extras)
 	cd ingest && $(UV) sync --dev
 
 dev-api: ## Start FastAPI development server (requires make install)
-	cd api && $(UV) run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+	cd api && $(UV) run python -m uvicorn api.main:app --app-dir .. --reload --host 127.0.0.1 --port 8000
 
 dev-ui: ## Start Streamlit development server (requires make install)
 	cd ui && $(UV) run streamlit run app.py

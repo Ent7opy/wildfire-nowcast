@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, Optional
 
-from ui.api_client import ApiError, ApiUnavailableError, get_forecast
+from api_client import ApiError, ApiUnavailableError, get_forecast
 
 def get_latest_forecast(
     region_name: str,
