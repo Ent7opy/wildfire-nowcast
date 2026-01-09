@@ -15,7 +15,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Iterable, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from ml.calibration import SpreadProbabilityCalibrator
+from ml.calibration import SpreadProbabilityCalibrator  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 

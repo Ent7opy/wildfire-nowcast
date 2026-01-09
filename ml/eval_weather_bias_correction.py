@@ -13,10 +13,9 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
@@ -26,8 +25,8 @@ REPO_ROOT = Path(__file__).parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from ml.weather_bias_analysis import DEFAULT_VARS, VAR_NAMES_HUMAN, align_datasets, compute_metrics, normalize_coords, normalize_truth
-from ml.weather_bias_correction import WeatherBiasCorrector
+from ml.weather_bias_analysis import DEFAULT_VARS, VAR_NAMES_HUMAN, align_datasets, compute_metrics, normalize_coords, normalize_truth  # noqa: E402
+from ml.weather_bias_correction import WeatherBiasCorrector  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 
@@ -152,7 +151,7 @@ def run_eval(args: argparse.Namespace) -> Path:
     df = pd.DataFrame(rows).sort_values("variable")
     df.to_csv(out_dir / "summary.csv", index=False)
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "forecast_path": str(args.forecast_nc),
         "truth_path": str(args.truth_nc),

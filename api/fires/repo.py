@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Literal
 
 from sqlalchemy import text
@@ -39,6 +39,7 @@ def list_fire_detections_bbox_time(
     limit: int | None = None,
     order: Literal["asc", "desc"] = "asc",
     include_noise: bool = False,
+    min_confidence: float | None = None,
 ) -> list[dict]:
     """List fire detections in a lon/lat bbox and acquisition time window.
 
@@ -72,7 +73,23 @@ def list_fire_detections_bbox_time(
     if not include_noise:
         noise_predicate = "AND is_noise IS NOT TRUE"
 
+    confidence_predicate = ""
+    if min_confidence is not None:
+        # Include NULL confidence values when filtering (NULL means unknown, not 0)
+        confidence_predicate = "AND (confidence IS NULL OR confidence >= :min_confidence)"
+
     limit_sql = ""
+    # Ensure datetimes are timezone-aware (UTC) for database queries
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    elif start_time.tzinfo != timezone.utc:
+        start_time = start_time.astimezone(timezone.utc)
+    
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    elif end_time.tzinfo != timezone.utc:
+        end_time = end_time.astimezone(timezone.utc)
+    
     params: dict[str, object] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -81,6 +98,8 @@ def list_fire_detections_bbox_time(
         "max_lon": float(max_lon),
         "max_lat": float(max_lat),
     }
+    if min_confidence is not None:
+        params["min_confidence"] = float(min_confidence)
     if limit is not None:
         if limit <= 0:
             raise ValueError("limit must be positive.")
@@ -96,6 +115,7 @@ def list_fire_detections_bbox_time(
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
           {noise_predicate}
+          {confidence_predicate}
         ORDER BY acq_time {order}
         {limit_sql}
         """

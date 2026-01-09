@@ -40,7 +40,7 @@ MAX_AOI_CELLS = 40000
 class SpreadForecastRequest:
     """Request parameters for a spread forecast."""
 
-    region_name: str
+    region_name: str | None  # None for location-based forecasting (grid derived from bbox)
     bbox: tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
     forecast_reference_time: datetime
     horizons_hours: Sequence[int] = DEFAULT_HORIZONS_HOURS
@@ -99,7 +99,10 @@ def run_spread_forecast(
         build_spread_inputs = _build_spread_inputs
 
     # Resolve operational bias-correction + calibration artifacts.
-    weather_bias_corrector_path = _resolve_weather_bias_corrector_path(request.region_name)
+    # Only resolve if region_name is provided (location-based forecasts skip bias correction)
+    weather_bias_corrector_path = None
+    if request.region_name is not None:
+        weather_bias_corrector_path = _resolve_weather_bias_corrector_path(request.region_name)
     if weather_bias_corrector_path is not None:
         LOGGER.info(
             "Using weather bias corrector",
@@ -132,9 +135,10 @@ def run_spread_forecast(
     )
 
     if n_cells == 0:
+        region_msg = f"region {request.region_name!r}" if request.region_name else "bbox"
         raise ValueError(
-            f"AOI produces an empty window for region {request.region_name!r} and bbox {request.bbox}. "
-            "Ensure the bbox overlaps with the region's extent."
+            f"AOI produces an empty window for {region_msg} and bbox {request.bbox}. "
+            "Ensure the bbox is valid."
         )
 
     if n_cells > MAX_AOI_CELLS:
@@ -188,11 +192,15 @@ def run_spread_forecast(
             calibration_run_dir=None,
         )
     else:
-        calibrator_run_dir = _resolve_spread_calibrator_run_dir(request.region_name)
+        # Only resolve calibrator if region_name is provided
+        calibrator_run_dir = None
+        if request.region_name is not None:
+            calibrator_run_dir = _resolve_spread_calibrator_run_dir(request.region_name)
         if calibrator_run_dir is None:
+            region_msg = request.region_name if request.region_name else "location-based"
             LOGGER.warning(
                 "No spread calibrator configured; returning uncalibrated probabilities.",
-                extra={"region": request.region_name, "env": SPREAD_CALIBRATOR_RUN_DIR_ENV},
+                extra={"region": region_msg, "env": SPREAD_CALIBRATOR_RUN_DIR_ENV},
             )
             forecast = _annotate_forecast(
                 forecast,

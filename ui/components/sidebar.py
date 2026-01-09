@@ -3,6 +3,7 @@
 import streamlit as st
 from config.constants import TIME_WINDOW_OPTIONS
 
+
 def get_time_window_index(time_window: str) -> int:
     """Get the index of the time window in the options list, defaulting to 0 if not found."""
     try:
@@ -10,18 +11,42 @@ def get_time_window_index(time_window: str) -> int:
     except ValueError:
         return 0
 
+
 def render_sidebar() -> str:
     """Render the sidebar controls and return selected time window."""
-    st.header("Controls")
+    st.header("Filters & Controls")
 
-    # Time window section
-    st.subheader("Time window")
-    selected_time = st.selectbox(
-        "Select time range",
-        options=TIME_WINDOW_OPTIONS,
-        index=get_time_window_index(st.session_state.time_window),
-        key="time_window"
-    )
+    # Fires filters (debounced via Apply button)
+    st.subheader("Filters")
+    st.caption("Adjust fires filters, then click **Apply filters**.")
+    with st.form("fires_filters", clear_on_submit=False):
+        pending_time_window = st.selectbox(
+            "Time window",
+            options=TIME_WINDOW_OPTIONS,
+            index=get_time_window_index(st.session_state.time_window),
+            key="pending_time_window",
+        )
+
+        pending_min_confidence = st.slider(
+            "Minimum confidence",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(st.session_state.fires_min_confidence),
+            step=5.0,
+            key="pending_min_confidence",
+        )
+
+        pending_apply_denoiser = st.checkbox(
+            "Apply denoiser filter (exclude noise)",
+            value=bool(st.session_state.fires_apply_denoiser),
+            key="pending_apply_denoiser",
+        )
+
+        applied = st.form_submit_button("Apply filters", type="primary")
+        if applied:
+            st.session_state.time_window = pending_time_window
+            st.session_state.fires_min_confidence = float(pending_min_confidence)
+            st.session_state.fires_apply_denoiser = bool(pending_apply_denoiser)
 
     st.divider()
 
@@ -33,7 +58,7 @@ def render_sidebar() -> str:
         key="fires_checkbox"
     )
     st.session_state.show_forecast = st.checkbox(
-        "Forecast (24–72h)",
+        "Show forecast overlay",
         value=st.session_state.show_forecast,
         key="forecast_checkbox"
     )
@@ -53,22 +78,30 @@ def render_sidebar() -> str:
 
     st.divider()
 
-    # Region / AOI placeholder
-    st.subheader("Region / AOI")
-    st.info(
-        "Region selection will be available in a future version. "
-        "This will allow you to focus on specific areas of interest."
-    )
+    # Map controls
+    st.subheader("Map Controls")
+    if st.button("🔄 Refresh fires for current view", use_container_width=True, help="Update fires for the current map viewport. Pan/zoom the map first, then click to refresh.", key="refresh_fires_btn"):
+        # Request bounds capture on next render
+        st.session_state.map_refresh_requested = True
+        # Clear cache to force fresh fetch
+        if "fires_cache" in st.session_state:
+            st.session_state.fires_cache = {}
+    
+    st.divider()
+
+    # AOI behavior (MVP)
+    st.subheader("AOI")
+    st.caption("Forecast AOI uses the current map viewport (bbox).")
 
     st.divider()
 
     # About / Data notice
-    st.subheader("About / Data")
+    st.subheader("About")
     st.caption(
-        "⚠️ **Placeholder Data Notice**\n\n"
-        "All map data, fire detections, forecasts, and risk indices shown here are "
-        "placeholder demonstrations. Real satellite data (NASA FIRMS), weather forecasts, "
-        "and terrain analysis will be integrated in future versions."
+        "**Data sources**\n\n"
+        "- Fires and forecast layers are fetched live from the FastAPI backend.\n"
+        "- If the backend is stopped, the UI will show an API error message.\n"
+        "- The risk layer is still a placeholder."
     )
 
-    return selected_time
+    return st.session_state.time_window

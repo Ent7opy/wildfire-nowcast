@@ -21,14 +21,14 @@ REPO_ROOT = Path(__file__).parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from ml.weather_bias_analysis import (
+from ml.weather_bias_analysis import (  # noqa: E402
     DEFAULT_VARS,
     align_datasets,
     compute_metrics,
     normalize_coords,
     normalize_truth,
 )
-from ml.weather_bias_correction import WeatherBiasCorrector
+from ml.weather_bias_correction import WeatherBiasCorrector  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 

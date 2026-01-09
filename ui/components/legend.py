@@ -4,12 +4,17 @@ import streamlit as st
 
 def render_legend() -> None:
     """Render the map legend based on active layers."""
-    with st.expander("Map Legend", expanded=False):
+    with st.expander("Legend", expanded=False):
         legend_items = []
         if st.session_state.show_fires:
-            legend_items.append("🔴 **Active fires** (red markers) - Placeholder fire detections")
+            legend_items.append("🔴 **Active fires** (red markers/clusters) - Live detections")
         if st.session_state.show_forecast:
-            legend_items.append("🟠 **Forecast (24-72h)** (orange polygon) - Placeholder spread forecast")
+            legend_items.append("🟠 **Forecast overlay** (viewport AOI)")
+            legend_items.append(
+                "**Contours by horizon**: "
+                "T+24h (blue), T+48h (orange), T+72h (red)"
+            )
+            legend_items.append("**Raster**: probability tiles (semi-transparent)")
         if st.session_state.show_risk:
             legend_items.append("🟣 **Risk index** (purple polygon) - Placeholder fire risk")
 

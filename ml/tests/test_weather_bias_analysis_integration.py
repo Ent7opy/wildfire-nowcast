@@ -5,17 +5,16 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import sys
-import shutil
 from datetime import datetime, timedelta
 import logging
+from argparse import Namespace
 
 # Add repo root to path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from ml.weather_bias_analysis import run_analysis
-from argparse import Namespace
+from ml.weather_bias_analysis import run_analysis  # noqa: E402
 
 def create_dummy_nc(path: Path, time_start, steps=5):
     lats = np.linspace(30, 40, 10)
