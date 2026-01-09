@@ -290,7 +290,7 @@ def _maybe_apply_weather_bias_correction(
 
 
 def build_spread_inputs(
-    region_name: str,
+    region_name: str | None,
     bbox: tuple[float, float, float, float],
     forecast_reference_time: datetime,
     *,
@@ -304,8 +304,9 @@ def build_spread_inputs(
     
     Parameters
     ----------
-    region_name : str
-        The name of the region (determines the analysis grid).
+    region_name : str | None
+        The name of the region (determines the analysis grid). If None, grid is created from bbox
+        and terrain is set to empty (for location-based forecasting without pre-defined regions).
     bbox : tuple[float, float, float, float]
         The AOI bounding box (min_lon, min_lat, max_lon, max_lat).
     forecast_reference_time : datetime
@@ -329,21 +330,93 @@ def build_spread_inputs(
     )
 
     # 1. Resolve grid and window
-    grid = get_region_grid_spec(region_name)
+    # If region_name is None, create grid from bbox (for location-based forecasting)
+    if region_name is None:
+        min_lon, min_lat, max_lon, max_lat = bbox
+        grid = GridSpec.from_bbox(
+            lat_min=min_lat,
+            lat_max=max_lat,
+            lon_min=min_lon,
+            lon_max=max_lon,
+        )
+    else:
+        grid = get_region_grid_spec(region_name)
     window = get_grid_window_for_bbox(grid, bbox, clip=True)
     
     # 2. Load fires
     fire_start = forecast_reference_time - timedelta(hours=fire_lookback_hours)
     try:
-        fires = get_fire_cells_heatmap(
-            region_name=region_name,
-            bbox=bbox,
-            start_time=fire_start,
-            end_time=forecast_reference_time,
-            weight_by_denoised_score=weight_by_denoised_score,
-            mode="max" if weight_by_denoised_score else "presence",
-            clip=True,
-        )
+        # If region_name is None, we need to create fire heatmap manually using the grid
+        if region_name is None:
+            from api.fires.repo import list_fire_detections_bbox_time
+            from api.fires.grid_mapping import fires_to_indices, aggregate_indices_to_grid
+            
+            cols = ["lat", "lon"]
+            if weight_by_denoised_score:
+                cols.append("denoised_score")
+            
+            detections = list_fire_detections_bbox_time(
+                bbox=bbox,
+                start_time=fire_start,
+                end_time=forecast_reference_time,
+                columns=cols,
+                include_noise=False,
+            )
+            mapped = fires_to_indices(detections, grid, drop_outside=True)
+            
+            if not mapped:
+                heatmap = aggregate_indices_to_grid(
+                    i=np.asarray([], dtype=int),
+                    j=np.asarray([], dtype=int),
+                    shape=(window.lat.size, window.lon.size),
+                    mode="max" if weight_by_denoised_score else "presence",
+                )
+            else:
+                i = np.asarray([r["i"] for r in mapped], dtype=int)
+                j = np.asarray([r["j"] for r in mapped], dtype=int)
+                # Adjust indices to window-relative
+                i_window = i - window.i0
+                j_window = j - window.j0
+                # Filter to window bounds
+                in_window = (i_window >= 0) & (i_window < window.lat.size) & (j_window >= 0) & (j_window < window.lon.size)
+                i_window = i_window[in_window]
+                j_window = j_window[in_window]
+                
+                if weight_by_denoised_score:
+                    values = np.asarray([r.get("denoised_score", 1.0) for r in mapped], dtype=np.float32)
+                    values = values[in_window]
+                    heatmap = aggregate_indices_to_grid(
+                        i=i_window,
+                        j=j_window,
+                        shape=(window.lat.size, window.lon.size),
+                        mode="max",
+                        values=values,
+                    )
+                else:
+                    heatmap = aggregate_indices_to_grid(
+                        i=i_window,
+                        j=j_window,
+                        shape=(window.lat.size, window.lon.size),
+                        mode="presence",
+                    )
+            
+            from api.fires.service import FireHeatmapWindow
+            fires = FireHeatmapWindow(
+                grid=grid,
+                window=window,
+                heatmap=heatmap,
+                points=None,
+            )
+        else:
+            fires = get_fire_cells_heatmap(
+                region_name=region_name,
+                bbox=bbox,
+                start_time=fire_start,
+                end_time=forecast_reference_time,
+                weight_by_denoised_score=weight_by_denoised_score,
+                mode="max" if weight_by_denoised_score else "presence",
+                clip=True,
+            )
     except Exception as e:
         raise RuntimeError(
             f"Failed to load fire heatmap for region={region_name!r} bbox={bbox!r} "
@@ -353,18 +426,42 @@ def build_spread_inputs(
         raise ValueError("Fire heatmap grid does not match region grid spec.")
     _assert_same_window(expected=window, actual=fires.window, label="active_fires")
     
-    # 3. Load terrain
-    try:
-        terrain = load_terrain_window(
-            region_name=region_name,
-            bbox=bbox,
-            include_dem=include_dem,
-            clip=True,
+    # 3. Load terrain (optional - create empty terrain if region_name is None or terrain unavailable)
+    if region_name is None:
+        # Create empty terrain for location-based forecasting
+        LOGGER.info("No region_name provided; using empty terrain (terrain features disabled)")
+        from api.terrain.window import TerrainWindow
+        terrain = TerrainWindow(
+            window=window,
+            slope=np.zeros((window.lat.size, window.lon.size), dtype=np.float32),
+            aspect=np.zeros((window.lat.size, window.lon.size), dtype=np.float32),
+            elevation=np.zeros((window.lat.size, window.lon.size), dtype=np.float32) if include_dem else None,
+            valid_data_mask=np.ones((window.lat.size, window.lon.size), dtype=bool),
+            aoi_mask=None,
         )
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to load terrain window for region={region_name!r} bbox={bbox!r}"
-        ) from e
+    else:
+        try:
+            terrain = load_terrain_window(
+                region_name=region_name,
+                bbox=bbox,
+                include_dem=include_dem,
+                clip=True,
+            )
+        except Exception as e:
+            LOGGER.warning(
+                f"Failed to load terrain for region={region_name!r} bbox={bbox!r}; using empty terrain",
+                exc_info=e
+            )
+            # Fallback to empty terrain if region exists but terrain load fails
+            from api.terrain.window import TerrainWindow
+            terrain = TerrainWindow(
+                window=window,
+                slope=np.zeros((window.lat.size, window.lon.size), dtype=np.float32),
+                aspect=np.zeros((window.lat.size, window.lon.size), dtype=np.float32),
+                elevation=np.zeros((window.lat.size, window.lon.size), dtype=np.float32) if include_dem else None,
+                valid_data_mask=np.ones((window.lat.size, window.lon.size), dtype=bool),
+                aoi_mask=None,
+            )
     _assert_same_window(expected=window, actual=terrain.window, label="terrain")
     
     # 4. Load weather
