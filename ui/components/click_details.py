@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from math import asin, cos, radians, sin, sqrt
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
+
+from api_client import ApiError, ApiUnavailableError, generate_forecast
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -153,3 +155,49 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
         st.write("**Denoiser**")
         st.write(f"**Denoised score:** {det.get('denoised_score')}")
         st.write(f"**Is noise:** {det.get('is_noise')}")
+    
+    # Generate forecast button
+    st.divider()
+    st.write("**Forecast**")
+    
+    # Create a bbox around the fire (50km radius)
+    radius_deg = 50.0 / 111.0  # Approximate: 1 degree ≈ 111 km
+    fire_lat = float(lat)
+    fire_lon = float(lon)
+    forecast_bbox = (
+        fire_lon - radius_deg,  # min_lon
+        fire_lat - radius_deg,  # min_lat
+        fire_lon + radius_deg,  # max_lon
+        fire_lat + radius_deg,  # max_lat
+    )
+    
+    if st.button("Generate Spread Forecast", key="generate_forecast_btn"):
+        try:
+            with st.spinner("Generating forecast (this may take a moment)…"):
+                # Use the fire's acquisition time as reference, or current time
+                ref_time = _parse_time(acq_time)
+                if ref_time is None:
+                    ref_time = datetime.now(timezone.utc)
+                elif ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                
+                forecast_data = generate_forecast(
+                    bbox=forecast_bbox,
+                    horizons=[24, 48, 72],
+                    region_name=None,  # Location-based (no region)
+                    forecast_reference_time=ref_time,
+                )
+                
+                st.success("Forecast generated successfully!")
+                st.json(forecast_data.get("forecast", {}))
+                
+                # Store forecast in session state so map_view can display it
+                st.session_state.last_forecast = forecast_data
+                st.session_state.last_forecast_bbox = forecast_bbox
+        except ApiUnavailableError:
+            st.error("API unavailable — please start the backend")
+        except ApiError as e:
+            details = f"(status={e.status_code})" if e.status_code is not None else ""
+            st.error(f"Forecast generation failed {details}".strip())
+            if e.response_text:
+                st.caption(str(e.response_text)[:300])
