@@ -72,3 +72,14 @@ y_pred_24 = case.y_pred.isel(time=0)
 y_obs_24 = case.y_obs.isel(time=0)
 ```
 
+## Calibration and bias correction (transparency)
+
+Hindcasts are used for **evaluation and calibration**:
+- **Calibration** uses hindcast `y_pred` vs `y_obs` to learn per-horizon calibration mappings (see `ml/calibration.py`).
+- **Evaluation** scripts produce tables and plots so improvements are visible:
+  - Spread calibration evaluation: `ml/eval_spread_calibration.py` (reliability diagrams, Brier, ECE)
+  - Weather bias correction evaluation: `ml/eval_weather_bias_correction.py` (bias/MAE/RMSE + maps/time series)
+
+For a high-level, non-magical explanation of both layers, see:
+`docs/ml/calibration_and_weather_bias_correction.md`.
+

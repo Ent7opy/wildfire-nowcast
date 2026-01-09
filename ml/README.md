@@ -2,6 +2,9 @@
 
 This directory contains the machine learning pipelines for the Wildfire Nowcast project.
 
+> For a transparent explanation of post-processing layers (calibration and weather bias correction),
+> see `docs/ml/calibration_and_weather_bias_correction.md`.
+
 ## Denoiser Classifier
 
 The denoiser is a tabular classifier that distinguishes between real fires and noise (e.g., industrial heat sources, sensor noise) in FIRMS detections.
@@ -79,4 +82,60 @@ Reports are saved to `reports/weather_bias/<timestamp>/`:
 - `plots/`: Mean bias maps and time series plots.
 - `notes.md`: Template for documenting findings and observations.
 - `metadata.json` / `config_resolved.yaml`: Reproducibility metadata.
+
+## Weather Bias Correction (for Spread Inference)
+
+For spread inference, you can optionally apply a lightweight bias corrector to the weather cube.
+The corrector is a **per-variable affine transform** (truth \(\approx \alpha + \beta \cdot forecast\)) fit on aligned forecast vs truth data.
+
+### Training
+
+```bash
+python -m ml.train_weather_bias_corrector \
+  --forecast-nc path/to/forecast.nc \
+  --truth-nc path/to/truth.nc \
+  --out-dir models/weather_bias_corrector
+```
+
+This writes a run directory containing:
+- `weather_bias_corrector.json`: correction parameters (loadable in inference).
+- `metrics.json`: before/after validation metrics on a held-out time slice.
+
+### Using in spread code
+
+`ml.spread_features._load_weather_cube` will apply the corrector automatically if you provide a path:
+- pass `weather_bias_corrector_path=Path(".../weather_bias_corrector.json")` to `build_spread_inputs`, or
+- set `WEATHER_BIAS_CORRECTOR_PATH=/abs/path/to/weather_bias_corrector.json` in the environment.
+
+## Evaluation: Calibration & Weather Bias Correction
+
+### Calibration evaluation (spread reliability)
+
+Given a hindcast run (predicted vs observed grids) and a calibrator run dir, generate a report with:
+- per-horizon **Brier score** and **ECE**
+- **reliability diagrams** (raw vs calibrated)
+
+```bash
+python -m ml.eval_spread_calibration \
+  --hindcast-run-dir path/to/hindcast_run \
+  --calibrator-run-dir models/spread_calibration/<run_id>
+```
+
+Outputs are written to `reports/spread_calibration_eval/<timestamp>_<run_id>/`.
+
+### Weather bias correction evaluation (systematic error reduction)
+
+Compare forecast vs truth (raw and corrected) and generate:
+- per-variable **bias/MAE/RMSE** tables (raw vs corrected)
+- mean bias maps + bias reduction maps
+- domain-mean bias time series overlays
+
+```bash
+python -m ml.eval_weather_bias_correction \
+  --forecast-nc path/to/forecast.nc \
+  --truth-nc path/to/truth.nc \
+  --corrector-json models/weather_bias_corrector/<run_id>/weather_bias_corrector.json
+```
+
+Outputs are written to `reports/weather_bias_correction_eval/<timestamp>/`.
 
