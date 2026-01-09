@@ -383,7 +383,9 @@ def build_spread_inputs(
                 j_window = j_window[in_window]
                 
                 if weight_by_denoised_score:
-                    values = np.asarray([r.get("denoised_score", 1.0) for r in mapped], dtype=np.float32)
+                    # Handle NULL denoised_score values: treat unscored detections as full-weight (1.0)
+                    # to avoid NaN poisoning in numpy arrays (same pattern as api/fires/service.py)
+                    values = np.asarray([(r.get("denoised_score") if r.get("denoised_score") is not None else 1.0) for r in mapped], dtype=np.float32)
                     values = values[in_window]
                     heatmap = aggregate_indices_to_grid(
                         i=i_window,
