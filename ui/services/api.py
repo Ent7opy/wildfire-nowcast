@@ -8,10 +8,7 @@ def get_latest_forecast(
     region_name: str,
     bbox: tuple[float, float, float, float]
 ) -> Optional[Dict[str, Any]]:
-    """Fetch the latest spread forecast for an AOI from the API.
-
-    Deprecated: prefer `ui.api_client.get_forecast`.
-    """
+    """Fetch the latest spread forecast for an AOI from the API."""
     try:
         data = get_forecast(bbox=bbox, horizons=None)
         # Preserve previous behavior: treat missing run as None.
