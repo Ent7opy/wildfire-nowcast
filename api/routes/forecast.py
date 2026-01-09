@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Query, Body
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from api.config import settings
@@ -126,15 +126,15 @@ async def generate_forecast_endpoint(request: GenerateForecastRequest):
         forecast_reference_time = datetime.now(timezone.utc)
     
     # Create request
-    request = SpreadForecastRequest(
-        region_name=region_name,
+    spread_request = SpreadForecastRequest(
+        region_name=request.region_name,
         bbox=bbox,
         forecast_reference_time=forecast_reference_time,
         horizons_hours=horizons,
     )
     
     # Generate forecast
-    forecast = run_spread_forecast(request)
+    forecast = run_spread_forecast(spread_request)
     
     # Convert to response format (similar to get_forecast but without persistence)
     # For now, return a simplified response with the forecast data
@@ -148,7 +148,7 @@ async def generate_forecast_endpoint(request: GenerateForecastRequest):
             "id": None,  # No persisted run
             "model_name": "heuristic_v0",
             "forecast_reference_time": forecast_reference_time.isoformat(),
-            "region_name": region_name,
+            "region_name": request.region_name,
             "status": "completed",
         },
         "forecast": {
