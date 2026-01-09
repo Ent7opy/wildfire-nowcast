@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Literal
 
 from sqlalchemy import text
@@ -75,9 +75,21 @@ def list_fire_detections_bbox_time(
 
     confidence_predicate = ""
     if min_confidence is not None:
-        confidence_predicate = "AND confidence >= :min_confidence"
+        # Include NULL confidence values when filtering (NULL means unknown, not 0)
+        confidence_predicate = "AND (confidence IS NULL OR confidence >= :min_confidence)"
 
     limit_sql = ""
+    # Ensure datetimes are timezone-aware (UTC) for database queries
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    elif start_time.tzinfo != timezone.utc:
+        start_time = start_time.astimezone(timezone.utc)
+    
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    elif end_time.tzinfo != timezone.utc:
+        end_time = end_time.astimezone(timezone.utc)
+    
     params: dict[str, object] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -110,7 +122,12 @@ def list_fire_detections_bbox_time(
     )
 
     with get_engine().begin() as conn:
+        # Debug: log the actual query parameters
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Fire query params: start_time={start_time}, end_time={end_time}, bbox={bbox}, include_noise={include_noise}")
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
+        logger.info(f"Fire query returned {len(rows)} rows")
     return [dict(r) for r in rows]
 

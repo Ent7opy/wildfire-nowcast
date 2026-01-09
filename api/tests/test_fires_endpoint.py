@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 import api.routes.fires as fires
-from main import app
+from api.main import app
 
 client = TestClient(app)
 

@@ -51,12 +51,12 @@ def _list_detections(
 
 @fires_router.get("")
 async def get_fires(
-    min_lon: float,
-    min_lat: float,
-    max_lon: float,
-    max_lat: float,
-    start_time: datetime,
-    end_time: datetime,
+    min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
+    min_lat: float = Query(..., description="Minimum latitude (south boundary)"),
+    max_lon: float = Query(..., description="Maximum longitude (east boundary)"),
+    max_lat: float = Query(..., description="Maximum latitude (north boundary)"),
+    start_time: datetime = Query(..., description="Start time for the query window (ISO 8601 format)"),
+    end_time: datetime = Query(..., description="End time for the query window (ISO 8601 format)"),
     min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
     include_denoiser_fields: bool = Query(
@@ -81,12 +81,12 @@ async def get_fires(
 
 @fires_router.get("/detections")
 async def get_detections(
-    min_lon: float,
-    min_lat: float,
-    max_lon: float,
-    max_lat: float,
-    start_time: datetime,
-    end_time: datetime,
+    min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
+    min_lat: float = Query(..., description="Minimum latitude (south boundary)"),
+    max_lon: float = Query(..., description="Maximum longitude (east boundary)"),
+    max_lat: float = Query(..., description="Maximum latitude (north boundary)"),
+    start_time: datetime = Query(..., description="Start time for the query window (ISO 8601 format)"),
+    end_time: datetime = Query(..., description="End time for the query window (ISO 8601 format)"),
     min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
     include_denoiser_fields: bool = Query(
