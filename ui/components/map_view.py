@@ -308,8 +308,10 @@ def render_map_view() -> Optional[Dict[str, float]]:
             # Check if we have cached results for this query
             cached_result = st.session_state.get("fires_cache", {}).get(cache_key)
             
+            just_queried = False
             if cached_result is None:
                 # Need to fetch new data
+                just_queried = True
                 try:
                     with st.spinner("Loading fires…"):
                         fires_data = get_fires(
@@ -358,7 +360,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
                         f"Showing the first {FIRE_API_LIMIT}. Zoom in or narrow the time window."
                     )
                 add_fires_layer(m, detections)
-            elif cached_result is not None:  # Only show message if we actually queried (not from cache)
+            elif just_queried:  # Only show message if we actually queried (not from cache)
                 st.info(
                     "No fires found for the current filters. "
                     "Try a wider time window, lower minimum confidence, or zoom out."

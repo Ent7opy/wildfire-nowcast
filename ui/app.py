@@ -54,10 +54,6 @@ def main() -> None:
         st.session_state.fires_cache = {}
     if "map_refresh_requested" not in st.session_state:
         st.session_state.map_refresh_requested = False
-    if "fires_cache" not in st.session_state:
-        st.session_state.fires_cache = {}
-    if "map_refresh_requested" not in st.session_state:
-        st.session_state.map_refresh_requested = False
 
     # App identity
     st.title("Wildfire Nowcast & Forecast")
