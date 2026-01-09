@@ -42,7 +42,9 @@ class ApiUnavailableError(ApiError):
 def _isoformat(dt: datetime) -> str:
     # FastAPI parses RFC3339/ISO-8601; use 'Z' for UTC to avoid URL encoding issues with '+00:00'
     # Remove microseconds to avoid potential parsing issues
-    if dt.tzinfo is not None and dt.utcoffset().total_seconds() == 0:
+    # Check if UTC: utcoffset() can return None even when tzinfo is set (custom tzinfo implementations)
+    offset = dt.utcoffset() if dt.tzinfo is not None else None
+    if offset is not None and offset.total_seconds() == 0:
         # UTC timezone - use 'Z' suffix instead of '+00:00' to avoid URL encoding issues
         # Remove microseconds for cleaner datetime strings
         dt_no_microseconds = dt.replace(microsecond=0)
