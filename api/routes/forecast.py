@@ -101,7 +101,7 @@ async def get_forecast(
 
 
 @forecast_router.post("/generate")
-async def generate_forecast_endpoint(request: GenerateForecastRequest):
+def generate_forecast_endpoint(request: GenerateForecastRequest):
     """Generate a spread forecast on-the-fly for a given bbox.
     
     This endpoint generates forecasts dynamically without requiring pre-computed runs.
