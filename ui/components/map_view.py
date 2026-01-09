@@ -310,6 +310,9 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 if e.response_text:
                     st.caption(str(e.response_text)[:300])
                 st.session_state.fires_last_detections = []
+        else:
+            # Clear detections if the layer is disabled, to avoid stale inspection data.
+            st.session_state.fires_last_detections = []
 
         if st.session_state.show_forecast:
             add_forecast_layers(m)
