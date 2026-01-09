@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 import xarray as xr
 
 from ml.weather_bias_analysis import compute_metrics

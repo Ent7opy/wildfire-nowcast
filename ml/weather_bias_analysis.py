@@ -4,13 +4,14 @@ Computes systematic biases, MAE, and RMSE for wind, temperature, and humidity.
 Outputs summary tables and plots to a versioned run directory.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,8 +23,6 @@ import yaml
 REPO_ROOT = Path(__file__).parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-
-from api.core.grid import GridSpec
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ VAR_NAMES_HUMAN = {
 }
 
 
-def compute_metrics(forecast: np.ndarray, truth: np.ndarray) -> Dict[str, float]:
+def compute_metrics(forecast: np.ndarray, truth: np.ndarray) -> dict[str, float]:
     """Compute basic error metrics between forecast and truth arrays."""
     diff = forecast - truth
     # Filter NaNs
@@ -82,7 +81,7 @@ def normalize_coords(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def normalize_truth(ds: xr.Dataset, var_mapping: Dict[str, str]) -> xr.Dataset:
+def normalize_truth(ds: xr.Dataset, var_mapping: dict[str, str]) -> xr.Dataset:
     """Normalize truth dataset: rename variables and coordinates, sort by coords."""
     ds = normalize_coords(ds)
 
@@ -94,8 +93,8 @@ def normalize_truth(ds: xr.Dataset, var_mapping: Dict[str, str]) -> xr.Dataset:
 
 
 def align_datasets(
-    forecast: xr.Dataset, truth: xr.Dataset, variables: List[str]
-) -> Tuple[xr.Dataset, xr.Dataset]:
+    forecast: xr.Dataset, truth: xr.Dataset, variables: list[str]
+) -> tuple[xr.Dataset, xr.Dataset]:
     """Align truth dataset to forecast grid and time coordinates."""
     # Subset truth to forecast time range and bbox
     t_min, t_max = forecast.time.min().values, forecast.time.max().values
@@ -121,8 +120,8 @@ def align_datasets(
 
 
 def plot_bias_maps(
-    bias_ds: xr.Dataset, variables: List[str], run_dir: Path
-) -> List[Path]:
+    bias_ds: xr.Dataset, variables: list[str], run_dir: Path
+) -> list[Path]:
     """Generate and save mean bias maps for each variable."""
     plot_paths = []
     plots_dir = run_dir / "plots"
@@ -145,8 +144,8 @@ def plot_bias_maps(
 
 
 def plot_bias_timeseries(
-    bias_ds: xr.Dataset, variables: List[str], run_dir: Path
-) -> List[Path]:
+    bias_ds: xr.Dataset, variables: list[str], run_dir: Path
+) -> list[Path]:
     """Generate and save domain-mean bias time series."""
     plot_paths = []
     plots_dir = run_dir / "plots"
@@ -168,7 +167,7 @@ def plot_bias_timeseries(
     return plot_paths
 
 
-def compute_quadrant_stats(bias_ds: xr.Dataset, variables: List[str]) -> Dict[str, Dict[str, float]]:
+def compute_quadrant_stats(bias_ds: xr.Dataset, variables: list[str]) -> dict[str, dict[str, float]]:
     """Compute mean bias for 2x2 quadrants of the domain."""
     lats = bias_ds.lat.values
     lons = bias_ds.lon.values
@@ -193,8 +192,8 @@ def compute_quadrant_stats(bias_ds: xr.Dataset, variables: List[str]) -> Dict[st
 
 
 def compute_elevation_stats(
-    bias_ds: xr.Dataset, dem: xr.DataArray, variables: List[str]
-) -> Dict[str, Dict[str, float]]:
+    bias_ds: xr.Dataset, dem: xr.DataArray, variables: list[str]
+) -> dict[str, dict[str, float]]:
     """Compute bias metrics binned by elevation."""
     # Align DEM to bias grid
     dem_aligned = dem.interp(lat=bias_ds.lat, lon=bias_ds.lon, method="nearest")
@@ -340,8 +339,10 @@ def run_analysis(args: argparse.Namespace) -> None:
         if "band" in dem_da.dims:
             dem_da = dem_da.squeeze("band", drop=True)
         # Rename to lat/lon if needed
-        if "y" in dem_da.coords: dem_da = dem_da.rename({"y": "lat"})
-        if "x" in dem_da.coords: dem_da = dem_da.rename({"x": "lon"})
+        if "y" in dem_da.coords:
+            dem_da = dem_da.rename({"y": "lat"})
+        if "x" in dem_da.coords:
+            dem_da = dem_da.rename({"x": "lon"})
         elevation_stats = compute_elevation_stats(bias_ds, dem_da, available_vars)
 
     summary_json = {
@@ -364,7 +365,7 @@ def run_analysis(args: argparse.Namespace) -> None:
     # 8. Generate notes.md
     LOGGER.info("Generating notes.md...")
     with open(run_dir / "notes.md", "w") as f:
-        f.write(f"# Weather Bias Analysis Report\n\n")
+        f.write("# Weather Bias Analysis Report\n\n")
         f.write(f"- **Run ID**: `{run_id}`\n")
         f.write(f"- **Forecast**: `{args.forecast_nc}`\n")
         f.write(f"- **Truth**: `{args.truth_nc}`\n\n")

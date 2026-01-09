@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
+from pathlib import Path
 import numpy as np
 
 from ml.spread.service import run_spread_forecast, SpreadForecastRequest, MAX_AOI_CELLS
@@ -198,5 +199,5 @@ def test_run_spread_forecast_passes_weather_bias_corrector_path(monkeypatch, moc
 
     assert mock_build.call_count == 1
     _, kwargs = mock_build.call_args
-    assert str(kwargs["weather_bias_corrector_path"]) == "/fake/corrector.json"
+    assert Path(kwargs["weather_bias_corrector_path"]) == Path("/fake/corrector.json")
 
