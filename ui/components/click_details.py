@@ -112,10 +112,12 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
 
         # Small, cheap “timeline”: just show first/last + a few sample times
         if times:
-            preview = [t.isoformat() for t in times[:3]]
-            if len(times) > 6:
+            if len(times) <= 6:
+                preview = [t.isoformat() for t in times]
+            else:
+                preview = [t.isoformat() for t in times[:3]]
                 preview.append("…")
-            preview.extend(t.isoformat() for t in times[-3:])
+                preview.extend(t.isoformat() for t in times[-3:])
             st.caption("Times (preview): " + ", ".join(preview))
         return
 
