@@ -122,12 +122,7 @@ def list_fire_detections_bbox_time(
     )
 
     with get_engine().begin() as conn:
-        # Debug: log the actual query parameters
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"Fire query params: start_time={start_time}, end_time={end_time}, bbox={bbox}, include_noise={include_noise}")
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
-        logger.info(f"Fire query returned {len(rows)} rows")
     return [dict(r) for r in rows]
 
