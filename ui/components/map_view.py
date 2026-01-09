@@ -9,7 +9,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap, MarkerCluster
 
-from api_client import ApiError, ApiUnavailableError, generate_forecast, get_forecast, get_fires
+from api_client import ApiError, ApiUnavailableError, get_forecast, get_fires
 from config.constants import (
     DEFAULT_MAP_CENTER,
     DEFAULT_ZOOM_LEVEL,

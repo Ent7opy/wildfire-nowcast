@@ -134,7 +134,7 @@ def run_spread_forecast(
         }
     )
 
-        if n_cells == 0:
+    if n_cells == 0:
         region_msg = f"region {request.region_name!r}" if request.region_name else "bbox"
         raise ValueError(
             f"AOI produces an empty window for {region_msg} and bbox {request.bbox}. "

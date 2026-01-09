@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 import requests
 
-from runtime_config import api_base_url, forecast_region_name
+from runtime_config import api_base_url
 
 
 JsonDict = Dict[str, Any]
