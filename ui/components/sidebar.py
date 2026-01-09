@@ -78,6 +78,17 @@ def render_sidebar() -> str:
 
     st.divider()
 
+    # Map controls
+    st.subheader("Map Controls")
+    if st.button("🔄 Refresh fires for current view", use_container_width=True, help="Update fires for the current map viewport. Pan/zoom the map first, then click to refresh.", key="refresh_fires_btn"):
+        # Request bounds capture on next render
+        st.session_state.map_refresh_requested = True
+        # Clear cache to force fresh fetch
+        if "fires_cache" in st.session_state:
+            st.session_state.fires_cache = {}
+    
+    st.divider()
+
     # AOI behavior (MVP)
     st.subheader("AOI")
     st.caption("Forecast AOI uses the current map viewport (bbox).")

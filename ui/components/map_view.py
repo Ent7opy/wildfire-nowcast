@@ -9,8 +9,8 @@ import streamlit as st
 from streamlit_folium import st_folium
 from folium.plugins import HeatMap, MarkerCluster
 
-from ui.api_client import ApiError, ApiUnavailableError, get_forecast, get_fires
-from ui.config.constants import (
+from api_client import ApiError, ApiUnavailableError, generate_forecast, get_forecast, get_fires
+from config.constants import (
     DEFAULT_MAP_CENTER,
     DEFAULT_ZOOM_LEVEL,
     MAP_HEIGHT,
@@ -27,20 +27,31 @@ def _current_bbox() -> tuple[float, float, float, float]:
     if "map_bounds" in st.session_state and st.session_state.map_bounds:
         b = st.session_state.map_bounds
         # st-folium bounds format: {'_southWest': {'lat': 41.0, 'lng': 22.0}, ...}
-        return (
-            b["_southWest"]["lng"],
-            b["_southWest"]["lat"],
-            b["_northEast"]["lng"],
-            b["_northEast"]["lat"],
-        )
+        try:
+            sw = b.get("_southWest", {})
+            ne = b.get("_northEast", {})
+            if sw.get("lng") is not None and sw.get("lat") is not None and ne.get("lng") is not None and ne.get("lat") is not None:
+                return (
+                    float(sw["lng"]),
+                    float(sw["lat"]),
+                    float(ne["lng"]),
+                    float(ne["lat"]),
+                )
+        except (KeyError, TypeError, ValueError):
+            # If map_bounds structure is invalid, fall back to default
+            pass
 
-    # Default bbox around Bulgaria area
-    return (22.0, 41.0, 29.0, 44.5)
+    # Default bbox worldwide (so users can see fires immediately)
+    return (-180.0, -90.0, 180.0, 90.0)
 
 
 def _current_time_range() -> tuple[datetime, datetime]:
-    """Return (start_time, end_time) based on selected time window."""
-    end = datetime.now(timezone.utc)
+    """Return (start_time, end_time) based on selected time window.
+    
+    Time is rounded to the nearest minute to enable caching and prevent
+    constant refetches due to second/microsecond changes.
+    """
+    end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     window = getattr(st.session_state, "time_window", "Last 24 hours")
     hours = 24
     if window == "Last 6 hours":
@@ -160,25 +171,31 @@ def add_fires_layer(map_obj: folium.Map, detections: List[Dict[str, Any]]) -> No
 
 def add_forecast_layers(map_obj: folium.Map) -> None:
     """Fetch and add real forecast layers to the map."""
-    bbox = _current_bbox()
+    # Check if there's a location-based forecast from click_details
+    if "last_forecast" in st.session_state and "last_forecast_bbox" in st.session_state:
+        forecast_data = st.session_state.last_forecast
+        bbox = st.session_state.last_forecast_bbox
+        # Use the generated forecast
+    else:
+        # Use current map view
+        bbox = _current_bbox()
+        try:
+            with st.spinner("Loading forecast overlay…"):
+                forecast_data = get_forecast(bbox, horizons=[24, 48, 72], region_name=None)
+        except ApiUnavailableError:
+            st.error("API unavailable — please start the backend")
+            return
+        except ApiError as e:
+            details = f"(status={e.status_code})" if e.status_code is not None else ""
+            st.error(f"Forecast unavailable {details}".strip())
+            if e.response_text:
+                st.caption(str(e.response_text)[:300])
+            return
 
-    try:
-        with st.spinner("Loading forecast overlay…"):
-            forecast_data = get_forecast(bbox, horizons=[24, 48, 72])
-    except ApiUnavailableError:
-        st.error("API unavailable — please start the backend")
-        return
-    except ApiError as e:
-        details = f"(status={e.status_code})" if e.status_code is not None else ""
-        st.error(f"Forecast unavailable {details}".strip())
-        if e.response_text:
-            st.caption(str(e.response_text)[:300])
-        return
-
-    if not forecast_data.get("run"):
+    if not forecast_data.get("run") and not forecast_data.get("forecast"):
         st.info(
             "No forecast available for the current view. "
-            "Try panning/zooming to a different AOI."
+            "Click a fire and click 'Generate Spread Forecast' to create a location-based forecast."
         )
         return
 
@@ -268,48 +285,84 @@ def create_base_map() -> folium.Map:
 def render_map_view() -> Optional[Dict[str, float]]:
     """Render the map view and return click coordinates if any."""
     try:
+        # Only recreate map if bounds changed significantly to reduce reruns
         m = create_base_map()
 
         # Add layers based on toggles
         if st.session_state.show_fires:
             bbox = _current_bbox()
             start_time, end_time = _current_time_range()
-            try:
-                include_noise = not bool(getattr(st.session_state, "fires_apply_denoiser", True))
-                min_confidence = float(getattr(st.session_state, "fires_min_confidence", 0.0))
-                with st.spinner("Loading fires…"):
-                    fires_data = get_fires(
-                        bbox=bbox,
-                        time_range=(start_time, end_time),
-                        filters={
-                            "limit": FIRE_API_LIMIT,
-                            "include_noise": include_noise,
-                            "min_confidence": min_confidence,
-                            "include_denoiser_fields": True,
-                        },
-                    )
-                detections = fires_data.get("detections", [])
+            include_noise = not bool(getattr(st.session_state, "fires_apply_denoiser", True))
+            min_confidence = float(getattr(st.session_state, "fires_min_confidence", 0.0))
+            
+            # Create a cache key based on query parameters
+            # Time is already rounded by _current_time_range(), so use as-is
+            cache_key = (
+                tuple(bbox),
+                start_time.isoformat(),
+                end_time.isoformat(),
+                include_noise,
+                min_confidence,
+            )
+            
+            # Check if we have cached results for this query
+            cached_result = st.session_state.get("fires_cache", {}).get(cache_key)
+            
+            if cached_result is None:
+                # Need to fetch new data
+                try:
+                    with st.spinner("Loading fires…"):
+                        fires_data = get_fires(
+                            bbox=bbox,
+                            time_range=(start_time, end_time),
+                            filters={
+                                "limit": FIRE_API_LIMIT,
+                                "include_noise": include_noise,
+                                "min_confidence": min_confidence,
+                                "include_denoiser_fields": True,
+                            },
+                        )
+                    detections = fires_data.get("detections", [])
+                    # Cache the result (keep only last 10 queries to avoid memory issues)
+                    if len(st.session_state.fires_cache) >= 10:
+                        # Remove oldest entry
+                        oldest_key = next(iter(st.session_state.fires_cache))
+                        del st.session_state.fires_cache[oldest_key]
+                    st.session_state.fires_cache[cache_key] = detections
+                    st.session_state.fires_last_detections = detections
+                except (ApiUnavailableError, ApiError, Exception) as e:
+                    # Handle errors below
+                    detections = []
+                    st.session_state.fires_last_detections = []
+                    if isinstance(e, ApiUnavailableError):
+                        st.error("API unavailable — please start the backend")
+                    elif isinstance(e, ApiError):
+                        details = f"(status={e.status_code})" if e.status_code is not None else ""
+                        st.error(f"Fires unavailable {details}".strip())
+                        if e.response_text:
+                            st.caption(str(e.response_text)[:300])
+                    else:
+                        st.error(f"Unexpected error: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+            else:
+                # Use cached result
+                detections = cached_result
                 st.session_state.fires_last_detections = detections
-                if len(detections) == 0:
-                    st.info(
-                        "No fires found for the current filters. "
-                        "Try a wider time window, lower minimum confidence, or zoom out."
-                    )
+            
+            # Display fires if we have them
+            if detections:
                 if len(detections) >= FIRE_API_LIMIT:
                     st.warning(
                         f"Too many detections for the current view/time window. "
                         f"Showing the first {FIRE_API_LIMIT}. Zoom in or narrow the time window."
                     )
                 add_fires_layer(m, detections)
-            except ApiUnavailableError:
-                st.error("API unavailable — please start the backend")
-                st.session_state.fires_last_detections = []
-            except ApiError as e:
-                details = f"(status={e.status_code})" if e.status_code is not None else ""
-                st.error(f"Fires unavailable {details}".strip())
-                if e.response_text:
-                    st.caption(str(e.response_text)[:300])
-                st.session_state.fires_last_detections = []
+            elif cached_result is not None:  # Only show message if we actually queried (not from cache)
+                st.info(
+                    "No fires found for the current filters. "
+                    "Try a wider time window, lower minimum confidence, or zoom out."
+                )
         else:
             # Clear detections if the layer is disabled, to avoid stale inspection data.
             st.session_state.fires_last_detections = []
@@ -324,13 +377,29 @@ def render_map_view() -> Optional[Dict[str, float]]:
         folium.LayerControl().add_to(m)
 
         # Render map and capture interactions
+        # Only request bounds if refresh was explicitly requested (prevents automatic reruns)
+        # This prevents continuous rerun loops while still allowing manual refresh
+        map_refresh_requested = st.session_state.get("map_refresh_requested", False)
+        requested_objects = ["last_clicked"]
+        if map_refresh_requested:
+            # Only request bounds when refresh button was clicked
+            requested_objects.append("bounds")
+        
         map_data = st_folium(
-            m, width=None, height=MAP_HEIGHT, returned_objects=["last_clicked", "bounds"]
+            m, 
+            width=None, 
+            height=MAP_HEIGHT, 
+            returned_objects=requested_objects,
+            key="main_map",
         )
 
-        # Update bounds in session state for next rerun (for API querying)
-        if map_data.get("bounds"):
-            st.session_state.map_bounds = map_data["bounds"]
+        # Update bounds only if refresh was requested and bounds were captured
+        if map_refresh_requested and map_data.get("bounds"):
+            new_bounds = map_data["bounds"]
+            st.session_state.map_bounds = new_bounds
+            # Clear the refresh flag after successfully capturing bounds
+            st.session_state.map_refresh_requested = False
+            # Cache will be cleared by the button handler, so fires will refetch automatically
 
         # Handle map click safely
         last_clicked = map_data.get("last_clicked")

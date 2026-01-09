@@ -50,6 +50,14 @@ def main() -> None:
         st.session_state.fires_last_detections = []
     if "map_bounds" not in st.session_state:
         st.session_state.map_bounds = None
+    if "fires_cache" not in st.session_state:
+        st.session_state.fires_cache = {}
+    if "map_refresh_requested" not in st.session_state:
+        st.session_state.map_refresh_requested = False
+    if "fires_cache" not in st.session_state:
+        st.session_state.fires_cache = {}
+    if "map_refresh_requested" not in st.session_state:
+        st.session_state.map_refresh_requested = False
 
     # App identity
     st.title("Wildfire Nowcast & Forecast")
@@ -81,8 +89,14 @@ def main() -> None:
     col_map, col_details = st.columns([3, 1], gap="large")
     with col_map:
         click_coords = render_map_view()
+        # Only update last_click if click actually happened
         if click_coords is not None:
-            st.session_state.last_click = click_coords
+            # Check if click is actually different to avoid unnecessary updates
+            current_click = st.session_state.get("last_click")
+            if (current_click is None or 
+                current_click.get("lat") != click_coords.get("lat") or 
+                current_click.get("lng") != click_coords.get("lng")):
+                st.session_state.last_click = click_coords
 
     with col_details:
         st.subheader("Details")
