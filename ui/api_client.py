@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 import requests
 
-from ui.runtime_config import api_base_url, forecast_region_name
+from runtime_config import api_base_url, forecast_region_name
 
 
 JsonDict = Dict[str, Any]
@@ -19,7 +19,7 @@ BBox = Tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 TimeRange = Tuple[datetime, datetime]  # (start_time, end_time)
 
 
-@dataclass(frozen=True)
+@dataclass
 class ApiError(Exception):
     message: str
     status_code: Optional[int] = None
@@ -40,8 +40,16 @@ class ApiUnavailableError(ApiError):
 
 
 def _isoformat(dt: datetime) -> str:
-    # FastAPI parses RFC3339/ISO-8601; this keeps timezone if present.
-    return dt.isoformat()
+    # FastAPI parses RFC3339/ISO-8601; use 'Z' for UTC to avoid URL encoding issues with '+00:00'
+    # Remove microseconds to avoid potential parsing issues
+    if dt.tzinfo is not None and dt.utcoffset().total_seconds() == 0:
+        # UTC timezone - use 'Z' suffix instead of '+00:00' to avoid URL encoding issues
+        # Remove microseconds for cleaner datetime strings
+        dt_no_microseconds = dt.replace(microsecond=0)
+        return dt_no_microseconds.replace(tzinfo=None).isoformat() + "Z"
+    # Remove microseconds for non-UTC times too
+    dt_no_microseconds = dt.replace(microsecond=0)
+    return dt_no_microseconds.isoformat()
 
 
 def _get_json(path: str, params: Mapping[str, Any]) -> JsonDict:
@@ -89,7 +97,26 @@ def get_fires(
     Response shape:
       { "count": int, "detections": [ { "lat": float, "lon": float, ... }, ... ] }
     """
+    # Validate bbox
+    if not bbox or len(bbox) != 4:
+        raise ApiError(
+            message="Invalid bbox: must be a 4-tuple (min_lon, min_lat, max_lon, max_lat)",
+            url=None,
+        )
     min_lon, min_lat, max_lon, max_lat = bbox
+    
+    # Validate bbox values
+    if not all(isinstance(x, (int, float)) for x in bbox):
+        raise ApiError(
+            message="Invalid bbox: all values must be numbers",
+            url=None,
+        )
+    if min_lon >= max_lon or min_lat >= max_lat:
+        raise ApiError(
+            message="Invalid bbox: min values must be less than max values",
+            url=None,
+        )
+    
     start_time, end_time = time_range
 
     params: Dict[str, Any] = {
@@ -120,12 +147,13 @@ def get_fires(
 def get_forecast(
     bbox: BBox,
     horizons: Optional[Iterable[int]] = None,
+    region_name: Optional[str] = None,
 ) -> JsonDict:
     """Fetch latest spread forecast metadata for a bbox.
 
     Backend contract: GET /forecast
-      - region_name (required by backend)
       - min_lon, min_lat, max_lon, max_lat
+      - region_name (optional - if None, uses location-based forecasting)
 
     The `horizons` argument is currently not used by the backend route; it is accepted
     here to keep the UI call-site explicit and future-compatible.
@@ -133,13 +161,14 @@ def get_forecast(
     min_lon, min_lat, max_lon, max_lat = bbox
 
     params: Dict[str, Any] = {
-        "region_name": forecast_region_name(),
         "min_lon": min_lon,
         "min_lat": min_lat,
         "max_lon": max_lon,
         "max_lat": max_lat,
     }
-    if horizons is not None:
+    if region_name is not None:
+        params["region_name"] = region_name
+    elif horizons is not None:
         # Not currently consumed by the backend; safe to ignore server-side.
         params["horizons"] = ",".join(str(h) for h in horizons)
 
@@ -154,4 +183,60 @@ def get_forecast(
             response_text=str(data)[:500],
         )
     return data
+
+
+def generate_forecast(
+    bbox: BBox,
+    horizons: Optional[Iterable[int]] = None,
+    region_name: Optional[str] = None,
+    forecast_reference_time: Optional[datetime] = None,
+) -> JsonDict:
+    """Generate a spread forecast on-the-fly for a bbox.
+
+    Backend contract: POST /forecast/generate
+      Request body:
+      - min_lon, min_lat, max_lon, max_lat
+      - region_name (optional - if None, uses location-based forecasting)
+      - forecast_reference_time (optional - ISO format string, defaults to now)
+      - horizons_hours (optional - list of ints, defaults to [24,48,72])
+    """
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    body: Dict[str, Any] = {
+        "min_lon": min_lon,
+        "min_lat": min_lat,
+        "max_lon": max_lon,
+        "max_lat": max_lat,
+    }
+    if region_name is not None:
+        body["region_name"] = region_name
+    if horizons is not None:
+        body["horizons_hours"] = list(horizons)
+    if forecast_reference_time is not None:
+        body["forecast_reference_time"] = _isoformat(forecast_reference_time)
+
+    base = api_base_url()
+    url = f"{base}/forecast/generate"
+    try:
+        resp = requests.post(url, json=body, timeout=(5.0, 60.0))  # Longer timeout for forecast generation
+    except (requests.Timeout, requests.ConnectionError) as e:
+        raise ApiUnavailableError(message=str(e), url=url) from e
+
+    if resp.status_code != 200:
+        raise ApiError(
+            message="Non-200 response from forecast generation API",
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        )
+
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise ApiError(
+            message="API returned non-JSON response",
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        ) from e
 
