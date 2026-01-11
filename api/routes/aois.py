@@ -74,6 +74,12 @@ def _validate_geometry(geojson: dict[str, Any]) -> None:
         # We could try to fix it, but let's encourage valid input
         pass
 
+    if geom.is_empty:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Geometry is empty",
+        )
+
     # Vertex count check
     if geom.geom_type == "MultiPolygon":
         # MultiPolygon has .geoms, each is a Polygon
@@ -167,8 +173,10 @@ def update_aoi(aoi_id: UUID, request: UpdateAOIRequest):
         tags=request.tags,
         geom_geojson=request.geometry,
     )
+    if not aoi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
     
-    if request.geometry and aoi and aoi["area_km2"] > MAX_AOI_AREA_KM2:
+    if request.geometry and aoi["area_km2"] > MAX_AOI_AREA_KM2:
         # Revert update
         repo.update_aoi(
             aoi_id,

@@ -191,10 +191,38 @@ def update_aoi(
         params["tags"] = tags
         
     if geom_geojson is not None:
-        updates.append("geom = ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326))")
-        updates.append("bbox = ST_Envelope(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)))")
-        updates.append("area_km2 = ST_Area(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326))::geography) / 1000000.0")
-        updates.append("vertex_count = ST_NPoints(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)))")
+        updates.append(
+            """
+            geom = (
+                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
+                SELECT CASE WHEN ST_IsValid(geom) THEN geom ELSE ST_MakeValid(geom) END FROM g
+            )
+            """
+        )
+        updates.append(
+            """
+            bbox = (
+                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
+                SELECT ST_Envelope(geom) FROM g
+            )
+            """
+        )
+        updates.append(
+            """
+            area_km2 = (
+                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
+                SELECT ST_Area(geom::geography) / 1000000.0 FROM g
+            )
+            """
+        )
+        updates.append(
+            """
+            vertex_count = (
+                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
+                SELECT ST_NPoints(geom) FROM g
+            )
+            """
+        )
         params["geom_geojson"] = geom_geojson
 
     if len(updates) == 1: # Only updated_at

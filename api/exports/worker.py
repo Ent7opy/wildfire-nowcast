@@ -13,8 +13,8 @@ def export_task(job_id, kind, request):
     # though worker process usually preloads.
     from api.exports import repo
     
-    repo.update_job_status(job_id, "running")
     try:
+        repo.update_job_status(job_id, "running")
         # TODO: Implement actual export logic based on `kind` and `request`
         # e.g. write to disk, upload to S3
         
