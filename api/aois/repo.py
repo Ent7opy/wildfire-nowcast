@@ -190,47 +190,39 @@ def update_aoi(
         updates.append("tags = :tags")
         params["tags"] = tags
         
+    
     if geom_geojson is not None:
-        updates.append(
-            """
-            geom = (
-                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
-                SELECT CASE WHEN ST_IsValid(geom) THEN geom ELSE ST_MakeValid(geom) END FROM g
-            )
-            """
-        )
-        updates.append(
-            """
-            bbox = (
-                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
-                SELECT ST_Envelope(geom) FROM g
-            )
-            """
-        )
-        updates.append(
-            """
-            area_km2 = (
-                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
-                SELECT ST_Area(geom::geography) / 1000000.0 FROM g
-            )
-            """
-        )
-        updates.append(
-            """
-            vertex_count = (
-                WITH g AS (SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom)
-                SELECT ST_NPoints(geom) FROM g
-            )
-            """
-        )
+        updates.append("geom = (SELECT geom FROM new_geom_cte)")
+        updates.append("bbox = (SELECT ST_Envelope(geom) FROM new_geom_cte)")
+        updates.append("area_km2 = (SELECT ST_Area(geom::geography) / 1000000.0 FROM new_geom_cte)")
+        updates.append("vertex_count = (SELECT ST_NPoints(geom) FROM new_geom_cte)")
         params["geom_geojson"] = geom_geojson
 
     if len(updates) == 1: # Only updated_at
         return get_aoi(aoi_id)
 
+    # Build the query with optional CTE for geometry
+    cte_part = ""
+    if geom_geojson is not None:
+        cte_part = """
+        WITH new_geom_cte AS (
+            SELECT 
+                CASE 
+                    WHEN ST_IsValid(g.geom) THEN g.geom 
+                    ELSE ST_MakeValid(g.geom) 
+                END as geom
+            FROM (
+                SELECT ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geom_geojson), 4326)) AS geom
+            ) g
+        ),
+        updated AS (
+        """
+    else:
+        cte_part = "WITH updated AS ("
+
     stmt_obj = text(
         f"""
-        WITH updated AS (
+        {cte_part}
             UPDATE aois
             SET {', '.join(updates)}
             WHERE id = :aoi_id
