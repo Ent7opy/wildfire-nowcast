@@ -28,7 +28,9 @@ MAX_SYNC_FEATURES = 10000
 
 def _stream_csv(data: list[dict[str, Any]], filename: str) -> StreamingResponse:
     if not data:
-        return Response(content="", media_type="text/csv")
+        resp = Response(content="", media_type="text/csv")
+        resp.headers["Content-Disposition"] = f"attachment; filename={filename}"
+        return resp
 
     fieldnames = list(data[0].keys())
     
@@ -91,7 +93,7 @@ def export_fires(
     start_time: str = Query(..., description="Start time (ISO 8601)"),
     end_time: str = Query(..., description="End time (ISO 8601)"),
     format: str = Query("csv", pattern="^(csv|geojson)$"),
-    limit: int = Query(1000, le=MAX_SYNC_FEATURES),
+    limit: int = Query(1000, ge=1, le=MAX_SYNC_FEATURES),
 ):
     """Export fire detections."""
     
@@ -173,16 +175,20 @@ class ExportJobResponse(BaseModel):
 )
 def create_export_job(job_request: ExportJobRequest):
     """Enqueue an async export job."""
+    job = jobs_repo.create_job(job_request.kind, job_request.request)
+    job_id = job["id"]
+    
     try:
-        job = jobs_repo.create_job(job_request.kind, job_request.request)
-        job_id = job["id"]
-        
         # Enqueue in Redis
         queue.enqueue(export_task, job_id, job_request.kind, job_request.request)
-        
         return {"job_id": job_id, "status": "queued"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Update job status to failed so it's not stuck
+        jobs_repo.update_job_status(job_id, "failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to enqueue export job: {str(e)}"
+        )
 
 @exports_router.get("/exports/{job_id}")
 def get_export_job(job_id: UUID):

@@ -200,7 +200,7 @@ def update_aoi(
     if len(updates) == 1: # Only updated_at
         return get_aoi(aoi_id)
 
-    stmt = text(
+    stmt_obj = text(
         f"""
         WITH updated AS (
             UPDATE aois
@@ -222,13 +222,19 @@ def update_aoi(
             updated_at
         FROM updated
         """
-    ).bindparams(
-        bindparam("tags", type_=JSONB),
-        bindparam("geom_geojson", type_=JSONB)
     )
+    
+    binds = []
+    if tags is not None:
+        binds.append(bindparam("tags", type_=JSONB))
+    if geom_geojson is not None:
+        binds.append(bindparam("geom_geojson", type_=JSONB))
+        
+    if binds:
+        stmt_obj = stmt_obj.bindparams(*binds)
 
     with get_engine().begin() as conn:
-        row = conn.execute(stmt, params).mappings().first()
+        row = conn.execute(stmt_obj, params).mappings().first()
 
     return dict(row) if row else None
 

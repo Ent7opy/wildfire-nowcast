@@ -185,7 +185,7 @@ def test_update_aoi(monkeypatch):
         "name": "Updated Name",
         "area_km2": 10.0,
         "vertex_count": 4,
-        "geometry": {},
+        "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]]},
         "bbox": {},
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-02T00:00:00Z",
@@ -194,7 +194,9 @@ def test_update_aoi(monkeypatch):
         "owner_id": None,
     }
     mock_update = MagicMock(return_value=mock_aoi)
+    mock_get = MagicMock(return_value=mock_aoi)
     monkeypatch.setattr(aois_routes.repo, "update_aoi", mock_update)
+    monkeypatch.setattr(aois_routes.repo, "get_aoi", mock_get)
 
     response = client.patch(
         f"/aois/{aoi_id}",

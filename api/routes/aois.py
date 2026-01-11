@@ -63,36 +63,24 @@ def _validate_geometry(geojson: dict[str, Any]) -> None:
             detail=f"Invalid GeoJSON: {str(e)}",
         )
 
+    # AOIs must be Polygons or MultiPolygons
+    if geom.geom_type not in ("Polygon", "MultiPolygon"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Geometry must be a Polygon or MultiPolygon, not {geom.geom_type}",
+        )
+
     if not geom.is_valid:
-        # We could try to fix it, but for now reject
-        # Or relying on repo's ST_MakeValid, but better to warn user
-        # Plan says: Reject obviously invalid geometry (400) unless you explicitly choose “auto-fix”.
-        # Repo uses ST_MakeValid, so we might be lenient here or strict.
-        # Let's be strict for creation to encourage good data.
-        # But `repo.py` handles validity. Let's allow repo to handle it for now, 
-        # but check bounds/complexity.
+        # We could try to fix it, but let's encourage valid input
         pass
 
-    # Check limits
-    # Area calculation in shapely is cartesian if coords are lat/lon, which is wrong for km2.
-    # We should rely on DB for area check or use a proper geodesic area lib (pyproj).
-    # Since we don't want to add deps, we can skip precise area check here and rely on DB return,
-    # or just do a rough check.
-    # 
-    # Vertex count is easy.
-    if hasattr(geom, "geoms"): # Multi-part
+    # Vertex count check
+    if geom.geom_type == "MultiPolygon":
+        # MultiPolygon has .geoms, each is a Polygon
         vertex_count = sum(len(g.exterior.coords) + sum(len(i.coords) for i in g.interiors) for g in geom.geoms)
-    elif hasattr(geom, "exterior"): # Polygon
-        vertex_count = len(geom.exterior.coords) + sum(len(i.coords) for i in geom.interiors)
     else:
-        # Point/LineString etc - not supporting non-polygons for AOIs?
-        # Plan says "User-defined polygons".
-        if geom.geom_type not in ("Polygon", "MultiPolygon"):
-             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Geometry must be a Polygon or MultiPolygon",
-            )
-        vertex_count = len(geom.coords)
+        # Polygon has .exterior and .interiors
+        vertex_count = len(geom.exterior.coords) + sum(len(i.coords) for i in geom.interiors)
 
     if vertex_count > MAX_AOI_VERTICES:
         raise HTTPException(
@@ -165,6 +153,10 @@ def get_aoi(aoi_id: UUID):
 @aois_router.patch("/{aoi_id}", response_model=AOIResponse)
 def update_aoi(aoi_id: UUID, request: UpdateAOIRequest):
     """Update an AOI."""
+    old_aoi = repo.get_aoi(aoi_id)
+    if not old_aoi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
+
     if request.geometry:
         _validate_geometry(request.geometry)
 
@@ -175,12 +167,13 @@ def update_aoi(aoi_id: UUID, request: UpdateAOIRequest):
         tags=request.tags,
         geom_geojson=request.geometry,
     )
-    if not aoi:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
-        
-    if request.geometry and aoi["area_km2"] > MAX_AOI_AREA_KM2:
-        # Revert update?
-        # Ideally we check inside transaction.
+    
+    if request.geometry and aoi and aoi["area_km2"] > MAX_AOI_AREA_KM2:
+        # Revert update
+        repo.update_aoi(
+            aoi_id,
+            geom_geojson=old_aoi["geometry"],
+        )
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"New geometry area ({aoi['area_km2']:.1f} km²) exceeds maximum ({MAX_AOI_AREA_KM2} km²)",
