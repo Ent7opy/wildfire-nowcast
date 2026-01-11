@@ -42,6 +42,7 @@ def upgrade() -> None:
             WHERE
                 acq_time BETWEEN start_time AND end_time
                 AND (confidence IS NULL OR confidence >= min_confidence)
+                AND (is_noise IS NOT TRUE)
                 AND ST_Intersects(ST_Transform(geom, 3857), tile.bbox)
         )
         SELECT ST_AsMVT(grid, 'fires', 4096, 'geom')

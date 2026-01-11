@@ -32,22 +32,6 @@ def test_proxy_tiles_success(monkeypatch):
     response = client.get("/tiles/fires/0/0/0.pbf")
     
     assert response.status_code == 200
-    mock_resp.content = b"fake_pbf_data"
-    mock_resp.headers = {"content-type": "application/x-protobuf", "Cache-Control": "max-age=300"}
-    
-    mock_client = AsyncMock()
-    mock_client.get.return_value = mock_resp
-    
-    # Mock httpx.AsyncClient context manager
-    mock_context = AsyncMock()
-    mock_context.__aenter__.return_value = mock_client
-    mock_context.__aexit__.return_value = None
-    
-    monkeypatch.setattr(httpx, "AsyncClient", MagicMock(return_value=mock_context))
-
-    response = client.get("/tiles/fires/0/0/0.pbf")
-    
-    assert response.status_code == 200
     assert response.content == b"fake_pbf_data"
     assert response.headers["content-type"] == "application/x-protobuf"
     
