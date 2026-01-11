@@ -36,6 +36,8 @@ docker compose down -v
 | Streamlit UI | `http://localhost:8501/` | Powered by the Streamlit app in `ui/`. |
 | Postgres+PostGIS | `localhost:5432` | Connection info matches the default env vars below. |
 | Redis | `localhost:6379` | Ready for future caching/queue needs. |
+| TiTiler | `localhost:8080` | Raster tile server (COG). |
+| Vector Tiles | `localhost:7800` | Vector tile server (pg_tileserv). |
 
 ## Environment variables
 
