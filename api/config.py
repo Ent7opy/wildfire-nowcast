@@ -64,6 +64,14 @@ class AppSettings(BaseSettings):
     titiler_public_base_url: str = Field(
         default="http://localhost:8080", validation_alias="TITILER_PUBLIC_BASE_URL"
     )
+    # Vector Tile Server settings (MVP default: same port mapping logic as TiTiler, but different port)
+    vector_tiles_public_base_url: str = Field(
+        default="http://localhost:7800", validation_alias="VECTOR_TILES_PUBLIC_BASE_URL"
+    )
+    vector_tiles_internal_base_url: str = Field(
+        default="http://tiles:7800", validation_alias="VECTOR_TILES_INTERNAL_BASE_URL"
+    )
+
     # Mapping for DB paths -> TiTiler container paths.
     # e.g., "data/forecasts/run_1/spread_h024_cog.tif" -> "/data/forecasts/run_1/spread_h024_cog.tif"
     # TiTiler then accesses it via filesystem.
