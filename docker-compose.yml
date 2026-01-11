@@ -93,7 +93,7 @@ services:
     command: uv run rq worker
     volumes:
       - ./api:/app/api:delegated
-      - ./data:/data
+      - ./data:/app/data
     environment:
       APP_ENV: dev
       POSTGRES_HOST: db
