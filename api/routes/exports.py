@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timezone
 import io
 import json
-from typing import Any, Generator, Optional
+import os
+from typing import Any, Generator
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Response, status, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi_limiter.depends import RateLimiter
+from pydantic import BaseModel
 
 from api.aois import repo as aois_repo
+from api.exports import repo as jobs_repo
+from api.exports.worker import queue, export_task
 from api.fires import repo as fires_repo
 from api.forecast import repo as forecast_repo
 
@@ -89,14 +94,15 @@ def export_fires(
     limit: int = Query(1000, le=MAX_SYNC_FEATURES),
 ):
     """Export fire detections."""
-    from datetime import datetime, timezone
     
     # Parse times (simplified for MVP, ideally share parsing logic)
     try:
         dt_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         dt_end = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
-        if dt_start.tzinfo is None: dt_start = dt_start.replace(tzinfo=timezone.utc)
-        if dt_end.tzinfo is None: dt_end = dt_end.replace(tzinfo=timezone.utc)
+        if dt_start.tzinfo is None:
+            dt_start = dt_start.replace(tzinfo=timezone.utc)
+        if dt_end.tzinfo is None:
+            dt_end = dt_end.replace(tzinfo=timezone.utc)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid timestamps")
 
@@ -151,10 +157,6 @@ def export_forecast_contours(run_id: int, format: str = Query("geojson", pattern
 
 # Async Exports
 
-from pydantic import BaseModel
-from api.exports import repo as jobs_repo
-from api.exports.worker import queue, export_task
-
 class ExportJobRequest(BaseModel):
     kind: str
     request: dict[str, Any]
@@ -204,9 +206,6 @@ def download_export_job(job_id: UUID):
     file_path = result.get("file_path")
     
     if file_path:
-        from fastapi.responses import FileResponse
-        import os
-        
         if not os.path.exists(file_path):
              raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found on server")
              

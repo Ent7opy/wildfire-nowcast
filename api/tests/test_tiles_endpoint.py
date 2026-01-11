@@ -2,7 +2,6 @@ from unittest.mock import MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 import httpx
 from api.main import app
-import api.routes.tiles as tiles_routes
 
 client = TestClient(app)
 
