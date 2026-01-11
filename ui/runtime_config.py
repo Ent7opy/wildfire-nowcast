@@ -10,12 +10,18 @@ import os
 
 
 DEFAULT_API_BASE_URL = "http://localhost:8000"
+DEFAULT_VECTOR_TILES_BASE_URL = "http://localhost:7800"
 DEFAULT_FORECAST_REGION_NAME = "smoke_grid"
 
 
 def api_base_url() -> str:
     """FastAPI base URL (no trailing slash)."""
     return os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
+
+
+def vector_tiles_base_url() -> str:
+    """Vector tile server base URL (no trailing slash)."""
+    return os.getenv("VECTOR_TILES_PUBLIC_BASE_URL", DEFAULT_VECTOR_TILES_BASE_URL).rstrip("/")
 
 
 def forecast_region_name() -> str:
