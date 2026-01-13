@@ -37,7 +37,7 @@ def render_sidebar() -> str:
         )
 
         pending_apply_denoiser = st.checkbox(
-            "Apply denoiser filter (exclude noise)",
+            "Apply noise filter (exclude false alarms)",
             value=bool(st.session_state.fires_apply_denoiser),
             key="pending_apply_denoiser",
         )
@@ -80,18 +80,17 @@ def render_sidebar() -> str:
 
     # Map controls
     st.subheader("Map Controls")
-    if st.button("🔄 Refresh fires for current view", use_container_width=True, help="Update fires for the current map viewport. Pan/zoom the map first, then click to refresh.", key="refresh_fires_btn"):
-        # Request bounds capture on next render
-        st.session_state.map_refresh_requested = True
-        # Clear cache to force fresh fetch
-        if "fires_cache" in st.session_state:
-            st.session_state.fires_cache = {}
+    st.caption("Pan and zoom to explore. The map updates as you move.")
+    if st.button("🗑️ Clear selection", use_container_width=True):
+        st.session_state.selected_fire = None
+        st.session_state.last_click = None
+        st.rerun()
     
     st.divider()
 
     # AOI behavior (MVP)
-    st.subheader("AOI")
-    st.caption("Forecast AOI uses the current map viewport (bbox).")
+    st.subheader("Forecast area")
+    st.caption("Forecast uses the area currently shown on the map.")
 
     st.divider()
 
@@ -99,8 +98,8 @@ def render_sidebar() -> str:
     st.subheader("About")
     st.caption(
         "**Data sources**\n\n"
-        "- Fires and forecast layers are fetched live from the FastAPI backend.\n"
-        "- If the backend is stopped, the UI will show an API error message.\n"
+        "- Fires and forecast layers are updated automatically from our data service.\n"
+        "- If data can’t be reached, you’ll see an error and can retry.\n"
         "- The risk layer is still a placeholder."
     )
 

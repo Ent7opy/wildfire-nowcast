@@ -7,14 +7,14 @@ def render_legend() -> None:
     with st.expander("Legend", expanded=False):
         legend_items = []
         if st.session_state.show_fires:
-            legend_items.append("🔴 **Active fires** (red markers/clusters) - Live detections")
+            legend_items.append("🔴 **Active fires** — satellite detections")
         if st.session_state.show_forecast:
-            legend_items.append("🟠 **Forecast overlay** (viewport AOI)")
+            legend_items.append("🟠 **Forecast overlay** — spread outlook")
             legend_items.append(
                 "**Contours by horizon**: "
                 "T+24h (blue), T+48h (orange), T+72h (red)"
             )
-            legend_items.append("**Raster**: probability tiles (semi-transparent)")
+            legend_items.append("Shaded layer: higher = more likely spread")
         if st.session_state.show_risk:
             legend_items.append("🟣 **Risk index** (purple polygon) - Placeholder fire risk")
 

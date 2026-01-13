@@ -46,19 +46,13 @@ def main() -> None:
         st.session_state.show_risk = False
     if "last_click" not in st.session_state:
         st.session_state.last_click = None
-    if "fires_last_detections" not in st.session_state:
-        st.session_state.fires_last_detections = []
-    if "map_bounds" not in st.session_state:
-        st.session_state.map_bounds = None
-    if "fires_cache" not in st.session_state:
-        st.session_state.fires_cache = {}
-    if "map_refresh_requested" not in st.session_state:
-        st.session_state.map_refresh_requested = False
+    if "selected_fire" not in st.session_state:
+        st.session_state.selected_fire = None
 
     # App identity
     st.title("Wildfire Nowcast & Forecast")
     st.caption(
-        "Live satellite fire detections (FIRMS) with optional probabilistic spread overlays."
+        "Live satellite fire detections with optional spread overlays."
     )
     st.info(
         "Forecast overlays are **experimental** and **probabilistic** (not deterministic). "
@@ -74,11 +68,11 @@ def main() -> None:
     st.subheader("Map")
 
     # Active filters summary
-    denoiser_state = "on" if st.session_state.fires_apply_denoiser else "off"
+    filter_state = "on" if st.session_state.fires_apply_denoiser else "off"
     st.caption(
         f"**Fires filters:** {st.session_state.time_window}, "
-        f"min confidence ≥ {st.session_state.fires_min_confidence:.0f}, "
-        f"denoiser {denoiser_state}"
+        f"confidence at least {st.session_state.fires_min_confidence:.0f}%, "
+        f"noise filter {filter_state}"
     )
 
     # Render map + details side-by-side
