@@ -1,3 +1,8 @@
+## Purpose
+This file defines **repo-specific operational rules**.
+It does NOT define task scope or planning logic.
+When conflicts exist, these rules override generic agent behavior.
+
 # Agent Guidelines
 
 This repository expects agents to use the Make-based workflow as the default for setup, development, testing, and ingestion. Keep changes minimal, safe, and aligned with existing patterns.
@@ -87,3 +92,7 @@ This repository expects agents to use the Make-based workflow as the default for
 - Ask for clarification when requirements are ambiguous.
 - If an operation is long/expensive, call it out before running.
 
+## STOP conditions
+- If unsure which make target to use → stop and ask
+- If data outputs would be large or long-running → confirm before running
+- If a command fails twice due to quoting/shell issues → switch to script approach
