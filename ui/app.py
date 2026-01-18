@@ -8,6 +8,7 @@ from components.sidebar import render_sidebar
 from components.map_view import render_map_view
 from components.legend import render_legend
 from components.click_details import render_click_details
+from components.forecast_status import render_forecast_status_polling
 
 def main() -> None:
     """Main application entry point."""
@@ -63,6 +64,11 @@ def main() -> None:
     # Sidebar controls
     with st.sidebar:
         render_sidebar()
+
+    # Check for ongoing JIT forecast polling - display as status banner
+    if st.session_state.get("jit_job_id"):
+        with st.container():
+            render_forecast_status_polling(st.session_state.jit_job_id)
 
     # Main content area - Map and details
     st.subheader("Map")
