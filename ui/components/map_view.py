@@ -106,6 +106,42 @@ def render_map_view() -> Optional[Dict[str, float]]:
             line_width_min_pixels=1,
         ))
 
+    # 3. Risk Index Layer (GeoJSON)
+    if st.session_state.show_risk:
+        # Get current viewport to fetch risk data
+        view_state = st.session_state.get("map_view_state")
+        if view_state:
+            lat = view_state.latitude
+            lon = view_state.longitude
+            zoom = view_state.zoom
+            
+            # Calculate bbox for risk query
+            degrees_per_tile = 360.0 / (2 ** zoom)
+            lat_extent = degrees_per_tile * 0.5
+            lon_extent = degrees_per_tile * 0.5
+            
+            min_lon = max(lon - lon_extent, -180.0)
+            max_lon = min(lon + lon_extent, 180.0)
+            min_lat = max(lat - lat_extent, -85.0)
+            max_lat = min(lat + lat_extent, 85.0)
+            
+            risk_url = (
+                f"{api_public_base_url()}/risk?"
+                f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}"
+            )
+            
+            layers.append(pdk.Layer(
+                "GeoJsonLayer",
+                data=risk_url,
+                id="risk",
+                pickable=True,
+                stroked=True,
+                filled=True,
+                get_fill_color=[128, 0, 128, 60],  # semi-transparent purple
+                get_line_color=[128, 0, 128, 150],
+                line_width_min_pixels=1,
+            ))
+
     # Create the Deck
     deck = pdk.Deck(
         layers=layers,

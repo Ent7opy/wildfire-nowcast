@@ -8,7 +8,7 @@ from redis.asyncio import Redis
 
 from api.config import settings
 from api.errors import ErrorResponse
-from api.routes import internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router
+from api.routes import internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router
 
 app = FastAPI(title=settings.app_name, version=settings.version)
 
@@ -69,4 +69,5 @@ app.include_router(forecast_router)
 app.include_router(aois_router)
 app.include_router(tiles_router)
 app.include_router(exports_router)
+app.include_router(risk_router)
 
