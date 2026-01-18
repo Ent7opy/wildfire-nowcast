@@ -154,6 +154,49 @@ def create_jit_forecast(request: JitForecastRequest):
         )
 
 
+@forecast_router.get("/jit/{job_id}")
+def get_jit_forecast_status(job_id: UUID):
+    """Get JIT forecast job status.
+
+    Returns current job status with user-friendly progress messages.
+    Includes result data on completion and error details on failure.
+
+    Example:
+        GET /forecast/jit/550e8400-e29b-41d4-a716-446655440000
+    """
+    job = repo.get_jit_job(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found"
+        )
+
+    status_messages = {
+        "pending": "Job is queued and waiting to start...",
+        "ingesting_terrain": "Downloading terrain data...",
+        "ingesting_weather": "Fetching weather data...",
+        "running_forecast": "Generating spread forecast...",
+        "completed": "Forecast complete!",
+        "failed": "Job failed"
+    }
+
+    response = {
+        "job_id": job["id"],
+        "status": job["status"],
+        "progress_message": status_messages.get(job["status"], "Processing..."),
+        "created_at": job["created_at"].isoformat() if job.get("created_at") else None,
+        "updated_at": job["updated_at"].isoformat() if job.get("updated_at") else None,
+    }
+
+    if job.get("result"):
+        response["result"] = job["result"]
+
+    if job.get("error"):
+        response["error"] = job["error"]
+
+    return response
+
+
 @forecast_router.post("/generate")
 def generate_forecast_endpoint(request: GenerateForecastRequest):
     """Generate a spread forecast on-the-fly for a given bbox and persist it.

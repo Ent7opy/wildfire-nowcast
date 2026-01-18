@@ -156,3 +156,179 @@ def test_generate_forecast_persists_run():
         assert args[0][0] == 42
         assert args[1]["status"] == "completed"
 
+
+def test_create_jit_forecast_valid_bbox():
+    """Test POST /forecast/jit with valid bbox creates job and returns job_id with status='queued'."""
+    from uuid import uuid4
+    from unittest.mock import MagicMock
+    
+    mock_job_id = uuid4()
+    mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
+    
+    with patch("api.forecast.repo.create_jit_job", return_value=mock_job), \
+         patch("api.forecast.worker.queue.enqueue") as mock_enqueue:
+        
+        response = client.post(
+            "/forecast/jit",
+            json={"bbox": [20.0, 40.0, 21.0, 41.0]},
+        )
+        
+        assert response.status_code == 202
+        data = response.json()
+        assert data["job_id"] == str(mock_job_id)
+        assert data["status"] == "queued"
+        mock_enqueue.assert_called_once()
+
+
+def test_create_jit_forecast_invalid_bbox_length():
+    """Test POST /forecast/jit with invalid bbox (wrong length) returns 400 error."""
+    response = client.post(
+        "/forecast/jit",
+        json={"bbox": [20.0, 40.0, 21.0]},
+    )
+    
+    assert response.status_code == 400
+    assert "bbox must have exactly 4 elements" in response.json()["detail"]
+
+
+def test_create_jit_forecast_enqueue_failure():
+    """Test POST /forecast/jit updates job status to 'failed' and returns 500 error on enqueue failure."""
+    from uuid import uuid4
+    
+    mock_job_id = uuid4()
+    mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
+    
+    with patch("api.forecast.repo.create_jit_job", return_value=mock_job), \
+         patch("api.forecast.worker.queue.enqueue", side_effect=Exception("Queue unavailable")), \
+         patch("api.forecast.repo.update_jit_job_status") as mock_update_status:
+        
+        response = client.post(
+            "/forecast/jit",
+            json={"bbox": [20.0, 40.0, 21.0, 41.0]},
+        )
+        
+        assert response.status_code == 500
+        assert "Failed to enqueue JIT forecast" in response.json()["detail"]
+        mock_update_status.assert_called_once_with(mock_job_id, "failed", error="Queue unavailable")
+
+
+def test_get_jit_status_not_found():
+    """Test GET /forecast/jit/{job_id} returns 404 when job does not exist."""
+    from uuid import uuid4
+    
+    non_existent_job_id = uuid4()
+    
+    with patch("api.forecast.repo.get_jit_job", return_value=None):
+        response = client.get(f"/forecast/jit/{non_existent_job_id}")
+        
+        assert response.status_code == 404
+        assert "Job not found" in response.json()["detail"]
+
+
+def test_get_jit_status_pending():
+    """Test GET /forecast/jit/{job_id} returns pending status with progress message."""
+    from uuid import uuid4
+    from datetime import datetime
+    
+    mock_job_id = uuid4()
+    mock_job = {
+        "id": mock_job_id,
+        "status": "pending",
+        "created_at": datetime(2025, 1, 19, 0, 0, 0),
+        "updated_at": datetime(2025, 1, 19, 0, 0, 1),
+    }
+    
+    with patch("api.forecast.repo.get_jit_job", return_value=mock_job):
+        response = client.get(f"/forecast/jit/{mock_job_id}")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == str(mock_job_id)
+        assert data["status"] == "pending"
+        assert data["progress_message"] == "Job is queued and waiting to start..."
+
+
+def test_get_jit_status_completed_with_result():
+    """Test GET /forecast/jit/{job_id} returns completed status with result data."""
+    from uuid import uuid4
+    from datetime import datetime
+    
+    mock_job_id = uuid4()
+    mock_result = {
+        "run_id": 42,
+        "forecast_url": "http://example.com/forecast/42"
+    }
+    mock_job = {
+        "id": mock_job_id,
+        "status": "completed",
+        "result": mock_result,
+        "created_at": datetime(2025, 1, 19, 0, 0, 0),
+        "updated_at": datetime(2025, 1, 19, 0, 5, 0),
+    }
+    
+    with patch("api.forecast.repo.get_jit_job", return_value=mock_job):
+        response = client.get(f"/forecast/jit/{mock_job_id}")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == str(mock_job_id)
+        assert data["status"] == "completed"
+        assert data["progress_message"] == "Forecast complete!"
+        assert data["result"] == mock_result
+
+
+def test_get_jit_status_failed_with_error():
+    """Test GET /forecast/jit/{job_id} returns failed status with error details."""
+    from uuid import uuid4
+    from datetime import datetime
+    
+    mock_job_id = uuid4()
+    mock_error = "Weather data unavailable for requested region"
+    mock_job = {
+        "id": mock_job_id,
+        "status": "failed",
+        "error": mock_error,
+        "created_at": datetime(2025, 1, 19, 0, 0, 0),
+        "updated_at": datetime(2025, 1, 19, 0, 2, 30),
+    }
+    
+    with patch("api.forecast.repo.get_jit_job", return_value=mock_job):
+        response = client.get(f"/forecast/jit/{mock_job_id}")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == str(mock_job_id)
+        assert data["status"] == "failed"
+        assert data["progress_message"] == "Job failed"
+        assert data["error"] == mock_error
+
+
+def test_get_jit_status_all_intermediate_statuses():
+    """Test GET /forecast/jit/{job_id} returns correct progress messages for all intermediate statuses."""
+    from uuid import uuid4
+    from datetime import datetime
+    
+    mock_job_id = uuid4()
+    
+    statuses_and_messages = [
+        ("ingesting_terrain", "Downloading terrain data..."),
+        ("ingesting_weather", "Fetching weather data..."),
+        ("running_forecast", "Generating spread forecast..."),
+    ]
+    
+    for status, expected_message in statuses_and_messages:
+        mock_job = {
+            "id": mock_job_id,
+            "status": status,
+            "created_at": datetime(2025, 1, 19, 0, 0, 0),
+            "updated_at": datetime(2025, 1, 19, 0, 1, 0),
+        }
+        
+        with patch("api.forecast.repo.get_jit_job", return_value=mock_job):
+            response = client.get(f"/forecast/jit/{mock_job_id}")
+            
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == status
+            assert data["progress_message"] == expected_message
+
