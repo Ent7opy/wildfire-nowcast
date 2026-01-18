@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import streamlit as st
 
 from api_client import ApiError, ApiUnavailableError, generate_forecast
+from runtime_config import forecast_region_name
 
 def _parse_time(value: Any) -> Optional[datetime]:
     if value is None:
@@ -102,7 +103,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
                     forecast_data = generate_forecast(
                         bbox=forecast_bbox,
                         horizons=[24, 48, 72],
-                        region_name=None,
+                        region_name=forecast_region_name(),
                         forecast_reference_time=ref_time,
                     )
                     
@@ -111,6 +112,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
                     
                     st.session_state.last_forecast = forecast_data
                     st.session_state.last_forecast_bbox = forecast_bbox
+                    st.session_state.show_forecast = True
                     # Force a rerun to show the new forecast on the map
                     st.rerun()
             except ApiUnavailableError:

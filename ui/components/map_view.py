@@ -1,8 +1,6 @@
 """Map view component for wildfire dashboard using PyDeck."""
 
 from datetime import datetime, timedelta, timezone
-import json
-import time
 from typing import Dict, Optional
 
 import pydeck as pdk
@@ -19,7 +17,6 @@ from config.constants import (
 INITIAL_LAT = DEFAULT_MAP_CENTER[0]
 INITIAL_LON = DEFAULT_MAP_CENTER[1]
 INITIAL_ZOOM = DEFAULT_ZOOM_LEVEL
-DEBUG_LOG_PATH = r"c:\Projects\wildfire-nowcast\.cursor\debug.log"
 
 def _isoformat(dt: datetime) -> str:
     """Format datetime for API query parameters."""
@@ -56,68 +53,14 @@ def render_map_view() -> Optional[Dict[str, float]]:
             pitch=0,
             bearing=0,
         )
-        # region agent log
-        try:
-            with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as log_file:
-                log_file.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "pre-fix",
-                    "hypothesisId": "C",
-                    "location": "ui/components/map_view.py:render_map_view",
-                    "message": "Initialized map_view_state",
-                    "data": {"lat": INITIAL_LAT, "lon": INITIAL_LON, "zoom": INITIAL_ZOOM},
-                    "timestamp": int(time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-        # endregion agent log
 
     layers = []
-    # region agent log
-    try:
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps({
-                "sessionId": "debug-session",
-                "runId": "pre-fix",
-                "hypothesisId": "C",
-                "location": "ui/components/map_view.py:render_map_view",
-                "message": "Render map view flags",
-                "data": {
-                    "show_fires": bool(getattr(st.session_state, "show_fires", False)),
-                    "show_forecast": bool(getattr(st.session_state, "show_forecast", False)),
-                },
-                "timestamp": int(time.time() * 1000),
-            }) + "\n")
-    except Exception:
-        pass
-    # endregion agent log
 
     # 1. Fires Layer (MVT)
     if st.session_state.show_fires:
         start_time, end_time = _current_time_range()
         include_noise = not bool(getattr(st.session_state, "fires_apply_denoiser", True))
         min_confidence = float(getattr(st.session_state, "fires_min_confidence", 0.0))
-        # region agent log
-        try:
-            with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as log_file:
-                log_file.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "pre-fix",
-                    "hypothesisId": "B",
-                    "location": "ui/components/map_view.py:render_map_view",
-                    "message": "Fires layer query inputs",
-                    "data": {
-                        "start_time": _isoformat(start_time),
-                        "end_time": _isoformat(end_time),
-                        "min_confidence": min_confidence,
-                        "include_noise": include_noise,
-                        "api_public_base_url": api_public_base_url(),
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-        # endregion agent log
         
         # Build query params for the tile URL
         params = {
@@ -130,21 +73,6 @@ def render_map_view() -> Optional[Dict[str, float]]:
         
         # Point to the API proxy for vector tiles
         tile_url = f"{api_public_base_url()}/tiles/fires/{{z}}/{{x}}/{{y}}.pbf?{query_str}"
-        # region agent log
-        try:
-            with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as log_file:
-                log_file.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "pre-fix",
-                    "hypothesisId": "A",
-                    "location": "ui/components/map_view.py:render_map_view",
-                    "message": "Fires tile URL computed",
-                    "data": {"tile_url": tile_url},
-                    "timestamp": int(time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-        # endregion agent log
         
         layers.append(pdk.Layer(
             "MVTLayer",
@@ -166,21 +94,6 @@ def render_map_view() -> Optional[Dict[str, float]]:
         contour_url = f"{api_public_base_url()}/tiles/forecast_contours/{{z}}/{{x}}/{{y}}.pbf"
         if run_id:
             contour_url += f"?run_id={run_id}"
-        # region agent log
-        try:
-            with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as log_file:
-                log_file.write(json.dumps({
-                    "sessionId": "debug-session",
-                    "runId": "pre-fix",
-                    "hypothesisId": "D",
-                    "location": "ui/components/map_view.py:render_map_view",
-                    "message": "Forecast tile URL computed",
-                    "data": {"run_id": run_id, "contour_url": contour_url},
-                    "timestamp": int(time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-        # endregion agent log
             
         layers.append(pdk.Layer(
             "MVTLayer",
