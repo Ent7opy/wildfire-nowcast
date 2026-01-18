@@ -119,3 +119,8 @@ reports/
 *.tmp
 *.temp
 .cache/
+
+# Ralph execution artifacts
+.ralph/inbox/
+.ralph/out/
+.ralph/logs/
