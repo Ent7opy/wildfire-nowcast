@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from api.config import settings
 from api.forecast import repo
+from api.forecast.worker import queue, run_jit_forecast_pipeline
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
 
@@ -26,6 +28,19 @@ class GenerateForecastRequest(BaseModel):
     horizons_hours: list[int] | None = None
 
 
+class JitForecastRequest(BaseModel):
+    """Request body for JIT forecast pipeline (bbox-only, no region_name required)."""
+    bbox: list[float]
+    forecast_reference_time: str | None = None
+    horizons_hours: list[int] | None = None
+
+
+class JitForecastResponse(BaseModel):
+    """Response body for JIT forecast pipeline initiation."""
+    job_id: UUID
+    status: str
+
+
 @forecast_router.get("")
 async def get_forecast(
     min_lon: float,
@@ -38,12 +53,12 @@ async def get_forecast(
 
     Returns run metadata, raster asset pointers (with TiTiler URLs),
     and vector contours as GeoJSON.
-    
+
     If region_name is not provided, this will trigger a location-based forecast
     using the bbox (terrain will be empty/optional).
     """
     bbox = (min_lon, min_lat, max_lon, max_lat)
-    
+
     # If region_name is provided, try to get existing forecast run
     # Otherwise, we'll generate on-the-fly (not yet implemented in repo)
     if region_name:
@@ -100,10 +115,49 @@ async def get_forecast(
     }
 
 
+@forecast_router.post("/jit", response_model=JitForecastResponse, status_code=status.HTTP_202_ACCEPTED)
+def create_jit_forecast(request: JitForecastRequest):
+    """Enqueue a JIT forecast pipeline for arbitrary bbox.
+
+    Accepts a bbox without requiring region_name. The pipeline will:
+    1. Ingest terrain data for the bbox
+    2. Ingest weather data for the bbox
+    3. Generate spread forecast
+    4. Persist results
+
+    Returns job_id for tracking the job.
+    """
+    if len(request.bbox) != 4:
+        raise HTTPException(
+            status_code=400,
+            detail="bbox must have exactly 4 elements: [min_lon, min_lat, max_lon, max_lat]"
+        )
+
+    bbox = tuple(request.bbox)
+
+    forecast_params = {
+        "forecast_reference_time": request.forecast_reference_time,
+        "horizons_hours": request.horizons_hours or [24, 48, 72],
+    }
+
+    job = repo.create_jit_job(bbox, {"bbox": request.bbox, **forecast_params})
+    job_id = job["id"]
+
+    try:
+        queue.enqueue(run_jit_forecast_pipeline, job_id, bbox, forecast_params)
+        return {"job_id": job_id, "status": "queued"}
+    except Exception as e:
+        repo.update_jit_job_status(job_id, "failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to enqueue JIT forecast: {str(e)}"
+        )
+
+
 @forecast_router.post("/generate")
 def generate_forecast_endpoint(request: GenerateForecastRequest):
     """Generate a spread forecast on-the-fly for a given bbox and persist it.
-    
+
     This endpoint generates forecasts dynamically and persists contours and rasters.
     Requires region_name to determine the grid for persistence.
     """
@@ -119,21 +173,21 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
     )
     from ingest.config import REPO_ROOT
     from pathlib import Path
-    
+
     if not request.region_name:
         raise HTTPException(
             status_code=400,
             detail="region_name is required for persisting forecasts"
         )
-    
+
     bbox = (request.min_lon, request.min_lat, request.max_lon, request.max_lat)
-    
+
     # Parse horizons
     if request.horizons_hours:
         horizons = request.horizons_hours
     else:
         horizons = [24, 48, 72]
-    
+
     # Parse forecast_reference_time
     if request.forecast_reference_time:
         forecast_reference_time = datetime.fromisoformat(request.forecast_reference_time.replace("Z", "+00:00"))
@@ -141,7 +195,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             forecast_reference_time = forecast_reference_time.replace(tzinfo=timezone.utc)
     else:
         forecast_reference_time = datetime.now(timezone.utc)
-    
+
     # Create run record
     run_id = create_spread_forecast_run(
         region_name=request.region_name,
@@ -150,7 +204,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         forecast_reference_time=forecast_reference_time,
         bbox=bbox,
     )
-    
+
     try:
         # Create request
         spread_request = SpreadForecastRequest(
@@ -159,19 +213,19 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             forecast_reference_time=forecast_reference_time,
             horizons_hours=horizons,
         )
-        
+
         # Generate forecast
         forecast = run_spread_forecast(spread_request)
-        
+
         # Get grid and window for persistence
         grid = get_region_grid_spec(request.region_name)
         window = get_grid_window_for_bbox(grid, bbox, clip=True)
-        
+
         # Persist rasters
         run_dir = REPO_ROOT / "data" / "forecasts" / request.region_name / f"run_{run_id}"
         raster_records = save_forecast_rasters(forecast, grid, window, run_dir, emit_cog=True)
         insert_spread_forecast_rasters(run_id, raster_records)
-        
+
         # Generate and persist contours
         contour_records = build_contour_records(
             forecast=forecast,
@@ -180,7 +234,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             thresholds=[0.3, 0.5, 0.7],
         )
         insert_spread_forecast_contours(run_id, contour_records)
-        
+
         # Capture operational metadata from forecast output
         extra_meta = {}
         try:
@@ -195,10 +249,10 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                     extra_meta[k] = attrs.get(k)
         except Exception:
             pass
-        
+
         # Finalize
         finalize_spread_forecast_run(run_id, status="completed", extra_metadata=extra_meta)
-        
+
         # Enrich rasters with TileJSON URLs for TiTiler
         for r in raster_records:
             storage_path = str(r["storage_path"])
@@ -209,7 +263,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             r["tilejson_url"] = (
                 f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
             )
-        
+
         # Return response similar to GET /forecast
         return {
             "run": {
@@ -233,7 +287,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                 for c in contour_records
             ]},
         }
-    
+
     except Exception as e:
         finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(e)})
         raise
