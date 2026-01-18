@@ -19,10 +19,16 @@
       "verification": [
         "Would run: make help"
       ],
-      "status": "implemented",
-      "commits": [],
+      "status": "done",
+      "commits": [
+        {
+          "sha": "1c57f93",
+          "message": "chore: update maintenance scripts and ruff config"
+        }
+      ],
       "notes": [
-        "worker: Replaced grep+awk in Makefile help target with portable Python one-liner. Changed PYTHON default from 'python' to 'python3' for better cross-platform compatibility."
+        "worker: Replaced grep+awk in Makefile help target with portable Python one-liner. Changed PYTHON default from 'python' to 'python3' for better cross-platform compatibility.",
+        "committer: manual sync"
       ],
       "review_cycles": 1
     },
@@ -44,10 +50,16 @@
         "Would run: make lint",
         "Would run: make test"
       ],
-      "status": "implemented",
-      "commits": [],
+      "status": "done",
+      "commits": [
+        {
+          "sha": "1c57f93",
+          "message": "chore: update maintenance scripts and ruff config"
+        }
+      ],
       "notes": [
-        "worker: Fixed Windows uv permission error by adding deterministic cleanup of ui/.venv/lib64 symlink before lint and test commands. Extended scripts/clean.py to remove .venv directories."
+        "worker: Fixed Windows uv permission error by adding deterministic cleanup of ui/.venv/lib64 symlink before lint and test commands. Extended scripts/clean.py to remove .venv directories.",
+        "committer: manual sync"
       ],
       "review_cycles": 1
     },
@@ -99,10 +111,18 @@
         "Would run: make dev-api && make dev-ui",
         "Manual: click Generate Spread Forecast, confirm overlay appears and requests include run_id="
       ],
-      "status": "todo",
-      "commits": [],
-      "notes": [],
-      "review_cycles": 0
+      "status": "done",
+      "commits": [
+        {
+          "sha": "87d2773",
+          "message": "feat(ui): auto-enable forecast overlay after generation"
+        }
+      ],
+      "notes": [
+        "worker: Modified ui/components/click_details.py to automatically enable forecast overlay after generation by setting show_forecast=True in session state. The run_id from forecast response is already correctly extracted and used in map_view.py to build tile URL with ?run_id= parameter.",
+        "committer: done"
+      ],
+      "review_cycles": 2
     },
     {
       "id": "T05",
@@ -128,9 +148,17 @@
         "Would run: make test",
         "Would run: curl http://127.0.0.1:8000/risk?... (expect HTTP 200)"
       ],
-      "status": "todo",
-      "commits": [],
-      "notes": [],
+      "status": "done",
+      "commits": [
+        {
+          "sha": "349e054",
+          "message": "feat(api): add baseline /risk endpoint"
+        }
+      ],
+      "notes": [
+        "worker: Created /risk endpoint returning baseline GeoJSON risk surface and wired UI Risk index toggle to render layer with baseline labeling in legend.",
+        "committer: done"
+      ],
       "review_cycles": 0
     },
     {
@@ -153,9 +181,17 @@
         "Would run: make dev-ui",
         "Manual: click Export fires, confirm file downloads"
       ],
-      "status": "todo",
-      "commits": [],
-      "notes": [],
+      "status": "done",
+      "commits": [
+        {
+          "sha": "d1318d7",
+          "message": "feat(ui): add Export fires CSV download button"
+        }
+      ],
+      "notes": [
+        "worker: Added Export fires CSV download button in sidebar. Button calculates bbox from current map viewport and uses time/filter settings from session state. URL uses API_PUBLIC_BASE_URL for browser accessibility.",
+        "committer: done"
+      ],
       "review_cycles": 0
     },
     {
@@ -236,10 +272,18 @@
       "verification": [
         "Manual: follow documented steps in fresh environment, confirm overlay appears"
       ],
-      "status": "todo",
-      "commits": [],
-      "notes": [],
-      "review_cycles": 0
+      "status": "done",
+      "commits": [
+        {
+          "sha": "ee2637f",
+          "message": "docs: update forecast overlay operational workflow"
+        }
+      ],
+      "notes": [
+        "worker: Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing.",
+        "committer: manual sync after agent timeout"
+      ],
+      "review_cycles": 4
     },
     {
       "id": "T10",
@@ -261,9 +305,17 @@
         "Would run: make test",
         "Run UI, confirm no file write to that path"
       ],
-      "status": "todo",
-      "commits": [],
-      "notes": [],
+      "status": "done",
+      "commits": [
+        {
+          "sha": "87d2773",
+          "message": "feat(ui): auto-enable forecast overlay after generation"
+        }
+      ],
+      "notes": [
+        "worker: Task T10 already completed in commit 87d2773. DEBUG_LOG_PATH constant and all 'region agent log' blocks were removed from ui/components/map_view.py during T04 implementation.",
+        "committer: done"
+      ],
       "review_cycles": 0
     }
   ]

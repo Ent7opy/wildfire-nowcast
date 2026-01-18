@@ -370,7 +370,7 @@ choose_task() {
     }
   }' >"$inbox"
 
-  run_agent "worker" "$WORKER_PROMPT" "$inbox" "$OUT_DIR/worker.json" || die "Worker failed to produce outbox."
+  run_agent "worker" "$WORKER_PROMPT" "$inbox" "$OUT_DIR/worker.json" || { info "Worker failed to produce outbox."; return 1; }
 
   local task_id
   task_id="$(jq -r '.selected_task_id // empty' "$OUT_DIR/worker.json")"
@@ -431,7 +431,7 @@ review_loop() {
       }
     ' "$STATE_FILE" >"$inbox"
 
-    run_agent "reviewer" "$REVIEWER_PROMPT" "$inbox" "$OUT_DIR/review.json" || die "Reviewer failed."
+    run_agent "reviewer" "$REVIEWER_PROMPT" "$inbox" "$OUT_DIR/review.json" || { info "Reviewer failed."; return 1; }
 
     local verdict
     verdict="$(jq -r '.verdict' "$OUT_DIR/review.json")"
@@ -470,7 +470,7 @@ review_loop() {
       }
     ' "$OUT_DIR/review.json" >"$fix_inbox"
 
-    run_agent "bug_fixer" "$FIXER_PROMPT" "$fix_inbox" "$OUT_DIR/fix.json" || die "Bug fixer failed."
+    run_agent "bug_fixer" "$FIXER_PROMPT" "$fix_inbox" "$OUT_DIR/fix.json" || { info "Bug fixer failed."; return 1; }
     info "Bug fixer applied changes; re-reviewing..."
   done
 
@@ -498,7 +498,7 @@ commit_task() {
     }
   ' "$STATE_FILE" >"$inbox"
 
-  run_agent "committer" "$COMMITTER_PROMPT" "$inbox" "$OUT_DIR/commit.json" || die "Committer failed."
+  run_agent "committer" "$COMMITTER_PROMPT" "$inbox" "$OUT_DIR/commit.json" || { info "Committer failed."; return 1; }
 
   local c_status
   c_status="$(jq -r '.status // "committed"' "$OUT_DIR/commit.json")"
@@ -529,7 +529,7 @@ plan() {
 {"goal_file":"$GOAL_FILE","existing_state_file":"$STATE_FILE","instruction":"Create a concrete task plan and write it as JSON to the outbox path."}
 EOF
 
-  run_agent "planner" "$PLANNER_PROMPT" "$inbox" "$PLAN_FILE" || die "Planner failed."
+  run_agent "planner" "$PLANNER_PROMPT" "$inbox" "$PLAN_FILE" || { info "Planner failed."; return 1; }
   init_state_from_plan
 }
 
@@ -560,34 +560,45 @@ run_loop() {
     fi
 
     local task_id
-    if ! task_id="$(choose_task)"; then
-      info "No runnable tasks (deps may be blocked)."
-      status
-      die "Cannot continue."
+    # Check for resumable tasks first (implemented but not done)
+    task_id="$(jq -r '.tasks[] | select(.status=="implemented") | .id' "$STATE_FILE" | head -n 1)"
+
+    if [[ -z "$task_id" ]]; then
+      if ! task_id="$(choose_task)"; then
+        info "No runnable tasks (deps may be blocked)."
+        status
+        die "Cannot continue."
+      fi
+
+      # Mark as implemented (or blocked) based on worker output
+      local w_status
+      w_status="$(jq -r '.status' "$OUT_DIR/worker.json")"
+      local w_note
+      w_note="$(jq -r '.summary // ""' "$OUT_DIR/worker.json")"
+
+      if [[ "$w_status" == "blocked" ]]; then
+        update_task_status "$task_id" "blocked" "worker: $w_note"
+        info "Worker blocked on $task_id. Trying next iteration."
+        continue
+      fi
+
+      if [[ "$w_status" != "implemented" ]]; then
+        update_task_status "$task_id" "blocked" "worker returned unexpected status: $w_status"
+        info "Worker returned unexpected status ($w_status); marking blocked."
+        continue
+      fi
+
+      update_task_status "$task_id" "implemented" "worker: $w_note"
+    else
+      info "Resuming implemented task: $task_id"
     fi
-
-    # Mark as implemented (or blocked) based on worker output
-    local w_status
-    w_status="$(jq -r '.status' "$OUT_DIR/worker.json")"
-    local w_note
-    w_note="$(jq -r '.summary // ""' "$OUT_DIR/worker.json")"
-
-    if [[ "$w_status" == "blocked" ]]; then
-      update_task_status "$task_id" "blocked" "worker: $w_note"
-      info "Worker blocked on $task_id. Trying next iteration."
-      continue
-    fi
-
-    if [[ "$w_status" != "implemented" ]]; then
-      update_task_status "$task_id" "blocked" "worker returned unexpected status: $w_status"
-      info "Worker returned unexpected status ($w_status); marking blocked."
-      continue
-    fi
-
-    update_task_status "$task_id" "implemented" "worker: $w_note"
 
     # Review / fix loop
-    review_loop "$task_id"
+    if ! review_loop "$task_id"; then
+      info "Review/Fix loop failed for $task_id. Marking blocked."
+      update_task_status "$task_id" "blocked" "Review/Fix loop failed."
+      continue
+    fi
 
     # Commit
     if commit_task "$task_id"; then
