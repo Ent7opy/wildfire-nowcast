@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
+from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
+from sqlalchemy.dialects.postgresql import JSONB
 
 from api.db import get_engine
 
@@ -82,4 +84,78 @@ def list_contours_for_run(run_id: int) -> list[dict[str, Any]]:
     with get_engine().begin() as conn:
         rows = conn.execute(stmt, {"run_id": run_id}).mappings().all()
     return [dict(r) for r in rows]
+
+
+def create_jit_job(bbox: BBox, request: dict[str, Any]) -> dict[str, Any]:
+    """Create a new JIT forecast job record."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+    stmt = text("""
+        INSERT INTO jit_forecast_jobs (bbox, status, request)
+        VALUES (
+            ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326),
+            'pending',
+            :request
+        )
+        RETURNING id, status, created_at
+    """).bindparams(bindparam("request", type_=JSONB))
+    
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt, {
+            "min_lon": min_lon,
+            "min_lat": min_lat,
+            "max_lon": max_lon,
+            "max_lat": max_lat,
+            "request": request
+        }).mappings().one()
+    return dict(row)
+
+
+def get_jit_job(job_id: UUID) -> Optional[dict[str, Any]]:
+    """Retrieve a JIT forecast job by ID."""
+    stmt = text("""
+        SELECT
+            id,
+            ST_AsGeoJSON(bbox) AS bbox_geojson,
+            status,
+            request,
+            result,
+            error,
+            created_at,
+            updated_at,
+            started_at,
+            finished_at
+        FROM jit_forecast_jobs
+        WHERE id = :id
+    """)
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt, {"id": job_id}).mappings().first()
+    return dict(row) if row else None
+
+
+def update_jit_job_status(
+    job_id: UUID,
+    status: str,
+    result: Optional[dict] = None,
+    error: Optional[str] = None
+):
+    """Update JIT job status and optionally result/error."""
+    ts_update = ""
+    if status not in ("pending", "queued"):
+        ts_update = ", started_at = COALESCE(started_at, now())"
+    if status in ("completed", "failed"):
+        ts_update += ", finished_at = now()"
+    
+    stmt = text(f"""
+        UPDATE jit_forecast_jobs
+        SET status = :status, result = :result, error = :error, updated_at = now() {ts_update}
+        WHERE id = :id
+    """).bindparams(bindparam("result", type_=JSONB))
+    
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {
+            "id": job_id,
+            "status": status,
+            "result": result,
+            "error": error
+        })
 
