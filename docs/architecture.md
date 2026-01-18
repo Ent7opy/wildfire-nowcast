@@ -44,7 +44,7 @@ This is the **high‑level mental model** for the project. It intentionally skip
 - **Infra (`infra/`, `docker-compose.yml`)**
   - Docker Compose stack:
     - `api`: FastAPI + `uvicorn`, pointed at Postgres + Redis.
-    - `ui`: Streamlit app talking to the API (`API_BASE_URL`).
+    - `ui`: Streamlit app talking to the API (`API_BASE_URL` + `API_PUBLIC_BASE_URL` for browser).
     - `db`: Postgres with PostGIS.
     - `redis`: cache / future worker backend.
   - `infra/README.md` explains ports, env vars, and migration commands.

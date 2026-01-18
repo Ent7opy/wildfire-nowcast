@@ -19,6 +19,11 @@ def api_base_url() -> str:
     return os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
 
 
+def api_public_base_url() -> str:
+    """FastAPI base URL for browser requests (no trailing slash)."""
+    return os.getenv("API_PUBLIC_BASE_URL", api_base_url()).rstrip("/")
+
+
 def vector_tiles_base_url() -> str:
     """Vector tile server base URL (no trailing slash)."""
     return os.getenv("VECTOR_TILES_PUBLIC_BASE_URL", DEFAULT_VECTOR_TILES_BASE_URL).rstrip("/")

@@ -36,6 +36,7 @@ services:
     environment:
       APP_ENV: dev
       API_BASE_URL: http://api:8000
+      API_PUBLIC_BASE_URL: http://localhost:8000
       STREAMLIT_SERVER_RUN_ON_SAVE: "true"
     depends_on:
       - api
@@ -108,7 +109,7 @@ services:
       - redis
 
   tiles:
-    image: ghcr.io/crunchydata/pg_tileserv:latest
+    image: pramsey/pg_tileserv:latest
     ports:
       - "7800:7800"
     environment:

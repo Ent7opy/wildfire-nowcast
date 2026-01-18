@@ -2,6 +2,7 @@ import os
 from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi_limiter import FastAPILimiter
 from redis.asyncio import Redis
 
@@ -10,6 +11,20 @@ from api.errors import ErrorResponse
 from api.routes import internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router
 
 app = FastAPI(title=settings.app_name, version=settings.version)
+
+cors_allow_origins = [
+    origin.strip()
+    for origin in settings.cors_allow_origins.split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_allow_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 async def startup():
