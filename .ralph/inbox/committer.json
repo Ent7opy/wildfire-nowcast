@@ -1,0 +1,49 @@
+{
+  "goal_file": ".ralph/GOAL.md",
+  "plan_file": ".ralph/plan.json",
+  "state_file": ".ralph/state.json",
+  "task": {
+    "id": "T08",
+    "title": "Extend CI to run ml and ingest lint/tests",
+    "priority": "P1",
+    "depends_on": [],
+    "description": "Add ml and ingest to CI workflow matrix, mirroring existing api/ui pattern. Keep changes minimal.",
+    "files_likely": [
+      ".github/workflows/ci.yml"
+    ],
+    "acceptance": [
+      "CI workflow includes ml and ingest jobs",
+      "Jobs run ruff check and pytest for each"
+    ],
+    "verification": [
+      "Would run: cd ml && uv sync --dev && uv run pytest",
+      "Would run: cd ingest && uv sync --dev && uv run pytest",
+      "Check GitHub Actions for new ml+ingest jobs"
+    ],
+    "status": "implemented",
+    "commits": [],
+    "notes": [
+      "worker: Extended CI matrix to include ml and ingest projects alongside api and ui",
+      "worker: CI already includes ml and ingest in matrix with lint (ruff) and test (pytest) steps; configuration verified as complete"
+    ],
+    "review_cycles": 1
+  },
+  "instruction": "Create semantic commits for the approved changes. Output commit list with shas + messages.",
+  "outbox_schema": {
+    "task_id": "T01",
+    "status": "committed|blocked",
+    "commits": [
+      {
+        "sha": "abc1234",
+        "message": "feat(scope): ..."
+      }
+    ],
+    "verification": [
+      "Ran: ...",
+      "Would run: ..."
+    ],
+    "notes": [
+      "optional"
+    ]
+  }
+}

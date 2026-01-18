@@ -1,0 +1,27 @@
+{
+  "task_id": "T08",
+  "status": "committed",
+  "commits": [
+    {
+      "sha": "7f3e065",
+      "message": "ci(workflows): add ml and ingest to CI matrix"
+    }
+  ],
+  "verification": [
+    "Ran: git status --porcelain=v1",
+    "Ran: git ls-files -o --exclude-standard",
+    "Ran: git diff --name-only",
+    "Ran: git diff --staged --name-only",
+    "Ran: git diff --staged --check",
+    "Ran: dos2unix .github/workflows/ci.yml (fixed CRLF line endings)",
+    "Ran: git add .github/workflows/ci.yml",
+    "Ran: git commit -m 'ci(workflows): add ml and ingest to CI matrix'",
+    "Ran: git log -1 --format='%h %s'",
+    "Would run: GitHub Actions will verify ml and ingest jobs run ruff check and pytest on next push"
+  ],
+  "notes": [
+    "Fixed CRLF line endings to pass git diff --check",
+    "Job renamed from 'api-and-ui' to 'lint-and-test' for consistency",
+    "Added ml and ingest to CI matrix alongside existing api and ui projects"
+  ]
+}

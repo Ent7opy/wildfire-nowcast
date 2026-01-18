@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Windows-friendly shim for Ralph:
+# - Ralph expects `cursor-agent` on PATH.
+# - On Windows, the Cursor app CLI (`cursor.exe`) may exist without the Agent CLI.
+# - This shim proxies to `cursor-agent` inside WSL, running from the Windows-mounted repo directory
+#   so relative paths like `.ralph/plan.json` land on the Windows filesystem.
+
+die() { echo "❌ $*" >&2; exit 1; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"
+}
+
+need_cmd wsl.exe
+
+# Choose a WSL distro (default: Ubuntu).
+# You can override by setting RALPH_WSL_DISTRO (e.g. "Ubuntu").
+# We default to Ubuntu because the docker-desktop distro often lacks bash and tools.
+WSL_DISTRO="${RALPH_WSL_DISTRO:-Ubuntu}"
+
+# If we are ALREADY inside WSL, just find and run the real cursor-agent.
+if [[ -n "${WSL_DISTRO_NAME:-}" ]] && command -v cursor-agent >/dev/null 2>&1; then
+  # But wait, we need to make sure we aren't calling OURSELVES.
+  # This shim is in .ralph/bin/cursor-agent.
+  REAL_AGENT="$(type -ap cursor-agent | grep -v ".ralph/bin/cursor-agent" | head -n 1 || true)"
+  if [[ -n "$REAL_AGENT" ]]; then
+    exec "$REAL_AGENT" "$@"
+  fi
+fi
+
+need_cmd powershell.exe
+
+# Determine the current repo directory as a Windows path (Git Bash).
+WIN_PWD=""
+if WIN_PWD="$(pwd -W 2>/dev/null)"; then
+  :
+fi
+WIN_PWD="${WIN_PWD//$'\r'/}"
+
+if [[ -z "$WIN_PWD" ]]; then
+  if command -v cygpath >/dev/null 2>&1; then
+    WIN_PWD="$(cygpath -w "$PWD" 2>/dev/null || true)"
+    WIN_PWD="${WIN_PWD//$'\r'/}"
+  fi
+fi
+
+[[ -n "$WIN_PWD" ]] || die "Unable to resolve Windows working directory (expected Git Bash)."
+
+# Validate the distro exists and has bash.
+WIN_DISTRO_CHECK_CMD="wsl.exe -d '$WSL_DISTRO' -e bash -lc 'true'"
+if ! powershell.exe -NoProfile -NonInteractive -Command "$WIN_DISTRO_CHECK_CMD" >/dev/null 2>&1; then
+  die "WSL distro '$WSL_DISTRO' is not available or lacks bash.
+Set RALPH_WSL_DISTRO to a working distro (see: wsl.exe -l -q)."
+fi
+
+# Convert Windows path to WSL path *in the chosen distro*.
+# Note: calling wslpath in docker-desktop yields a different mount layout than Ubuntu.
+WIN_PWD_ESC="${WIN_PWD//\'/\'\'}"
+WSL_PWD="$(powershell.exe -NoProfile -NonInteractive -Command "wsl.exe -d '$WSL_DISTRO' wslpath -u '$WIN_PWD_ESC'" 2>/dev/null || true)"
+WSL_PWD="${WSL_PWD//$'\r'/}"
+[[ -n "$WSL_PWD" ]] || die "WSL path conversion failed for: $WIN_PWD"
+
+# Ensure cursor-agent exists inside WSL.
+WSL_PREFIX=(wsl.exe)
+if [[ -n "$WSL_DISTRO" ]]; then
+  WSL_PREFIX+=( -d "$WSL_DISTRO" )
+fi
+
+if ! "${WSL_PREFIX[@]}" -e bash -lc "command -v cursor-agent >/dev/null 2>&1"; then
+  die "cursor-agent not found inside WSL.
+Install it in a WSL Linux distro (e.g. Ubuntu), then retry:
+  wsl.exe -d Ubuntu -e bash -lc \"curl -fsS https://cursor.com/install | bash\"
+Also ensure you are authenticated in WSL (e.g. run: cursor-agent login)."
+fi
+
+# Quote args safely for bash -lc.
+quoted_args=()
+for a in "$@"; do
+  quoted_args+=("$(printf "%q" "$a")")
+done
+
+# If CURSOR_API_KEY is set on Windows, forward it into WSL for non-interactive auth.
+prefix=""
+if [[ -n "${CURSOR_API_KEY:-}" ]]; then
+  prefix="CURSOR_API_KEY=$(printf "%q" "$CURSOR_API_KEY") "
+fi
+
+cmd="cd $(printf "%q" "$WSL_PWD") && ${prefix}cursor-agent ${quoted_args[*]}"
+MSYS2_ARG_CONV_EXCL="*" exec "${WSL_PREFIX[@]}" -e bash -lc "$cmd"

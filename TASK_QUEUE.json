@@ -1,0 +1,124 @@
+[
+  {
+    "id": "WN-001",
+    "title": "Make `make help` work on Windows",
+    "type": "infra",
+    "blocked_by": [],
+    "unblocks": ["WN-002"],
+    "worker_prompt": "Outcome: `make help` prints targets on Windows PowerShell without requiring grep/awk.\n\nPaths:\n- `Makefile` (help target currently uses `grep` + `awk`, per status_scan).\n\nScope:\n- Do: modify ONLY the `help` target.\n- Don't: refactor other targets or change unrelated Makefile behavior.\n\nImplementation notes:\n- Use a portable Python one-liner (repo already assumes Python) to parse `##` help comments.\n- Keep output human-readable and include at least: install, dev-api, dev-ui, test, lint.\n\nCommands (success checks):\n- `make help`\n\nAcceptance criteria:\n- On Windows PowerShell, `make help` succeeds and lists at least install/dev/test/lint targets.\n\nRollback:\n- `git checkout -- Makefile` (or revert the help target only).\n",
+    "success_checks": ["make help"],
+    "rollback": "git checkout -- Makefile (or revert the help target only)"
+  },
+  {
+    "id": "WN-002",
+    "title": "Fix UI uv Windows permission failure (.venv\\\\lib64 Access is denied)",
+    "type": "infra",
+    "blocked_by": [],
+    "unblocks": ["WN-004", "WN-005", "WN-006", "WN-010"],
+    "worker_prompt": "Outcome: On Windows PowerShell, `make lint` and `make test` complete the UI steps without the uv error removing `ui\\\\.venv\\\\lib64` (Access is denied).\n\nPaths:\n- `Makefile` (targets `lint` and `test` invoke `cd ui && uv run ...`).\n- `ui/` environment/venv layout.\n\nScope:\n- Do: minimal change that removes the failure (e.g., deterministic cleanup step, guidance, or uv invocation tweak).\n- Don't: restructure dependency management across subprojects.\n\nImplementation notes:\n- Likely a stale symlink/dir or filesystem lock; aim for a deterministic fix.\n- If you add a cleanup target or docs guidance, keep it safe and minimal.\n\nCommands (success checks):\n- `make lint`\n- `make test`\n\nAcceptance criteria:\n- Both commands complete without the specific uv remove-file permission error.\n\nRollback:\n- Revert the minimal changes you made (e.g., `git checkout -- <touched files>`). If guidance-only, remove additions and document manual cleanup as fallback.\n",
+    "success_checks": ["make lint", "make test"],
+    "rollback": "Revert your changes (git checkout -- <touched files>) and document manual cleanup as fallback"
+  },
+  {
+    "id": "WN-003",
+    "title": "Persist on-demand forecasts from POST /forecast/generate",
+    "type": "api",
+    "blocked_by": [],
+    "unblocks": ["WN-004", "WN-009"],
+    "worker_prompt": "Outcome: `POST /forecast/generate` returns a non-null `run.id` and persists forecast contours (and optionally rasters) so they can be served via `/tiles/forecast_contours?...run_id=...`.\n\nPaths:\n- `api/routes/forecast.py` (currently returns empty rasters/contours per status_scan).\n- `api/forecast/repo.py` (reads persisted runs).\n- `ingest/spread_forecast.py` (existing persistence logic to reuse).\n\nScope:\n- Do: reuse existing DB tables and existing contour/raster generation + persistence logic.\n- Don't: add new architecture, new ML models, or training.\n\nImplementation notes:\n- The endpoint must create a run record, insert contour (and optionally raster) records, finalize status, and return a handle with `run.id`.\n\nCommands (success checks):\n- Unit tests: `cd api && uv run pytest`\n- Bring stack up: `docker compose up -d`\n- Manual API check:\n  - Generate: `curl -X POST \"http://127.0.0.1:8000/forecast/generate\" ...` (expect: non-null `run.id`)\n  - Tile fetch: `curl -I \"http://127.0.0.1:8000/tiles/forecast_contours/{z}/{x}/{y}.pbf?run_id=<RUN_ID>\"` (expect: HTTP 200)\n\nAcceptance criteria:\n- `run.id` is not null.\n- Forecast contour tiles are retrievable using that run id.\n\nRollback:\n- Revert changes in `api/routes/forecast.py` (and any files you touched) to restore metadata-only behavior.\n\nHandoff:\n- Document the minimal request payload the endpoint expects so the UI can call reliably.\n",
+    "success_checks": [
+      "cd api && uv run pytest",
+      "docker compose up -d",
+      "curl -X POST \"http://127.0.0.1:8000/forecast/generate\" ... (expect non-null run.id)",
+      "curl -I \"http://127.0.0.1:8000/tiles/forecast_contours/{z}/{x}/{y}.pbf?run_id=<RUN_ID>\" (expect HTTP 200)"
+    ],
+    "rollback": "git checkout -- api/routes/forecast.py (and any other touched files) or revert the commit"
+  },
+  {
+    "id": "WN-004",
+    "title": "UI: use generated forecast run_id for overlay",
+    "type": "ui",
+    "blocked_by": ["WN-002", "WN-003"],
+    "unblocks": ["WN-009"],
+    "worker_prompt": "Outcome: When a user generates a forecast, the map overlay renders contours for that specific run (using `run_id`).\n\nPaths:\n- `ui/components/click_details.py` (calls POST /forecast/generate and stores response in session state).\n- `ui/components/map_view.py` (builds forecast contour tile URL using `run_id` if present).\n\nScope:\n- Do: UI-only wiring to ensure the generated `run.id` is stored and used.\n- Don't: redesign UI or change unrelated behavior.\n\nImplementation notes:\n- Map overlay already supports a `run_id` query param; ensure `st.session_state.last_forecast.run.id` (or equivalent) is set from API response and used.\n\nCommands (success checks):\n- `make dev-api`\n- `make dev-ui`\n- Manual: click “Generate Spread Forecast” and confirm overlay appears without manual refresh.\n\nAcceptance criteria:\n- Overlay updates immediately after generation.\n- It uses the generated run id (confirm by observing requests include `run_id=`).\n\nRollback:\n- Revert UI session-state wiring changes.\n\nHandoff:\n- Note any session-state keys used so later UI work doesn't conflict.\n",
+    "success_checks": [
+      "make dev-api",
+      "make dev-ui",
+      "Manual UI: click Generate Spread Forecast -> overlay appears and requests include run_id="
+    ],
+    "rollback": "git checkout -- ui/components/click_details.py ui/components/map_view.py (or revert commit)"
+  },
+  {
+    "id": "WN-005",
+    "title": "Add baseline /risk endpoint and render in UI",
+    "type": "api",
+    "blocked_by": ["WN-002"],
+    "unblocks": [],
+    "worker_prompt": "Outcome: A `/risk` endpoint exists and the UI “Risk index” toggle renders a layer clearly labeled as baseline (no model training).\n\nPaths:\n- API: add a new route module consistent with existing routers wired in `api/main.py`.\n- UI: `ui/components/sidebar.py` (toggle exists), `ui/components/legend.py` (legend text), `ui/components/map_view.py` (layer rendering).\n\nScope:\n- Do: implement the simplest viable baseline risk surface and an explicit definition in code/legend.\n- Don't: ML training; ambiguous semantics without labeling.\n\nImplementation notes:\n- No existing `/risk` route found in scan; define a minimal contract and keep it stable.\n\nCommands (success checks):\n- `make lint`\n- `make test`\n- `curl \"http://127.0.0.1:8000/risk?min_lon=...&min_lat=...&max_lon=...&max_lat=...&start_time=...&end_time=...\"` (expect HTTP 200)\n- Manual UI: toggle “Risk index” and confirm layer renders and is labeled baseline.\n\nAcceptance criteria:\n- `/risk` returns something renderable by the chosen UI approach.\n- UI renders it and labels it baseline.\n\nRollback:\n- Remove the route wiring and UI layer usage; optionally hide the toggle.\n\nHandoff:\n- Document the risk definition in the route docstring and UI legend.\n",
+    "success_checks": [
+      "make lint",
+      "make test",
+      "curl \"http://127.0.0.1:8000/risk?...\" (expect HTTP 200)",
+      "Manual UI: Risk index toggle renders layer labeled baseline"
+    ],
+    "rollback": "git checkout -- api ui (only touched files) or revert commit"
+  },
+  {
+    "id": "WN-006",
+    "title": "UI: add “Export fires” download",
+    "type": "ui",
+    "blocked_by": ["WN-002"],
+    "unblocks": [],
+    "worker_prompt": "Outcome: UI can download CSV or GeoJSON for current bbox/time via existing `GET /fires/export`.\n\nPaths:\n- API (existing): `api/routes/exports.py` (`/fires/export`).\n- UI: `ui/api_client.py`, plus `ui/components/sidebar.py` or `ui/app.py` for the button/link.\n\nScope:\n- Do: UI-only wiring to call the existing export.\n- Don't: change API formats/limits unless strictly needed.\n\nImplementation notes:\n- Use `API_PUBLIC_BASE_URL` so the download URL is browser-accessible.\n\nCommands (success checks):\n- `make dev-ui`\n- Manual: click “Export fires” and confirm file downloads.\n\nAcceptance criteria:\n- File downloads and matches the selected bbox/time filters.\n\nRollback:\n- Remove the UI button/link.\n\nHandoff:\n- Document how bbox/time are derived from current map state.\n",
+    "success_checks": ["make dev-ui", "Manual UI: Export fires downloads file matching bbox/time"],
+    "rollback": "git checkout -- ui (only touched files) or revert commit"
+  },
+  {
+    "id": "WN-007",
+    "title": "Implement real async export worker (remove TODO)",
+    "type": "api",
+    "blocked_by": [],
+    "unblocks": [],
+    "worker_prompt": "Outcome: `api/exports/worker.py` produces an actual file artifact and updates `export_jobs.result` so download works.\n\nPaths:\n- `api/routes/exports.py` (async export jobs scaffolding).\n- `api/exports/worker.py` (currently TODO/placeholder per scan).\n\nScope:\n- Do: implement ONE kind end-to-end (e.g., fires_csv) minimally.\n- Don't: build a generalized job framework.\n\nCommands (success checks):\n- `docker compose up --build` (ensure worker service runs)\n- Create an export job through the existing API route\n- Observe job transitions queued→running→succeeded and download works\n\nAcceptance criteria:\n- One async export job completes and produces a downloadable artifact.\n\nRollback:\n- Revert worker changes; keep sync exports.\n\nHandoff:\n- Note where artifacts are stored and how they are served/downloaded.\n",
+    "success_checks": [
+      "docker compose up --build",
+      "Create export job via API -> job succeeds -> download works"
+    ],
+    "rollback": "git checkout -- api/exports/worker.py api/routes/exports.py (or revert commit)"
+  },
+  {
+    "id": "WN-008",
+    "title": "Extend CI to run ml and ingest lint/tests",
+    "type": "qa",
+    "blocked_by": [],
+    "unblocks": [],
+    "worker_prompt": "Outcome: CI runs ruff/pytest for `ml/` and `ingest/`, mirroring existing api/ui checks.\n\nPaths:\n- `.github/workflows/ci.yml`\n\nScope:\n- Do: small, minimal changes to add ml+ingest jobs/steps.\n- Don't: restructure packaging or add heavy system dependencies.\n\nCommands (success checks):\n- Local mimic:\n  - `cd ml && uv sync --dev && uv run pytest`\n  - `cd ingest && uv sync --dev && uv run pytest`\n- CI: verify new jobs appear and pass in GitHub Actions.\n\nAcceptance criteria:\n- PR checks include ml+ingest and they pass.\n\nRollback:\n- Revert workflow changes.\n\nHandoff:\n- Note any skips/mocks required for CI stability.\n",
+    "success_checks": [
+      "cd ml && uv sync --dev && uv run pytest",
+      "cd ingest && uv sync --dev && uv run pytest",
+      "GitHub Actions: new ml+ingest jobs present and green"
+    ],
+    "rollback": "git checkout -- .github/workflows/ci.yml (or revert commit)"
+  },
+  {
+    "id": "WN-009",
+    "title": "Document the forecast overlay operational workflow",
+    "type": "docs",
+    "blocked_by": ["WN-003", "WN-004"],
+    "unblocks": [],
+    "worker_prompt": "Outcome: A doc section that tells contributors exactly how to ingest weather, run/generate a forecast, and see the forecast overlay in the UI.\n\nPaths:\n- `docs/GETTING_STARTED.md`\n- `docs/architecture.md`\n- `ingest/spread_forecast.py`\n\nScope:\n- Do: docs-only.\n- Don't: change code.\n\nImplementation notes:\n- Must match the final on-demand forecast contract (POST /forecast/generate returning run.id) and UI behavior.\n\nCommands (success checks):\n- Copy/paste the documented steps in a fresh environment and confirm the UI overlay appears.\n\nAcceptance criteria:\n- Instructions are copy/paste runnable and match current code paths.\n\nRollback:\n- Revert doc changes.\n\nHandoff:\n- Keep secrets out; reference env vars without copying values.\n",
+    "success_checks": ["Manual: follow the new docs and confirm overlay appears"],
+    "rollback": "git checkout -- docs/GETTING_STARTED.md docs/architecture.md (or revert commit)"
+  },
+  {
+    "id": "WN-010",
+    "title": "Remove hard-coded debug log path from UI",
+    "type": "ui",
+    "blocked_by": ["WN-002"],
+    "unblocks": [],
+    "worker_prompt": "Outcome: UI no longer writes to the hard-coded path `c:\\\\Projects\\\\wildfire-nowcast\\\\.cursor\\\\debug.log`.\n\nPaths:\n- `ui/components/map_view.py`\n\nScope:\n- Do: minimal deletion of debug logging blocks only.\n- Don't: introduce a new logging subsystem unless UI already has one.\n\nCommands (success checks):\n- `make lint`\n- `make test`\n- Run UI and confirm no file write occurs to that path.\n\nAcceptance criteria:\n- No writes to that hard-coded path; UI behavior unchanged.\n\nRollback:\n- Revert removal if absolutely required for debugging (prefer keeping it removed).\n\nHandoff:\n- If logging is needed, use existing repo-standard logging approach (do not add new deps).\n",
+    "success_checks": ["make lint", "make test", "Manual UI run: confirm no hard-coded debug.log writes"],
+    "rollback": "git checkout -- ui/components/map_view.py (or revert commit)"
+  }
+]
+

@@ -1,0 +1,184 @@
+{
+  "version": 1,
+  "goal_summary": "Execute 10 tasks from TASK_QUEUE.json: fix Windows make help, resolve uv permission issues, persist on-demand forecasts, wire UI to use run_id, add /risk endpoint, add export fires button, implement async export worker, extend CI for ml/ingest, document forecast workflow, and remove hardcoded debug log path.",
+  "tasks": [
+    {
+      "id": "T01",
+      "title": "Make help target portable for Windows",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "Replace grep+awk in Makefile help target (line 18) with a portable Python one-liner that parses ## comments and prints targets.",
+      "files_likely": ["Makefile"],
+      "acceptance": [
+        "make help succeeds on Windows PowerShell",
+        "Output lists at least: install, dev-api, dev-ui, test, lint"
+      ],
+      "verification": ["Would run: make help"]
+    },
+    {
+      "id": "T02",
+      "title": "Fix uv Windows permission failure in UI venv",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "Resolve 'Access is denied' error when uv tries to remove ui/.venv/lib64 on Windows. Likely a stale symlink issue; add deterministic cleanup or workaround.",
+      "files_likely": ["Makefile", "ui/pyproject.toml"],
+      "acceptance": [
+        "make lint completes without uv permission error",
+        "make test completes without uv permission error"
+      ],
+      "verification": ["Would run: make lint", "Would run: make test"]
+    },
+    {
+      "id": "T03",
+      "title": "Persist on-demand forecasts from POST /forecast/generate",
+      "priority": "P0",
+      "depends_on": [],
+      "description": "Modify POST /forecast/generate to create a run record, persist contours (and optionally rasters), and return non-null run.id. Reuse existing persistence logic from ingest/spread_forecast.py.",
+      "files_likely": [
+        "api/routes/forecast.py",
+        "api/forecast/repo.py",
+        "ingest/spread_forecast.py"
+      ],
+      "acceptance": [
+        "POST /forecast/generate returns non-null run.id",
+        "Contour tiles retrievable via /tiles/forecast_contours?run_id=<ID>"
+      ],
+      "verification": [
+        "Would run: cd api && uv run pytest",
+        "Would run: curl -X POST http://127.0.0.1:8000/forecast/generate ... (expect non-null run.id)"
+      ]
+    },
+    {
+      "id": "T04",
+      "title": "UI: use generated forecast run_id for overlay",
+      "priority": "P1",
+      "depends_on": ["T02", "T03"],
+      "description": "Wire UI so that after calling POST /forecast/generate, the returned run.id is stored in session state and used to build forecast contour tile URL.",
+      "files_likely": [
+        "ui/components/click_details.py",
+        "ui/components/map_view.py"
+      ],
+      "acceptance": [
+        "Overlay updates immediately after forecast generation",
+        "Tile requests include run_id= parameter"
+      ],
+      "verification": [
+        "Would run: make dev-api && make dev-ui",
+        "Manual: click Generate Spread Forecast, confirm overlay appears and requests include run_id="
+      ]
+    },
+    {
+      "id": "T05",
+      "title": "Add baseline /risk endpoint and UI layer",
+      "priority": "P1",
+      "depends_on": ["T02"],
+      "description": "Create new /risk route returning a simple baseline risk surface. Wire UI Risk index toggle to render this layer with clear 'baseline' labeling in legend.",
+      "files_likely": [
+        "api/routes/risk.py",
+        "api/main.py",
+        "ui/components/sidebar.py",
+        "ui/components/legend.py",
+        "ui/components/map_view.py"
+      ],
+      "acceptance": [
+        "GET /risk?min_lon=...&min_lat=...&max_lon=...&max_lat=... returns HTTP 200",
+        "UI Risk index toggle renders layer labeled as baseline"
+      ],
+      "verification": [
+        "Would run: make lint",
+        "Would run: make test",
+        "Would run: curl http://127.0.0.1:8000/risk?... (expect HTTP 200)"
+      ]
+    },
+    {
+      "id": "T06",
+      "title": "UI: add Export fires download button",
+      "priority": "P1",
+      "depends_on": ["T02"],
+      "description": "Add UI button/link that calls existing GET /fires/export with current bbox/time filters. Use API_PUBLIC_BASE_URL so download URL is browser-accessible.",
+      "files_likely": [
+        "ui/api_client.py",
+        "ui/components/sidebar.py"
+      ],
+      "acceptance": [
+        "Clicking Export fires downloads a file",
+        "Downloaded file matches current bbox/time filters"
+      ],
+      "verification": [
+        "Would run: make dev-ui",
+        "Manual: click Export fires, confirm file downloads"
+      ]
+    },
+    {
+      "id": "T07",
+      "title": "Implement real async export worker",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "Implement actual export logic in api/exports/worker.py for at least fires_csv kind. Remove TODO placeholder, write file artifact, update export_jobs.result so download works.",
+      "files_likely": [
+        "api/exports/worker.py",
+        "api/routes/exports.py"
+      ],
+      "acceptance": [
+        "One async export job (fires_csv) completes end-to-end",
+        "Job transitions queued->running->succeeded and download works"
+      ],
+      "verification": [
+        "Would run: docker compose up --build",
+        "Create export job via API, observe job succeeds, download file"
+      ]
+    },
+    {
+      "id": "T08",
+      "title": "Extend CI to run ml and ingest lint/tests",
+      "priority": "P1",
+      "depends_on": [],
+      "description": "Add ml and ingest to CI workflow matrix, mirroring existing api/ui pattern. Keep changes minimal.",
+      "files_likely": [".github/workflows/ci.yml"],
+      "acceptance": [
+        "CI workflow includes ml and ingest jobs",
+        "Jobs run ruff check and pytest for each"
+      ],
+      "verification": [
+        "Would run: cd ml && uv sync --dev && uv run pytest",
+        "Would run: cd ingest && uv sync --dev && uv run pytest",
+        "Check GitHub Actions for new ml+ingest jobs"
+      ]
+    },
+    {
+      "id": "T09",
+      "title": "Document forecast overlay operational workflow",
+      "priority": "P2",
+      "depends_on": ["T03", "T04"],
+      "description": "Add docs explaining how to ingest weather, generate a forecast via POST /forecast/generate, and see the overlay in UI. Keep instructions copy/paste runnable.",
+      "files_likely": [
+        "docs/GETTING_STARTED.md",
+        "docs/architecture.md"
+      ],
+      "acceptance": [
+        "Instructions are copy/paste runnable",
+        "Following the steps shows forecast overlay in UI"
+      ],
+      "verification": [
+        "Manual: follow documented steps in fresh environment, confirm overlay appears"
+      ]
+    },
+    {
+      "id": "T10",
+      "title": "Remove hardcoded debug log path from UI",
+      "priority": "P1",
+      "depends_on": ["T02"],
+      "description": "Delete DEBUG_LOG_PATH constant and all 'region agent log' blocks in ui/components/map_view.py. These write to hardcoded Windows path c:\\Projects\\wildfire-nowcast\\.cursor\\debug.log.",
+      "files_likely": ["ui/components/map_view.py"],
+      "acceptance": [
+        "No writes to hardcoded debug.log path",
+        "UI behavior unchanged"
+      ],
+      "verification": [
+        "Would run: make lint",
+        "Would run: make test",
+        "Run UI, confirm no file write to that path"
+      ]
+    }
+  ]
+}

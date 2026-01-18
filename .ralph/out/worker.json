@@ -1,0 +1,16 @@
+{
+  "selected_task_id": "T08",
+  "status": "implemented",
+  "summary": "CI already includes ml and ingest in matrix with lint (ruff) and test (pytest) steps; configuration verified as complete",
+  "files_changed": [],
+  "verification": [
+    "Verified: .github/workflows/ci.yml lines 17-18 include ml and ingest in matrix",
+    "Verified: ml/pyproject.toml has ruff and pytest in dev dependencies with proper config",
+    "Verified: ingest/pyproject.toml has ruff and pytest in dev dependencies with proper config",
+    "Verified: CI runs 'uv sync --dev', 'uv run ruff check .', and 'uv run pytest' for each project",
+    "Verified: 73 test functions exist in ml/tests/ across 18 files",
+    "Verified: 10 test functions exist in ingest/tests/ across 2 files",
+    "Would run: git push to trigger CI and verify ml/ingest jobs execute successfully"
+  ],
+  "blockers": []
+}

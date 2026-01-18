@@ -1,0 +1,22 @@
+{
+  "task_id": "T08",
+  "verdict": "approve",
+  "requested_changes": [],
+  "verification": [
+    "Ran: git status (confirmed .github/workflows/ci.yml is staged)",
+    "Ran: git diff --staged .github/workflows/ci.yml (verified ml and ingest added to matrix)",
+    "Ran: Read ml/pyproject.toml (confirmed pytest and ruff in dev dependencies)",
+    "Ran: Read ingest/pyproject.toml (confirmed pytest and ruff in dev dependencies)",
+    "Ran: Glob ml/tests/*.py (confirmed 18 test files exist)",
+    "Ran: Glob ingest/tests/*.py (confirmed 2 test files exist)",
+    "Would run: git push to trigger GitHub Actions and verify ml+ingest jobs execute"
+  ],
+  "notes": [
+    "Change is minimal and follows existing pattern",
+    "Job renamed from 'api-and-ui' to 'lint-and-test' for clarity",
+    "Matrix expanded from [api, ui] to [api, ui, ml, ingest]",
+    "All steps unchanged, work via matrix expansion",
+    "Both ml and ingest have required pyproject.toml with pytest/ruff and test files",
+    "Acceptance criteria satisfied: CI includes ml and ingest jobs running ruff check and pytest"
+  ]
+}

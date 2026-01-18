@@ -1,0 +1,68 @@
+{
+  "goal_file": ".ralph/GOAL.md",
+  "plan_file": ".ralph/plan.json",
+  "state_file": ".ralph/state.json",
+  "task": {
+    "id": "T08",
+    "title": "Extend CI to run ml and ingest lint/tests",
+    "priority": "P1",
+    "depends_on": [],
+    "description": "Add ml and ingest to CI workflow matrix, mirroring existing api/ui pattern. Keep changes minimal.",
+    "files_likely": [
+      ".github/workflows/ci.yml"
+    ],
+    "acceptance": [
+      "CI workflow includes ml and ingest jobs",
+      "Jobs run ruff check and pytest for each"
+    ],
+    "verification": [
+      "Would run: cd ml && uv sync --dev && uv run pytest",
+      "Would run: cd ingest && uv sync --dev && uv run pytest",
+      "Check GitHub Actions for new ml+ingest jobs"
+    ],
+    "status": "implemented",
+    "commits": [],
+    "notes": [
+      "worker: Extended CI matrix to include ml and ingest projects alongside api and ui"
+    ],
+    "review_cycles": 1
+  },
+  "requested_changes": [
+    {
+      "severity": "must",
+      "title": "Add [tool.ruff] configuration to ml/pyproject.toml",
+      "evidence": "ml/pyproject.toml:1-33 - Missing [tool.ruff] section that exists in api/pyproject.toml:30-32 and ui/pyproject.toml:19-21",
+      "suggested_fix": "Add the following section to ml/pyproject.toml after line 29 (before [tool.pytest.ini_options]):\n\n[tool.ruff]\ntarget-version = \"py311\"\nline-length = 100\n\nThis mirrors the existing pattern in api and ui projects."
+    },
+    {
+      "severity": "must",
+      "title": "Add [tool.ruff] configuration to ingest/pyproject.toml",
+      "evidence": "ingest/pyproject.toml:1-33 - Missing [tool.ruff] section that exists in api/pyproject.toml:30-32 and ui/pyproject.toml:19-21",
+      "suggested_fix": "Add the following section to ingest/pyproject.toml after line 28 (before [tool.pytest.ini_options]):\n\n[tool.ruff]\ntarget-version = \"py311\"\nline-length = 100\n\nThis mirrors the existing pattern in api and ui projects."
+    },
+    {
+      "severity": "must",
+      "title": "Rename CI job from 'api-and-ui' to reflect all projects",
+      "evidence": ".github/workflows/ci.yml:10 - Job name 'api-and-ui' is misleading now that matrix includes ml and ingest (lines 17-18)",
+      "suggested_fix": "Rename job from 'api-and-ui' to 'lint-and-test' or 'python-projects' to accurately reflect that it runs for all four projects (api, ui, ml, ingest)."
+    }
+  ],
+  "instruction": "Implement ONLY the requested changes. Do not expand scope. Do not commit.",
+  "outbox_schema": {
+    "task_id": "T01",
+    "status": "fixed|blocked",
+    "applied_changes": [
+      "..."
+    ],
+    "files_changed": [
+      "..."
+    ],
+    "verification": [
+      "Ran: ...",
+      "Would run: ..."
+    ],
+    "blockers": [
+      "if blocked..."
+    ]
+  }
+}

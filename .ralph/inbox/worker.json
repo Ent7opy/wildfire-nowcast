@@ -1,0 +1,30 @@
+{
+  "goal_file": ".ralph/GOAL.md",
+  "plan_file": ".ralph/plan.json",
+  "state_file": ".ralph/state.json",
+  "runnable_tasks": [
+    {
+      "id": "T08",
+      "title": "Extend CI to run ml and ingest lint/tests",
+      "priority": "P1",
+      "depends_on": []
+    }
+  ],
+  "instruction": "Pick ONE runnable task (most important), implement it fully, then write outbox with selected_task_id and status. Do not commit.",
+  "outbox_schema": {
+    "selected_task_id": "T01",
+    "status": "implemented|blocked",
+    "summary": "short, concrete summary",
+    "files_changed": [
+      "path1",
+      "path2"
+    ],
+    "verification": [
+      "Ran: ...",
+      "Would run: ..."
+    ],
+    "blockers": [
+      "if blocked..."
+    ]
+  }
+}

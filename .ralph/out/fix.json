@@ -1,0 +1,20 @@
+{
+  "task_id": "T08",
+  "status": "fixed",
+  "applied_changes": [
+    "Added [tool.ruff] configuration to ml/pyproject.toml (lines 31-33) mirroring api/ui pattern",
+    "Added [tool.ruff] configuration to ingest/pyproject.toml (lines 30-32) mirroring api/ui pattern",
+    "Renamed CI job from 'api-and-ui' to 'lint-and-test' to reflect all four projects in matrix"
+  ],
+  "files_changed": [
+    "ml/pyproject.toml",
+    "ingest/pyproject.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "verification": [
+    "Would run: cd ml && uv run ruff check . (should now respect target-version and line-length)",
+    "Would run: cd ingest && uv run ruff check . (should now respect target-version and line-length)",
+    "Would run: git diff ml/pyproject.toml ingest/pyproject.toml .github/workflows/ci.yml (to confirm minimal diff)"
+  ],
+  "blockers": []
+}
