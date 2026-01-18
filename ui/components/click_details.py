@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 import streamlit as st
 
-from api_client import ApiError, ApiUnavailableError, generate_forecast
+from api_client import ApiError, ApiUnavailableError, create_jit_forecast
 from runtime_config import forecast_region_name
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -91,30 +91,34 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
             fire_lat + radius_deg,  # max_lat
         )
         
-        if st.button("Generate Spread Forecast", key="generate_forecast_btn"):
+        # Disable button if a JIT forecast is currently running
+        is_forecast_running = st.session_state.get("jit_job_id") is not None
+        
+        if st.button(
+            "Generate Spread Forecast",
+            key="generate_forecast_btn",
+            disabled=is_forecast_running,
+        ):
             try:
-                with st.spinner("Generating forecast (this may take a moment)…"):
-                    ref_time = _parse_time(acq_time)
-                    if ref_time is None:
-                        ref_time = datetime.now(timezone.utc)
-                    elif ref_time.tzinfo is None:
-                        ref_time = ref_time.replace(tzinfo=timezone.utc)
-                    
-                    forecast_data = generate_forecast(
-                        bbox=forecast_bbox,
-                        horizons=[24, 48, 72],
-                        region_name=forecast_region_name(),
-                        forecast_reference_time=ref_time,
-                    )
-                    
-                    st.success("Forecast generated successfully!")
-                    st.json(forecast_data.get("forecast", {}))
-                    
-                    st.session_state.last_forecast = forecast_data
-                    st.session_state.last_forecast_bbox = forecast_bbox
-                    st.session_state.show_forecast = True
-                    # Force a rerun to show the new forecast on the map
+                ref_time = _parse_time(acq_time)
+                if ref_time is None:
+                    ref_time = datetime.now(timezone.utc)
+                elif ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                
+                job_data = create_jit_forecast(
+                    bbox=forecast_bbox,
+                    horizons=[24, 48, 72],
+                    forecast_reference_time=ref_time,
+                )
+                
+                job_id = job_data.get("job_id")
+                if job_id:
+                    st.session_state.jit_job_id = job_id
+                    st.success("Forecast job queued successfully!")
                     st.rerun()
+                else:
+                    st.error("Failed to start forecast: no job ID returned")
             except ApiUnavailableError:
                 st.error("Data service is unavailable right now. Please try again in a moment.")
             except ApiError as e:
@@ -122,5 +126,8 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
                 st.error(f"Forecast generation failed {details}".strip())
                 if e.response_text:
                     st.caption(str(e.response_text)[:300])
+        
+        if is_forecast_running:
+            st.caption("Forecast in progress...")
     else:
         st.warning("Selected fire is missing coordinates. Cannot generate forecast.")
