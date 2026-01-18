@@ -109,6 +109,7 @@ data/dem/bulgaria/
 data/dem/test_region/
 data/dem/smoke_grid/
 data/dem/smoke_grid_test/
+data/dem/global_base/
 data/terrain/bulgaria/
 data/weather/gfs_0p25/
 output.nc
