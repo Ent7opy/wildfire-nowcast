@@ -125,7 +125,32 @@ def create_jit_forecast(request: JitForecastRequest):
     3. Generate spread forecast
     4. Persist results
 
-    Returns job_id for tracking the job.
+    Args:
+        request: JIT forecast request containing:
+            - bbox: [min_lon, min_lat, max_lon, max_lat] in decimal degrees (WGS84)
+            - forecast_reference_time (optional): ISO timestamp (defaults to current time)
+            - horizons_hours (optional): list of forecast horizons in hours (defaults to [24, 48, 72])
+
+    Returns:
+        JitForecastResponse with job_id and status='queued'
+
+    Example:
+        ```bash
+        curl -X POST http://localhost:8000/forecast/jit \\
+          -H "Content-Type: application/json" \\
+          -d '{
+            "bbox": [20.0, 40.0, 21.0, 41.0],
+            "horizons_hours": [24, 48, 72]
+          }'
+        ```
+
+        Response:
+        ```json
+        {
+          "job_id": "550e8400-e29b-41d4-a716-446655440000",
+          "status": "queued"
+        }
+        ```
     """
     if len(request.bbox) != 4:
         raise HTTPException(
@@ -161,8 +186,50 @@ def get_jit_forecast_status(job_id: UUID):
     Returns current job status with user-friendly progress messages.
     Includes result data on completion and error details on failure.
 
+    Args:
+        job_id: UUID of the JIT forecast job
+
+    Returns:
+        Job status response containing:
+        - job_id: UUID of the job
+        - status: pending|ingesting_terrain|ingesting_weather|running_forecast|completed|failed
+        - progress_message: Human-readable status message
+        - created_at: ISO timestamp when job was created
+        - updated_at: ISO timestamp of last status update
+        - result (if completed): forecast run_id and asset URLs
+        - error (if failed): error message
+
     Example:
-        GET /forecast/jit/550e8400-e29b-41d4-a716-446655440000
+        ```bash
+        curl http://localhost:8000/forecast/jit/550e8400-e29b-41d4-a716-446655440000
+        ```
+
+        Response (in progress):
+        ```json
+        {
+          "job_id": "550e8400-e29b-41d4-a716-446655440000",
+          "status": "ingesting_weather",
+          "progress_message": "Fetching weather data...",
+          "created_at": "2026-01-19T12:00:00Z",
+          "updated_at": "2026-01-19T12:00:15Z"
+        }
+        ```
+
+        Response (completed):
+        ```json
+        {
+          "job_id": "550e8400-e29b-41d4-a716-446655440000",
+          "status": "completed",
+          "progress_message": "Forecast complete!",
+          "created_at": "2026-01-19T12:00:00Z",
+          "updated_at": "2026-01-19T12:02:30Z",
+          "result": {
+            "run_id": 123,
+            "raster_urls": ["..."],
+            "contour_geojson": {"type": "FeatureCollection", "features": [...]}
+          }
+        }
+        ```
     """
     job = repo.get_jit_job(job_id)
     if not job:
