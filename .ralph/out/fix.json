@@ -1,20 +1,21 @@
 {
-  "task_id": "T08",
+  "task_id": "T09",
   "status": "fixed",
   "applied_changes": [
-    "Added [tool.ruff] configuration to ml/pyproject.toml (lines 31-33) mirroring api/ui pattern",
-    "Added [tool.ruff] configuration to ingest/pyproject.toml (lines 30-32) mirroring api/ui pattern",
-    "Renamed CI job from 'api-and-ui' to 'lint-and-test' to reflect all four projects in matrix"
+    "Added Step 2.5 'Ingest Terrain Data (Required for Forecast)' before forecast generation step, including copy/paste runnable commands with correct --region-name and --bbox parameters matching the forecast example",
+    "Updated 'Optional: Additional Data Ingestion' section to 'Optional: Additional Terrain Data (For Other Regions)' to clarify it's for regions beyond the Balkans example"
   ],
   "files_changed": [
-    "ml/pyproject.toml",
-    "ingest/pyproject.toml",
-    ".github/workflows/ci.yml"
+    "docs/GETTING_STARTED.md"
   ],
   "verification": [
-    "Would run: cd ml && uv run ruff check . (should now respect target-version and line-length)",
-    "Would run: cd ingest && uv run ruff check . (should now respect target-version and line-length)",
-    "Would run: git diff ml/pyproject.toml ingest/pyproject.toml .github/workflows/ci.yml (to confirm minimal diff)"
+    "Ran: Read docs/GETTING_STARTED.md to understand current structure",
+    "Ran: Applied terrain ingestion step insertion before Step 3 (forecast generation)",
+    "Ran: Updated optional section to clarify scope for other regions",
+    "Ran: Verified changes by reading updated sections",
+    "Would run: Follow documented workflow to verify terrain data is ingested before forecast generation succeeds",
+    "Would run: docker compose exec api uv run --project ingest -m ingest.dem_preprocess --region-name balkans --bbox 19.0 41.0 23.0 43.0 --cog",
+    "Would run: curl -X POST http://localhost:8000/forecast/generate -H 'Content-Type: application/json' -d '{\"min_lon\": 19.0, \"min_lat\": 41.0, \"max_lon\": 23.0, \"max_lat\": 43.0, \"region_name\": \"balkans\", \"horizons_hours\": [24, 48, 72]}'"
   ],
   "blockers": []
 }

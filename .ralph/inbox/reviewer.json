@@ -3,30 +3,31 @@
   "plan_file": ".ralph/plan.json",
   "state_file": ".ralph/state.json",
   "task": {
-    "id": "T08",
-    "title": "Extend CI to run ml and ingest lint/tests",
-    "priority": "P1",
-    "depends_on": [],
-    "description": "Add ml and ingest to CI workflow matrix, mirroring existing api/ui pattern. Keep changes minimal.",
+    "id": "T09",
+    "title": "Document forecast overlay operational workflow",
+    "priority": "P2",
+    "depends_on": [
+      "T03",
+      "T04"
+    ],
+    "description": "Add docs explaining how to ingest weather, generate a forecast via POST /forecast/generate, and see the overlay in UI. Keep instructions copy/paste runnable.",
     "files_likely": [
-      ".github/workflows/ci.yml"
+      "docs/GETTING_STARTED.md",
+      "docs/architecture.md"
     ],
     "acceptance": [
-      "CI workflow includes ml and ingest jobs",
-      "Jobs run ruff check and pytest for each"
+      "Instructions are copy/paste runnable",
+      "Following the steps shows forecast overlay in UI"
     ],
     "verification": [
-      "Would run: cd ml && uv sync --dev && uv run pytest",
-      "Would run: cd ingest && uv sync --dev && uv run pytest",
-      "Check GitHub Actions for new ml+ingest jobs"
+      "Manual: follow documented steps in fresh environment, confirm overlay appears"
     ],
     "status": "implemented",
     "commits": [],
     "notes": [
-      "worker: Extended CI matrix to include ml and ingest projects alongside api and ui",
-      "worker: CI already includes ml and ingest in matrix with lint (ruff) and test (pytest) steps; configuration verified as complete"
+      "worker: Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing."
     ],
-    "review_cycles": 1
+    "review_cycles": 4
   },
   "instruction": "Review the repo changes for this task. Do NOT implement. You may run: git status, git diff, tests. Output verdict approve|changes_requested plus change list.",
   "outbox_schema": {

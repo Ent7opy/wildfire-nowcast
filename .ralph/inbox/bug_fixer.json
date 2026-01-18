@@ -3,48 +3,38 @@
   "plan_file": ".ralph/plan.json",
   "state_file": ".ralph/state.json",
   "task": {
-    "id": "T08",
-    "title": "Extend CI to run ml and ingest lint/tests",
-    "priority": "P1",
-    "depends_on": [],
-    "description": "Add ml and ingest to CI workflow matrix, mirroring existing api/ui pattern. Keep changes minimal.",
+    "id": "T09",
+    "title": "Document forecast overlay operational workflow",
+    "priority": "P2",
+    "depends_on": [
+      "T03",
+      "T04"
+    ],
+    "description": "Add docs explaining how to ingest weather, generate a forecast via POST /forecast/generate, and see the overlay in UI. Keep instructions copy/paste runnable.",
     "files_likely": [
-      ".github/workflows/ci.yml"
+      "docs/GETTING_STARTED.md",
+      "docs/architecture.md"
     ],
     "acceptance": [
-      "CI workflow includes ml and ingest jobs",
-      "Jobs run ruff check and pytest for each"
+      "Instructions are copy/paste runnable",
+      "Following the steps shows forecast overlay in UI"
     ],
     "verification": [
-      "Would run: cd ml && uv sync --dev && uv run pytest",
-      "Would run: cd ingest && uv sync --dev && uv run pytest",
-      "Check GitHub Actions for new ml+ingest jobs"
+      "Manual: follow documented steps in fresh environment, confirm overlay appears"
     ],
     "status": "implemented",
     "commits": [],
     "notes": [
-      "worker: Extended CI matrix to include ml and ingest projects alongside api and ui"
+      "worker: Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing."
     ],
-    "review_cycles": 1
+    "review_cycles": 4
   },
   "requested_changes": [
     {
       "severity": "must",
-      "title": "Add [tool.ruff] configuration to ml/pyproject.toml",
-      "evidence": "ml/pyproject.toml:1-33 - Missing [tool.ruff] section that exists in api/pyproject.toml:30-32 and ui/pyproject.toml:19-21",
-      "suggested_fix": "Add the following section to ml/pyproject.toml after line 29 (before [tool.pytest.ini_options]):\n\n[tool.ruff]\ntarget-version = \"py311\"\nline-length = 100\n\nThis mirrors the existing pattern in api and ui projects."
-    },
-    {
-      "severity": "must",
-      "title": "Add [tool.ruff] configuration to ingest/pyproject.toml",
-      "evidence": "ingest/pyproject.toml:1-33 - Missing [tool.ruff] section that exists in api/pyproject.toml:30-32 and ui/pyproject.toml:19-21",
-      "suggested_fix": "Add the following section to ingest/pyproject.toml after line 28 (before [tool.pytest.ini_options]):\n\n[tool.ruff]\ntarget-version = \"py311\"\nline-length = 100\n\nThis mirrors the existing pattern in api and ui projects."
-    },
-    {
-      "severity": "must",
-      "title": "Rename CI job from 'api-and-ui' to reflect all projects",
-      "evidence": ".github/workflows/ci.yml:10 - Job name 'api-and-ui' is misleading now that matrix includes ml and ingest (lines 17-18)",
-      "suggested_fix": "Rename job from 'api-and-ui' to 'lint-and-test' or 'python-projects' to accurately reflect that it runs for all four projects (api, ui, ml, ingest)."
+      "title": "Terrain ingestion is required for forecast workflow but marked as optional and missing parameters",
+      "evidence": "docs/GETTING_STARTED.md:178-276 - The forecast overlay workflow (Step 3, line 210-246) calls POST /forecast/generate with region_name=\"balkans\", which requires terrain metadata. api/routes/forecast.py:167 calls get_region_grid_spec(request.region_name), and api/fires/service.py:20-38 shows this function raises ValueError \"No terrain metadata found for region '{region_name}'\" if terrain data is missing. However, terrain ingestion is documented as \"Optional\" at line 262 and appears AFTER the forecast generation steps. Additionally, the terrain command at line 271 lacks --region-name and --bbox arguments, so it defaults to region=\"test_region\" (ingest/dem_preprocess.py:55) which won't match the forecast example's region=\"balkans\".",
+      "suggested_fix": "Add terrain ingestion as a required step BEFORE Step 3. Insert a new step between current Step 2 and Step 3:\n\n### Step 2.5: Ingest Terrain Data (Required for Forecast)\n\nForecast generation requires terrain data for the region grid specification:\n\n```bash\n# Using Docker Compose (use same bbox as forecast)\ndocker compose exec api uv run --project ingest -m ingest.dem_preprocess --region-name balkans --bbox 19.0 41.0 23.0 43.0 --cog\n\n# Or using make\nmake ingest-dem ARGS=\"--region-name balkans --bbox 19.0 41.0 23.0 43.0 --cog\"\n```\n\n**Note:** The region name and bounding box should match what you'll use in Step 3. For other regions, adjust accordingly.\n\nYou can verify terrain data was ingested:\n\n```bash\ndocker compose exec db psql -U wildfire -d wildfire -c \"SELECT id, region_name, dem_source FROM terrain_metadata ORDER BY created_at DESC LIMIT 5;\"\n```\n\nThen update the \"Optional: Additional Data Ingestion\" section (line 262) to clarify it's for OTHER regions/use cases:\n\n## Optional: Additional Terrain Data (For Other Regions)\n\nIf you want to work with additional regions beyond the Balkans example above:\n\n```bash\n# Example for a different region\ndocker compose exec api uv run --project ingest -m ingest.dem_preprocess --region-name <region> --bbox <min_lon> <min_lat> <max_lon> <max_lat> --cog\n```"
     }
   ],
   "instruction": "Implement ONLY the requested changes. Do not expand scope. Do not commit.",

@@ -1,16 +1,19 @@
 {
-  "selected_task_id": "T08",
+  "selected_task_id": "T09",
   "status": "implemented",
-  "summary": "CI already includes ml and ingest in matrix with lint (ruff) and test (pytest) steps; configuration verified as complete",
-  "files_changed": [],
+  "summary": "Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing.",
+  "files_changed": [
+    "docs/GETTING_STARTED.md"
+  ],
   "verification": [
-    "Verified: .github/workflows/ci.yml lines 17-18 include ml and ingest in matrix",
-    "Verified: ml/pyproject.toml has ruff and pytest in dev dependencies with proper config",
-    "Verified: ingest/pyproject.toml has ruff and pytest in dev dependencies with proper config",
-    "Verified: CI runs 'uv sync --dev', 'uv run ruff check .', and 'uv run pytest' for each project",
-    "Verified: 73 test functions exist in ml/tests/ across 18 files",
-    "Verified: 10 test functions exist in ingest/tests/ across 2 files",
-    "Would run: git push to trigger CI and verify ml/ingest jobs execute successfully"
+    "Would run: Manual verification following documented steps",
+    "Would run: 1. make db-up && make migrate",
+    "Would run: 2. make ingest-firms ARGS='--day-range 3 --area 19,41,23,43'",
+    "Would run: 3. make ingest-weather ARGS='--run-time 2025-01-18T00:00Z'",
+    "Would run: 4. make dev-api (terminal 1) && make dev-ui (terminal 2)",
+    "Would run: 5. curl -X POST http://localhost:8000/forecast/generate -H 'Content-Type: application/json' -d '{\"min_lon\": 19.0, \"min_lat\": 41.0, \"max_lon\": 23.0, \"max_lat\": 43.0, \"region_name\": \"balkans\", \"horizons_hours\": [24, 48, 72]}'",
+    "Would run: 6. Open http://localhost:8501, navigate to Balkans region, toggle 'Show forecast overlay'",
+    "Would run: Expected: Forecast contours appear on map, browser DevTools shows /tiles/forecast_contours requests with run_id parameter"
   ],
   "blockers": []
 }

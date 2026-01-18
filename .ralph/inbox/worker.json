@@ -4,10 +4,13 @@
   "state_file": ".ralph/state.json",
   "runnable_tasks": [
     {
-      "id": "T08",
-      "title": "Extend CI to run ml and ingest lint/tests",
-      "priority": "P1",
-      "depends_on": []
+      "id": "T09",
+      "title": "Document forecast overlay operational workflow",
+      "priority": "P2",
+      "depends_on": [
+        "T03",
+        "T04"
+      ]
     }
   ],
   "instruction": "Pick ONE runnable task (most important), implement it fully, then write outbox with selected_task_id and status. Do not commit.",
