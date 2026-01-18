@@ -214,7 +214,12 @@ def download_export_job(job_id: UUID):
     if file_path:
         if not os.path.exists(file_path):
              raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found on server")
-             
-        return FileResponse(file_path, filename=f"export_{job_id}.bin") # MVP filename
+        
+        # Derive filename from kind and original file
+        kind = job.get("kind", "export")
+        original_name = os.path.basename(file_path)
+        filename = f"{kind}_{job_id}_{original_name}"
+        
+        return FileResponse(file_path, filename=filename)
     
     return result
