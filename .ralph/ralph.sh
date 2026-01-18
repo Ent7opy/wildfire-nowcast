@@ -520,6 +520,12 @@ commit_task() {
 
 plan() {
   need_cmd jq
+
+  info "Cleaning up previous Ralph state and outputs..."
+  rm -f "$STATE_FILE" "$PLAN_FILE"
+  rm -rf "$INBOX_DIR" "$OUT_DIR"
+  mkdir -p "$INBOX_DIR" "$OUT_DIR"
+
   prepare_goal_from_task_file
   [[ -f "$GOAL_FILE" ]] || die "Missing goal file: $GOAL_FILE (run ./.ralph/ralph.sh init first)"
 
