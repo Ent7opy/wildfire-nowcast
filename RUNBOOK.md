@@ -300,3 +300,87 @@ Checkpoint 5 (QA)
 5. **CI expansion may introduce flaky deps**.  
    Mitigation: keep CI lean, avoid integration tests requiring network downloads; run unit tests + lint.
 
+---
+
+## 6) JIT Forecast Pipeline Observability
+
+This section documents how to monitor and troubleshoot the Just-In-Time (JIT) forecast pipeline worker (`api/forecast/worker.py`).
+
+### Worker Architecture
+- The JIT worker runs as a separate Docker Compose service (`worker`) that processes RQ tasks from Redis.
+- Tasks are enqueued by the API when users trigger JIT forecasts via `POST /forecast/jit`.
+- Each task updates the `jit_forecast_jobs` table with status transitions: `pending` → `ingesting_terrain` → `ingesting_weather` → `running_forecast` → `completed` or `failed`.
+
+### Inspecting Worker Logs
+All worker operations include structured logging with `job_id` context. View logs via:
+
+```bash
+docker compose logs worker -f
+```
+
+Example log entries:
+```
+JIT forecast pipeline started: job_id=<UUID>, bbox=(20.0, 40.0, 21.0, 41.0)
+JIT job <UUID>: starting terrain ingestion
+JIT job <UUID>: starting weather ingestion
+JIT job <UUID>: starting forecast
+JIT forecast pipeline completed: job_id=<UUID>
+```
+
+On failure, logs include full traceback:
+```
+JIT forecast pipeline failed: job_id=<UUID>, error=ValueError: ...
+Traceback (most recent call last):
+  ...
+```
+
+### Checking Worker Health
+The worker service has a healthcheck configured but currently disabled (`healthcheck: disable: true` in `docker-compose.yml`). This is acceptable for development but should be enabled for production deployments.
+
+To verify the worker is running:
+```bash
+docker compose ps worker
+```
+
+Expected output shows `worker` service status as `running`.
+
+### Querying Job Status via API
+Check the status of any JIT forecast job:
+```bash
+curl http://localhost:8000/forecast/jit/<JOB_ID>
+```
+
+Response includes:
+- `status`: current pipeline stage or terminal state (`completed`, `failed`)
+- `progress_message`: user-friendly description of current activity
+- `result`: forecast outputs on success (raster URLs, contour GeoJSON)
+- `error`: error message on failure
+
+### Querying Job Status via Database
+Directly inspect the `jit_forecast_jobs` table:
+```sql
+SELECT id, status, created_at, updated_at, error
+FROM jit_forecast_jobs
+WHERE id = '<JOB_ID>';
+```
+
+### Common Failure Scenarios
+1. **Terrain ingestion timeout**: Job stuck in `ingesting_terrain` state. Check worker logs for Copernicus DEM download failures or network timeouts.
+2. **Weather ingestion failure**: Job fails during `ingesting_weather` with GRIB download errors. Verify NOAA NOMADS availability and network connectivity.
+3. **Forecast execution error**: Job fails during `running_forecast`. Check logs for missing weather/terrain data or model errors.
+
+### Troubleshooting Workflow
+1. Check job status via API: `GET /forecast/jit/<JOB_ID>`
+2. If status is `failed`, inspect `error` field for high-level cause
+3. View detailed worker logs: `docker compose logs worker -f`
+4. Query database for job record: `SELECT * FROM jit_forecast_jobs WHERE id = '<JOB_ID>'`
+5. For ingestion failures, verify external dependencies (Copernicus DEM, NOAA GFS)
+
+### Restarting the Worker
+If the worker becomes unresponsive:
+```bash
+docker compose restart worker
+```
+
+In-flight jobs will fail and must be retried by the user.
+
