@@ -1,14 +1,15 @@
 {
   "selected_task_id": "T99",
   "status": "implemented",
-  "summary": "Created api/tests/conftest.py to fix Python path for cross-module imports. File adds workspace root to sys.path enabling api tests to import from ingest, ml, and other sibling packages. Also registers pytest.mark.integration custom mark.",
+  "summary": "Removed 3 malformed task objects from state.json (2 with null fields + T99 meta-task itself). State now contains exactly 3 valid tasks: WN-FIRE-004, WN-FIRE-006, WN-FIRE-007.",
   "files_changed": [
-    "api/tests/conftest.py"
+    ".ralph/state.json"
   ],
   "verification": [
-    "Ran: cd api && uv run python -c 'import sys; sys.path.insert(0, \"..\"); import ingest; print(\"Successfully imported ingest module\")' (SUCCESS)",
-    "Ran: cd api && uv run pytest --collect-only tests/test_jit_forecast_integration.py (SUCCESS - collected 5 items, no AttributeError)",
-    "Ran: cd api && uv run pytest tests/test_jit_forecast_integration.py::test_jit_pipeline_invalid_bbox -v (COLLECTED - test runs but fails on endpoint assertion, not import error)"
+    "Ran: jq '.tasks | length' .ralph/state.json → outputs 3",
+    "Ran: jq '.tasks[] | select(.id == null)' .ralph/state.json → outputs nothing (no null ids)",
+    "Ran: jq '.tasks[].id' .ralph/state.json → outputs WN-FIRE-004, WN-FIRE-006, WN-FIRE-007",
+    "Ran: python3 -m json.tool .ralph/state.json → JSON valid"
   ],
   "blockers": []
 }

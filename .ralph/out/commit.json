@@ -3,24 +3,22 @@
   "status": "committed",
   "commits": [
     {
-      "sha": "74b1abc",
-      "message": "fix(api): enable cross-module imports in pytest"
+      "sha": "09b3f74",
+      "message": "chore(ralph): update orchestrator state for fire likelihood goal"
     }
   ],
   "verification": [
-    "Ran: git status --porcelain=v1",
-    "Ran: git ls-files -o --exclude-standard",
-    "Ran: git diff --name-only",
-    "Ran: git diff --stat",
-    "Ran: git diff --check",
-    "Ran: git add api/tests/conftest.py",
-    "Ran: git commit -m 'fix(api): enable cross-module imports in pytest'",
-    "Ran: cd api && uv run python -c 'import sys; sys.path.insert(0, \"..\"); import ingest' (succeeded)",
-    "Ran: cd api && uv run pytest --collect-only tests/test_jit_forecast_integration.py (collected 5 tests)"
+    "Ran: git status --porcelain=v1 (checked for artifacts and unrelated changes)",
+    "Ran: git diff --check (checked for whitespace errors in staged files)",
+    "Ran: git diff --cached --stat (reviewed staged changes before commit)",
+    "Ran: git commit -m 'chore(ralph): update orchestrator state for fire likelihood goal'",
+    "Ran: git log -1 --format='%H %s' (verified commit SHA and message)",
+    "Ran: git status --porcelain=v1 (confirmed clean commit, only ephemeral Ralph files and implementation files remain unstaged)",
+    "Would run: jq '.tasks[] | select(.id == \"WN-FIRE-004\") | .status' .ralph/state.json (would verify WN-FIRE-004 marked as completed)"
   ],
   "notes": [
-    "Created single semantic commit for api/tests/conftest.py",
-    "Ralph orchestrator files (.ralph/*) remain modified but were correctly excluded from commit",
-    "All acceptance criteria verified: cross-module imports work, pytest collection succeeds"
+    "Committed only Ralph orchestrator state files (state.json, plan.json, state.history.json, GOAL.from_task.md, TASK_QUEUE.json) to reflect goal change from JIT pipeline to Fire Likelihood Score and mark WN-FIRE-004 as completed.",
+    "Did NOT commit implementation files (api/*, ui/*, ingest/*) or ephemeral Ralph files (.ralph/inbox/*, .ralph/out/*) - these should be committed separately as part of their respective feature tasks.",
+    "Remaining unstaged changes include: implementation files with Fire Likelihood Score feature code, new migrations, and test files that should be committed as part of WN-FIRE-006 and related tasks."
   ]
 }

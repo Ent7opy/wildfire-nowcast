@@ -1,32 +1,7 @@
 {
   "goal_file": ".ralph/GOAL.md",
-  "goal_summary": "Transform the wildfire nowcast system from region-specific manual ingestion to a global Just-In-Time (JIT) pipeline where clicking any fire triggers automated background ingestion (terrain, weather) and forecast generation, providing worldwide coverage without pre-provisioned databases.",
-  "task": {
-    "id": "T99",
-    "title": "Unblock T16: Fix Python path for cross-module imports in api tests",
-    "priority": "P0",
-    "description": "The integration test in api/tests/test_jit_forecast_integration.py fails because it cannot import the 'ingest' module (sibling package). The test needs to patch functions from ingest.dem_preprocess, ingest.weather_ingest, etc., but these modules are not importable from the api/ directory. The pyproject.toml specifies pythonpath = ['..'], but this configuration is not being respected by pytest 8.4.2. Add a conftest.py file to api/tests/ that adds the workspace root to sys.path, enabling cross-module imports. Also register the pytest.mark.integration custom mark to eliminate warnings.",
-    "acceptance": [
-      "File api/tests/conftest.py exists",
-      "conftest.py adds parent directory to sys.path at test collection time",
-      "conftest.py registers pytest.mark.integration custom mark",
-      "Test can import ingest module: cd api && uv run python -c 'import sys; sys.path.insert(0, \"..\"); import ingest' succeeds",
-      "Integration test collection succeeds: cd api && uv run pytest --collect-only tests/test_jit_forecast_integration.py (no AttributeError)"
-    ],
-    "verification": [
-      "cd api && uv run pytest --collect-only tests/test_jit_forecast_integration.py",
-      "cd api && uv run pytest tests/test_jit_forecast_integration.py::test_jit_pipeline_invalid_bbox -v"
-    ],
-    "files_likely": [],
-    "status": "implemented",
-    "depends_on": [],
-    "commits": [],
-    "notes": [
-      "worker: Created api/tests/conftest.py to fix Python path for cross-module imports. File adds workspace root to sys.path enabling api tests to import from ingest, ml, and other sibling packages. Also registers pytest.mark.integration custom mark."
-    ],
-    "review_cycles": 0,
-    "unblock_attempts": 0
-  },
+  "goal_summary": "Improve wildfire detection quality by replacing naive FIRMS confidence filtering with a composite Fire Likelihood Score that combines FIRMS confidence (weak prior), persistence filtering, land-cover plausibility, weather plausibility, and industrial false-source masking. Fix UI bugs (tooltip, details panel, coordinate extraction) and update UI to reflect new likelihood semantics.",
+  "task": null,
   "instruction": "Review the repo changes for this task. Do NOT implement. You may run: git status, git diff, tests. Output verdict approve|changes_requested plus change list.",
   "outbox_schema": {
     "task_id": "T01",
