@@ -288,7 +288,6 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         finalize_spread_forecast_run,
     )
     from ingest.config import REPO_ROOT
-    from pathlib import Path
 
     if not request.region_name:
         raise HTTPException(

@@ -4,7 +4,6 @@ import logging
 import os
 import traceback
 from datetime import datetime, timezone
-from pathlib import Path
 from redis import Redis
 from rq import Queue
 

@@ -8,8 +8,6 @@ This configuration file:
 import sys
 from pathlib import Path
 
-import pytest
-
 # Add workspace root to Python path for cross-module imports
 # This enables api tests to import from ingest, ml, and other sibling packages
 workspace_root = Path(__file__).parent.parent.parent

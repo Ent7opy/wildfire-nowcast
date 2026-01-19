@@ -283,11 +283,8 @@ def test_jit_pipeline_caching_behavior():
     Uses real DB queries (find_cached_terrain/find_cached_weather) to validate
     caching logic, but mocks expensive operations (actual downloads).
     """
-    from unittest.mock import call
-    
     test_bbox = [20.0, 40.0, 20.1, 40.1]
     mock_terrain_id = 1
-    mock_weather_run_id = 42
     mock_forecast = MagicMock()
     mock_forecast.probabilities = xr.DataArray(
         np.random.rand(3, 10, 10),

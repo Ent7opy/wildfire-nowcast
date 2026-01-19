@@ -160,7 +160,6 @@ def test_generate_forecast_persists_run():
 def test_create_jit_forecast_valid_bbox():
     """Test POST /forecast/jit with valid bbox creates job and returns job_id with status='queued'."""
     from uuid import uuid4
-    from unittest.mock import MagicMock
     
     mock_job_id = uuid4()
     mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
