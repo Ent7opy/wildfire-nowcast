@@ -41,25 +41,25 @@ def handle_jit_pipeline_failure(job, connection, type, value, traceback):
 def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, float], forecast_params: dict):
     """Execute JIT forecast pipeline: ingest terrain -> weather -> run forecast."""
     logger.info(f"JIT forecast pipeline started: job_id={job_id}, bbox={bbox}")
-    
+
     try:
         from ingest.dem_preprocess import ingest_terrain_for_bbox
         from ingest.weather_ingest import ingest_weather_for_bbox
-        
-        repo.update_jit_job_status(job_id, "ingesting_terrain")
-        logger.info(f"JIT job {job_id}: starting terrain ingestion")
-        
-        terrain_output_dir = REPO_ROOT / "data" / "terrain"
-        terrain_output_dir.mkdir(parents=True, exist_ok=True)
-        terrain_id = ingest_terrain_for_bbox(bbox, terrain_output_dir)
-        logger.info(f"JIT job {job_id}: terrain ingestion completed, terrain_id={terrain_id}")
-        
-        repo.update_jit_job_status(job_id, "ingesting_weather")
-        logger.info(f"JIT job {job_id}: starting weather ingestion")
-        
-        weather_output_dir = REPO_ROOT / "data" / "weather"
-        weather_output_dir.mkdir(parents=True, exist_ok=True)
-        
+
+        # Check for cached terrain
+        cached_terrain = repo.find_cached_terrain(bbox)
+        if cached_terrain:
+            terrain_id = cached_terrain["id"]
+            logger.info(f"JIT job {job_id}: cache hit for terrain, terrain_id={terrain_id}")
+        else:
+            repo.update_jit_job_status(job_id, "ingesting_terrain")
+            logger.info(f"JIT job {job_id}: starting terrain ingestion")
+
+            terrain_output_dir = REPO_ROOT / "data" / "terrain"
+            terrain_output_dir.mkdir(parents=True, exist_ok=True)
+            terrain_id = ingest_terrain_for_bbox(bbox, terrain_output_dir)
+            logger.info(f"JIT job {job_id}: terrain ingestion completed, terrain_id={terrain_id}")
+
         # Parse forecast_reference_time or use current time
         if forecast_params.get("forecast_reference_time"):
             forecast_time = datetime.fromisoformat(
@@ -69,21 +69,33 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 forecast_time = forecast_time.replace(tzinfo=timezone.utc)
         else:
             forecast_time = datetime.now(timezone.utc)
-        
+
         horizons_hours = forecast_params.get("horizons_hours", [24, 48, 72])
         max_horizon = max(horizons_hours)
-        
-        weather_run_id = ingest_weather_for_bbox(
-            bbox=bbox,
-            forecast_time=forecast_time,
-            output_dir=weather_output_dir,
-            horizon_hours=max_horizon,
-        )
-        logger.info(f"JIT job {job_id}: weather ingestion completed, weather_run_id={weather_run_id}")
-        
+
+        # Check for cached weather (within 6 hour freshness window)
+        cached_weather = repo.find_cached_weather(bbox, freshness_hours=6, required_horizon_hours=max_horizon)
+        if cached_weather:
+            weather_run_id = cached_weather["id"]
+            logger.info(f"JIT job {job_id}: cache hit for weather, weather_run_id={weather_run_id}")
+        else:
+            repo.update_jit_job_status(job_id, "ingesting_weather")
+            logger.info(f"JIT job {job_id}: starting weather ingestion")
+
+            weather_output_dir = REPO_ROOT / "data" / "weather"
+            weather_output_dir.mkdir(parents=True, exist_ok=True)
+
+            weather_run_id = ingest_weather_for_bbox(
+                bbox=bbox,
+                forecast_time=forecast_time,
+                output_dir=weather_output_dir,
+                horizon_hours=max_horizon,
+            )
+            logger.info(f"JIT job {job_id}: weather ingestion completed, weather_run_id={weather_run_id}")
+
         repo.update_jit_job_status(job_id, "running_forecast")
         logger.info(f"JIT job {job_id}: starting forecast")
-        
+
         # Run spread forecast and persist products
         from ml.spread.service import SpreadForecastRequest, run_spread_forecast
         from ingest.spread_forecast import save_forecast_rasters, build_contour_records
@@ -94,7 +106,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             insert_spread_forecast_rasters,
         )
         from api.core.grid import GridSpec, get_grid_window_for_bbox
-        
+
         # Create forecast run record
         run_id = create_spread_forecast_run(
             region_name=forecast_params.get("region_name", "location-based"),
@@ -104,7 +116,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             bbox=bbox,
         )
         logger.info(f"JIT job {job_id}: created forecast run_id={run_id}")
-        
+
         try:
             # Build and execute forecast request
             request = SpreadForecastRequest(
@@ -186,7 +198,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             # Mark forecast run as failed
             finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(forecast_error)})
             raise
-        
+
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.error(
