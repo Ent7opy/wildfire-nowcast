@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.pytest_cache/
+.coverage
+.cache/
+.env
+.venv/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.git/
+tests/
+*.md
