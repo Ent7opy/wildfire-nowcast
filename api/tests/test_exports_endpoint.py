@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 from uuid import uuid4
 from datetime import datetime, timezone
 import tempfile
@@ -6,10 +6,18 @@ import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from fastapi_limiter import FastAPILimiter
 
 import api.routes.exports as exports_routes
 from api.main import app
 
+# Mock FastAPILimiter to avoid Redis initialization requirement
+mock_redis = AsyncMock()
+mock_redis.evalsha = AsyncMock(return_value=0)  # Return 0 to indicate rate limit not exceeded
+FastAPILimiter.redis = mock_redis
+FastAPILimiter.identifier = AsyncMock(return_value="test_identifier")
+FastAPILimiter.http_callback = AsyncMock()
+FastAPILimiter.lua_sha = "mock_sha"
 client = TestClient(app)
 
 def test_export_aoi_geojson(monkeypatch):
