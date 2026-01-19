@@ -98,7 +98,7 @@ def create_jit_job(bbox: BBox, request: dict[str, Any]) -> dict[str, Any]:
         )
         RETURNING id, status, created_at
     """).bindparams(bindparam("request", type_=JSONB))
-    
+
     with get_engine().begin() as conn:
         row = conn.execute(stmt, {
             "min_lon": min_lon,
@@ -144,13 +144,13 @@ def update_jit_job_status(
         ts_update = ", started_at = COALESCE(started_at, now())"
     if status in ("completed", "failed"):
         ts_update += ", finished_at = now()"
-    
+
     stmt = text(f"""
         UPDATE jit_forecast_jobs
         SET status = :status, result = :result, error = :error, updated_at = now() {ts_update}
         WHERE id = :id
     """).bindparams(bindparam("result", type_=JSONB))
-    
+
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": job_id,
@@ -158,4 +158,79 @@ def update_jit_job_status(
             "result": result,
             "error": error
         })
+
+
+def find_cached_terrain(bbox: BBox) -> Optional[dict[str, Any]]:
+    """Find existing terrain features that fully contain the bbox."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    stmt = text("""
+        SELECT
+            id,
+            region_name,
+            slope_path,
+            aspect_path,
+            ST_XMin(bbox) AS bbox_min_lon,
+            ST_YMin(bbox) AS bbox_min_lat,
+            ST_XMax(bbox) AS bbox_max_lon,
+            ST_YMax(bbox) AS bbox_max_lat,
+            created_at
+        FROM terrain_features_metadata
+        WHERE ST_Contains(bbox, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
+        ORDER BY created_at DESC
+        LIMIT 1
+    """)
+
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt, {
+            "min_lon": min_lon,
+            "min_lat": min_lat,
+            "max_lon": max_lon,
+            "max_lat": max_lat,
+        }).mappings().first()
+
+    return dict(row) if row else None
+
+
+def find_cached_weather(bbox: BBox, freshness_hours: int = 6, required_horizon_hours: int = 72) -> Optional[dict[str, Any]]:
+    """Find recent weather run that fully contains the bbox within freshness window."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    stmt = text("""
+        SELECT
+            id,
+            model,
+            run_time,
+            horizon_hours,
+            step_hours,
+            bbox_min_lon,
+            bbox_min_lat,
+            bbox_max_lon,
+            bbox_max_lat,
+            storage_path,
+            status,
+            created_at
+        FROM weather_runs
+        WHERE status = 'completed'
+          AND created_at > now() - make_interval(hours => :freshness_hours)
+          AND horizon_hours >= :required_horizon_hours
+          AND ST_Contains(
+            ST_MakeEnvelope(bbox_min_lon, bbox_min_lat, bbox_max_lon, bbox_max_lat, 4326),
+            ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+          )
+        ORDER BY created_at DESC
+        LIMIT 1
+    """)
+
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt, {
+            "freshness_hours": freshness_hours,
+            "required_horizon_hours": required_horizon_hours,
+            "min_lon": min_lon,
+            "min_lat": min_lat,
+            "max_lon": max_lon,
+            "max_lat": max_lat,
+        }).mappings().first()
+
+    return dict(row) if row else None
 
