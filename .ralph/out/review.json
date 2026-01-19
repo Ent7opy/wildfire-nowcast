@@ -1,44 +1,26 @@
 {
-  "task_id": "T14",
-  "verdict": "changes_requested",
-  "requested_changes": [
-    {
-      "severity": "must",
-      "title": "Unintended behavioral change affects all weather ingestion, not just patch_mode",
-      "evidence": "ingest/weather_ingest.py:785 - Changed from `crop_to_bbox(dataset, settings, target_bbox=grid_bounds(grid_spec))` to `crop_to_bbox(dataset, settings, target_bbox=bbox)`. This change affects ALL weather ingestion calls, not just when patch_mode=True. The grid_spec is snapped to 0.01° cell boundaries via GridSpec.from_bbox(), but the crop now uses the exact user-provided bbox instead of the cell-aligned bounds. This creates a mismatch between grid metadata (which describes snapped cells) and actual data extent.",
-      "suggested_fix": "Either: (A) Revert this line to use `grid_bounds(grid_spec)` and ensure patch mode works correctly with snapped bounds, OR (B) If the intent is to change cropping behavior for all ingestion, document this breaking change, add a note explaining why, and add test coverage for the new behavior. The task scope (T14) only mentions patch_mode changes, so option A (revert) is recommended to minimize scope."
-    },
-    {
-      "severity": "must",
-      "title": "Acceptance criterion wording mismatch with implementation",
-      "evidence": "Task acceptance criterion #2 states 'Weather cube output is spatially limited to bbox + margin'. Implementation crops output to original bbox (line 786: `target_bbox=bbox`), NOT bbox + margin. Worker notes say 'cropping output to original bbox' which matches implementation but contradicts acceptance criterion text.",
-      "suggested_fix": "Clarify acceptance criterion #2. If the intent is 'output matches original bbox' (not bbox + margin), update the acceptance text. If output should actually include the margin, change line 786 to: `target_bbox=download_bbox` (when patch_mode=True only)."
-    },
-    {
-      "severity": "must",
-      "title": "No verification evidence - acceptance criterion #4 not met",
-      "evidence": "Task acceptance criterion #4: 'Benchmark shows measurable speedup'. Task verification section lists: 'Would run: cd ingest && uv run python weather_ingest.py --bbox 20,40,20.1,40.1 --patch-mode' and 'Would run: time comparison of patch vs full mode'. Benchmark script exists at scripts/benchmark_weather_patch_mode.py but no evidence it was executed. No timing data or speedup measurement provided.",
-      "suggested_fix": "Run the benchmark script or at least one manual timing comparison showing patch_mode is faster than default mode for a small AOI. Document the results in task notes or commit message. Without this, acceptance criterion #4 remains unmet."
-    },
-    {
-      "severity": "must",
-      "title": "Tests have not been executed",
-      "evidence": "New test file ingest/tests/test_weather_ingest.py exists but is untracked (git status shows 'Untracked files'). Task verification says 'Would run: make test (ingest tests)' but no evidence tests were actually run. Tests use heavy mocking and won't catch integration issues.",
-      "suggested_fix": "Run `cd ingest && uv run pytest tests/test_weather_ingest.py -v` and confirm all tests pass. Add the test file to git. Consider adding at least one integration test that validates the patch_mode parameter flow (even if it mocks external HTTP calls)."
-    }
+  "task_id": "T99",
+  "verdict": "approve",
+  "requested_changes": [],
+  "verification": [
+    "Ran: cd /mnt/c/Projects/wildfire-nowcast/api && uv run pytest --collect-only tests/test_jit_forecast_integration.py",
+    "Ran: cd /mnt/c/Projects/wildfire-nowcast/api && uv run pytest --collect-only tests/test_jit_forecast_integration.py --strict-markers",
+    "Ran: cd /mnt/c/Projects/wildfire-nowcast/api && uv run pytest tests/test_jit_forecast_integration.py::test_jit_pipeline_invalid_bbox -v"
   ],
   "notes": [
-    "Implementation correctly adds patch_mode parameter and threads it through CLI to ingest_weather_for_bbox().",
-    "Patch mode optimizations (horizon=24h, step=6h, no precip) are correctly applied when enabled.",
-    "Spatial margin logic (0.5° padding) for download_bbox is correctly implemented.",
-    "Documentation updates in docs/ingest/ingest_weather.md clearly explain patch mode usage.",
-    "Minor: patch_mode silently overrides user-specified horizon_hours/step_hours/include_precipitation parameters. This is acceptable given the docstring explains the optimization, but could be mentioned more explicitly.",
-    "Minor: No validation that bbox is actually small (<50km x 50km) for patch mode. User could enable patch_mode for large regions and get suboptimal 24h horizon.",
-    "The most critical issue is #1 (unintended behavioral change affecting all ingestion). This should be fixed before approval."
-  ],
-  "verification": [
-    "Would run: cd ingest && uv run pytest tests/test_weather_ingest.py -v",
-    "Would run: cd /mnt/c/Projects/wildfire-nowcast && python scripts/benchmark_weather_patch_mode.py --bbox 20.0 40.0 20.1 40.1",
-    "Would run: cd ingest && uv run python -m ingest.weather_ingest --bbox 20.0 40.0 20.1 40.1 --patch-mode --run-time 2025-01-19T00:00Z"
+    "All acceptance criteria satisfied:",
+    "1. File api/tests/conftest.py exists (verified as untracked file)",
+    "2. conftest.py adds workspace root to sys.path at test collection time (lines 15-17, verified by successful pytest collection)",
+    "3. conftest.py registers pytest.mark.integration custom mark (lines 20-25 via pytest_configure, verified with --strict-markers flag)",
+    "4. Integration test collection succeeds without AttributeError (5 tests collected successfully)",
+    "5. No marker warnings with strict mode",
+    "",
+    "Implementation quality:",
+    "- Uses Path(__file__).parent.parent.parent to correctly compute workspace root",
+    "- Checks if path already in sys.path before adding (idempotent)",
+    "- Well-documented with clear docstring and inline comments",
+    "- Follows pytest conventions for conftest.py and pytest_configure hook",
+    "",
+    "Note: The test execution of test_jit_pipeline_invalid_bbox failed with KeyError on 'detail' field. This is a bug in the test itself (response.json() doesn't contain expected 'detail' key), NOT an import issue. This is out of scope for T99, which only addresses Python path configuration for cross-module imports. The fact that the test ran and failed on an assertion proves that imports are working correctly."
   ]
 }

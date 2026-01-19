@@ -1,8 +1,6 @@
 {
-  "version": 1,
-  "created_at": "2026-01-18T22:01:17Z",
   "goal_summary": "Transform the wildfire nowcast system from region-specific manual ingestion to a global Just-In-Time (JIT) pipeline where clicking any fire triggers automated background ingestion (terrain, weather) and forecast generation, providing worldwide coverage without pre-provisioned databases.",
-  "tasks": [
+  "blocked_tasks": [
     {
       "id": "T16",
       "title": "Add integration test for JIT pipeline end-to-end",
@@ -34,5 +32,22 @@
       "review_cycles": 0,
       "unblock_attempts": 3
     }
-  ]
+  ],
+  "instruction": "Investigate the deadlocked tasks and propose a surgical unblocker task T99. Use git status, ls, etc. to diagnose.",
+  "outbox_schema": {
+    "unblocker_task": {
+      "id": "T99",
+      "title": "Unblock ...",
+      "priority": "P0",
+      "description": "...",
+      "acceptance": [
+        "..."
+      ],
+      "verification": [
+        "..."
+      ]
+    },
+    "diagnosis": "...",
+    "status": "resolved|cannot_resolve"
+  }
 }

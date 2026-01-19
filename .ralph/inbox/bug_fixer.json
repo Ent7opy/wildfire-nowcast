@@ -1,61 +1,50 @@
 {
   "goal_file": ".ralph/GOAL.md",
-  "plan_file": ".ralph/plan.json",
-  "state_file": ".ralph/state.json",
+  "goal_summary": "Transform the wildfire nowcast system from region-specific manual ingestion to a global Just-In-Time (JIT) pipeline where clicking any fire triggers automated background ingestion (terrain, weather) and forecast generation, providing worldwide coverage without pre-provisioned databases.",
   "task": {
-    "id": "T14",
-    "title": "Implement weather 'patch mode' for small AOIs",
+    "id": "T18",
+    "title": "Add caching to prevent redundant ingestion for same region",
     "priority": "P2",
     "depends_on": [
-      "T03",
-      "T13"
+      "T05"
     ],
-    "description": "In ingest/weather_ingest.py, add `patch_mode=True` parameter to ingest_weather_for_bbox. When enabled, use findings from T13 to download only bbox-relevant GRIB data. If T13 shows full download is necessary, implement aggressive spatial subsetting after download and skip unnecessary variable processing. Target <10s for 10km x 10km.",
+    "description": "In api/forecast/worker.py, before ingesting terrain or weather, check if recent data exists for the bbox (within last 6 hours for weather, indefinitely for terrain). If found, reuse existing data and skip ingestion. Use spatial index on weather_runs and terrain_features tables to query by bbox overlap.",
     "files_likely": [
-      "ingest/weather_ingest.py"
+      "api/forecast/worker.py",
+      "api/forecast/repository.py"
     ],
     "acceptance": [
-      "patch_mode reduces download/processing time for small AOIs",
-      "Weather cube output is spatially limited to bbox + margin",
-      "Existing region-based ingestion still works (patch_mode=False)",
-      "Benchmark shows measurable speedup"
+      "Second click in same region skips terrain ingestion",
+      "Weather reused if within freshness window (6 hours)",
+      "Spatial query uses PostGIS ST_Intersects or similar",
+      "Cache hit logged for observability"
     ],
     "verification": [
-      "Would run: cd ingest && uv run python weather_ingest.py --bbox 20,40,20.1,40.1 --patch-mode",
-      "Would run: make test (ingest tests)",
-      "Would run: time comparison of patch vs full mode"
+      "Would run: manual test clicking same fire twice",
+      "Would run: inspect worker logs for 'cache hit'",
+      "Would run: make test"
     ],
     "status": "implemented",
     "commits": [],
     "notes": [
-      "worker: Added patch_mode parameter to weather ingestion for small AOI optimization. When enabled, reduces horizon to 24h, uses 6h steps, skips precipitation, and adds 0.5° spatial margin to download bbox while cropping output to original bbox."
+      "worker: Added caching to prevent redundant ingestion for same region. Terrain is cached indefinitely using PostGIS spatial queries. Weather is cached for 6 hours. Cache hits are logged for observability.",
+      "worker: Added caching to prevent redundant ingestion for same region. Terrain is cached indefinitely using PostGIS spatial queries. Weather is cached for 6 hours. Cache hits are logged for observability."
     ],
-    "review_cycles": 2
+    "review_cycles": 7,
+    "unblock_attempts": 0
   },
   "requested_changes": [
     {
       "severity": "must",
-      "title": "Unintended behavioral change affects all weather ingestion, not just patch_mode",
-      "evidence": "ingest/weather_ingest.py:785 - Changed from `crop_to_bbox(dataset, settings, target_bbox=grid_bounds(grid_spec))` to `crop_to_bbox(dataset, settings, target_bbox=bbox)`. This change affects ALL weather ingestion calls, not just when patch_mode=True. The grid_spec is snapped to 0.01° cell boundaries via GridSpec.from_bbox(), but the crop now uses the exact user-provided bbox instead of the cell-aligned bounds. This creates a mismatch between grid metadata (which describes snapped cells) and actual data extent.",
-      "suggested_fix": "Either: (A) Revert this line to use `grid_bounds(grid_spec)` and ensure patch mode works correctly with snapped bounds, OR (B) If the intent is to change cropping behavior for all ingestion, document this breaking change, add a note explaining why, and add test coverage for the new behavior. The task scope (T14) only mentions patch_mode changes, so option A (revert) is recommended to minimize scope."
+      "title": "Spatial query uses ST_Intersects instead of ST_Contains, causing incorrect cache hits",
+      "evidence": "api/forecast/repo.py:179 - ST_Intersects(bbox, ST_MakeEnvelope(...)) allows partial overlap cache hits. Same issue at api/forecast/repo.py:217 for weather caching.",
+      "suggested_fix": "Replace ST_Intersects with ST_Contains to ensure cached bbox fully covers requested bbox. For terrain: `WHERE ST_Contains(bbox, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))`. For weather: `WHERE ST_Contains(ST_MakeEnvelope(bbox_min_lon, bbox_min_lat, bbox_max_lon, bbox_max_lat, 4326), ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))`. This prevents using cached data that only partially covers the requested region, which would result in incomplete terrain/weather data for the forecast."
     },
     {
       "severity": "must",
-      "title": "Acceptance criterion wording mismatch with implementation",
-      "evidence": "Task acceptance criterion #2 states 'Weather cube output is spatially limited to bbox + margin'. Implementation crops output to original bbox (line 786: `target_bbox=bbox`), NOT bbox + margin. Worker notes say 'cropping output to original bbox' which matches implementation but contradicts acceptance criterion text.",
-      "suggested_fix": "Clarify acceptance criterion #2. If the intent is 'output matches original bbox' (not bbox + margin), update the acceptance text. If output should actually include the margin, change line 786 to: `target_bbox=download_bbox` (when patch_mode=True only)."
-    },
-    {
-      "severity": "must",
-      "title": "No verification evidence - acceptance criterion #4 not met",
-      "evidence": "Task acceptance criterion #4: 'Benchmark shows measurable speedup'. Task verification section lists: 'Would run: cd ingest && uv run python weather_ingest.py --bbox 20,40,20.1,40.1 --patch-mode' and 'Would run: time comparison of patch vs full mode'. Benchmark script exists at scripts/benchmark_weather_patch_mode.py but no evidence it was executed. No timing data or speedup measurement provided.",
-      "suggested_fix": "Run the benchmark script or at least one manual timing comparison showing patch_mode is faster than default mode for a small AOI. Document the results in task notes or commit message. Without this, acceptance criterion #4 remains unmet."
-    },
-    {
-      "severity": "must",
-      "title": "Tests have not been executed",
-      "evidence": "New test file ingest/tests/test_weather_ingest.py exists but is untracked (git status shows 'Untracked files'). Task verification says 'Would run: make test (ingest tests)' but no evidence tests were actually run. Tests use heavy mocking and won't catch integration issues.",
-      "suggested_fix": "Run `cd ingest && uv run pytest tests/test_weather_ingest.py -v` and confirm all tests pass. Add the test file to git. Consider adding at least one integration test that validates the patch_mode parameter flow (even if it mocks external HTTP calls)."
+      "title": "Weather cache horizon validation occurs after DB query instead of within query",
+      "evidence": "api/forecast/worker.py:78 - Checks `cached_weather[\"horizon_hours\"] >= max_horizon` in Python after fetching from DB. The query at api/forecast/repo.py:195-219 returns most recent weather run without horizon validation.",
+      "suggested_fix": "Move horizon validation into SQL WHERE clause: `AND horizon_hours >= :required_horizon_hours`. This prevents returning weather runs with insufficient horizon coverage and ensures the cache hit is valid. Current implementation could cause a cache miss followed by re-ingestion even when adequate cached data exists with different timestamps."
     }
   ],
   "instruction": "Implement ONLY the requested changes. Do not expand scope. Do not commit.",

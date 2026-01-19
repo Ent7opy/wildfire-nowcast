@@ -55,6 +55,7 @@ WORKER_PROMPT="$PROMPTS_DIR/worker.md"
 REVIEWER_PROMPT="$PROMPTS_DIR/code_reviewer.md"
 FIXER_PROMPT="$PROMPTS_DIR/bug_fixer.md"
 COMMITTER_PROMPT="$PROMPTS_DIR/committer.md"
+TROUBLESHOOTER_PROMPT="$PROMPTS_DIR/troubleshooter.md"
 GUIDELINES_PROMPT="$PROMPTS_DIR/guidelines.md"
 
 mkdir -p "$RALPH_DIR" "$PROMPTS_DIR" "$INBOX_DIR" "$OUT_DIR" "$LOG_DIR"
@@ -324,7 +325,7 @@ init_state_from_plan() {
       version: 1,
       created_at: (now | todate),
       goal_summary: ($plan.goal_summary // ""),
-      tasks: ($plan.tasks | map(. + {status:"todo", commits:[], notes:[], review_cycles:0}))
+      tasks: ($plan.tasks | map(. + {status:"todo", commits:[], notes:[], review_cycles:0, unblock_attempts:0}))
     }
   ' "$PLAN_FILE" >"$STATE_FILE"
   ok "Initialized state: $STATE_FILE"
@@ -584,6 +585,49 @@ archive_done_tasks() {
   mv "$tmp_state" "$STATE_FILE"
 }
 
+troubleshoot() {
+  info "Running Troubleshooter..."
+  local inbox="$INBOX_DIR/troubleshooter.json"
+  
+  # Get blocked tasks and their unblock_attempts
+  # We incremented the counter for all tasks with status="blocked" before calling this
+  jq '
+    {
+      goal_summary: (.goal_summary // ""),
+      blocked_tasks: [.tasks[] | select(.status=="blocked")],
+      instruction: "Investigate the deadlocked tasks and propose a surgical unblocker task T99. Use git status, ls, etc. to diagnose.",
+      outbox_schema: {
+        unblocker_task: {
+          id: "T99",
+          title: "Unblock ...",
+          priority: "P0",
+          description: "...",
+          acceptance: ["..."],
+          verification: ["..."]
+        },
+        diagnosis: "...",
+        status: "resolved|cannot_resolve"
+      }
+    }
+  ' "$STATE_FILE" >"$inbox"
+
+  run_agent "troubleshooter" "$TROUBLESHOOTER_PROMPT" "$inbox" "$OUT_DIR/troubleshoot.json" || { info "Troubleshooter failed."; return 1; }
+
+  local t_status
+  t_status="$(jq -r '.status' "$OUT_DIR/troubleshoot.json")"
+  if [[ "$t_status" == "cannot_resolve" ]]; then
+    die "Troubleshooter could not resolve the deadlock. Human intervention required."
+  fi
+
+  # Add T99 to tasks
+  tmp="$(mktemp)"
+  jq --slurpfile t "$OUT_DIR/troubleshoot.json" '
+    .tasks += [$t[0].unblocker_task + {status:"todo", depends_on:[], files_likely:[], commits:[], notes:[], review_cycles:0, unblock_attempts:0}]
+  ' "$STATE_FILE" >"$tmp"
+  mv "$tmp" "$STATE_FILE"
+  ok "Troubleshooter added unblocker task: $(jq -r '.unblocker_task.id // "T99"' "$OUT_DIR/troubleshoot.json")"
+}
+
 run_loop() {
   need_cmd jq
   need_cmd git
@@ -617,8 +661,13 @@ run_loop() {
     if [[ -z "$task_id" ]]; then
       if ! task_id="$(choose_task)"; then
         info "No runnable tasks (deps may be blocked)."
-        status
-        die "Cannot continue."
+        # Increment unblock_attempts for blocked tasks
+        tmp="$(mktemp)"
+        jq '.tasks = (.tasks | map(if .status=="blocked" then .unblock_attempts = ((.unblock_attempts // 0)+1) else . end))' "$STATE_FILE" >"$tmp"
+        mv "$tmp" "$STATE_FILE"
+
+        troubleshoot
+        continue
       fi
 
       # Mark as implemented (or blocked) based on worker output

@@ -1,0 +1,19 @@
+{
+  "task_id": "T18",
+  "status": "fixed",
+  "applied_changes": [
+    "Replaced ST_Intersects with ST_Contains in terrain cache query (api/forecast/repo.py:179) to ensure cached bbox fully covers requested bbox",
+    "Replaced ST_Intersects with ST_Contains in weather cache query (api/forecast/repo.py:217-220) to ensure cached bbox fully covers requested bbox",
+    "Added required_horizon_hours parameter to SQL execute statement (api/forecast/repo.py:228) to pass horizon validation constraint to database",
+    "Updated worker.py to pass max_horizon parameter to find_cached_weather (api/forecast/worker.py:77) and removed redundant Python-side horizon check (api/forecast/worker.py:78)"
+  ],
+  "files_changed": [
+    "api/forecast/repo.py",
+    "api/forecast/worker.py"
+  ],
+  "verification": [
+    "Would run: make test",
+    "Would run: python -m pytest api/tests/test_jit_forecast_integration.py::test_caching_prevents_redundant_ingestion -v"
+  ],
+  "blockers": []
+}
