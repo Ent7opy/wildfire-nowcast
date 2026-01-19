@@ -1,7 +1,6 @@
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import MagicMock, patch, ANY
+from unittest.mock import MagicMock, patch
 import tempfile
 
 from ingest.weather_ingest import ingest_weather_for_bbox

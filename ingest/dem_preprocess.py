@@ -470,7 +470,7 @@ def main(argv: list[str] | None = None) -> None:
         emit_cog=bool(args.cog),
     )
 
-    print(f"Terrain features ingested successfully.")
+    print("Terrain features ingested successfully.")
     print(f"terrain_features_metadata id={features_id}")
 
 
