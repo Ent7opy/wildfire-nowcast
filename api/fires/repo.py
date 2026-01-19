@@ -21,6 +21,7 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "confidence": "confidence",
     "confidence_score": "confidence_score",
     "persistence_score": "persistence_score",
+    "landcover_score": "landcover_score",
     "brightness": "brightness",
     "bright_t31": "bright_t31",
     "scan": "scan",
