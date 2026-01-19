@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import numpy as np
 
@@ -15,6 +15,85 @@ from api.terrain import features_repo, repo as terrain_repo
 from api.terrain.dem_loader import grid_spec_from_metadata
 
 Mode = Literal["count", "presence", "sum", "max"]
+
+
+def normalize_firms_confidence(
+    confidence: Optional[float],
+    sensor: Optional[str],
+) -> float:
+    """Normalize FIRMS confidence to a 0-1 prior for fire likelihood scoring.
+
+    FIRMS confidence semantics differ by sensor:
+
+    - MODIS (Terra/Aqua):
+      Confidence is categorical and mapped to numeric values:
+        - Low (l): 10 → Detections with low confidence, often false positives
+        - Nominal (n): 50 → Standard confidence level for most fire detections
+        - High (h): 90 → High confidence detections, typically large/intense fires
+      Scale: 0-100 (after categorical-to-numeric mapping)
+
+    - VIIRS (S-NPP/NOAA-20):
+      Confidence is directly numeric, representing detection quality:
+        - 0-30: Low confidence, high false positive rate
+        - 30-70: Nominal confidence, typical fire detections
+        - 70-100: High confidence, well-validated detections
+      Scale: 0-100
+
+    Both sensors use 0-100 scale, but interpretation differs slightly:
+    - MODIS confidence is more categorical and coarse (3 levels)
+    - VIIRS confidence is continuous and more granular
+
+    Normalization strategy:
+    - Treat confidence as a weak prior (not a hard gate)
+    - Normalize to 0-1 scale where:
+      - 0 = no confidence signal (missing or 0)
+      - 0.1 = low confidence (MODIS low, VIIRS 0-30)
+      - 0.5 = nominal confidence (MODIS nominal, VIIRS 30-70)
+      - 1.0 = high confidence (MODIS high, VIIRS 70-100)
+    - This prior will contribute at most 20% weight to composite Fire Likelihood Score
+
+    Args:
+        confidence: Raw FIRMS confidence value (0-100) or None
+        sensor: Sensor identifier (e.g., "VIIRS", "Terra", "Aqua") or None
+
+    Returns:
+        Normalized confidence prior in range [0, 1]
+        Returns 0.5 (neutral prior) if confidence is missing
+    """
+    # Handle missing confidence: return neutral prior (0.5)
+    if confidence is None:
+        return 0.5
+
+    # Ensure confidence is in valid range [0, 100]
+    confidence_clamped = max(0.0, min(100.0, confidence))
+
+    # Simple linear normalization: 0-100 → 0-1
+    # This works for both MODIS and VIIRS since both use 0-100 scale
+    normalized = confidence_clamped / 100.0
+
+    return normalized
+
+
+def compute_confidence_prior(
+    confidence: Optional[float],
+    sensor: Optional[str],
+    max_weight: float = 0.2,
+) -> float:
+    """Compute confidence contribution to Fire Likelihood Score.
+
+    This applies the normalized confidence with a maximum weight constraint,
+    ensuring confidence alone cannot dominate the fire likelihood assessment.
+
+    Args:
+        confidence: Raw FIRMS confidence value (0-100) or None
+        sensor: Sensor identifier or None
+        max_weight: Maximum weight for confidence contribution (default 0.2 = 20%)
+
+    Returns:
+        Weighted confidence prior in range [0, max_weight]
+    """
+    normalized = normalize_firms_confidence(confidence, sensor)
+    return normalized * max_weight
 
 
 def get_region_grid_spec(region_name: str) -> GridSpec:

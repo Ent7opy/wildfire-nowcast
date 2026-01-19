@@ -19,6 +19,7 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "lon": "lon",
     "frp": "frp",
     "confidence": "confidence",
+    "confidence_score": "confidence_score",
     "brightness": "brightness",
     "bright_t31": "bright_t31",
     "scan": "scan",

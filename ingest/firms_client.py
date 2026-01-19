@@ -12,6 +12,7 @@ from typing import Dict, Iterable, List
 
 import httpx
 
+from api.fires.service import normalize_firms_confidence
 from ingest.logging_utils import log_event
 from ingest.models import DetectionRecord
 
@@ -179,13 +180,17 @@ def parse_detection_rows(
             )
             brightness = None
 
+        sensor = _pick_sensor(row)
+        confidence_score = normalize_firms_confidence(confidence, sensor)
+
         detection = DetectionRecord(
             lat=lat,
             lon=lon,
             acq_time=acq_time,
-            sensor=_pick_sensor(row),
+            sensor=sensor,
             source=source,
             confidence=confidence,
+            confidence_score=confidence_score,
             brightness=brightness,
             bright_t31=_optional_float(row.get("bright_t31")),
             frp=_optional_float(row.get("frp")),
