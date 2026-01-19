@@ -172,10 +172,28 @@ def render_map_view() -> Optional[Dict[str, float]]:
         # Check fires layer
         selected_fires = event.selection.objects.get("fires", [])
         if selected_fires:
-            props = selected_fires[0]
-            # Save props for the details panel
-            st.session_state.selected_fire = props
+            feature = selected_fires[0]
+
+            # Extract coordinates from properties or geometry
+            lat = feature.get("lat")
+            lon = feature.get("lon")
+
+            # Fallback to geometry.coordinates if properties missing
+            if (lat is None or lon is None) and "geometry" in feature:
+                geom = feature["geometry"]
+                if geom.get("type") == "Point" and "coordinates" in geom:
+                    coords = geom["coordinates"]
+                    if len(coords) >= 2:
+                        lon, lat = coords[0], coords[1]
+
+            # Add coordinates to feature dict for details panel
+            if lat is not None and lon is not None:
+                feature["lat"] = lat
+                feature["lon"] = lon
+
+            # Save feature for the details panel
+            st.session_state.selected_fire = feature
             # Return coordinates for app level click tracking
-            return {"lat": props.get("lat"), "lng": props.get("lon")}
+            return {"lat": lat, "lng": lon}
             
     return None
