@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 import xarray as xr
 
 from api.fires.scoring import compute_weather_plausibility_scores

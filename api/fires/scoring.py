@@ -88,7 +88,7 @@ def compute_persistence_scores(
     detections: Iterable[dict],
     *,
     spatial_radius_m: float = 750.0,
-    time_window_hours: tuple[float, float] = (24.0, 72.0),
+    time_window_hours: tuple[float, float] = (0.0, 72.0),
 ) -> dict[int, float]:
     """Compute persistence scores for fire detections based on spatial-temporal clustering.
 
@@ -109,7 +109,8 @@ def compute_persistence_scores(
         detections: Iterable of detection dicts with keys: id, lat, lon, acq_time, sensor
         spatial_radius_m: Spatial clustering radius in meters (default 750m)
         time_window_hours: Time window for clustering as (min_hours, max_hours) tuple
-            Default (24, 72) means detections must be 24-72 hours apart
+            looking BACKWARD from target detection time. Default (0, 72) means
+            all detections from the past 0-72 hours are considered
 
     Returns:
         Dict mapping detection_id → persistence_score in range [0, 1]
@@ -153,7 +154,7 @@ def compute_persistence_scores(
         JOIN fire_detections n ON (
             ST_DWithin(t.geom::geography, n.geom::geography, :radius_m)
             AND n.acq_time BETWEEN (t.acq_time - INTERVAL '1 hour' * :max_hours)
-                                AND (t.acq_time - INTERVAL '1 hour' * :min_hours)
+                                AND t.acq_time
         )
         GROUP BY t.id
     """)
@@ -198,6 +199,83 @@ def compute_persistence_scores(
             scores[det_id] = 0.2
 
     return scores
+
+
+def compute_fire_likelihood(
+    confidence_score: float,
+    persistence_score: float | None,
+    landcover_score: float | None,
+    weather_score: float | None,
+    false_source_masked: bool,
+) -> float:
+    """Compute composite fire likelihood score from component scores.
+
+    Combines FIRMS confidence (weak prior), persistence filtering, land-cover plausibility,
+    weather plausibility, and industrial false-source masking into a single fire likelihood score.
+
+    Scoring logic:
+    - If false_source_masked is True: return 0.0 (industrial false positive)
+    - Otherwise: weighted combination of component scores
+        - confidence_score: 0.2 weight (weak prior from FIRMS)
+        - persistence_score: 0.3 weight (spatial-temporal clustering)
+        - landcover_score: 0.25 weight (land-cover plausibility)
+        - weather_score: 0.25 weight (meteorological plausibility)
+    - Missing scores (None) are treated as neutral (0.5) for weighting
+
+    Note on multi-sensor bonus:
+        The original task (WN-FIRE-006) suggested a separate ~10% weight for multi-sensor
+        detection bonus. This was intentionally omitted because:
+        1. Multi-sensor detection is already captured within persistence_score via sensor_count
+           in compute_persistence_scores() (see api/fires/scoring.py:~150-165)
+        2. The 10% allocation was redistributed to landcover (12.5%) and weather (12.5%),
+           increasing their weights from 0.2 to 0.25 each
+        3. This simplifies the scoring model while maintaining signal strength from
+           multi-sensor observations through the persistence component
+
+    Args:
+        confidence_score: Normalized FIRMS confidence in range [0, 1]
+        persistence_score: Persistence score from spatial-temporal clustering (optional)
+        landcover_score: Land-cover plausibility score (optional)
+        weather_score: Weather plausibility score (optional)
+        false_source_masked: True if detection is near industrial source
+
+    Returns:
+        Composite fire likelihood score in range [0, 1]
+
+    Example:
+        >>> compute_fire_likelihood(0.8, 0.9, 1.0, 0.7, False)
+        0.855  # High likelihood: good confidence, strong persistence, forest, favorable weather
+        >>> compute_fire_likelihood(0.9, 0.9, 0.1, 0.8, False)
+        0.675  # Medium: good scores but unlikely land-cover (water/urban)
+        >>> compute_fire_likelihood(0.9, 0.9, 0.9, 0.9, True)
+        0.0  # Industrial false positive: masked regardless of other scores
+    """
+    # Industrial false sources get zero likelihood
+    if false_source_masked:
+        return 0.0
+
+    # Define weights for each component
+    # Confidence is a weak prior; persistence and plausibility scores are stronger
+    weights = {
+        "confidence": 0.2,
+        "persistence": 0.3,
+        "landcover": 0.25,
+        "weather": 0.25,
+    }
+
+    # Use neutral score (0.5) for missing components
+    scores = {
+        "confidence": confidence_score,
+        "persistence": persistence_score if persistence_score is not None else 0.5,
+        "landcover": landcover_score if landcover_score is not None else 0.5,
+        "weather": weather_score if weather_score is not None else 0.5,
+    }
+
+    # Compute weighted sum
+    likelihood = sum(weights[k] * scores[k] for k in weights.keys())
+
+    # Clamp to [0, 1] range (should already be in range, but defensive)
+    return max(0.0, min(1.0, likelihood))
 
 
 def compute_weather_plausibility_scores(
@@ -370,6 +448,7 @@ def _get_weather_data_for_point(
         )
         return None
 
+    ds = None
     try:
         # Load weather dataset
         ds = xr.open_dataset(storage_path)
@@ -425,7 +504,6 @@ def _get_weather_data_for_point(
                     "Failed to compute precipitation accumulation: %s", e
                 )
 
-        ds.close()
         return result if result else None
 
     except Exception as e:
@@ -434,3 +512,6 @@ def _get_weather_data_for_point(
             storage_path, e
         )
         return None
+    finally:
+        if ds is not None:
+            ds.close()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable
 
@@ -9,6 +10,8 @@ import rasterio
 from rasterio.transform import rowcol
 
 from ingest.config import REPO_ROOT
+
+LOGGER = logging.getLogger(__name__)
 
 
 # Land-cover scoring rules based on fire plausibility
@@ -89,6 +92,13 @@ def compute_landcover_scores(
     
     # If no landcover data available, return neutral scores
     if landcover_path is None:
+        LOGGER.warning(
+            "Landcover data file not found at %s. "
+            "Land-cover scoring is disabled; returning neutral scores (0.5). "
+            "To enable land-cover scoring, download ESA WorldCover or similar "
+            "land-cover classification data and place it at data/landcover.tif.",
+            REPO_ROOT / "data" / "landcover.tif"
+        )
         return {d["id"]: 0.5 for d in detection_list}
     
     # Try to open the raster; if it fails, return neutral scores

@@ -35,8 +35,8 @@ def main() -> None:
     # Initialize session state after set_page_config
     if "time_window" not in st.session_state:
         st.session_state.time_window = TIME_WINDOW_OPTIONS[0]
-    if "fires_min_confidence" not in st.session_state:
-        st.session_state.fires_min_confidence = 0.0
+    if "fires_min_likelihood" not in st.session_state:
+        st.session_state.fires_min_likelihood = 0.0
     if "fires_apply_denoiser" not in st.session_state:
         st.session_state.fires_apply_denoiser = True
     if "show_fires" not in st.session_state:
@@ -77,7 +77,7 @@ def main() -> None:
     filter_state = "on" if st.session_state.fires_apply_denoiser else "off"
     st.caption(
         f"**Fires filters:** {st.session_state.time_window}, "
-        f"confidence at least {st.session_state.fires_min_confidence:.0f}%, "
+        f"likelihood at least {st.session_state.fires_min_likelihood:.2f}, "
         f"noise filter {filter_state}"
     )
 

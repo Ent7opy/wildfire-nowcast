@@ -61,6 +61,36 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
     st.write(f"**Fire intensity (FRP):** {det.get('frp')}")
     st.write(f"**Source:** {det.get('source')}")
 
+    # Display fire likelihood and component scores
+    fire_likelihood = det.get("fire_likelihood")
+    if fire_likelihood is not None:
+        st.divider()
+        st.write("**Fire Likelihood**")
+        try:
+            likelihood_val = float(fire_likelihood)
+            st.write(f"**Composite Score:** {likelihood_val:.3f}")
+            
+            # Display component scores
+            confidence_score = det.get("confidence_score")
+            persistence_score = det.get("persistence_score")
+            landcover_score = det.get("landcover_score")
+            weather_score = det.get("weather_score")
+            false_source_masked = det.get("false_source_masked")
+            
+            if confidence_score is not None:
+                st.caption(f"Confidence: {float(confidence_score):.3f}")
+            if persistence_score is not None:
+                st.caption(f"Persistence: {float(persistence_score):.3f}")
+            if landcover_score is not None:
+                st.caption(f"Land Cover: {float(landcover_score):.3f}")
+            if weather_score is not None:
+                st.caption(f"Weather: {float(weather_score):.3f}")
+            if false_source_masked is not None:
+                masked_str = "Yes" if false_source_masked else "No"
+                st.caption(f"Industrial Source Masked: {masked_str}")
+        except (ValueError, TypeError):
+            st.write(f"**Composite Score:** {fire_likelihood}")
+
     if "denoised_score" in det or "is_noise" in det:
         st.divider()
         st.write("**Noise Filter**")
@@ -98,7 +128,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
             if not (-180 <= fire_lon <= 180):
                 st.error(f"Invalid longitude: {fire_lon} (must be between -180 and 180)")
                 return
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             st.error(f"Invalid coordinates: lat={lat}, lon={lon}")
             return
 

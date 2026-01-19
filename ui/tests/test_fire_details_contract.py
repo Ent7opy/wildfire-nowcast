@@ -1,8 +1,5 @@
 """Contract test for fire details panel property access."""
 
-import pytest
-from unittest.mock import MagicMock
-import streamlit as st
 
 
 # FireMapFeature Contract (synced with api/tests/test_fire_map_contract.py)

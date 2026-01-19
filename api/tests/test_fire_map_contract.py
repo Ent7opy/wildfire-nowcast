@@ -1,10 +1,8 @@
 """Contract test for fire map MVT properties used by UI."""
 
-import pytest
 from unittest.mock import MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 import httpx
-import struct
 
 from api.main import app
 
@@ -37,6 +35,14 @@ FIRE_MAP_FEATURE_CONTRACT = {
         # Denoiser-specific properties (may not be present for all detections)
         "denoised_score": "ML denoiser confidence score (0-1)",
         "is_noise": "Boolean flag indicating if detection is classified as noise",
+        
+        # Fire likelihood composite scoring properties
+        "fire_likelihood": "Composite fire likelihood score (0-1)",
+        "confidence_score": "Normalized FIRMS confidence (0-1)",
+        "persistence_score": "Spatial-temporal clustering score (0-1)",
+        "landcover_score": "Land-cover plausibility score (0-1)",
+        "weather_score": "Weather plausibility score (0-1)",
+        "false_source_masked": "Industrial false-positive mask flag",
     }
 }
 
@@ -62,12 +68,6 @@ def test_mvt_fires_layer_includes_required_properties(monkeypatch):
     async def mock_call(*args, **kwargs):
         return True
     monkeypatch.setattr(RateLimiter, "__call__", mock_call)
-    
-    # Use the contract definition as the source of truth
-    required_properties = set(FIRE_MAP_FEATURE_CONTRACT["required"].keys())
-    optional_properties = set(FIRE_MAP_FEATURE_CONTRACT["optional"].keys())
-    
-    all_properties = required_properties | optional_properties
     
     # Mock a realistic MVT response with these properties
     mock_resp = MagicMock()
@@ -121,7 +121,7 @@ def test_mvt_fires_properties_documented():
     """Test that MVT fires function properties are documented in migration."""
     # Read the migration to verify properties are exposed
     import pathlib
-    migration_path = pathlib.Path(__file__).parent.parent / "migrations" / "versions" / "d46889070598_update_mvt_fires_props.py"
+    migration_path = pathlib.Path(__file__).parent.parent / "migrations" / "versions" / "20260119_update_mvt_fires_likelihood.py"
     
     assert migration_path.exists(), "MVT fires migration should exist"
     
@@ -148,6 +148,12 @@ def test_ui_property_access_matches_mvt_schema():
         "lon": 21.3,
         "is_noise": False,
         "denoised_score": 0.95,
+        "fire_likelihood": 0.85,
+        "confidence_score": 0.85,
+        "persistence_score": 0.9,
+        "landcover_score": 0.8,
+        "weather_score": 0.75,
+        "false_source_masked": False,
     }
     
     # Verify all required properties from contract are present
@@ -165,6 +171,7 @@ def test_ui_property_access_matches_mvt_schema():
         "source",
         "denoised_score",
         "is_noise",
+        "fire_likelihood",
     ]
     
     all_contract_properties = set(FIRE_MAP_FEATURE_CONTRACT["required"].keys()) | set(FIRE_MAP_FEATURE_CONTRACT["optional"].keys())
@@ -173,7 +180,6 @@ def test_ui_property_access_matches_mvt_schema():
     
     # Verify no KeyError when accessing properties
     for prop in ui_accessed_properties:
-        value = mvt_properties.get(prop)
         # None is acceptable for optional fields, but key must exist
         assert prop in mvt_properties
 

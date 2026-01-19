@@ -1,5 +1,6 @@
 """Map view component for wildfire dashboard using PyDeck."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
@@ -12,6 +13,8 @@ from config.constants import (
     DEFAULT_ZOOM_LEVEL,
     MAP_HEIGHT,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 # Constants for defaults if not in session state
 INITIAL_LAT = DEFAULT_MAP_CENTER[0]
@@ -60,13 +63,13 @@ def render_map_view() -> Optional[Dict[str, float]]:
     if st.session_state.show_fires:
         start_time, end_time = _current_time_range()
         include_noise = not bool(getattr(st.session_state, "fires_apply_denoiser", True))
-        min_confidence = float(getattr(st.session_state, "fires_min_confidence", 0.0))
+        min_likelihood = float(getattr(st.session_state, "fires_min_likelihood", 0.0))
         
         # Build query params for the tile URL
         params = {
             "start_time": _isoformat(start_time),
             "end_time": _isoformat(end_time),
-            "min_confidence": min_confidence,
+            "min_fire_likelihood": min_likelihood,
             "include_noise": str(include_noise).lower()
         }
         query_str = "&".join([f"{k}={v}" for k, v in params.items()])
@@ -150,7 +153,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
         tooltip={
             "html": "<b>ID:</b> {properties.id}<br/>"
                     "<b>Time:</b> {properties.acq_time}<br/>"
-                    "<b>Confidence:</b> {properties.confidence}<br/>"
+                    "<b>Likelihood:</b> {properties.fire_likelihood}<br/>"
                     "<b>Intensity (FRP):</b> {properties.frp}",
             "style": {"color": "white", "backgroundColor": "#333"}
         },
@@ -185,6 +188,14 @@ def render_map_view() -> Optional[Dict[str, float]]:
                     coords = geom["coordinates"]
                     if len(coords) >= 2:
                         lon, lat = coords[0], coords[1]
+
+            # Log if coordinate extraction failed
+            if lat is None or lon is None:
+                LOGGER.warning(
+                    "Failed to extract coordinates from MVT feature. "
+                    "Feature structure: %s",
+                    feature
+                )
 
             # Add coordinates to feature dict for details panel
             if lat is not None and lon is not None:

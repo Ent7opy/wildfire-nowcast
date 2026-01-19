@@ -81,13 +81,14 @@ def render_sidebar() -> str:
             key="pending_time_window",
         )
 
-        pending_min_confidence = st.slider(
-            "Minimum confidence",
+        pending_min_likelihood = st.slider(
+            "Minimum fire likelihood",
             min_value=0.0,
-            max_value=100.0,
-            value=float(st.session_state.fires_min_confidence),
-            step=5.0,
-            key="pending_min_confidence",
+            max_value=1.0,
+            value=float(st.session_state.fires_min_likelihood),
+            step=0.05,
+            key="pending_min_likelihood",
+            help="Composite score combining FIRMS confidence (20%), persistence (30%), land-cover plausibility (25%), and weather conditions (25%). Values <0.3 indicate low confidence, 0.3-0.6 uncertain, >0.6 likely real fire.",
         )
 
         pending_apply_denoiser = st.checkbox(
@@ -99,7 +100,7 @@ def render_sidebar() -> str:
         applied = st.form_submit_button("Apply filters", type="primary")
         if applied:
             st.session_state.time_window = pending_time_window
-            st.session_state.fires_min_confidence = float(pending_min_confidence)
+            st.session_state.fires_min_likelihood = float(pending_min_likelihood)
             st.session_state.fires_apply_denoiser = bool(pending_apply_denoiser)
 
     # Export fires button
