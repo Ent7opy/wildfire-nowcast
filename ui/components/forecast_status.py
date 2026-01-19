@@ -1,7 +1,6 @@
 """Forecast status polling component for JIT forecast jobs."""
 
 import time
-from typing import Optional
 
 import streamlit as st
 

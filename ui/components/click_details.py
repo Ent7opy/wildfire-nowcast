@@ -12,7 +12,6 @@ from api_client import (
     ApiUnavailableError,
     create_jit_forecast,
 )
-from runtime_config import forecast_region_name
 
 def _parse_time(value: Any) -> Optional[datetime]:
     if value is None:
