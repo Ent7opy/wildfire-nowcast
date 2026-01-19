@@ -5,11 +5,13 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote_plus
 from uuid import UUID
 
 from redis import Redis
 from rq import Queue
 
+from api.config import settings
 from api.forecast import repo
 
 # Add ingest module to path for imports
@@ -82,17 +84,108 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
         repo.update_jit_job_status(job_id, "running_forecast")
         logger.info(f"JIT job {job_id}: starting forecast")
         
-        # TODO: Call run_spread_forecast in T10
-        forecast_result = None
+        # Run spread forecast and persist products
+        from ml.spread.service import SpreadForecastRequest, run_spread_forecast
+        from ingest.spread_forecast import save_forecast_rasters, build_contour_records
+        from ingest.spread_repository import (
+            create_spread_forecast_run,
+            finalize_spread_forecast_run,
+            insert_spread_forecast_contours,
+            insert_spread_forecast_rasters,
+        )
+        from api.core.grid import GridSpec, get_grid_window_for_bbox
         
-        result = {
-            "terrain_id": terrain_id,
-            "weather_run_id": weather_run_id,
-            "forecast_run_id": forecast_result
-        }
+        # Create forecast run record
+        run_id = create_spread_forecast_run(
+            region_name=forecast_params.get("region_name", "location-based"),
+            model_name="HeuristicSpreadModelV0",
+            model_version="v0",
+            forecast_reference_time=forecast_time,
+            bbox=bbox,
+        )
+        logger.info(f"JIT job {job_id}: created forecast run_id={run_id}")
         
-        repo.update_jit_job_status(job_id, "completed", result=result)
-        logger.info(f"JIT forecast pipeline completed: job_id={job_id}")
+        try:
+            # Build and execute forecast request
+            request = SpreadForecastRequest(
+                region_name=forecast_params.get("region_name"),
+                bbox=bbox,
+                forecast_reference_time=forecast_time,
+                horizons_hours=horizons_hours,
+            )
+            forecast = run_spread_forecast(request)
+            logger.info(f"JIT job {job_id}: forecast computation completed")
+            
+            # Capture operational metadata
+            extra_meta = {}
+            try:
+                attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+                for k in (
+                    "weather_bias_corrected",
+                    "weather_bias_corrector_path",
+                    "calibration_applied",
+                    "calibration_source",
+                    "calibration_run_id",
+                    "calibration_run_dir",
+                ):
+                    if k in attrs:
+                        extra_meta[k] = attrs.get(k)
+            except Exception:
+                pass
+            
+            # Derive grid and window for persistence
+            if forecast_params.get("region_name"):
+                from api.fires.service import get_region_grid_spec
+                grid = get_region_grid_spec(forecast_params["region_name"])
+            else:
+                grid = GridSpec.from_bbox(bbox)
+            window = get_grid_window_for_bbox(grid, bbox, clip=True)
+            
+            # Save rasters
+            region_dir_name = forecast_params.get("region_name", "location-based")
+            run_dir = REPO_ROOT / "data" / "forecasts" / region_dir_name / f"run_{run_id}"
+            raster_records = save_forecast_rasters(forecast, grid, window, run_dir, emit_cog=True)
+            insert_spread_forecast_rasters(run_id, raster_records)
+            logger.info(f"JIT job {job_id}: saved {len(raster_records)} rasters")
+            
+            # Generate and persist contours
+            thresholds = forecast_params.get("thresholds", [0.3, 0.5, 0.7])
+            contour_records = build_contour_records(
+                forecast=forecast, grid=grid, window=window, thresholds=thresholds
+            )
+            insert_spread_forecast_contours(run_id, contour_records)
+            logger.info(f"JIT job {job_id}: saved {len(contour_records)} contours")
+            
+            # Finalize forecast run
+            finalize_spread_forecast_run(run_id, status="completed", extra_metadata=extra_meta)
+            
+            # Build result with TileJSON URLs for UI consumption
+            tilejson_urls = []
+            for r in raster_records:
+                storage_path = str(r["storage_path"])
+                titiler_path = storage_path.replace(
+                    settings.data_dir_local_prefix, settings.data_dir_titiler_mount
+                )
+                encoded_path = quote_plus(titiler_path)
+                tilejson_url = (
+                    f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
+                )
+                tilejson_urls.append(tilejson_url)
+            
+            result = {
+                "terrain_id": terrain_id,
+                "weather_run_id": weather_run_id,
+                "forecast_run_id": run_id,
+                "tilejson_urls": tilejson_urls,
+            }
+            
+            repo.update_jit_job_status(job_id, "completed", result=result)
+            logger.info(f"JIT forecast pipeline completed: job_id={job_id}, run_id={run_id}")
+            
+        except Exception as forecast_error:
+            # Mark forecast run as failed
+            finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(forecast_error)})
+            raise
         
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
