@@ -14,7 +14,7 @@ Read the inbox JSON provided by the orchestrator. It contains:
 - `task` (id/title/description/acceptance/verification/etc.)
 - `instruction`
 - `outbox_schema`
-You may inspect the repo and use `git diff`, `git status`, and tests as needed.
+You may inspect the repo and use `git diff --stat`, `git diff <file>`, `git status`, and tests as needed. Prefer `git diff --stat` or specific file diffs over a naked `git diff`.
 
 ---
 
@@ -52,7 +52,7 @@ You may inspect the repo and use `git diff`, `git status`, and tests as needed.
 
 ## Review workflow (tight)
 - Read the task acceptance criteria from inbox.
-- Inspect `git diff` to see what changed.
+- Inspect changes using `git diff --stat` and `git diff <file>`. Prefer specific file diffs over a naked `git diff`.
 - Trace through relevant code paths for correctness.
 - Check how the repo normally verifies changes (tests/scripts).
 - Decide verdict:

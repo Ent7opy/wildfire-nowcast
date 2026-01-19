@@ -162,6 +162,24 @@ wait_for_json() {
 }
 
 # Run cursor-agent with a role prompt wrapper. Expects the agent to write valid JSON to OUTBOX.
+get_guidelines() {
+  local role="$1"
+  local file="$PROMPTS_DIR/guidelines.md"
+  [[ -f "$file" ]] || return 0
+
+  # Extract [COMMON] section
+  sed -n '/## \[COMMON\]/,/## \[/p' "$file" | grep -v '^## \['
+  
+  case "$role" in
+    worker|bug_fixer)
+      sed -n '/## \[CODING\]/,/## \[/p' "$file" | grep -v '^## \['
+      ;;
+    reviewer)
+      sed -n '/## \[REVIEW\]/,/## \[/p' "$file" | grep -v '^## \['
+      ;;
+  esac
+}
+
 run_agent() {
   local role="$1"
   local role_prompt_file="$2"
@@ -179,7 +197,7 @@ run_agent() {
 
   # Wrapper prompt: keep short; agent should read inbox + repo files for context.
   local wrapper
-  wrapper="$(cat "$GUIDELINES_PROMPT" 2>/dev/null || true)"
+  wrapper="$(get_guidelines "$role")"
   wrapper+=$'\n\n'
   wrapper+="## ROLE PROMPT (${role})"$'\n'
   wrapper+="(Read carefully, then follow the Orchestrator Protocol at the bottom.)"$'\n\n'
@@ -354,10 +372,9 @@ choose_task() {
 
   # Prepare inbox for worker to choose and implement one task
   local inbox="$INBOX_DIR/worker.json"
-  echo "$runnable" | jq '{
+  echo "$runnable" | jq --argjson state "$(cat "$STATE_FILE")" '{
     goal_file: ".ralph/GOAL.md",
-    plan_file: ".ralph/plan.json",
-    state_file: ".ralph/state.json",
+    goal_summary: ($state.goal_summary // ""),
     runnable_tasks: .,
     instruction: "Pick ONE runnable task (most important), implement it fully, then write outbox with selected_task_id and status. Do not commit.",
     outbox_schema: {
@@ -416,8 +433,7 @@ review_loop() {
     jq --arg id "$task_id" '
       {
         goal_file: ".ralph/GOAL.md",
-        plan_file: ".ralph/plan.json",
-        state_file: ".ralph/state.json",
+        goal_summary: (.goal_summary // ""),
         task: (.tasks | map(select(.id==$id)) | .[0]),
         instruction: "Review the repo changes for this task. Do NOT implement. You may run: git status, git diff, tests. Output verdict approve|changes_requested plus change list.",
         outbox_schema: {
@@ -451,11 +467,12 @@ review_loop() {
     local fix_inbox="$INBOX_DIR/bug_fixer.json"
     local task_json
     task_json="$(get_task_json "$task_id")"
-    jq --argjson task "$task_json" '
+    local goal_summary
+    goal_summary="$(jq -r '.goal_summary // ""' "$STATE_FILE")"
+    jq --argjson task "$task_json" --arg gs "$goal_summary" '
       {
         goal_file: ".ralph/GOAL.md",
-        plan_file: ".ralph/plan.json",
-        state_file: ".ralph/state.json",
+        goal_summary: $gs,
         task: $task,
         requested_changes: (.requested_changes // []),
         instruction: "Implement ONLY the requested changes. Do not expand scope. Do not commit.",
@@ -484,8 +501,7 @@ commit_task() {
   jq --arg id "$task_id" '
     {
       goal_file: ".ralph/GOAL.md",
-      plan_file: ".ralph/plan.json",
-      state_file: ".ralph/state.json",
+      goal_summary: (.goal_summary // ""),
       task: (.tasks | map(select(.id==$id)) | .[0]),
       instruction: "Create semantic commits for the approved changes. Output commit list with shas + messages.",
       outbox_schema: {
@@ -537,6 +553,35 @@ EOF
 
   run_agent "planner" "$PLANNER_PROMPT" "$inbox" "$PLAN_FILE" || { info "Planner failed."; return 1; }
   init_state_from_plan
+}
+
+archive_done_tasks() {
+  local history_file="$RALPH_DIR/state.history.json"
+  [[ -f "$STATE_FILE" ]] || return 0
+
+  # Extract done tasks
+  local done_tasks
+  done_tasks="$(jq '[.tasks[] | select(.status=="done")]' "$STATE_FILE")"
+  
+  if [[ "$(echo "$done_tasks" | jq 'length')" -eq 0 ]]; then
+    return 0
+  fi
+
+  info "Archiving completed tasks to history..."
+  
+  # Append to history file (create if missing)
+  if [[ ! -f "$history_file" ]]; then
+    echo "[]" > "$history_file"
+  fi
+  
+  tmp_hist="$(mktemp)"
+  jq --argjson done "$done_tasks" '. + $done' "$history_file" > "$tmp_hist"
+  mv "$tmp_hist" "$history_file"
+
+  # Remove done tasks from state
+  tmp_state="$(mktemp)"
+  jq '.tasks = [.tasks[] | select(.status!="done")]' "$STATE_FILE" > "$tmp_state"
+  mv "$tmp_state" "$STATE_FILE"
 }
 
 run_loop() {
@@ -610,6 +655,7 @@ run_loop() {
     if commit_task "$task_id"; then
       update_task_status "$task_id" "done" "committer: done"
       ok "Task $task_id done."
+      archive_done_tasks
     else
       info "Commit failed for $task_id. Task marked as blocked."
     fi

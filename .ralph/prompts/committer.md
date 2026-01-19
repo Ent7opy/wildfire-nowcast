@@ -41,7 +41,8 @@ Scope: repo area/module (pick a consistent scope based on paths)
 ### 2) Scope gate
 - Run:
   - `git diff --name-only`
-  - `git diff`
+  - `git diff --stat`
+  - `git diff <file>` (preferred over a naked `git diff`)
 - Only stage hunks relevant to the approved changes for this task.
 - Prefer `git add -p`.
 - Do NOT use `git add .` unless there is a very strong repo precedent AND the diff is clearly limited to relevant files.
