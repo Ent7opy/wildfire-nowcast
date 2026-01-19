@@ -245,8 +245,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--area",
         type=str,
-        default=None,
-        help='Bounding box "w,s,e,n" or "world".',
+        default="world",
+        help='Bounding box "w,s,e,n" or "world". Defaults to "world".',
     )
     parser.add_argument(
         "--sources",

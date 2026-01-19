@@ -1,0 +1,26 @@
+{
+  "task_id": "T99",
+  "status": "committed",
+  "commits": [
+    {
+      "sha": "74b1abc",
+      "message": "fix(api): enable cross-module imports in pytest"
+    }
+  ],
+  "verification": [
+    "Ran: git status --porcelain=v1",
+    "Ran: git ls-files -o --exclude-standard",
+    "Ran: git diff --name-only",
+    "Ran: git diff --stat",
+    "Ran: git diff --check",
+    "Ran: git add api/tests/conftest.py",
+    "Ran: git commit -m 'fix(api): enable cross-module imports in pytest'",
+    "Ran: cd api && uv run python -c 'import sys; sys.path.insert(0, \"..\"); import ingest' (succeeded)",
+    "Ran: cd api && uv run pytest --collect-only tests/test_jit_forecast_integration.py (collected 5 tests)"
+  ],
+  "notes": [
+    "Created single semantic commit for api/tests/conftest.py",
+    "Ralph orchestrator files (.ralph/*) remain modified but were correctly excluded from commit",
+    "All acceptance criteria verified: cross-module imports work, pytest collection succeeds"
+  ]
+}

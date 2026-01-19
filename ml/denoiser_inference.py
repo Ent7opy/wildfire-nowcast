@@ -6,6 +6,10 @@ import logging
 import os
 import sys
 from typing import Any, Optional
+from pathlib import Path
+
+# Add project root to sys.path to allow importing from other subprojects
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import joblib
 import numpy as np
@@ -20,6 +24,7 @@ from ml.denoiser.features import (
     add_spatiotemporal_context_batch,
     add_terrain_features,
 )
+from ingest.config import settings as ingest_settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,19 +50,32 @@ def load_model_artifacts(model_run_dir: str) -> tuple[Any, list[str]]:
 
     return model, feature_list
 
-def get_pending_detections(engine: Engine, batch_id: int) -> pd.DataFrame:
-    """Fetch detections from a batch that need denoising."""
-    query = text("""
-        SELECT 
-            id, lat, lon, acq_time, confidence, frp, 
-            brightness, bright_t31, scan, track, sensor, source,
-            raw_properties
-        FROM fire_detections
-        WHERE ingest_batch_id = :batch_id
-          AND denoised_score IS NULL
-    """)
+def get_pending_detections(engine: Engine, batch_id: Optional[int] = None) -> pd.DataFrame:
+    """Fetch detections that need denoising."""
+    if batch_id is not None:
+        query = text("""
+            SELECT 
+                id, lat, lon, acq_time, confidence, frp, 
+                brightness, bright_t31, scan, track, sensor, source,
+                raw_properties
+            FROM fire_detections
+            WHERE ingest_batch_id = :batch_id
+              AND denoised_score IS NULL
+        """)
+        params = {"batch_id": batch_id}
+    else:
+        query = text("""
+            SELECT 
+                id, lat, lon, acq_time, confidence, frp, 
+                brightness, bright_t31, scan, track, sensor, source,
+                raw_properties
+            FROM fire_detections
+            WHERE denoised_score IS NULL
+        """)
+        params = {}
+
     with engine.connect() as conn:
-        df = pd.read_sql(query, conn, params={"batch_id": batch_id})
+        df = pd.read_sql(query, conn, params=params)
     return df
 
 def build_features(
@@ -113,13 +131,13 @@ def update_detections(
         conn.execute(update_stmt, params)
 
 def run_inference(
-    batch_id: int,
+    batch_id: Optional[int],
     model_run_dir: str,
     threshold: float,
     batch_size: int = 500,
     region_name: Optional[str] = None,
 ):
-    """Run denoiser inference on a batch of detections."""
+    """Run denoiser inference on a batch of detections (or all pending)."""
     engine = get_engine()
     
     # 1. Load artifacts
@@ -128,11 +146,12 @@ def run_inference(
     # 2. Get pending detections
     df_all = get_pending_detections(engine, batch_id)
     if df_all.empty:
-        LOGGER.info(f"No pending detections found for batch {batch_id}.")
+        msg = f"No pending detections found for batch {batch_id}." if batch_id else "No pending detections found."
+        LOGGER.info(msg)
         print(json.dumps({"batch_id": batch_id, "count": 0}))
         return
 
-    LOGGER.info(f"Found {len(df_all)} detections to score in batch {batch_id}.")
+    LOGGER.info(f"Found {len(df_all)} detections to score.")
     
     all_scores = []
     all_is_noise = []
@@ -180,7 +199,7 @@ def run_inference(
     
     LOGGER.info(
         "Inference complete for batch %s. Noise %%: %.2f%%",
-        batch_id,
+        batch_id if batch_id else "ALL",
         summary["noise_percent"],
     )
     # Print JSON summary to stdout as requested by plan
@@ -188,13 +207,32 @@ def run_inference(
 
 def main():
     parser = argparse.ArgumentParser(description="Run denoiser inference on ingested detections.")
-    parser.add_argument("--batch-id", type=int, required=True, help="Ingest batch ID to process")
-    parser.add_argument("--model-run", type=str, required=True, help="Path to model run directory")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Score threshold for is_noise=True")
-    parser.add_argument("--batch-size", type=int, default=500, help="Inference chunk size")
-    parser.add_argument("--region", type=str, help="Region name for terrain features")
+    parser.add_argument("--batch-id", type=int, help="Ingest batch ID to process (if omitted, processes all pending)")
+    parser.add_argument(
+        "--model-run", 
+        type=str, 
+        default=ingest_settings.denoiser_model_run_dir,
+        help="Path to model run directory (defaults to DENOISER_MODEL_RUN_DIR env)"
+    )
+    parser.add_argument(
+        "--threshold", 
+        type=float, 
+        default=ingest_settings.denoiser_threshold, 
+        help="Score threshold for is_noise=True"
+    )
+    parser.add_argument("--batch-size", type=int, default=ingest_settings.denoiser_batch_size, help="Inference chunk size")
+    parser.add_argument(
+        "--region", 
+        type=str, 
+        default=ingest_settings.denoiser_region,
+        help="Region name for terrain features"
+    )
     
     args = parser.parse_args()
+    
+    if not args.model_run:
+        LOGGER.error("No model run directory provided and DENOISER_MODEL_RUN_DIR is not set.")
+        sys.exit(1)
     
     try:
         run_inference(

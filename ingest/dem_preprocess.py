@@ -294,47 +294,184 @@ def _apply_cli_overrides(
     return settings.model_copy(update=updates)
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = _parse_args(argv)
-    settings = _apply_cli_overrides(DemIngestSettings(), args)
-    grid = settings.grid_spec
+def ingest_terrain_for_bbox(
+    bbox: tuple[float, float, float, float],
+    output_dir: Path | str,
+    region_name: str | None = None,
+    emit_cog: bool = False,
+) -> int:
+    """Download DEM, compute terrain features (slope, aspect), persist to DB.
+
+    Args:
+        bbox: (min_lon, min_lat, max_lon, max_lat) in EPSG:4326.
+        output_dir: Directory for output rasters (e.g., data/terrain).
+        region_name: Optional region label (defaults to bbox-based name).
+        emit_cog: If True, convert outputs to Cloud Optimized GeoTIFFs.
+
+    Returns:
+        terrain_features_metadata.id from the database.
+
+    Raises:
+        ValueError: If bbox is invalid or DEM download fails.
+        FileNotFoundError: If intermediate files are missing.
+    """
+    from api.terrain.features_math import compute_slope_aspect
+    from api.terrain.features_repo import (
+        TerrainFeaturesMetadataCreate,
+        insert_terrain_features_metadata,
+    )
+
+    output_dir = Path(output_dir)
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    if region_name is None:
+        region_name = f"bbox_{min_lon:.2f}_{min_lat:.2f}_{max_lon:.2f}_{max_lat:.2f}"
+
+    grid = GridSpec.from_bbox(
+        lat_min=min_lat,
+        lat_max=max_lat,
+        lon_min=min_lon,
+        lon_max=max_lon,
+        cell_size_deg=CANONICAL_CELL_SIZE_DEG,
+        crs=CANONICAL_CRS,
+    )
 
     raw_data, raw_profile = load_raw_dem(grid_bounds(grid))
     warped_data, warped_profile = resample_to_grid(raw_data, raw_profile, grid)
-    _summarize_dem(warped_data, settings)
-    geotiff_path = save_dem_to_geotiff(warped_data, warped_profile, settings)
-    final_path = convert_to_cog(geotiff_path) if args.cog else geotiff_path
+
+    settings_for_logging = DemIngestSettings(
+        region_name=region_name,
+        bbox_min_lon=min_lon,
+        bbox_min_lat=min_lat,
+        bbox_max_lon=max_lon,
+        bbox_max_lat=max_lat,
+        data_dir=output_dir,
+    )
+    _summarize_dem(warped_data, settings_for_logging)
+
+    out_dir = output_dir / region_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dem_filename = f"dem_{region_name}_epsg{CANONICAL_EPSG}_0p01deg.tif"
+    dem_path = out_dir / dem_filename
+
+    write_profile = warped_profile.copy()
+    write_profile.update({"driver": "GTiff", "count": 1, "dtype": warped_data.dtype})
+    with rasterio.open(dem_path, "w", **write_profile) as dst:
+        dst.write(warped_data, 1)
+    LOGGER.info("Wrote DEM to %s", dem_path)
+
+    final_dem_path = convert_to_cog(dem_path) if emit_cog else dem_path
 
     bbox_4326 = grid_bounds(grid)
     resolution_m = grid.cell_size_deg * METERS_PER_DEG_AT_EQUATOR
-    metadata = TerrainMetadataCreate(
-        region_name=settings.region_name,
-        dem_source=settings.source,
+    dem_metadata_obj = TerrainMetadataCreate(
+        region_name=region_name,
+        dem_source="copernicus_glo30",
         crs_epsg=CANONICAL_EPSG,
         resolution_m=float(resolution_m),
         bbox=bbox_4326,
-        raster_path=str(final_path),
+        raster_path=str(final_dem_path),
         cell_size_deg=grid.cell_size_deg,
         origin_lat=grid.origin_lat,
         origin_lon=grid.origin_lon,
         grid_n_lat=grid.n_lat,
         grid_n_lon=grid.n_lon,
     )
-    inserted = insert_terrain_metadata(metadata)
+    dem_metadata = insert_terrain_metadata(dem_metadata_obj)
+    LOGGER.info("Inserted terrain_metadata id=%s", dem_metadata.id)
 
-    transform = warped_profile["transform"]
-    resolution = (abs(transform.a), abs(transform.e))
-    LOGGER.info(
-        "DEM ingest complete: path=%s crs=%s resolution=(%.5f, %.5f) deg",
-        final_path,
-        warped_profile["crs"],
-        resolution[0],
-        resolution[1],
+    with rasterio.open(final_dem_path) as src:
+        z_ma = src.read(1, masked=True)
+        z = np.asarray(z_ma.filled(np.nan), dtype=float)
+        cell_deg = float(abs(src.transform.a))
+        lat_centers = src.transform.f + (np.arange(src.height) + 0.5) * src.transform.e
+
+        slope_deg, aspect_deg = compute_slope_aspect(
+            z, cell_size_deg=cell_deg, lat_centers_deg=lat_centers
+        )
+
+        nodata_value = -9999.0
+        slope_out = np.where(np.isfinite(slope_deg), slope_deg, nodata_value).astype(np.float32)
+        aspect_out = np.where(np.isfinite(aspect_deg), aspect_deg, nodata_value).astype(np.float32)
+
+        slope_path = out_dir / f"slope_{region_name}_epsg{CANONICAL_EPSG}_0p01deg.tif"
+        aspect_path = out_dir / f"aspect_{region_name}_epsg{CANONICAL_EPSG}_0p01deg.tif"
+
+        slope_profile = src.profile.copy()
+        slope_profile.update({"driver": "GTiff", "count": 1, "dtype": "float32", "nodata": nodata_value})
+        with rasterio.open(slope_path, "w", **slope_profile) as dst:
+            dst.write(slope_out, 1)
+        with rasterio.open(aspect_path, "w", **slope_profile) as dst:
+            dst.write(aspect_out, 1)
+
+        final_slope_path = convert_to_cog(slope_path) if emit_cog else slope_path
+        final_aspect_path = convert_to_cog(aspect_path) if emit_cog else aspect_path
+
+        mask = np.isfinite(slope_deg)
+        coverage = float(mask.mean()) if mask.any() else 0.0
+        s_min = float(np.min(slope_deg[mask])) if mask.any() else None
+        s_max = float(np.max(slope_deg[mask])) if mask.any() else None
+        a_min = float(np.min(aspect_deg[mask])) if mask.any() else None
+        a_max = float(np.max(aspect_deg[mask])) if mask.any() else None
+
+        log_event(
+            LOGGER,
+            "terrain_features.computed",
+            "Computed slope/aspect for bbox",
+            region=region_name,
+            slope={"min": s_min, "max": s_max, "units": "degrees"},
+            aspect={"min": a_min, "max": a_max, "units": "degrees"},
+            coverage_fraction=coverage,
+        )
+
+        origin_lon = float(src.transform.c)
+        north_edge = float(src.transform.f)
+        origin_lat = float(north_edge - src.height * cell_deg)
+
+    features_metadata_obj = TerrainFeaturesMetadataCreate(
+        region_name=region_name,
+        source_dem_metadata_id=int(dem_metadata.id),
+        slope_path=str(final_slope_path),
+        aspect_path=str(final_aspect_path),
+        crs_epsg=CANONICAL_EPSG,
+        cell_size_deg=float(cell_deg),
+        origin_lat=origin_lat,
+        origin_lon=origin_lon,
+        grid_n_lat=int(grid.n_lat),
+        grid_n_lon=int(grid.n_lon),
+        bbox=bbox_4326,
+        slope_min=s_min,
+        slope_max=s_max,
+        aspect_min=a_min,
+        aspect_max=a_max,
+        coverage_fraction=coverage,
+        nodata_value=nodata_value,
     )
-    print(f"DEM written to: {final_path}")
-    print(f"CRS: {warped_profile['crs']}")
-    print(f"Resolution (deg): {resolution}")
-    print(f"Inserted terrain_metadata id={inserted.id}")
+    features_metadata = insert_terrain_features_metadata(features_metadata_obj)
+
+    LOGGER.info(
+        "Terrain ingest complete: features_id=%s dem_path=%s slope_path=%s aspect_path=%s",
+        features_metadata.id,
+        final_dem_path,
+        final_slope_path,
+        final_aspect_path,
+    )
+    return int(features_metadata.id)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    settings = _apply_cli_overrides(DemIngestSettings(), args)
+
+    features_id = ingest_terrain_for_bbox(
+        bbox=settings.bbox,
+        output_dir=settings.data_dir,
+        region_name=settings.region_name,
+        emit_cog=bool(args.cog),
+    )
+
+    print("Terrain features ingested successfully.")
+    print(f"terrain_features_metadata id={features_id}")
 
 
 if __name__ == "__main__":

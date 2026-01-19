@@ -7,13 +7,15 @@ on:
     branches: [master]
 
 jobs:
-  api-and-ui:
+  lint-and-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         project:
           - api
           - ui
+          - ml
+          - ingest
     steps:
       - name: Checkout
         uses: actions/checkout@v4

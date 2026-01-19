@@ -1,0 +1,29 @@
+{
+  "goal_file": ".ralph/GOAL.md",
+  "goal_summary": "Transform the wildfire nowcast system from region-specific manual ingestion to a global Just-In-Time (JIT) pipeline where clicking any fire triggers automated background ingestion (terrain, weather) and forecast generation, providing worldwide coverage without pre-provisioned databases.",
+  "runnable_tasks": [
+    {
+      "id": "T99",
+      "title": "Unblock T16: Fix Python path for cross-module imports in api tests",
+      "priority": "P0",
+      "depends_on": []
+    }
+  ],
+  "instruction": "Pick ONE runnable task (most important), implement it fully, then write outbox with selected_task_id and status. Do not commit.",
+  "outbox_schema": {
+    "selected_task_id": "T01",
+    "status": "implemented|blocked",
+    "summary": "short, concrete summary",
+    "files_changed": [
+      "path1",
+      "path2"
+    ],
+    "verification": [
+      "Ran: ...",
+      "Would run: ..."
+    ],
+    "blockers": [
+      "if blocked..."
+    ]
+  }
+}

@@ -8,6 +8,7 @@ from components.sidebar import render_sidebar
 from components.map_view import render_map_view
 from components.legend import render_legend
 from components.click_details import render_click_details
+from components.forecast_status import render_forecast_status_polling
 
 def main() -> None:
     """Main application entry point."""
@@ -46,19 +47,13 @@ def main() -> None:
         st.session_state.show_risk = False
     if "last_click" not in st.session_state:
         st.session_state.last_click = None
-    if "fires_last_detections" not in st.session_state:
-        st.session_state.fires_last_detections = []
-    if "map_bounds" not in st.session_state:
-        st.session_state.map_bounds = None
-    if "fires_cache" not in st.session_state:
-        st.session_state.fires_cache = {}
-    if "map_refresh_requested" not in st.session_state:
-        st.session_state.map_refresh_requested = False
+    if "selected_fire" not in st.session_state:
+        st.session_state.selected_fire = None
 
     # App identity
     st.title("Wildfire Nowcast & Forecast")
     st.caption(
-        "Live satellite fire detections (FIRMS) with optional probabilistic spread overlays."
+        "Live satellite fire detections with optional spread overlays."
     )
     st.info(
         "Forecast overlays are **experimental** and **probabilistic** (not deterministic). "
@@ -70,15 +65,20 @@ def main() -> None:
     with st.sidebar:
         render_sidebar()
 
+    # Check for ongoing JIT forecast polling - display as status banner
+    if st.session_state.get("jit_job_id"):
+        with st.container():
+            render_forecast_status_polling(st.session_state.jit_job_id)
+
     # Main content area - Map and details
     st.subheader("Map")
 
     # Active filters summary
-    denoiser_state = "on" if st.session_state.fires_apply_denoiser else "off"
+    filter_state = "on" if st.session_state.fires_apply_denoiser else "off"
     st.caption(
         f"**Fires filters:** {st.session_state.time_window}, "
-        f"min confidence ≥ {st.session_state.fires_min_confidence:.0f}, "
-        f"denoiser {denoiser_state}"
+        f"confidence at least {st.session_state.fires_min_confidence:.0f}%, "
+        f"noise filter {filter_state}"
     )
 
     # Render map + details side-by-side

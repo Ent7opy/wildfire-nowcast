@@ -99,3 +99,28 @@ def test_bbox_to_window_max_edge_is_full_extent_window():
     assert (i0, i1, j0, j1) == (0, grid.n_lat, 0, grid.n_lon)
 
 
+def test_gridspec_from_bbox_tuple():
+    """GridSpec.from_bbox should accept bbox tuple (min_lon, min_lat, max_lon, max_lat)."""
+    bbox = (20.0, 40.0, 21.0, 41.0)
+    grid = GridSpec.from_bbox(bbox)
+
+    assert grid.crs == "EPSG:4326"
+    assert grid.cell_size_deg == 0.01
+    assert grid.origin_lat == 40.0
+    assert grid.origin_lon == 20.0
+    assert grid.n_lat == 100
+    assert grid.n_lon == 100
+
+
+def test_gridspec_from_bbox_tuple_vs_args():
+    """GridSpec.from_bbox with tuple should match separate args."""
+    bbox = (20.0, 40.0, 21.0, 41.0)
+    grid_tuple = GridSpec.from_bbox(bbox)
+    grid_args = GridSpec.from_bbox(lat_min=40.0, lat_max=41.0, lon_min=20.0, lon_max=21.0)
+
+    assert grid_tuple.origin_lat == grid_args.origin_lat
+    assert grid_tuple.origin_lon == grid_args.origin_lon
+    assert grid_tuple.n_lat == grid_args.n_lat
+    assert grid_tuple.n_lon == grid_args.n_lon
+
+

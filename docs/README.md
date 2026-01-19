@@ -45,6 +45,95 @@ Purpose: Give newcomers and contributors a single navigation point, reduce dupli
 - **[`grid.md`](grid.md)** – Analysis grid contract: CRS, indexing, terrain alignment
 - **[`spread_model_design.md`](spread_model_design.md)** – Spread model contract and implementation details
 
+### API & JIT Forecasting
+- **JIT Forecasting Workflow** – Generate forecasts for any global location on-demand (see below)
+
+---
+
+## JIT Forecasting
+
+The JIT (Just-In-Time) forecast pipeline enables worldwide coverage without pre-provisioned data. Click any fire location to trigger automated terrain ingestion, weather ingestion, and forecast generation.
+
+### Workflow
+
+1. **Trigger**: POST to `/forecast/jit` with a bounding box
+2. **Pipeline**: Background task ingests terrain → weather → generates forecast
+3. **Poll**: GET `/forecast/jit/{job_id}` to check status
+4. **Complete**: Results include forecast run_id, raster TileJSON URLs, and contour GeoJSON
+
+### API Endpoints
+
+#### POST /forecast/jit
+
+Enqueue a JIT forecast for an arbitrary bbox.
+
+**Request:**
+```bash
+curl -X POST http://localhost:8000/forecast/jit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "bbox": [20.0, 40.0, 21.0, 41.0],
+    "horizons_hours": [24, 48, 72]
+  }'
+```
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "queued"
+}
+```
+
+#### GET /forecast/jit/{job_id}
+
+Poll for job status.
+
+**Request:**
+```bash
+curl http://localhost:8000/forecast/jit/550e8400-e29b-41d4-a716-446655440000
+```
+
+**Response (in progress):**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "ingesting_weather",
+  "progress_message": "Fetching weather data...",
+  "created_at": "2026-01-19T12:00:00Z",
+  "updated_at": "2026-01-19T12:00:15Z"
+}
+```
+
+**Response (completed):**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "progress_message": "Forecast complete!",
+  "result": {
+    "run_id": 123,
+    "raster_urls": ["..."],
+    "contour_geojson": {"type": "FeatureCollection", "features": [...]}
+  }
+}
+```
+
+### Status Flow
+
+- `pending` → Job queued, waiting to start
+- `ingesting_terrain` → Downloading Copernicus DEM tiles
+- `ingesting_weather` → Fetching NOAA GFS weather data
+- `running_forecast` → Generating spread forecast
+- `completed` → Forecast ready (check `result` field)
+- `failed` → Error occurred (check `error` field)
+
+### Integration
+
+The UI automatically triggers JIT forecasts when clicking fires in regions without pre-ingested data. The polling component (`ui/components/forecast_status.py`) checks status every 2 seconds and updates the map on completion.
+
+For programmatic access, poll `/forecast/jit/{job_id}` until `status` is `completed` or `failed`.
+
 ---
 
 ## Reading Order (New Contributor)

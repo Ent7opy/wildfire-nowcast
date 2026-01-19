@@ -175,32 +175,118 @@ make dev-ui
 
 ---
 
-## Optional: Additional Data Ingestion
+## Generating and Viewing Forecast Overlays
 
-### Weather Data (for Forecast Features)
+This section shows how to generate a spread forecast and see the overlay in the UI. The workflow involves ingesting weather data, generating a forecast via API, and viewing the result.
 
-If you want to see forecast overlays:
+### Step 1: Ingest Weather Data
+
+Weather forecasts require GFS 0.25° data. Ingest for a specific forecast run time:
 
 ```bash
-# Using Docker Compose
-docker compose exec api uv run --project ingest -m ingest.weather_ingest --run-time 2025-12-06T00:00Z
+# Using Docker Compose (recommended)
+docker compose exec api uv run --project ingest -m ingest.weather_ingest --run-time <YYYY-MM-DD>T00:00Z
 
 # Or using make
-make ingest-weather ARGS="--run-time 2025-12-06T00:00Z"
+make ingest-weather ARGS="--run-time <YYYY-MM-DD>T00:00Z"
 ```
 
-**Note:** Requires ecCodes installed (see Prerequisites).
+**Note:** Requires ecCodes installed (see Prerequisites). **Replace `<YYYY-MM-DD>` with today's date or a recent date** (e.g., `2026-01-18`). GFS forecast data is only available for recent runs (typically the last few days to weeks), so dates older than ~1 week will likely fail. The `--run-time` should be a valid GFS run time (00Z, 06Z, 12Z, or 18Z).
 
-### Terrain Data (for Terrain Features)
-
-For terrain-based features:
+You can verify the weather data was ingested by checking the database:
 
 ```bash
-# Using Docker Compose
-docker compose exec api uv run --project ingest -m ingest.dem_preprocess --cog
+docker compose exec db psql -U wildfire -d wildfire -c "SELECT id, model, run_time, status FROM weather_runs ORDER BY created_at DESC LIMIT 5;"
+```
+
+### Step 2: Ensure Fire Data Exists
+
+Make sure you have recent fire detections (if you haven't already):
+
+```bash
+docker compose exec api uv run --project ingest -m ingest.firms_ingest --day-range 3 --area world
+```
+
+### Step 2.5: Ingest Terrain Data (Required for Forecast)
+
+Forecast generation requires terrain data for the region grid specification:
+
+```bash
+# Using Docker Compose (use same bbox as forecast)
+docker compose exec api uv run --project ingest -m ingest.dem_preprocess --region-name balkans --bbox 19.0 41.0 23.0 43.0 --cog
 
 # Or using make
-make ingest-dem ARGS="--cog"
+make ingest-dem ARGS="--region-name balkans --bbox 19.0 41.0 23.0 43.0 --cog"
+```
+
+**Note:** The region name and bounding box should match what you'll use in Step 3. For other regions, adjust accordingly.
+
+You can verify terrain data was ingested:
+
+```bash
+docker compose exec db psql -U wildfire -d wildfire -c "SELECT id, region_name, dem_source FROM terrain_metadata ORDER BY created_at DESC LIMIT 5;"
+```
+
+### Step 3: Generate a Forecast via API
+
+Call the forecast generation endpoint with a bounding box and region name:
+
+```bash
+curl -X POST http://localhost:8000/forecast/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "min_lon": 19.0,
+    "min_lat": 41.0,
+    "max_lon": 23.0,
+    "max_lat": 43.0,
+    "region_name": "balkans",
+    "horizons_hours": [24, 48, 72]
+  }'
+```
+
+**Expected response:** JSON with a non-null `run.id` field and contour GeoJSON.
+
+Example response:
+```json
+{
+  "run": {
+    "id": 1,
+    "model_name": "HeuristicSpreadModelV0",
+    "model_version": "v0",
+    "forecast_reference_time": "<YYYY-MM-DD>T00:00:00+00:00",
+    "region_name": "balkans",
+    "status": "completed"
+  },
+  "rasters": [...],
+  "contours": {"type": "FeatureCollection", "features": [...]}
+}
+```
+
+**Note the `run.id`** - this is used by the UI to fetch the forecast overlay tiles.
+
+### Step 4: View Forecast Overlay in UI
+
+1. Open the UI at `http://localhost:8501`
+2. Navigate to the area you generated the forecast for (Balkans in the example above)
+3. In the sidebar, enable the **"Show forecast overlay"** toggle
+4. The forecast contours should appear on the map
+
+Alternatively, if you click **"Generate Spread Forecast"** in the UI (in the click details panel after clicking on the map), the overlay will automatically appear after generation completes.
+
+**Verification:**
+- Open browser DevTools Network tab
+- Filter requests to `/tiles/forecast_contours`
+- Confirm requests include `run_id=` parameter matching the generated run
+
+---
+
+## Optional: Additional Terrain Data (For Other Regions)
+
+If you want to work with additional regions beyond the Balkans example above:
+
+```bash
+# Example for a different region
+docker compose exec api uv run --project ingest -m ingest.dem_preprocess --region-name <region> --bbox <min_lon> <min_lat> <max_lon> <max_lat> --cog
 ```
 
 ---
@@ -261,6 +347,12 @@ docker compose exec api uv run alembic upgrade head
 
 # Ingest data
 docker compose exec api uv run --project ingest -m ingest.firms_ingest --day-range 3 --area world
+docker compose exec api uv run --project ingest -m ingest.weather_ingest --run-time <TODAY-DATE>T00:00Z  # Use today's date, e.g., 2026-01-18
+
+# Generate forecast (requires weather + fire data)
+curl -X POST http://localhost:8000/forecast/generate \
+  -H "Content-Type: application/json" \
+  -d '{"min_lon": 19.0, "min_lat": 41.0, "max_lon": 23.0, "max_lat": 43.0, "region_name": "balkans", "horizons_hours": [24, 48, 72]}'
 
 # View logs
 docker compose logs -f api
@@ -280,10 +372,16 @@ make migrate
 
 # Ingest data
 make ingest-firms ARGS="--day-range 3 --area world"
+make ingest-weather ARGS="--run-time <TODAY-DATE>T00:00Z"  # Use today's date, e.g., 2026-01-18
 
 # Run services
 make dev-api    # Terminal 1
 make dev-ui     # Terminal 2
+
+# Generate forecast (in another terminal, after services are running)
+curl -X POST http://localhost:8000/forecast/generate \
+  -H "Content-Type: application/json" \
+  -d '{"min_lon": 19.0, "min_lat": 41.0, "max_lon": 23.0, "max_lat": 43.0, "region_name": "balkans", "horizons_hours": [24, 48, 72]}'
 
 # Stop database
 make db-down

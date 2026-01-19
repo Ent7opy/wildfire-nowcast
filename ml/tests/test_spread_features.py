@@ -41,7 +41,7 @@ def test_spread_inputs_to_model_input(mock_grid, mock_window):
     weather = xr.Dataset()
     terrain = MagicMock(spec=TerrainWindow)
     ref_time = datetime.now(timezone.utc)
-    
+
     inputs = SpreadInputs(
         grid=mock_grid,
         window=mock_window,
@@ -51,7 +51,7 @@ def test_spread_inputs_to_model_input(mock_grid, mock_window):
         forecast_reference_time=ref_time,
         horizons_hours=[24, 48]
     )
-    
+
     model_input = inputs.to_model_input()
     assert model_input.grid == mock_grid
     assert model_input.window == mock_window
@@ -65,16 +65,16 @@ def test_fallback_weather_creation(mock_window):
     """Verify fallback weather has correct shapes and coordinates."""
     ref_time = datetime(2025, 12, 26, 12, 0, 0, tzinfo=timezone.utc)
     horizons = [24, 48]
-    
+
     ds = _create_fallback_weather(mock_window, ref_time, horizons)
-    
+
     assert dict(ds.sizes) == {"time": 2, "lat": 10, "lon": 10}
     assert "u10" in ds.data_vars
     assert "v10" in ds.data_vars
     assert (ds.u10.values == 0).all()
     assert (ds.v10.values == 0).all()
     assert np.isnan(ds.t2m.values).all()
-    
+
     # Check coords
     assert len(ds.time) == 2
     assert np.array_equal(ds.lat.values, mock_window.lat)
@@ -148,20 +148,20 @@ def test_build_spread_inputs_aoi_to_window_extraction(
 def test_build_spread_inputs_fallback_on_no_weather(mock_get_run, mock_grid, mock_window):
     """Verify fallback behavior when no weather run is found."""
     mock_get_run.return_value = None
-    
+
     with (
         patch("ml.spread_features.get_region_grid_spec", return_value=mock_grid),
         patch("ml.spread_features.get_grid_window_for_bbox", return_value=mock_window),
         patch("ml.spread_features.get_fire_cells_heatmap") as mock_fires,
         patch("ml.spread_features.load_terrain_window") as mock_terrain,
     ):
-        
+
         mock_fires.return_value = FireHeatmapWindow(mock_grid, mock_window, np.zeros((10,10)))
         mock_terrain.return_value = TerrainWindow(mock_window, np.zeros((10,10)), np.zeros((10,10)))
-        
+
         ref_time = datetime(2025, 12, 26, 12, 0, 0, tzinfo=timezone.utc)
         inputs = build_spread_inputs("region", (5.055, 35.055, 5.145, 35.145), ref_time)
-        
+
         assert inputs.weather_cube.u10.shape == (3, 10, 10) # default horizons: 24, 48, 72
         assert (inputs.weather_cube.u10.values == 0).all()
 
@@ -210,4 +210,41 @@ def test_load_weather_cube_aligns_and_sets_coords(mock_open, mock_get_run, _mock
     assert dict(out.sizes) == {"time": 2, "lat": 10, "lon": 10}
     assert np.array_equal(out["time"].values, np.asarray(target_times))
     assert np.array_equal(out["lead_time_hours"].values, np.asarray([24, 48]))
+
+
+@patch("ml.spread_features._get_latest_weather_run")
+@patch("api.fires.repo.list_fire_detections_bbox_time")
+def test_build_spread_inputs_with_region_name_none(mock_list_fires, mock_get_weather_run):
+    """Verify build_spread_inputs works with region_name=None (bbox-only mode)."""
+    bbox = (20.0, 40.0, 21.0, 41.0)
+    ref_time = datetime(2025, 12, 26, 12, 0, 0, tzinfo=timezone.utc)
+
+    mock_list_fires.return_value = []
+    mock_get_weather_run.return_value = None
+
+    inputs = build_spread_inputs(
+        region_name=None,
+        bbox=bbox,
+        forecast_reference_time=ref_time,
+        horizons_hours=[24, 48],
+    )
+
+    assert inputs.grid.crs == "EPSG:4326"
+    assert inputs.grid.cell_size_deg == 0.01
+    assert inputs.grid.origin_lat == 40.0
+    assert inputs.grid.origin_lon == 20.0
+    assert inputs.grid.n_lat == 100
+    assert inputs.grid.n_lon == 100
+
+    assert inputs.terrain.slope.shape == inputs.window.lat.shape + inputs.window.lon.shape
+    assert (inputs.terrain.slope == 0).all()
+    assert (inputs.terrain.aspect == 0).all()
+
+    assert inputs.active_fires.heatmap.shape == (
+        len(inputs.window.lat),
+        len(inputs.window.lon),
+    )
+
+    assert "u10" in inputs.weather_cube.data_vars
+    assert "v10" in inputs.weather_cube.data_vars
 

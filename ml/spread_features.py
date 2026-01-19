@@ -223,23 +223,23 @@ def _load_weather_cube(
 
 
 def _create_fallback_weather(
-    window: GridWindow, 
-    ref_time: datetime, 
+    window: GridWindow,
+    ref_time: datetime,
     horizons_hours: Sequence[int]
 ) -> xr.Dataset:
     """Create a zero-wind fallback weather cube."""
     target_times = [ref_time + timedelta(hours=h) for h in horizons_hours]
     target_times_64 = [np.datetime64(t.astimezone(timezone.utc).replace(tzinfo=None), "ns") for t in target_times]
-    
+
     shape = (len(target_times_64), len(window.lat), len(window.lon))
-    
+
     coords = {
         "time": target_times_64,
         "lat": window.lat,
         "lon": window.lon,
         "lead_time_hours": ("time", list(horizons_hours))
     }
-    
+
     return xr.Dataset(
         data_vars={
             "u10": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
@@ -301,7 +301,7 @@ def build_spread_inputs(
     weather_bias_corrector_path: Path | None = None,
 ) -> SpreadInputs:
     """Assemble all required inputs for a spread model prediction.
-    
+
     Parameters
     ----------
     region_name : str | None
@@ -319,7 +319,7 @@ def build_spread_inputs(
         Whether to include elevation in the terrain features.
     weight_by_denoised_score : bool, optional
         Whether to weight fire cells by their denoised score (default: True).
-        
+
     Returns
     -------
     SpreadInputs
@@ -342,7 +342,7 @@ def build_spread_inputs(
     else:
         grid = get_region_grid_spec(region_name)
     window = get_grid_window_for_bbox(grid, bbox, clip=True)
-    
+
     # 2. Load fires
     fire_start = forecast_reference_time - timedelta(hours=fire_lookback_hours)
     try:
@@ -350,11 +350,11 @@ def build_spread_inputs(
         if region_name is None:
             from api.fires.repo import list_fire_detections_bbox_time
             from api.fires.grid_mapping import fires_to_indices, aggregate_indices_to_grid
-            
+
             cols = ["lat", "lon"]
             if weight_by_denoised_score:
                 cols.append("denoised_score")
-            
+
             detections = list_fire_detections_bbox_time(
                 bbox=bbox,
                 start_time=fire_start,
@@ -363,7 +363,7 @@ def build_spread_inputs(
                 include_noise=False,
             )
             mapped = fires_to_indices(detections, grid, drop_outside=True)
-            
+
             if not mapped:
                 heatmap = aggregate_indices_to_grid(
                     i=np.asarray([], dtype=int),
@@ -381,7 +381,7 @@ def build_spread_inputs(
                 in_window = (i_window >= 0) & (i_window < window.lat.size) & (j_window >= 0) & (j_window < window.lon.size)
                 i_window = i_window[in_window]
                 j_window = j_window[in_window]
-                
+
                 if weight_by_denoised_score:
                     # Handle NULL denoised_score values: treat unscored detections as full-weight (1.0)
                     # to avoid NaN poisoning in numpy arrays (same pattern as api/fires/service.py)
@@ -401,7 +401,7 @@ def build_spread_inputs(
                         shape=(window.lat.size, window.lon.size),
                         mode="presence",
                     )
-            
+
             from api.fires.service import FireHeatmapWindow
             fires = FireHeatmapWindow(
                 grid=grid,
@@ -427,7 +427,7 @@ def build_spread_inputs(
     if fires.grid != grid:
         raise ValueError("Fire heatmap grid does not match region grid spec.")
     _assert_same_window(expected=window, actual=fires.window, label="active_fires")
-    
+
     # 3. Load terrain (optional - create empty terrain if region_name is None or terrain unavailable)
     if region_name is None:
         # Create empty terrain for location-based forecasting
@@ -465,7 +465,7 @@ def build_spread_inputs(
                 aoi_mask=None,
             )
     _assert_same_window(expected=window, actual=terrain.window, label="terrain")
-    
+
     # 4. Load weather
     weather = _load_weather_cube(
         ref_time=forecast_reference_time,
@@ -493,7 +493,7 @@ def build_spread_inputs(
         np.asarray(weather.coords["lon"].values), np.asarray(window.lon), rtol=0.0, atol=1e-12
     ):
         raise ValueError("weather_cube.lon does not match window.lon")
-    
+
     return SpreadInputs(
         grid=grid,
         window=window,

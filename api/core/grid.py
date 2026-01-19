@@ -47,15 +47,32 @@ class GridSpec:
     @classmethod
     def from_bbox(
         cls,
-        lat_min: float,
-        lat_max: float,
-        lon_min: float,
-        lon_max: float,
+        lat_min: float | tuple[float, float, float, float],
+        lat_max: float | None = None,
+        lon_min: float | None = None,
+        lon_max: float | None = None,
         *,
         cell_size_deg: float = DEFAULT_CELL_SIZE_DEG,
         crs: str = DEFAULT_CRS,
     ) -> "GridSpec":
-        """Construct a grid snapped down to the cell size from a bbox."""
+        """Construct a grid snapped down to the cell size from a bbox.
+
+        Accepts either:
+        - Four separate arguments: from_bbox(lat_min, lat_max, lon_min, lon_max)
+        - A single bbox tuple: from_bbox((min_lon, min_lat, max_lon, max_lat))
+        """
+        if isinstance(lat_min, (tuple, list)):
+            if lat_max is not None or lon_min is not None or lon_max is not None:
+                raise ValueError("Cannot mix bbox tuple and individual arguments")
+            bbox = lat_min
+            if len(bbox) != 4:
+                raise ValueError(f"bbox tuple must have 4 elements, got {len(bbox)}")
+            min_lon, min_lat, max_lon, max_lat = bbox
+            lat_min, lat_max, lon_min, lon_max = min_lat, max_lat, min_lon, max_lon
+        else:
+            if lat_max is None or lon_min is None or lon_max is None:
+                raise ValueError("Must provide all four bbox coordinates")
+
         cell = float(cell_size_deg)
         origin_lat = math.floor(lat_min / cell) * cell
         origin_lon = math.floor(lon_min / cell) * cell

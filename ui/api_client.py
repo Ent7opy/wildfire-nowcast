@@ -14,9 +14,68 @@ import requests
 from runtime_config import api_base_url
 
 
+__all__ = [
+    "ApiError",
+    "ApiUnavailableError",
+    "get_fires",
+    "get_forecast",
+    "generate_forecast",
+    "create_jit_forecast",
+    "get_jit_forecast_status",
+]
+
+
 JsonDict = Dict[str, Any]
 BBox = Tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 TimeRange = Tuple[datetime, datetime]  # (start_time, end_time)
+
+
+def get_jit_forecast_status(job_id: str) -> JsonDict:
+    """Get JIT forecast job status.
+
+    Backend contract: GET /forecast/jit/{job_id}
+
+    Returns:
+      {
+        "job_id": UUID,
+        "status": "pending|ingesting_terrain|ingesting_weather|running_forecast|completed|failed",
+        "progress_message": str,
+        "result": {...} (if completed),
+        "error": str (if failed)
+      }
+    """
+    base = api_base_url()
+    url = f"{base}/forecast/jit/{job_id}"
+    try:
+        resp = requests.get(url, timeout=(2.0, 5.0))
+    except (requests.Timeout, requests.ConnectionError) as e:
+        raise ApiUnavailableError(message=str(e), url=url) from e
+
+    if resp.status_code == 404:
+        raise ApiError(
+            message="Job not found",
+            status_code=404,
+            url=str(resp.url),
+            response_text=resp.text,
+        )
+
+    if resp.status_code != 200:
+        raise ApiError(
+            message="Non-200 response from JIT status API",
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        )
+
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise ApiError(
+            message="API returned non-JSON response",
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        ) from e
 
 
 @dataclass
@@ -242,3 +301,52 @@ def generate_forecast(
             response_text=resp.text,
         ) from e
 
+
+def create_jit_forecast(
+    bbox: BBox,
+    horizons: Optional[Iterable[int]] = None,
+    forecast_reference_time: Optional[datetime] = None,
+) -> JsonDict:
+    """Enqueue a JIT forecast pipeline for arbitrary bbox.
+
+    Backend contract: POST /forecast/jit
+      Request body:
+      - bbox: [min_lon, min_lat, max_lon, max_lat]
+      - forecast_reference_time (optional - ISO format string, defaults to now)
+      - horizons_hours (optional - list of ints, defaults to [24,48,72])
+
+    Returns:
+      { "job_id": UUID, "status": "queued" }
+    """
+    body: Dict[str, Any] = {
+        "bbox": list(bbox),
+    }
+    if horizons is not None:
+        body["horizons_hours"] = list(horizons)
+    if forecast_reference_time is not None:
+        body["forecast_reference_time"] = _isoformat(forecast_reference_time)
+
+    base = api_base_url()
+    url = f"{base}/forecast/jit"
+    try:
+        resp = requests.post(url, json=body, timeout=(5.0, 10.0))
+    except (requests.Timeout, requests.ConnectionError) as e:
+        raise ApiUnavailableError(message=str(e), url=url) from e
+
+    if resp.status_code != 202:
+        raise ApiError(
+            message="Non-202 response from JIT forecast API",
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        )
+
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise ApiError(
+            message="API returned non-JSON response",
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        ) from e

@@ -1,11 +1,21 @@
-.PHONY: help dev-api dev-ui install test lint clean db-up db-down migrate revision ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval hindcast-build weather-bias
+.PHONY: help dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval hindcast-build weather-bias ralph-init ralph-plan ralph-run ralph-status
 
-PYTHON ?= python
+PYTHON ?= python3
 UV ?= uv
+RALPH_TASK_FILE ?=
+
+# Ralph detection
+ifeq ($(OS),Windows_NT)
+    # Windows (CMD or PowerShell)
+    RALPH_CMD = @C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -ExecutionPolicy Bypass -File .ralph/ralph.ps1
+else
+    # Linux / WSL / macOS
+    RALPH_CMD = @./.ralph/ralph.sh
+endif
 
 help: ## Show this help message
 	@echo "Available commands:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
+	@$(PYTHON) -c "import re; [print(f'  {m[0]:<15} {m[1]}') for m in re.findall(r'^([a-zA-Z_-]+):.*?## (.*)$$', open('Makefile').read(), re.MULTILINE)]"
 
 install: ## Install dependencies for all subprojects (with dev extras)
 	cd api && $(UV) sync --dev
@@ -23,6 +33,7 @@ test: ## Run unit tests (API + UI + ML + Ingest)
 	@echo "Running API tests..."
 	cd api && $(UV) run pytest
 	@echo "Running UI tests..."
+	@if [ -L "ui/.venv/lib64" ]; then rm -rf ui/.venv; fi
 	cd ui && $(UV) run pytest
 	@echo "Running ML tests..."
 	cd ml && $(UV) run pytest
@@ -31,17 +42,43 @@ test: ## Run unit tests (API + UI + ML + Ingest)
 
 lint: ## Run Ruff lint checks (API + UI + ML + Ingest)
 	@echo "Linting API..."
-	cd api && $(UV) run ruff check .
+	cd api && $(UV) run --no-sync ruff check .
 	@echo "Linting UI..."
-	cd ui && $(UV) run ruff check .
+	@if [ -L "ui/.venv/lib64" ]; then rm -rf ui/.venv; fi
+	cd ui && $(UV) run --no-sync ruff check .
 	@echo "Linting ML..."
-	cd ml && $(UV) run ruff check .
+	cd ml && $(UV) run --no-sync ruff check .
 	@echo "Linting Ingest..."
-	cd ingest && $(UV) run ruff check .
+	cd ingest && $(UV) run --no-sync ruff check .
+
+lint-fix: ## Auto-fix Ruff lint errors (API + UI + ML + Ingest)
+	@echo "Fixing API..."
+	cd api && $(UV) run --no-sync ruff check --fix .
+	@echo "Fixing UI..."
+	cd ui && $(UV) run --no-sync ruff check --fix .
+	@echo "Fixing ML..."
+	cd ml && $(UV) run --no-sync ruff check --fix .
+	@echo "Fixing Ingest..."
+	cd ingest && $(UV) run --no-sync ruff check --fix .
 
 clean: ## Remove Python caches and build artifacts
 	@$(PYTHON) scripts/clean.py
 	@echo "Clean complete."
+
+clean-venv: ## Remove .venv directories (fixes Windows permission issues)
+	@$(PYTHON) scripts/clean.py --include-venv
+
+ralph-init: ## Initialize Ralph loop (.ralph/)
+	$(RALPH_CMD) init "$(RALPH_TASK_FILE)"
+
+ralph-plan: ## Generate .ralph/plan.json + .ralph/state.json (optional: RALPH_TASK_FILE=...)
+	$(RALPH_CMD) plan "$(RALPH_TASK_FILE)"
+
+ralph-run: ## Run Ralph loop (optional: RALPH_TASK_FILE=...)
+	$(RALPH_CMD) run "$(RALPH_TASK_FILE)"
+
+ralph-status: ## Show Ralph loop status
+	$(RALPH_CMD) status
 
 db-up: ## Start the database service
 	@echo "Starting database service..."
@@ -83,6 +120,25 @@ ingest-forecast: ## Run spread forecast and persist (pass ARGS="--region ... --b
 
 ingest-industrial: ## Ingest industrial sources (pass ARGS="--wri --bbox ...")
 	$(UV) run --project ingest -m ingest.industrial_sources_ingest $(ARGS)
+
+ingest-viirs: ## Alias for ingest-firms
+	$(MAKE) ingest-firms ARGS="$(ARGS)"
+
+ingest-fwi: ## Alias for ingest-forecast
+	$(MAKE) ingest-forecast ARGS="$(ARGS)"
+
+ingest-all: ingest-viirs ingest-fwi ingest-weather ## Run all primary ingestion pipelines
+
+db-cleanup: ## Run database cleanup (14-day retention)
+	$(UV) run --project api scripts/db_cleanup.py
+
+prepare: ## Prepare the database and initial context data (FIRMS + Weather)
+	@echo "Cleaning up database..."
+	$(MAKE) db-cleanup
+	@echo "Ingesting FIRMS data..."
+	$(MAKE) ingest-firms
+	@echo "Ingesting weather data..."
+	$(MAKE) ingest-weather
 
 denoiser-label: ## Run heuristic labeling (pass ARGS="--bbox ... --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.label_v1 $(ARGS)

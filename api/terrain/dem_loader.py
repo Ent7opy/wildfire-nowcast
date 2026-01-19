@@ -73,7 +73,11 @@ def load_dem_for_bbox(
     """Load the latest DEM for a region and clip to bbox (lon/lat)."""
     metadata = get_latest_dem_metadata_for_region(region_name)
     if metadata is None:
-        raise ValueError(f"No DEM metadata found for region '{region_name}'.")
+        # Fallback to global_base if specific region is not found
+        metadata = get_latest_dem_metadata_for_region("global_base")
+
+    if metadata is None:
+        raise ValueError(f"No DEM metadata found for region '{region_name}' or 'global_base'.")
 
     raster_path = Path(metadata.raster_path)
     if not raster_path.exists():

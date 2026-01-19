@@ -24,7 +24,7 @@ class FIRMSIngestSettings(BaseSettings):
         extra="ignore",
     )
 
-    map_key: str = Field(validation_alias="FIRMS_MAP_KEY")
+    map_key: str = Field(default="", validation_alias="FIRMS_MAP_KEY")
     sources: List[str] = Field(
         default_factory=lambda: ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT"],
         validation_alias="FIRMS_SOURCES",

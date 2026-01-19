@@ -613,6 +613,11 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Include accumulated precipitation (APCP).",
     )
+    parser.add_argument(
+        "--patch-mode",
+        action="store_true",
+        help="Optimize for small AOIs: 24h horizon, 6h steps, no precipitation.",
+    )
     return parser.parse_args(argv)
 
 
@@ -635,15 +640,84 @@ def _apply_overrides(
     return settings.model_copy(update=updates)
 
 
-def run_weather_ingest(argv: List[str] | None = None) -> int:
-    args = parse_args(argv)
-    settings = _apply_overrides(weather_settings, args)
-    run_time = _resolve_run_time(args.run_time, settings.run_time)
-    grid_spec = build_grid_spec(settings)
+def ingest_weather_for_bbox(
+    bbox: tuple[float, float, float, float],
+    forecast_time: datetime,
+    output_dir: Path | str,
+    *,
+    horizon_hours: int = 72,
+    step_hours: int = 3,
+    include_precipitation: bool = False,
+    model_name: str = "gfs_0p25",
+    request_timeout_seconds: int = 60,
+    patch_mode: bool = False,
+) -> int:
+    """Ingest weather data for the given bbox and forecast time.
+
+    Args:
+        bbox: Bounding box as (min_lon, min_lat, max_lon, max_lat).
+        forecast_time: The model run time (UTC).
+        output_dir: Directory to store the NetCDF output.
+        horizon_hours: Forecast horizon in hours (default: 72).
+        step_hours: Forecast step in hours (default: 3).
+        include_precipitation: Whether to include precipitation data (default: False).
+        model_name: Weather model identifier (default: "gfs_0p25").
+        request_timeout_seconds: HTTP request timeout (default: 60).
+        patch_mode: Enable optimizations for small AOIs (<50km x 50km).
+                    Reduces horizon to 24h, uses 6h steps, skips precipitation,
+                    and adds spatial margin for subsetting. (default: False).
+
+    Returns:
+        weather_run_id: The database ID of the created weather run record.
+
+    Raises:
+        Exception: If the ingestion fails after fallback attempts.
+    """
+    output_dir = Path(output_dir)
+    if forecast_time.tzinfo is None:
+        forecast_time = forecast_time.replace(tzinfo=timezone.utc)
+    forecast_time = forecast_time.astimezone(timezone.utc)
+
+    # Apply patch mode optimizations for small AOIs
+    if patch_mode:
+        horizon_hours = 24
+        step_hours = 6
+        include_precipitation = False
+        LOGGER.info(
+            "Patch mode enabled: horizon_hours=24, step_hours=6, precipitation=False"
+        )
+
+    min_lon, min_lat, max_lon, max_lat = bbox
+    
+    # For patch mode, add spatial margin to download bbox to ensure adequate coverage
+    # for interpolation, but final grid will be cropped to original bbox
+    download_bbox = bbox
+    if patch_mode:
+        margin_deg = 0.5  # ~50km at equator
+        download_bbox = (
+            min_lon - margin_deg,
+            min_lat - margin_deg,
+            max_lon + margin_deg,
+            max_lat + margin_deg,
+        )
+        LOGGER.info(
+            "Patch mode: downloading with margin bbox=%s, final bbox=%s",
+            download_bbox,
+            bbox,
+        )
+    
+    grid_spec = GridSpec.from_bbox(
+        lat_min=min_lat,
+        lat_max=max_lat,
+        lon_min=min_lon,
+        lon_max=max_lon,
+        cell_size_deg=ANALYSIS_CELL_SIZE_DEG,
+        crs=ANALYSIS_CRS,
+    )
     grid_meta = grid_metadata_dict(grid_spec)
 
     canonical_variables = ["u10", "v10", "t2m", "rh2m"]
-    if settings.include_precipitation:
+    if include_precipitation:
         canonical_variables.append("tp")
 
     variables = [GFS_FILTER_VARIABLES[name] for name in canonical_variables]
@@ -654,30 +728,45 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
     LOGGER.info(
         "Starting weather ingestion",
         extra={
-            "run_time": run_time.isoformat(),
-            "bbox": settings.bbox,
-            "horizon_hours": settings.horizon_hours,
-            "step_hours": settings.step_hours,
-            "include_precipitation": settings.include_precipitation,
-        "grid": grid_meta,
+            "run_time": forecast_time.isoformat(),
+            "bbox": bbox,
+            "horizon_hours": horizon_hours,
+            "step_hours": step_hours,
+            "include_precipitation": include_precipitation,
+            "grid": grid_meta,
         },
     )
 
     run_id = create_weather_run_record(
-        model=settings.model_name,
-        run_time=run_time,
-        horizon_hours=settings.horizon_hours,
-        step_hours=settings.step_hours,
-        bbox=settings.bbox,
+        model=model_name,
+        run_time=forecast_time,
+        horizon_hours=horizon_hours,
+        step_hours=step_hours,
+        bbox=bbox,
         variables=canonical_variables,
     )
 
     storage_path = ""
-    base_urls = [settings.gfs_base_url_primary]
-    if settings.gfs_base_url_fallback:
-        base_urls.append(settings.gfs_base_url_fallback)
+    base_urls = [weather_settings.gfs_base_url_primary]
+    if weather_settings.gfs_base_url_fallback:
+        base_urls.append(weather_settings.gfs_base_url_fallback)
 
-    def _attempt_ingest(selected_run_time: datetime) -> int:
+    # Use download_bbox for NOMADS filter, but keep original bbox for final output
+    dl_min_lon, dl_min_lat, dl_max_lon, dl_max_lat = download_bbox
+    settings = WeatherIngestSettings(
+        model_name=model_name,
+        base_dir=output_dir,
+        bbox_min_lon=dl_min_lon,
+        bbox_min_lat=dl_min_lat,
+        bbox_max_lon=dl_max_lon,
+        bbox_max_lat=dl_max_lat,
+        horizon_hours=horizon_hours,
+        step_hours=step_hours,
+        include_precipitation=include_precipitation,
+        request_timeout_seconds=request_timeout_seconds,
+    )
+
+    def _attempt_ingest(selected_run_time: datetime) -> None:
         nonlocal storage_path
         with tempfile.TemporaryDirectory(prefix="gfs_grib_") as tmpdir:
             grib_paths = download_grib_files(
@@ -691,9 +780,10 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
             dataset = build_weather_dataset(
                 grib_paths,
                 selected_run_time,
-                include_precip=settings.include_precipitation,
+                include_precip=include_precipitation,
             )
-            dataset = crop_to_bbox(dataset, settings, target_bbox=grid_bounds(grid_spec))
+            # Crop to original bbox (not download_bbox with margin)
+            dataset = crop_to_bbox(dataset, settings, target_bbox=bbox)
             dataset = regrid_to_analysis_grid(dataset, grid_spec)
             dataset = attach_grid_metadata(dataset, grid_spec)
             _validate_weather_dataset(dataset, settings, canonical_variables)
@@ -717,26 +807,25 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
                     "grid": grid_meta,
                 },
             )
-        return 0
 
     try:
-        return_code = _attempt_ingest(run_time)
+        _attempt_ingest(forecast_time)
         LOGGER.info(
             "Weather ingest completed",
             extra={"run_id": run_id, "storage_path": storage_path},
         )
-        return return_code
+        return run_id
     except httpx.HTTPStatusError as exc:
         error_ctx = _extract_error_context(exc)
-        prev_run_time = run_time - timedelta(hours=6)
+        prev_run_time = forecast_time - timedelta(hours=6)
         LOGGER.warning(
             "Primary cycle %s failed (status %s). Falling back to previous cycle %s",
-            run_time.isoformat(),
+            forecast_time.isoformat(),
             error_ctx.get("status_code", "unknown"),
             prev_run_time.isoformat(),
         )
         try:
-            return_code = _attempt_ingest(prev_run_time)
+            _attempt_ingest(prev_run_time)
             LOGGER.info(
                 "Weather ingest completed via fallback cycle",
                 extra={
@@ -745,7 +834,7 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
                     "fallback_run_time": prev_run_time.isoformat(),
                 },
             )
-            return return_code
+            return run_id
         except Exception as fallback_exc:
             fallback_ctx = _extract_error_context(fallback_exc)
             LOGGER.exception("Weather ingest failed after fallback cycle")
@@ -761,16 +850,38 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
                     "fallback_error": fallback_ctx,
                 },
             )
-            return 1
-    except Exception as exc:  # pragma: no cover - defensive logging
+            raise
+    except Exception as exc:
         LOGGER.exception("Weather ingest failed")
         finalize_weather_run_record(
             run_id=run_id,
             storage_path=storage_path,
             status="failed",
-            run_time=run_time,
+            run_time=forecast_time,
             extra_metadata=_extract_error_context(exc),
         )
+        raise
+
+
+def run_weather_ingest(argv: List[str] | None = None) -> int:
+    args = parse_args(argv)
+    settings = _apply_overrides(weather_settings, args)
+    run_time = _resolve_run_time(args.run_time, settings.run_time)
+
+    try:
+        ingest_weather_for_bbox(
+            bbox=settings.bbox,
+            forecast_time=run_time,
+            output_dir=settings.base_dir,
+            horizon_hours=settings.horizon_hours,
+            step_hours=settings.step_hours,
+            include_precipitation=settings.include_precipitation,
+            model_name=settings.model_name,
+            request_timeout_seconds=settings.request_timeout_seconds,
+            patch_mode=args.patch_mode,
+        )
+        return 0
+    except Exception:
         return 1
 
 

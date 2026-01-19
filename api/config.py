@@ -8,6 +8,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _get_project_version() -> str:
     try:
@@ -77,6 +79,17 @@ class AppSettings(BaseSettings):
     # TiTiler then accesses it via filesystem.
     data_dir_local_prefix: str = Field(default="data/", validation_alias="DATA_DIR_LOCAL_PREFIX")
     data_dir_titiler_mount: str = Field(default="/data/", validation_alias="DATA_DIR_TITILER_MOUNT")
+
+    # CORS settings (comma-separated list of allowed origins)
+    cors_allow_origins: str = Field(
+        default="http://localhost:8501", validation_alias="CORS_ALLOW_ORIGINS"
+    )
+
+    # Export settings
+    exports_dir: Path = Field(
+        default=REPO_ROOT / "data" / "exports",
+        validation_alias="EXPORTS_DIR",
+    )
 
 
 settings = AppSettings()

@@ -50,7 +50,8 @@ These values can be overridden by defining them in a `.env` file (or your shell)
 | `POSTGRES_DB` | Database name | `wildfire` |
 | `POSTGRES_PORT` | Host port mapped to Postgres | `5432` |
 | `REDIS_PORT` | Host port mapped to Redis | `6379` |
-| `API_BASE_URL` | Service name used by the UI | `http://api:8000` |
+| `API_BASE_URL` | API URL used by the Streamlit server | `http://api:8000` |
+| `API_PUBLIC_BASE_URL` | API URL used by the browser | `http://localhost:8000` |
 | `APP_ENV` | Shared indicator for dev vs prod behaviors | `dev` |
 
 ## Database & Migrations
