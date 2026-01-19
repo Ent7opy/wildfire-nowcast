@@ -50,6 +50,18 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     return [segment.strip() for segment in value.split(",") if segment.strip()]
 
 
+def _update_false_source_masking(batch_id: int) -> None:
+    """Update false_source_masked column for detections in the batch."""
+    try:
+        from api.fires.repo import update_false_source_masking
+
+        LOGGER.info("Updating false-source masking for batch %s", batch_id)
+        masked_count = update_false_source_masking(batch_id)
+        LOGGER.info("Marked %s detections as false sources in batch %s", masked_count, batch_id)
+    except Exception:
+        LOGGER.exception("Failed to update false-source masking for batch %s", batch_id)
+
+
 def run_backfill(
     *,
     start: date,
@@ -124,6 +136,9 @@ def run_backfill(
                 parsed_count = len(detections)
                 inserted = repository.insert_detections(detections)
                 skipped_duplicates = parsed_count - inserted
+
+                if inserted > 0:
+                    _update_false_source_masking(batch_id)
 
                 repository.finalize_ingest_batch(
                     batch_id,
