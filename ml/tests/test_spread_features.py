@@ -213,7 +213,7 @@ def test_load_weather_cube_aligns_and_sets_coords(mock_open, mock_get_run, _mock
 
 
 @patch("ml.spread_features._get_latest_weather_run")
-@patch("ml.spread_features.list_fire_detections_bbox_time")
+@patch("api.fires.repo.list_fire_detections_bbox_time")
 def test_build_spread_inputs_with_region_name_none(mock_list_fires, mock_get_weather_run):
     """Verify build_spread_inputs works with region_name=None (bbox-only mode)."""
     bbox = (20.0, 40.0, 21.0, 41.0)
