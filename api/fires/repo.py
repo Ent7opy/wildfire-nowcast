@@ -8,6 +8,7 @@ from typing import Iterable, Literal
 from sqlalchemy import text
 
 from api.db import get_engine
+from api.fires.scoring import mask_false_sources
 
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 
@@ -30,6 +31,7 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "source": "source",
     "is_noise": "is_noise",
     "denoised_score": "denoised_score",
+    "false_source_masked": "false_source_masked",
 }
 
 
@@ -42,6 +44,7 @@ def list_fire_detections_bbox_time(
     limit: int | None = None,
     order: Literal["asc", "desc"] = "asc",
     include_noise: bool = False,
+    include_masked: bool = False,
     min_confidence: float | None = None,
 ) -> list[dict]:
     """List fire detections in a lon/lat bbox and acquisition time window.
@@ -51,6 +54,7 @@ def list_fire_detections_bbox_time(
     - Spatial filter uses GiST index-friendly predicates:
       `geom && envelope` plus `ST_Intersects(geom, envelope)`.
     - Denoiser: By default, filters out rows where `is_noise` is TRUE.
+    - False-source masking: By default, filters out rows where `false_source_masked` is TRUE.
     """
 
     min_lon, min_lat, max_lon, max_lat = bbox
@@ -75,6 +79,12 @@ def list_fire_detections_bbox_time(
     noise_predicate = ""
     if not include_noise:
         noise_predicate = "AND is_noise IS NOT TRUE"
+
+    # Masked filter: default to excluding detections near industrial sources.
+    # We use "IS NOT TRUE" to include NULLs (detections not yet checked).
+    masked_predicate = ""
+    if not include_masked:
+        masked_predicate = "AND false_source_masked IS NOT TRUE"
 
     confidence_predicate = ""
     if min_confidence is not None:
@@ -118,6 +128,7 @@ def list_fire_detections_bbox_time(
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
           {noise_predicate}
+          {masked_predicate}
           {confidence_predicate}
         ORDER BY acq_time {order}
         {limit_sql}
@@ -128,4 +139,54 @@ def list_fire_detections_bbox_time(
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
     return [dict(r) for r in rows]
+
+
+def update_false_source_masking(batch_id: int) -> int:
+    """Update false_source_masked column for detections in a batch.
+
+    Queries detections from the batch, uses mask_false_sources() to identify
+    detections near industrial sources, and updates the false_source_masked column.
+
+    Args:
+        batch_id: The ingest batch ID to process
+
+    Returns:
+        Number of detections marked as masked
+    """
+    # Query detections from the batch
+    stmt = text("""
+        SELECT id, lat, lon
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"batch_id": batch_id})
+        rows = result.mappings().all()
+
+    detections = [dict(r) for r in rows]
+    if not detections:
+        return 0
+
+    # Compute masking results
+    masked_results = mask_false_sources(detections)
+
+    # Update fire_detections table with masking results
+    update_stmt = text("""
+        UPDATE fire_detections
+        SET false_source_masked = :masked
+        WHERE id = :detection_id
+    """)
+
+    params = [
+        {"detection_id": det_id, "masked": is_masked}
+        for det_id, is_masked in masked_results.items()
+    ]
+
+    with get_engine().begin() as conn:
+        conn.execute(update_stmt, params)
+
+    # Count how many were marked as masked
+    masked_count = sum(1 for is_masked in masked_results.values() if is_masked)
+    return masked_count
 

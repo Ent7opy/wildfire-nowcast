@@ -10,6 +10,74 @@ from sqlalchemy import text
 from api.db import get_engine
 
 
+def mask_false_sources(
+    detections: Iterable[dict],
+    *,
+    radius_m: float = 500.0,
+) -> dict[int, bool]:
+    """Identify fire detections near known industrial false-positive sources.
+
+    Queries industrial_sources table and marks detections within radius_m as masked.
+    Masked detections should be excluded from default views or assigned fire_likelihood=0.
+
+    Spatial matching logic:
+    - Uses ST_DWithin for efficient spatial query with geometry index
+    - Default radius: 500m (typical thermal sensor spatial accuracy)
+    - Industrial sources include power plants, refineries, steel mills, etc.
+
+    Args:
+        detections: Iterable of detection dicts with keys: id, lat, lon
+        radius_m: Spatial masking radius in meters (default 500m)
+
+    Returns:
+        Dict mapping detection_id → masked (True if near industrial source)
+
+    Notes:
+        - Only returns True for masked detections; absent keys mean not masked
+        - Relies on industrial_sources table populated via ingest pipeline
+    """
+    detection_list = list(detections)
+    if not detection_list:
+        return {}
+
+    detection_ids = [d["id"] for d in detection_list]
+    if not detection_ids:
+        return {}
+
+    # Query detections within radius_m of any industrial source
+    stmt = text("""
+        SELECT DISTINCT fd.id AS detection_id
+        FROM fire_detections fd
+        JOIN industrial_sources ind ON (
+            ST_DWithin(fd.geom::geography, ind.geom::geography, :radius_m)
+        )
+        WHERE fd.id = ANY(:detection_ids)
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            stmt,
+            {
+                "detection_ids": detection_ids,
+                "radius_m": float(radius_m),
+            },
+        )
+        rows = result.mappings().all()
+
+    # Map masked detections to True
+    masked: dict[int, bool] = {}
+    for row in rows:
+        detection_id = int(row["detection_id"])
+        masked[detection_id] = True
+
+    # For detections not near industrial sources, explicitly mark as not masked
+    for det_id in detection_ids:
+        if det_id not in masked:
+            masked[det_id] = False
+
+    return masked
+
+
 def compute_persistence_scores(
     detections: Iterable[dict],
     *,
