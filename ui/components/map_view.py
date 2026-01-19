@@ -148,10 +148,10 @@ def render_map_view() -> Optional[Dict[str, float]]:
         initial_view_state=st.session_state.map_view_state,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         tooltip={
-            "html": "<b>ID:</b> {id}<br/>"
-                    "<b>Time:</b> {acq_time}<br/>"
-                    "<b>Confidence:</b> {confidence}<br/>"
-                    "<b>Intensity (FRP):</b> {frp}",
+            "html": "<b>ID:</b> {properties.id}<br/>"
+                    "<b>Time:</b> {properties.acq_time}<br/>"
+                    "<b>Confidence:</b> {properties.confidence}<br/>"
+                    "<b>Intensity (FRP):</b> {properties.frp}",
             "style": {"color": "white", "backgroundColor": "#333"}
         },
     )
