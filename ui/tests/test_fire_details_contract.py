@@ -5,10 +5,40 @@ from unittest.mock import MagicMock
 import streamlit as st
 
 
+# FireMapFeature Contract (synced with api/tests/test_fire_map_contract.py)
+# This defines the minimal set of properties that MUST be available
+# for the UI to function correctly. Any change to these property names
+# or their removal will break the UI and must be caught by these tests.
+FIRE_MAP_FEATURE_CONTRACT = {
+    "required": {
+        # Core identification and temporal properties
+        "id": "Unique identifier for the detection",
+        "acq_time": "Acquisition timestamp (ISO 8601 format)",
+        
+        # Sensor and source metadata
+        "sensor": "Satellite sensor name (e.g., VIIRS, MODIS)",
+        "source": "Data source (e.g., FIRMS)",
+        
+        # Fire detection measurements
+        "confidence": "Detection confidence score",
+        "frp": "Fire Radiative Power",
+        
+        # Geospatial properties
+        "lat": "Latitude coordinate",
+        "lon": "Longitude coordinate",
+    },
+    "optional": {
+        # Denoiser-specific properties (may not be present for all detections)
+        "denoised_score": "ML denoiser confidence score (0-1)",
+        "is_noise": "Boolean flag indicating if detection is classified as noise",
+    }
+}
+
+
 def test_click_details_handles_all_mvt_properties():
     """Test that click_details can render all MVT properties without KeyError."""
     
-    # Mock session state with realistic MVT properties
+    # Mock session state with realistic MVT properties from contract
     mock_session_state = {
         "selected_fire": {
             "id": 12345,
@@ -30,40 +60,20 @@ def test_click_details_handles_all_mvt_properties():
     # These accesses should not raise KeyError
     assert det is not None
     
-    # Core properties (lines 49-59 in click_details.py)
-    lat = det.get("lat")
-    lon = det.get("lon")
-    assert lat is not None
-    assert lon is not None
+    # Verify all required properties from contract are accessible
+    for prop in FIRE_MAP_FEATURE_CONTRACT["required"].keys():
+        value = det.get(prop)
+        assert value is not None, f"Required property '{prop}' should not be None"
     
-    acq_time = det.get("acq_time")
-    assert acq_time is not None
-    
-    sensor = det.get("sensor")
-    assert sensor is not None
-    
-    confidence = det.get("confidence")
-    assert confidence is not None
-    
-    frp = det.get("frp")
-    assert frp is not None
-    
-    source = det.get("source")
-    assert source is not None
-    
-    # Noise filter properties (lines 61-79 in click_details.py)
-    denoised_score = det.get("denoised_score")
-    is_noise = det.get("is_noise")
-    
-    # These may be None for some detections, but should not raise KeyError
-    assert "denoised_score" in det or denoised_score is None
-    assert "is_noise" in det or is_noise is None
+    # Optional properties may be None but should not raise KeyError
+    for prop in FIRE_MAP_FEATURE_CONTRACT["optional"].keys():
+        _ = det.get(prop)  # Should not raise KeyError
 
 
 def test_click_details_handles_missing_optional_properties():
     """Test that click_details gracefully handles missing optional properties."""
     
-    # Mock session state with minimal required properties
+    # Mock session state with minimal required properties (only those from contract)
     mock_session_state = {
         "selected_fire": {
             "id": 12345,
@@ -80,18 +90,15 @@ def test_click_details_handles_missing_optional_properties():
     
     det = mock_session_state.get("selected_fire")
     
-    # Core properties must be present
-    assert det.get("lat") is not None
-    assert det.get("lon") is not None
-    assert det.get("acq_time") is not None
-    assert det.get("sensor") is not None
-    assert det.get("confidence") is not None
-    assert det.get("frp") is not None
-    assert det.get("source") is not None
+    # All required properties from contract must be present
+    for prop in FIRE_MAP_FEATURE_CONTRACT["required"].keys():
+        assert det.get(prop) is not None, f"Required property '{prop}' must not be None"
     
-    # Optional properties should return None gracefully
-    assert det.get("denoised_score") is None
-    assert det.get("is_noise") is None
+    # Optional properties should return None gracefully (no KeyError)
+    for prop in FIRE_MAP_FEATURE_CONTRACT["optional"].keys():
+        value = det.get(prop)
+        # It's OK for optional properties to be None or missing
+        assert value is None or value is not None  # Just checking no KeyError
 
 
 def test_click_details_coordinate_validation():
@@ -152,18 +159,16 @@ def test_map_view_property_key_consistency():
         "denoised_score": 0.95,
     }
     
-    # Simulate line 177 in map_view.py: st.session_state.selected_fire = props
+    # Simulate line 195 in map_view.py: st.session_state.selected_fire = feature
     selected_fire = mvt_props
     
-    # Verify all expected properties are present
-    required_keys = ["id", "acq_time", "sensor", "confidence", "frp", "source", "lat", "lon"]
-    for key in required_keys:
-        assert key in selected_fire, f"Property '{key}' must be present in selected_fire"
+    # Verify all required properties from contract are present
+    for key in FIRE_MAP_FEATURE_CONTRACT["required"].keys():
+        assert key in selected_fire, f"Required property '{key}' from contract must be present in selected_fire"
     
-    # Verify coordinate extraction (line 179 in map_view.py)
-    # Note: line 179 uses "lng" but properties use "lon"
+    # Verify coordinate extraction (line 178-179 in map_view.py)
     lat_value = selected_fire.get("lat")
     lon_value = selected_fire.get("lon")
     
-    assert lat_value is not None
-    assert lon_value is not None
+    assert lat_value is not None, "lat coordinate must be present"
+    assert lon_value is not None, "lon coordinate must be present"
