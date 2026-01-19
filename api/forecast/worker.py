@@ -115,7 +115,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             )
             forecast = run_spread_forecast(request)
             logger.info(f"JIT job {job_id}: forecast computation completed")
-            
+
             # Capture operational metadata
             extra_meta = {}
             try:
@@ -132,7 +132,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                         extra_meta[k] = attrs.get(k)
             except Exception:
                 pass
-            
+
             # Derive grid and window for persistence
             if forecast_params.get("region_name"):
                 from api.fires.service import get_region_grid_spec
@@ -140,14 +140,14 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             else:
                 grid = GridSpec.from_bbox(bbox)
             window = get_grid_window_for_bbox(grid, bbox, clip=True)
-            
+
             # Save rasters
             region_dir_name = forecast_params.get("region_name", "location-based")
             run_dir = REPO_ROOT / "data" / "forecasts" / region_dir_name / f"run_{run_id}"
             raster_records = save_forecast_rasters(forecast, grid, window, run_dir, emit_cog=True)
             insert_spread_forecast_rasters(run_id, raster_records)
             logger.info(f"JIT job {job_id}: saved {len(raster_records)} rasters")
-            
+
             # Generate and persist contours
             thresholds = forecast_params.get("thresholds", [0.3, 0.5, 0.7])
             contour_records = build_contour_records(
@@ -155,10 +155,10 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             )
             insert_spread_forecast_contours(run_id, contour_records)
             logger.info(f"JIT job {job_id}: saved {len(contour_records)} contours")
-            
+
             # Finalize forecast run
             finalize_spread_forecast_run(run_id, status="completed", extra_metadata=extra_meta)
-            
+
             # Build result with TileJSON URLs for UI consumption
             tilejson_urls = []
             for r in raster_records:
@@ -171,17 +171,17 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                     f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
                 )
                 tilejson_urls.append(tilejson_url)
-            
+
             result = {
                 "terrain_id": terrain_id,
                 "weather_run_id": weather_run_id,
                 "forecast_run_id": run_id,
                 "tilejson_urls": tilejson_urls,
             }
-            
+
             repo.update_jit_job_status(job_id, "completed", result=result)
             logger.info(f"JIT forecast pipeline completed: job_id={job_id}, run_id={run_id}")
-            
+
         except Exception as forecast_error:
             # Mark forecast run as failed
             finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(forecast_error)})
