@@ -18,6 +18,7 @@ def _list_detections(
     end_time: datetime,
     min_confidence: Optional[float],
     include_noise: bool,
+    include_masked: bool,
     include_denoiser_fields: bool,
     limit: Optional[int],
 ):
@@ -42,6 +43,7 @@ def _list_detections(
         end_time=end_time,
         columns=columns,
         include_noise=include_noise,
+        include_masked=include_masked,
         limit=limit,
         min_confidence=min_confidence,
     )
@@ -59,6 +61,7 @@ async def get_fires(
     end_time: datetime = Query(..., description="End time for the query window (ISO 8601 format)"),
     min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
+    include_masked: bool = Query(False, description="Include detections near known industrial false-positive sources."),
     include_denoiser_fields: bool = Query(
         False, description="Include denoised_score and is_noise in response."
     ),
@@ -73,6 +76,7 @@ async def get_fires(
         start_time=start_time,
         end_time=end_time,
         include_noise=include_noise,
+        include_masked=include_masked,
         include_denoiser_fields=include_denoiser_fields,
         limit=limit,
         min_confidence=min_confidence,
@@ -89,6 +93,7 @@ async def get_detections(
     end_time: datetime = Query(..., description="End time for the query window (ISO 8601 format)"),
     min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
+    include_masked: bool = Query(False, description="Include detections near known industrial false-positive sources."),
     include_denoiser_fields: bool = Query(
         False, description="Include denoised_score and is_noise in response."
     ),
@@ -107,6 +112,7 @@ async def get_detections(
         start_time=start_time,
         end_time=end_time,
         include_noise=include_noise,
+        include_masked=include_masked,
         include_denoiser_fields=include_denoiser_fields,
         limit=limit,
         min_confidence=min_confidence,
