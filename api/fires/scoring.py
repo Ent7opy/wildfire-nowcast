@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Iterable
 
+import numpy as np
+import xarray as xr
 from sqlalchemy import text
 
 from api.db import get_engine
+
+LOGGER = logging.getLogger(__name__)
 
 
 def mask_false_sources(
@@ -192,3 +198,239 @@ def compute_persistence_scores(
             scores[det_id] = 0.2
 
     return scores
+
+
+def compute_weather_plausibility_scores(
+    detections: Iterable[dict],
+    *,
+    high_rh_threshold: float = 70.0,
+    low_rh_bonus_threshold: float = 40.0,
+    precip_lookback_hours: float = 72.0,
+    heavy_precip_threshold_mm: float = 10.0,
+    moderate_wind_threshold_ms: float = 3.0,
+    time_tolerance_hours: float = 6.0,
+) -> dict[int, float]:
+    """Compute weather plausibility scores for fire detections.
+
+    Weather plausibility scoring logic:
+    - Penalizes detections in meteorologically unfavorable conditions
+    - Boosts detections in fire-prone weather conditions
+    - Uses weather data from ingested weather runs (GFS NetCDF files)
+
+    Scoring rules:
+    - Base score: 0.5 (neutral)
+    - Penalties:
+      - High RH (>70%): -0.3 (very wet conditions suppress fires)
+      - Recent heavy precipitation (>10mm in 48-72h): -0.2 (wet fuel)
+    - Bonuses:
+      - Low RH (<40%): +0.2 (dry conditions favor fires)
+      - Moderate/high wind (>3 m/s): +0.1 (wind spreads fires)
+    - Score clamped to [0.1, 1.0] range
+
+    Args:
+        detections: Iterable of detection dicts with keys: id, lat, lon, acq_time
+        high_rh_threshold: RH percentage above which to penalize (default 70%)
+        low_rh_bonus_threshold: RH percentage below which to boost (default 40%)
+        precip_lookback_hours: Hours to look back for precipitation history (default 72h)
+        heavy_precip_threshold_mm: Precipitation threshold in mm for penalty (default 10mm)
+        moderate_wind_threshold_ms: Wind speed threshold in m/s for bonus (default 3 m/s)
+        time_tolerance_hours: Hours of tolerance for weather data matching (default 6h)
+
+    Returns:
+        Dict mapping detection_id → weather_plausibility_score in range [0.1, 1.0]
+
+    Notes:
+        - Falls back to neutral score (0.5) if weather data is unavailable
+        - Uses nearest-neighbor interpolation for spatial and temporal matching
+        - Weather variables: rh2m (relative humidity), tp (total precipitation), u10/v10 (wind)
+    """
+    detection_list = list(detections)
+    if not detection_list:
+        return {}
+
+    detection_ids = [d["id"] for d in detection_list]
+    if not detection_ids:
+        return {}
+
+    scores: dict[int, float] = {}
+
+    # Group detections by time window to minimize weather file loading
+    # For now, process each detection individually (can optimize later if needed)
+    for det in detection_list:
+        det_id = int(det["id"])
+        lat = float(det["lat"])
+        lon = float(det["lon"])
+        acq_time = det["acq_time"]
+
+        # Query weather data for this detection
+        weather_data = _get_weather_data_for_point(
+            lat=lat,
+            lon=lon,
+            ref_time=acq_time,
+            time_tolerance_hours=time_tolerance_hours,
+            precip_lookback_hours=precip_lookback_hours,
+        )
+
+        if weather_data is None:
+            # No weather data available: use neutral score
+            scores[det_id] = 0.5
+            continue
+
+        # Extract weather variables
+        rh = weather_data.get("rh2m")
+        precip_recent = weather_data.get("precip_recent_mm")
+        wind_speed = weather_data.get("wind_speed_ms")
+
+        # Base score: neutral
+        score = 0.5
+
+        # Apply penalties
+        if rh is not None and rh > high_rh_threshold:
+            score -= 0.3  # Very wet conditions suppress fires
+
+        if precip_recent is not None and precip_recent > heavy_precip_threshold_mm:
+            score -= 0.2  # Recent heavy rain wets fuel
+
+        # Apply bonuses
+        if rh is not None and rh < low_rh_bonus_threshold:
+            score += 0.2  # Dry conditions favor fires
+
+        if wind_speed is not None and wind_speed > moderate_wind_threshold_ms:
+            score += 0.1  # Wind spreads fires
+
+        # Clamp to [0.1, 1.0] range
+        score = max(0.1, min(1.0, score))
+        scores[det_id] = score
+
+    return scores
+
+
+def _get_weather_data_for_point(
+    *,
+    lat: float,
+    lon: float,
+    ref_time: datetime,
+    time_tolerance_hours: float,
+    precip_lookback_hours: float,
+) -> dict[str, float] | None:
+    """Query weather data for a specific point and time.
+
+    Args:
+        lat: Latitude of the point
+        lon: Longitude of the point
+        ref_time: Reference time for weather data
+        time_tolerance_hours: Maximum time difference allowed for matching
+        precip_lookback_hours: Hours to look back for precipitation accumulation
+
+    Returns:
+        Dict with weather variables or None if data unavailable:
+        - rh2m: Relative humidity at 2m (%)
+        - precip_recent_mm: Recent precipitation accumulation (mm)
+        - wind_speed_ms: Wind speed (m/s)
+    """
+    # Query weather runs that cover this point and time
+    stmt = text("""
+        SELECT id, storage_path, run_time
+        FROM weather_runs
+        WHERE status = 'completed'
+          AND run_time <= :ref_time
+          AND run_time >= :ref_time - INTERVAL '1 hour' * :tolerance_hours
+          AND COALESCE(bbox_min_lon, -180.0) <= :lon AND COALESCE(bbox_max_lon, 180.0) >= :lon
+          AND COALESCE(bbox_min_lat, -90.0) <= :lat AND COALESCE(bbox_max_lat, 90.0) >= :lat
+        ORDER BY run_time DESC, created_at DESC
+        LIMIT 1
+    """)
+
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            stmt,
+            {
+                "ref_time": ref_time,
+                "tolerance_hours": time_tolerance_hours,
+                "lat": lat,
+                "lon": lon,
+            },
+        ).mappings().first()
+
+    if not row:
+        LOGGER.debug(
+            "No weather run found for point (lat=%s, lon=%s) at time %s",
+            lat, lon, ref_time
+        )
+        return None
+
+    storage_path = Path(row["storage_path"])
+    if not storage_path.is_absolute():
+        storage_path = Path.cwd() / storage_path
+
+    if not storage_path.exists():
+        LOGGER.warning(
+            "Weather run %s file missing at %s",
+            row["id"], storage_path
+        )
+        return None
+
+    try:
+        # Load weather dataset
+        ds = xr.open_dataset(storage_path)
+
+        # Select nearest point spatially
+        ds_point = ds.sel(lat=lat, lon=lon, method="nearest")
+
+        # Select time closest to ref_time
+        if "time" in ds_point.coords:
+            # Convert ref_time to numpy datetime64 (naive UTC)
+            ref_time_utc = ref_time.replace(tzinfo=None) if ref_time.tzinfo else ref_time
+            ref_time_64 = np.datetime64(ref_time_utc, "ns")
+            ds_point = ds_point.sel(time=ref_time_64, method="nearest")
+
+        # Extract weather variables
+        result: dict[str, float] = {}
+
+        # Relative humidity at 2m
+        if "rh2m" in ds_point.data_vars:
+            rh_val = float(ds_point["rh2m"].values)
+            if not np.isnan(rh_val):
+                result["rh2m"] = rh_val
+
+        # Wind speed (compute from u10 and v10 components)
+        if "u10" in ds_point.data_vars and "v10" in ds_point.data_vars:
+            u10_val = float(ds_point["u10"].values)
+            v10_val = float(ds_point["v10"].values)
+            if not np.isnan(u10_val) and not np.isnan(v10_val):
+                wind_speed = np.sqrt(u10_val**2 + v10_val**2)
+                result["wind_speed_ms"] = float(wind_speed)
+
+        # Precipitation accumulation (if available)
+        # Note: GFS may not always have precipitation data in all runs
+        # If 'tp' (total precipitation) is available, accumulate recent values
+        if "tp" in ds_point.data_vars and "time" in ds.coords:
+            try:
+                # Select time range for precipitation lookback
+                precip_start = ref_time - timedelta(hours=precip_lookback_hours)
+                precip_start_64 = np.datetime64(precip_start.replace(tzinfo=None), "ns")
+                ref_time_64 = np.datetime64(ref_time.replace(tzinfo=None), "ns")
+
+                ds_precip = ds.sel(lat=lat, lon=lon, method="nearest")
+                ds_precip = ds_precip.sel(time=slice(precip_start_64, ref_time_64))
+
+                if "tp" in ds_precip.data_vars and len(ds_precip.time) > 0:
+                    # Sum precipitation over the lookback period
+                    precip_sum = float(ds_precip["tp"].sum().values)
+                    if not np.isnan(precip_sum):
+                        # Convert from meters to mm (GFS typically outputs in meters)
+                        result["precip_recent_mm"] = precip_sum * 1000.0
+            except Exception as e:
+                LOGGER.debug(
+                    "Failed to compute precipitation accumulation: %s", e
+                )
+
+        ds.close()
+        return result if result else None
+
+    except Exception as e:
+        LOGGER.warning(
+            "Failed to load weather data from %s: %s",
+            storage_path, e
+        )
+        return None

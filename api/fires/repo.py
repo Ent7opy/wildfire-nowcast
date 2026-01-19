@@ -8,7 +8,7 @@ from typing import Iterable, Literal
 from sqlalchemy import text
 
 from api.db import get_engine
-from api.fires.scoring import mask_false_sources
+from api.fires.scoring import compute_weather_plausibility_scores, mask_false_sources
 
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 
@@ -23,6 +23,7 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "confidence_score": "confidence_score",
     "persistence_score": "persistence_score",
     "landcover_score": "landcover_score",
+    "weather_score": "weather_score",
     "brightness": "brightness",
     "bright_t31": "bright_t31",
     "scan": "scan",
@@ -189,4 +190,52 @@ def update_false_source_masking(batch_id: int) -> int:
     # Count how many were marked as masked
     masked_count = sum(1 for is_masked in masked_results.values() if is_masked)
     return masked_count
+
+
+def update_weather_scores(batch_id: int) -> int:
+    """Update weather_score column for detections in a batch.
+
+    Queries detections from the batch, uses compute_weather_plausibility_scores()
+    to compute weather plausibility scores, and updates the weather_score column.
+
+    Args:
+        batch_id: The ingest batch ID to process
+
+    Returns:
+        Number of detections with scores updated
+    """
+    # Query detections from the batch with required fields
+    stmt = text("""
+        SELECT id, lat, lon, acq_time
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"batch_id": batch_id})
+        rows = result.mappings().all()
+
+    detections = [dict(r) for r in rows]
+    if not detections:
+        return 0
+
+    # Compute weather plausibility scores
+    weather_scores = compute_weather_plausibility_scores(detections)
+
+    # Update fire_detections table with weather scores
+    update_stmt = text("""
+        UPDATE fire_detections
+        SET weather_score = :score
+        WHERE id = :detection_id
+    """)
+
+    params = [
+        {"detection_id": det_id, "score": score}
+        for det_id, score in weather_scores.items()
+    ]
+
+    with get_engine().begin() as conn:
+        conn.execute(update_stmt, params)
+
+    return len(weather_scores)
 
