@@ -5,7 +5,11 @@ from typing import Optional
 
 import streamlit as st
 
-from api_client import ApiError, ApiUnavailableError, get_jit_forecast_status
+from api_client import (
+    ApiError,
+    ApiUnavailableError,
+    get_jit_forecast_status,
+)
 
 
 def render_forecast_status_polling(job_id: str) -> None:

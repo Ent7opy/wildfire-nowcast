@@ -7,7 +7,11 @@ from typing import Any, Dict, Optional
 
 import streamlit as st
 
-from api_client import ApiError, ApiUnavailableError, create_jit_forecast
+from api_client import (
+    ApiError,
+    ApiUnavailableError,
+    create_jit_forecast,
+)
 from runtime_config import forecast_region_name
 
 def _parse_time(value: Any) -> Optional[datetime]:
