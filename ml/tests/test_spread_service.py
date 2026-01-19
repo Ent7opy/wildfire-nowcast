@@ -201,3 +201,40 @@ def test_run_spread_forecast_passes_weather_bias_corrector_path(monkeypatch, moc
     _, kwargs = mock_build.call_args
     assert Path(kwargs["weather_bias_corrector_path"]) == Path("/fake/corrector.json")
 
+
+def test_run_spread_forecast_bbox_only_no_region_name(monkeypatch, mock_spread_inputs):
+    """Service should support bbox-only requests without region_name (JIT forecasting)."""
+    monkeypatch.delenv("WEATHER_BIAS_CORRECTOR_PATH", raising=False)
+    monkeypatch.delenv("WEATHER_BIAS_CORRECTOR_ROOT", raising=False)
+    monkeypatch.delenv("SPREAD_CALIBRATOR_RUN_DIR", raising=False)
+    monkeypatch.delenv("SPREAD_CALIBRATOR_ROOT", raising=False)
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name=None,
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+    )
+
+    mock_forecast = MagicMock(spec=SpreadForecast)
+    mock_forecast.probabilities = MagicMock()
+    mock_forecast.probabilities.min.return_value = 0.0
+    mock_forecast.probabilities.max.return_value = 0.0
+    mock_model = MagicMock()
+    mock_model.predict.return_value = mock_forecast
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs) as mock_build:
+        result = run_spread_forecast(request, model=mock_model)
+
+    assert result == mock_forecast
+    mock_model.predict.assert_called_once()
+    mock_forecast.validate.assert_called_once()
+    
+    # Verify build_spread_inputs was called with region_name=None
+    assert mock_build.call_count == 1
+    _, kwargs = mock_build.call_args
+    assert kwargs["region_name"] is None
+    assert kwargs["bbox"] == (20.0, 40.0, 20.2, 40.2)
+    # Weather bias corrector should be None for location-based forecasts
+    assert kwargs["weather_bias_corrector_path"] is None
+

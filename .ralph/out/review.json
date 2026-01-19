@@ -1,21 +1,44 @@
 {
-  "task_id": "T09",
-  "verdict": "approve",
-  "requested_changes": [],
-  "verification": [
-    "Ran: git status - confirmed modified docs/GETTING_STARTED.md",
-    "Ran: git diff - confirmed addition of 'Generating and Viewing Forecast Overlays' section",
-    "Would run: Follow documented steps to verify overlay appears (requires fresh environment with Docker, FIRMS API key, and ecCodes)"
+  "task_id": "T14",
+  "verdict": "changes_requested",
+  "requested_changes": [
+    {
+      "severity": "must",
+      "title": "Unintended behavioral change affects all weather ingestion, not just patch_mode",
+      "evidence": "ingest/weather_ingest.py:785 - Changed from `crop_to_bbox(dataset, settings, target_bbox=grid_bounds(grid_spec))` to `crop_to_bbox(dataset, settings, target_bbox=bbox)`. This change affects ALL weather ingestion calls, not just when patch_mode=True. The grid_spec is snapped to 0.01° cell boundaries via GridSpec.from_bbox(), but the crop now uses the exact user-provided bbox instead of the cell-aligned bounds. This creates a mismatch between grid metadata (which describes snapped cells) and actual data extent.",
+      "suggested_fix": "Either: (A) Revert this line to use `grid_bounds(grid_spec)` and ensure patch mode works correctly with snapped bounds, OR (B) If the intent is to change cropping behavior for all ingestion, document this breaking change, add a note explaining why, and add test coverage for the new behavior. The task scope (T14) only mentions patch_mode changes, so option A (revert) is recommended to minimize scope."
+    },
+    {
+      "severity": "must",
+      "title": "Acceptance criterion wording mismatch with implementation",
+      "evidence": "Task acceptance criterion #2 states 'Weather cube output is spatially limited to bbox + margin'. Implementation crops output to original bbox (line 786: `target_bbox=bbox`), NOT bbox + margin. Worker notes say 'cropping output to original bbox' which matches implementation but contradicts acceptance criterion text.",
+      "suggested_fix": "Clarify acceptance criterion #2. If the intent is 'output matches original bbox' (not bbox + margin), update the acceptance text. If output should actually include the margin, change line 786 to: `target_bbox=download_bbox` (when patch_mode=True only)."
+    },
+    {
+      "severity": "must",
+      "title": "No verification evidence - acceptance criterion #4 not met",
+      "evidence": "Task acceptance criterion #4: 'Benchmark shows measurable speedup'. Task verification section lists: 'Would run: cd ingest && uv run python weather_ingest.py --bbox 20,40,20.1,40.1 --patch-mode' and 'Would run: time comparison of patch vs full mode'. Benchmark script exists at scripts/benchmark_weather_patch_mode.py but no evidence it was executed. No timing data or speedup measurement provided.",
+      "suggested_fix": "Run the benchmark script or at least one manual timing comparison showing patch_mode is faster than default mode for a small AOI. Document the results in task notes or commit message. Without this, acceptance criterion #4 remains unmet."
+    },
+    {
+      "severity": "must",
+      "title": "Tests have not been executed",
+      "evidence": "New test file ingest/tests/test_weather_ingest.py exists but is untracked (git status shows 'Untracked files'). Task verification says 'Would run: make test (ingest tests)' but no evidence tests were actually run. Tests use heavy mocking and won't catch integration issues.",
+      "suggested_fix": "Run `cd ingest && uv run pytest tests/test_weather_ingest.py -v` and confirm all tests pass. Add the test file to git. Consider adding at least one integration test that validates the patch_mode parameter flow (even if it mocks external HTTP calls)."
+    }
   ],
   "notes": [
-    "Documentation correctly implements the complete forecast overlay workflow with all required steps in proper order.",
-    "Critical fix from previous review cycle has been properly applied: terrain ingestion is now documented as required (Step 2.5) and appears BEFORE forecast generation (Step 3).",
-    "Verified against codebase: api/routes/forecast.py line 167 calls get_region_grid_spec(request.region_name), which requires terrain metadata per api/fires/service.py lines 20-38. Documentation now correctly addresses this dependency.",
-    "All commands are copy/paste runnable with clear instructions for required placeholder replacements (e.g., <YYYY-MM-DD> with explicit guidance).",
-    "Workflow completeness verified: weather ingest → fire data → terrain data (required) → forecast generation → UI viewing.",
-    "Each major step includes verification commands (e.g., psql queries to check ingested data).",
-    "Parameters are consistent across steps: region_name='balkans' and bbox match between terrain ingestion and forecast generation.",
-    "Quick Reference section (lines 337-390) provides consolidated commands for both Docker Compose and manual setup workflows.",
-    "Optional terrain section (lines 283-290) correctly clarified as 'For Other Regions' to avoid confusion with the required Balkans example."
+    "Implementation correctly adds patch_mode parameter and threads it through CLI to ingest_weather_for_bbox().",
+    "Patch mode optimizations (horizon=24h, step=6h, no precip) are correctly applied when enabled.",
+    "Spatial margin logic (0.5° padding) for download_bbox is correctly implemented.",
+    "Documentation updates in docs/ingest/ingest_weather.md clearly explain patch mode usage.",
+    "Minor: patch_mode silently overrides user-specified horizon_hours/step_hours/include_precipitation parameters. This is acceptable given the docstring explains the optimization, but could be mentioned more explicitly.",
+    "Minor: No validation that bbox is actually small (<50km x 50km) for patch mode. User could enable patch_mode for large regions and get suboptimal 24h horizon.",
+    "The most critical issue is #1 (unintended behavioral change affecting all ingestion). This should be fixed before approval."
+  ],
+  "verification": [
+    "Would run: cd ingest && uv run pytest tests/test_weather_ingest.py -v",
+    "Would run: cd /mnt/c/Projects/wildfire-nowcast && python scripts/benchmark_weather_patch_mode.py --bbox 20.0 40.0 20.1 40.1",
+    "Would run: cd ingest && uv run python -m ingest.weather_ingest --bbox 20.0 40.0 20.1 40.1 --patch-mode --run-time 2025-01-19T00:00Z"
   ]
 }

@@ -3,6 +3,7 @@ param(
   [ValidateSet("init", "plan", "run", "status")]
   [string]$Command,
 
+  [Parameter(Position = 1)]
   [string]$TaskFile
 )
 

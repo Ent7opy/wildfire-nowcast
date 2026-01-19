@@ -4,12 +4,12 @@
   "state_file": ".ralph/state.json",
   "runnable_tasks": [
     {
-      "id": "T09",
-      "title": "Document forecast overlay operational workflow",
+      "id": "T14",
+      "title": "Implement weather 'patch mode' for small AOIs",
       "priority": "P2",
       "depends_on": [
         "T03",
-        "T04"
+        "T13"
       ]
     }
   ],

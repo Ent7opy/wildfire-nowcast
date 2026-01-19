@@ -13,6 +13,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from ml.spread.service import run_spread_forecast, SpreadForecastRequest
 from ml.spread.contract import DEFAULT_HORIZONS_HOURS
+from ingest.config import weather_settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,14 +29,12 @@ def main():
         "--bbox",
         nargs=4,
         type=float,
-        required=True,
-        help="Bounding box: min_lon min_lat max_lon max_lat",
+        help=f"Bounding box: min_lon min_lat max_lon max_lat. Defaults to {weather_settings.bbox}",
     )
     parser.add_argument(
         "--region",
         type=str,
-        required=True,
-        help="Region name (e.g., 'balkans')",
+        help="Region name (e.g., 'balkans'). Defaults to 'default'.",
     )
     parser.add_argument(
         "--time",
@@ -62,6 +61,10 @@ def main():
 
     args = parser.parse_args()
 
+    # 0. Handle defaults
+    bbox = tuple(args.bbox) if args.bbox else weather_settings.bbox
+    region = args.region if args.region else "default"
+
     # 1. Parse time
     if args.time:
         try:
@@ -76,15 +79,15 @@ def main():
 
     # 2. Build request
     request = SpreadForecastRequest(
-        region_name=args.region,
-        bbox=tuple(args.bbox),
+        region_name=region,
+        bbox=bbox,
         forecast_reference_time=ref_time,
         horizons_hours=args.horizons,
     )
 
     # 3. Run forecast
     try:
-        LOGGER.info(f"Running forecast for {args.region} at {ref_time}...")
+        LOGGER.info(f"Running forecast for {region} at {ref_time} with bbox {bbox}...")
         forecast = run_spread_forecast(request)
     except Exception as e:
         LOGGER.exception(f"Forecast failed: {e}")

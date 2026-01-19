@@ -3,38 +3,59 @@
   "plan_file": ".ralph/plan.json",
   "state_file": ".ralph/state.json",
   "task": {
-    "id": "T09",
-    "title": "Document forecast overlay operational workflow",
+    "id": "T14",
+    "title": "Implement weather 'patch mode' for small AOIs",
     "priority": "P2",
     "depends_on": [
       "T03",
-      "T04"
+      "T13"
     ],
-    "description": "Add docs explaining how to ingest weather, generate a forecast via POST /forecast/generate, and see the overlay in UI. Keep instructions copy/paste runnable.",
+    "description": "In ingest/weather_ingest.py, add `patch_mode=True` parameter to ingest_weather_for_bbox. When enabled, use findings from T13 to download only bbox-relevant GRIB data. If T13 shows full download is necessary, implement aggressive spatial subsetting after download and skip unnecessary variable processing. Target <10s for 10km x 10km.",
     "files_likely": [
-      "docs/GETTING_STARTED.md",
-      "docs/architecture.md"
+      "ingest/weather_ingest.py"
     ],
     "acceptance": [
-      "Instructions are copy/paste runnable",
-      "Following the steps shows forecast overlay in UI"
+      "patch_mode reduces download/processing time for small AOIs",
+      "Weather cube output is spatially limited to bbox + margin",
+      "Existing region-based ingestion still works (patch_mode=False)",
+      "Benchmark shows measurable speedup"
     ],
     "verification": [
-      "Manual: follow documented steps in fresh environment, confirm overlay appears"
+      "Would run: cd ingest && uv run python weather_ingest.py --bbox 20,40,20.1,40.1 --patch-mode",
+      "Would run: make test (ingest tests)",
+      "Would run: time comparison of patch vs full mode"
     ],
     "status": "implemented",
     "commits": [],
     "notes": [
-      "worker: Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing."
+      "worker: Added patch_mode parameter to weather ingestion for small AOI optimization. When enabled, reduces horizon to 24h, uses 6h steps, skips precipitation, and adds 0.5° spatial margin to download bbox while cropping output to original bbox."
     ],
-    "review_cycles": 4
+    "review_cycles": 2
   },
   "requested_changes": [
     {
       "severity": "must",
-      "title": "Terrain ingestion is required for forecast workflow but marked as optional and missing parameters",
-      "evidence": "docs/GETTING_STARTED.md:178-276 - The forecast overlay workflow (Step 3, line 210-246) calls POST /forecast/generate with region_name=\"balkans\", which requires terrain metadata. api/routes/forecast.py:167 calls get_region_grid_spec(request.region_name), and api/fires/service.py:20-38 shows this function raises ValueError \"No terrain metadata found for region '{region_name}'\" if terrain data is missing. However, terrain ingestion is documented as \"Optional\" at line 262 and appears AFTER the forecast generation steps. Additionally, the terrain command at line 271 lacks --region-name and --bbox arguments, so it defaults to region=\"test_region\" (ingest/dem_preprocess.py:55) which won't match the forecast example's region=\"balkans\".",
-      "suggested_fix": "Add terrain ingestion as a required step BEFORE Step 3. Insert a new step between current Step 2 and Step 3:\n\n### Step 2.5: Ingest Terrain Data (Required for Forecast)\n\nForecast generation requires terrain data for the region grid specification:\n\n```bash\n# Using Docker Compose (use same bbox as forecast)\ndocker compose exec api uv run --project ingest -m ingest.dem_preprocess --region-name balkans --bbox 19.0 41.0 23.0 43.0 --cog\n\n# Or using make\nmake ingest-dem ARGS=\"--region-name balkans --bbox 19.0 41.0 23.0 43.0 --cog\"\n```\n\n**Note:** The region name and bounding box should match what you'll use in Step 3. For other regions, adjust accordingly.\n\nYou can verify terrain data was ingested:\n\n```bash\ndocker compose exec db psql -U wildfire -d wildfire -c \"SELECT id, region_name, dem_source FROM terrain_metadata ORDER BY created_at DESC LIMIT 5;\"\n```\n\nThen update the \"Optional: Additional Data Ingestion\" section (line 262) to clarify it's for OTHER regions/use cases:\n\n## Optional: Additional Terrain Data (For Other Regions)\n\nIf you want to work with additional regions beyond the Balkans example above:\n\n```bash\n# Example for a different region\ndocker compose exec api uv run --project ingest -m ingest.dem_preprocess --region-name <region> --bbox <min_lon> <min_lat> <max_lon> <max_lat> --cog\n```"
+      "title": "Unintended behavioral change affects all weather ingestion, not just patch_mode",
+      "evidence": "ingest/weather_ingest.py:785 - Changed from `crop_to_bbox(dataset, settings, target_bbox=grid_bounds(grid_spec))` to `crop_to_bbox(dataset, settings, target_bbox=bbox)`. This change affects ALL weather ingestion calls, not just when patch_mode=True. The grid_spec is snapped to 0.01° cell boundaries via GridSpec.from_bbox(), but the crop now uses the exact user-provided bbox instead of the cell-aligned bounds. This creates a mismatch between grid metadata (which describes snapped cells) and actual data extent.",
+      "suggested_fix": "Either: (A) Revert this line to use `grid_bounds(grid_spec)` and ensure patch mode works correctly with snapped bounds, OR (B) If the intent is to change cropping behavior for all ingestion, document this breaking change, add a note explaining why, and add test coverage for the new behavior. The task scope (T14) only mentions patch_mode changes, so option A (revert) is recommended to minimize scope."
+    },
+    {
+      "severity": "must",
+      "title": "Acceptance criterion wording mismatch with implementation",
+      "evidence": "Task acceptance criterion #2 states 'Weather cube output is spatially limited to bbox + margin'. Implementation crops output to original bbox (line 786: `target_bbox=bbox`), NOT bbox + margin. Worker notes say 'cropping output to original bbox' which matches implementation but contradicts acceptance criterion text.",
+      "suggested_fix": "Clarify acceptance criterion #2. If the intent is 'output matches original bbox' (not bbox + margin), update the acceptance text. If output should actually include the margin, change line 786 to: `target_bbox=download_bbox` (when patch_mode=True only)."
+    },
+    {
+      "severity": "must",
+      "title": "No verification evidence - acceptance criterion #4 not met",
+      "evidence": "Task acceptance criterion #4: 'Benchmark shows measurable speedup'. Task verification section lists: 'Would run: cd ingest && uv run python weather_ingest.py --bbox 20,40,20.1,40.1 --patch-mode' and 'Would run: time comparison of patch vs full mode'. Benchmark script exists at scripts/benchmark_weather_patch_mode.py but no evidence it was executed. No timing data or speedup measurement provided.",
+      "suggested_fix": "Run the benchmark script or at least one manual timing comparison showing patch_mode is faster than default mode for a small AOI. Document the results in task notes or commit message. Without this, acceptance criterion #4 remains unmet."
+    },
+    {
+      "severity": "must",
+      "title": "Tests have not been executed",
+      "evidence": "New test file ingest/tests/test_weather_ingest.py exists but is untracked (git status shows 'Untracked files'). Task verification says 'Would run: make test (ingest tests)' but no evidence tests were actually run. Tests use heavy mocking and won't catch integration issues.",
+      "suggested_fix": "Run `cd ingest && uv run pytest tests/test_weather_ingest.py -v` and confirm all tests pass. Add the test file to git. Consider adding at least one integration test that validates the patch_mode parameter flow (even if it mocks external HTTP calls)."
     }
   ],
   "instruction": "Implement ONLY the requested changes. Do not expand scope. Do not commit.",

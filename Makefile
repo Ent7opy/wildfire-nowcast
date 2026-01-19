@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval hindcast-build weather-bias ralph-init ralph-plan ralph-run ralph-status
+.PHONY: help dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval hindcast-build weather-bias ralph-init ralph-plan ralph-run ralph-status
 
 PYTHON ?= python3
 UV ?= uv
@@ -120,6 +120,25 @@ ingest-forecast: ## Run spread forecast and persist (pass ARGS="--region ... --b
 
 ingest-industrial: ## Ingest industrial sources (pass ARGS="--wri --bbox ...")
 	$(UV) run --project ingest -m ingest.industrial_sources_ingest $(ARGS)
+
+ingest-viirs: ## Alias for ingest-firms
+	$(MAKE) ingest-firms ARGS="$(ARGS)"
+
+ingest-fwi: ## Alias for ingest-forecast
+	$(MAKE) ingest-forecast ARGS="$(ARGS)"
+
+ingest-all: ingest-viirs ingest-fwi ingest-weather ## Run all primary ingestion pipelines
+
+db-cleanup: ## Run database cleanup (14-day retention)
+	$(UV) run --project api scripts/db_cleanup.py
+
+prepare: ## Prepare the database and initial context data (FIRMS + Weather)
+	@echo "Cleaning up database..."
+	$(MAKE) db-cleanup
+	@echo "Ingesting FIRMS data..."
+	$(MAKE) ingest-firms
+	@echo "Ingesting weather data..."
+	$(MAKE) ingest-weather
 
 denoiser-label: ## Run heuristic labeling (pass ARGS="--bbox ... --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.label_v1 $(ARGS)

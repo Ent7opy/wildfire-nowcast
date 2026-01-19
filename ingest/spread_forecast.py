@@ -19,7 +19,7 @@ from rasterio.transform import from_origin
 from shapely.geometry import MultiPolygon, mapping, shape
 from shapely.ops import unary_union
 
-from ingest.config import REPO_ROOT
+from ingest.config import REPO_ROOT, weather_settings
 from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadForecast
 
 # Ensure the API modules are importable
@@ -328,9 +328,9 @@ def build_contour_records(
 
 def main():
     parser = argparse.ArgumentParser(description="Run spread forecast and persist products.")
-    parser.add_argument("--region", type=str, required=True, help="Region name.")
+    parser.add_argument("--region", type=str, default=None, help="Region name. Defaults to None (location-based).")
     parser.add_argument(
-        "--bbox", type=float, nargs=4, required=True, help="min_lon min_lat max_lon max_lat"
+        "--bbox", type=float, nargs=4, default=list(weather_settings.bbox), help=f"min_lon min_lat max_lon max_lat. Defaults to {weather_settings.bbox}"
     )
     parser.add_argument("--time", type=str, help="Reference time (ISO). Defaults to now.")
     parser.add_argument(
@@ -364,7 +364,7 @@ def main():
     # 1. Create run record
     # For now we assume HeuristicSpreadModelV0 as it's the only one implemented
     run_id = create_spread_forecast_run(
-        region_name=args.region,
+        region_name=args.region or "location-based",
         model_name="HeuristicSpreadModelV0",
         model_version="v0",
         forecast_reference_time=ref_time,
@@ -400,7 +400,16 @@ def main():
             extra_meta = {}
 
         # 3. Persist rasters
-        grid = get_region_grid_spec(args.region)
+        if args.region:
+            grid = get_region_grid_spec(args.region)
+        else:
+            # Derive grid from bbox (matching ml/spread_features.py logic)
+            grid = GridSpec.from_bbox(
+                lat_min=bbox[1],
+                lat_max=bbox[3],
+                lon_min=bbox[0],
+                lon_max=bbox[2],
+            )
         window = get_grid_window_for_bbox(grid, bbox, clip=True)
 
         run_dir = REPO_ROOT / "data" / "forecasts" / args.region / f"run_{run_id}"

@@ -1,19 +1,52 @@
 {
-  "selected_task_id": "T09",
+  "selected_task_id": "T14",
   "status": "implemented",
-  "summary": "Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing.",
+  "summary": "Added patch_mode parameter to weather ingestion for small AOI optimization. When enabled, reduces horizon to 24h, uses 6h steps, skips precipitation, and adds 0.5° spatial margin to download bbox while cropping output to original bbox.",
   "files_changed": [
-    "docs/GETTING_STARTED.md"
+    "ingest/weather_ingest.py"
   ],
   "verification": [
-    "Would run: Manual verification following documented steps",
-    "Would run: 1. make db-up && make migrate",
-    "Would run: 2. make ingest-firms ARGS='--day-range 3 --area 19,41,23,43'",
-    "Would run: 3. make ingest-weather ARGS='--run-time 2025-01-18T00:00Z'",
-    "Would run: 4. make dev-api (terminal 1) && make dev-ui (terminal 2)",
-    "Would run: 5. curl -X POST http://localhost:8000/forecast/generate -H 'Content-Type: application/json' -d '{\"min_lon\": 19.0, \"min_lat\": 41.0, \"max_lon\": 23.0, \"max_lat\": 43.0, \"region_name\": \"balkans\", \"horizons_hours\": [24, 48, 72]}'",
-    "Would run: 6. Open http://localhost:8501, navigate to Balkans region, toggle 'Show forecast overlay'",
-    "Would run: Expected: Forecast contours appear on map, browser DevTools shows /tiles/forecast_contours requests with run_id parameter"
+    "Would run: cd ingest && uv run python -c 'from ingest.weather_ingest import ingest_weather_for_bbox; import inspect; print(inspect.signature(ingest_weather_for_bbox))'",
+    "Would run: cd ingest && uv run python weather_ingest.py --bbox 20 40 20.1 40.1 --patch-mode --run-time 2026-01-17T00:00:00Z",
+    "Would run: time comparison: patch mode (4 files at 6h steps, 24h horizon) vs full mode (25 files at 3h steps, 72h horizon)",
+    "Ran: python3 -m py_compile weather_ingest.py (syntax check passed)"
   ],
-  "blockers": []
+  "implementation_details": {
+    "approach": "Added patch_mode boolean parameter to ingest_weather_for_bbox that applies temporal and spatial optimizations based on T13 findings that NOMADS filter API is already optimal for small AOIs.",
+    "optimizations": {
+      "temporal": "Reduces horizon_hours from 72 to 24, increases step_hours from 3 to 6 (downloads 4 files instead of 25)",
+      "spatial": "Adds 0.5° margin to download_bbox for NOMADS filter to ensure interpolation coverage, then crops final output to original bbox",
+      "variables": "Skips precipitation (include_precipitation forced to False)"
+    },
+    "cli_integration": "Added --patch-mode flag to CLI that passes through to ingest_weather_for_bbox",
+    "backward_compatibility": "Existing region-based ingestion unaffected (patch_mode defaults to False)",
+    "performance_target": "Should achieve <10s for 10km x 10km patches (T13 showed NOMADS filter achieves 1-3s download, plus 2-4s regrid, plus 1-2s persist)"
+  },
+  "code_changes": [
+    {
+      "file": "ingest/weather_ingest.py",
+      "changes": [
+        "Added patch_mode parameter to ingest_weather_for_bbox function signature (line 653)",
+        "Added patch_mode documentation to function docstring (lines 666-668)",
+        "Added patch mode optimization logic that overrides horizon_hours=24, step_hours=6, include_precipitation=False when enabled (lines 681-688)",
+        "Added spatial margin logic to create download_bbox with 0.5° padding for patch mode (lines 691-707)",
+        "Updated settings to use download_bbox for NOMADS filter request (lines 754-763)",
+        "Updated crop_to_bbox call to use original bbox, not download_bbox (line 786)",
+        "Added --patch-mode CLI flag to argparse (lines 617-620)",
+        "Wired patch_mode from CLI args to ingest_weather_for_bbox call (line 881)"
+      ]
+    }
+  ],
+  "rationale": {
+    "why_patch_mode": "JIT forecast pipeline needs <10s weather ingestion for interactive UX. Full 72h horizon with 3h steps downloads 25 GRIB files (~500KB). Patch mode reduces to 4 files (~80KB) by limiting temporal scope to 24h/6h steps, sufficient for initial nowcast (0-24h).",
+    "why_spatial_margin": "Grid interpolation requires data beyond target bbox. 0.5° margin (~50km at equator) ensures adequate coverage for regridding to 0.01° analysis grid without edge artifacts.",
+    "why_skip_precipitation": "Spread model in ML pipeline currently uses wind, temperature, humidity. Precipitation not required for initial forecast, skipping saves ~25% download size per file.",
+    "why_nomads_filter": "T13 research showed NOMADS filter API already provides server-side spatial subsetting, achieving 1-3s for 10km patches. No alternative approach (Range requests, post-download subsetting) outperforms this for small AOIs."
+  },
+  "testing_notes": {
+    "syntax_check": "Passed python3 -m py_compile weather_ingest.py",
+    "imports": "Cannot verify imports without uv environment, but syntax is valid",
+    "integration_test": "Full test requires: database (weather_runs table), network access to NOMADS, ecCodes/cfgrib dependencies. Would require make db-up && make ingest-weather ARGS='--bbox 20 40 20.1 40.1 --patch-mode' in full environment.",
+    "benchmark": "Would compare: time with --patch-mode (expected <10s) vs time without (expected 20-40s for same bbox due to 25 files vs 4 files)"
+  }
 }

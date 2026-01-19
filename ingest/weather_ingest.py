@@ -613,6 +613,11 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Include accumulated precipitation (APCP).",
     )
+    parser.add_argument(
+        "--patch-mode",
+        action="store_true",
+        help="Optimize for small AOIs: 24h horizon, 6h steps, no precipitation.",
+    )
     return parser.parse_args(argv)
 
 
@@ -645,6 +650,7 @@ def ingest_weather_for_bbox(
     include_precipitation: bool = False,
     model_name: str = "gfs_0p25",
     request_timeout_seconds: int = 60,
+    patch_mode: bool = False,
 ) -> int:
     """Ingest weather data for the given bbox and forecast time.
 
@@ -657,6 +663,9 @@ def ingest_weather_for_bbox(
         include_precipitation: Whether to include precipitation data (default: False).
         model_name: Weather model identifier (default: "gfs_0p25").
         request_timeout_seconds: HTTP request timeout (default: 60).
+        patch_mode: Enable optimizations for small AOIs (<50km x 50km).
+                    Reduces horizon to 24h, uses 6h steps, skips precipitation,
+                    and adds spatial margin for subsetting. (default: False).
 
     Returns:
         weather_run_id: The database ID of the created weather run record.
@@ -669,7 +678,34 @@ def ingest_weather_for_bbox(
         forecast_time = forecast_time.replace(tzinfo=timezone.utc)
     forecast_time = forecast_time.astimezone(timezone.utc)
 
+    # Apply patch mode optimizations for small AOIs
+    if patch_mode:
+        horizon_hours = 24
+        step_hours = 6
+        include_precipitation = False
+        LOGGER.info(
+            "Patch mode enabled: horizon_hours=24, step_hours=6, precipitation=False"
+        )
+
     min_lon, min_lat, max_lon, max_lat = bbox
+    
+    # For patch mode, add spatial margin to download bbox to ensure adequate coverage
+    # for interpolation, but final grid will be cropped to original bbox
+    download_bbox = bbox
+    if patch_mode:
+        margin_deg = 0.5  # ~50km at equator
+        download_bbox = (
+            min_lon - margin_deg,
+            min_lat - margin_deg,
+            max_lon + margin_deg,
+            max_lat + margin_deg,
+        )
+        LOGGER.info(
+            "Patch mode: downloading with margin bbox=%s, final bbox=%s",
+            download_bbox,
+            bbox,
+        )
+    
     grid_spec = GridSpec.from_bbox(
         lat_min=min_lat,
         lat_max=max_lat,
@@ -715,13 +751,15 @@ def ingest_weather_for_bbox(
     if weather_settings.gfs_base_url_fallback:
         base_urls.append(weather_settings.gfs_base_url_fallback)
 
+    # Use download_bbox for NOMADS filter, but keep original bbox for final output
+    dl_min_lon, dl_min_lat, dl_max_lon, dl_max_lat = download_bbox
     settings = WeatherIngestSettings(
         model_name=model_name,
         base_dir=output_dir,
-        bbox_min_lon=min_lon,
-        bbox_min_lat=min_lat,
-        bbox_max_lon=max_lon,
-        bbox_max_lat=max_lat,
+        bbox_min_lon=dl_min_lon,
+        bbox_min_lat=dl_min_lat,
+        bbox_max_lon=dl_max_lon,
+        bbox_max_lat=dl_max_lat,
         horizon_hours=horizon_hours,
         step_hours=step_hours,
         include_precipitation=include_precipitation,
@@ -744,7 +782,8 @@ def ingest_weather_for_bbox(
                 selected_run_time,
                 include_precip=include_precipitation,
             )
-            dataset = crop_to_bbox(dataset, settings, target_bbox=grid_bounds(grid_spec))
+            # Crop to original bbox (not download_bbox with margin)
+            dataset = crop_to_bbox(dataset, settings, target_bbox=bbox)
             dataset = regrid_to_analysis_grid(dataset, grid_spec)
             dataset = attach_grid_metadata(dataset, grid_spec)
             _validate_weather_dataset(dataset, settings, canonical_variables)
@@ -839,6 +878,7 @@ def run_weather_ingest(argv: List[str] | None = None) -> int:
             include_precipitation=settings.include_precipitation,
             model_name=settings.model_name,
             request_timeout_seconds=settings.request_timeout_seconds,
+            patch_mode=args.patch_mode,
         )
         return 0
     except Exception:

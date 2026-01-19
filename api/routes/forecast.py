@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from api.config import settings
 from api.forecast import repo
-from api.forecast.worker import queue, run_jit_forecast_pipeline
+from api.forecast.worker import queue, run_jit_forecast_pipeline, handle_jit_pipeline_failure
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
 
@@ -169,7 +169,13 @@ def create_jit_forecast(request: JitForecastRequest):
     job_id = job["id"]
 
     try:
-        queue.enqueue(run_jit_forecast_pipeline, job_id, bbox, forecast_params)
+        queue.enqueue(
+            run_jit_forecast_pipeline,
+            job_id,
+            bbox,
+            forecast_params,
+            on_failure=handle_jit_pipeline_failure
+        )
         return {"job_id": job_id, "status": "queued"}
     except Exception as e:
         repo.update_jit_job_status(job_id, "failed", error=str(e))

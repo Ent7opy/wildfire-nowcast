@@ -19,10 +19,36 @@ data/weather/gfs_0p25/YYYY/MM/DD/HH/
 `id, model, run_time, horizon_hours, step_hours, bbox_min_lon/lat/max_lon/lat, file_format, storage_path, status, created_at, metadata`.
 
 ## Usage
+
+### Standard ingestion (region or large AOI)
 ```
 python -m ingest.weather_ingest --run-time 2025-12-06T00:00Z
 ```
 Options: `--bbox min_lon min_lat max_lon max_lat`, `--horizon-hours`, `--step-hours`, `--include-precip`.
+
+### Small AOI optimization (patch mode)
+For small bounding boxes (<50km x 50km) or just-in-time forecasts, use `--patch-mode` to reduce download and processing time:
+```
+python -m ingest.weather_ingest --run-time 2025-12-06T00:00Z --bbox 20.0 40.0 20.1 40.1 --patch-mode
+```
+Or via make:
+```
+make ingest-weather ARGS="--run-time 2025-12-06T00:00Z --bbox 20.0 40.0 20.1 40.1 --patch-mode"
+```
+
+**Patch mode optimizations:**
+- Reduces forecast horizon to 24h (vs 72h default)
+- Uses 6h temporal steps (vs 3h default)
+- Skips precipitation variable processing
+- Adds 0.5° spatial margin during download for interpolation coverage
+- Final output is cropped to original bbox
+
+**When to use:**
+- Small areas of interest (<50km x 50km)
+- Just-in-time forecast scenarios requiring low latency
+- Cases where 24h horizon is sufficient
+
+**Target performance:** <10s for 10km x 10km AOI.
 
 Example read:
 ```python

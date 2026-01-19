@@ -1,0 +1,25 @@
+# Enforce LF line endings for all text files
+* text=auto eol=lf
+
+# Explicitly mark binary files to prevent line ending conversion
+*.tif binary
+*.tiff binary
+*.nc binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.pyc binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.sqlite binary
+*.db binary

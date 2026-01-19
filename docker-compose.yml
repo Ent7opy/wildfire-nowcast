@@ -45,6 +45,7 @@ services:
 
   db:
     image: postgis/postgis:16-3.4
+    shm_size: 256mb
     restart: unless-stopped
     ports:
       - "5432:5432"

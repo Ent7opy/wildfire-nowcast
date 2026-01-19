@@ -4,30 +4,32 @@
   "state_file": ".ralph/state.json",
   "task": {
     "id": "T09",
-    "title": "Document forecast overlay operational workflow",
-    "priority": "P2",
+    "title": "Update spread forecast service to accept bbox-only requests",
+    "priority": "P1",
     "depends_on": [
-      "T03",
-      "T04"
+      "T08"
     ],
-    "description": "Add docs explaining how to ingest weather, generate a forecast via POST /forecast/generate, and see the overlay in UI. Keep instructions copy/paste runnable.",
+    "description": "In ml/spread/service.py, ensure run_spread_forecast accepts region_name=None and derives GridSpec from bbox. Update SpreadForecastRequest dataclass if needed. Terrain should be optional (TerrainWindow can be empty for regions without pre-ingested terrain, gracefully degrading model accuracy).",
     "files_likely": [
-      "docs/GETTING_STARTED.md",
-      "docs/architecture.md"
+      "ml/spread/service.py",
+      "ml/spread_features.py"
     ],
     "acceptance": [
-      "Instructions are copy/paste runnable",
-      "Following the steps shows forecast overlay in UI"
+      "run_spread_forecast callable with region_name=None",
+      "Function derives GridSpec from bbox",
+      "Terrain absence does not crash (graceful fallback)",
+      "Weather data still required (ingested via JIT)"
     ],
     "verification": [
-      "Manual: follow documented steps in fresh environment, confirm overlay appears"
+      "Would run: cd ml && uv run pytest tests/test_spread_service.py -k bbox",
+      "Would run: make lint"
     ],
     "status": "implemented",
     "commits": [],
     "notes": [
-      "worker: Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing."
+      "worker: Added test coverage for bbox-only spread forecasts (region_name=None). Core implementation already supports this from T08."
     ],
-    "review_cycles": 4
+    "review_cycles": 0
   },
   "instruction": "Create semantic commits for the approved changes. Output commit list with shas + messages.",
   "outbox_schema": {

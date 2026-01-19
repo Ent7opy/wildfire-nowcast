@@ -3,31 +3,34 @@
   "plan_file": ".ralph/plan.json",
   "state_file": ".ralph/state.json",
   "task": {
-    "id": "T09",
-    "title": "Document forecast overlay operational workflow",
+    "id": "T14",
+    "title": "Implement weather 'patch mode' for small AOIs",
     "priority": "P2",
     "depends_on": [
       "T03",
-      "T04"
+      "T13"
     ],
-    "description": "Add docs explaining how to ingest weather, generate a forecast via POST /forecast/generate, and see the overlay in UI. Keep instructions copy/paste runnable.",
+    "description": "In ingest/weather_ingest.py, add `patch_mode=True` parameter to ingest_weather_for_bbox. When enabled, use findings from T13 to download only bbox-relevant GRIB data. If T13 shows full download is necessary, implement aggressive spatial subsetting after download and skip unnecessary variable processing. Target <10s for 10km x 10km.",
     "files_likely": [
-      "docs/GETTING_STARTED.md",
-      "docs/architecture.md"
+      "ingest/weather_ingest.py"
     ],
     "acceptance": [
-      "Instructions are copy/paste runnable",
-      "Following the steps shows forecast overlay in UI"
+      "patch_mode reduces download/processing time for small AOIs",
+      "Weather cube output is spatially limited to bbox + margin",
+      "Existing region-based ingestion still works (patch_mode=False)",
+      "Benchmark shows measurable speedup"
     ],
     "verification": [
-      "Manual: follow documented steps in fresh environment, confirm overlay appears"
+      "Would run: cd ingest && uv run python weather_ingest.py --bbox 20,40,20.1,40.1 --patch-mode",
+      "Would run: make test (ingest tests)",
+      "Would run: time comparison of patch vs full mode"
     ],
     "status": "implemented",
     "commits": [],
     "notes": [
-      "worker: Added forecast overlay operational workflow documentation to GETTING_STARTED.md with copy/paste runnable commands for weather ingest, forecast generation, and UI viewing."
+      "worker: Added patch_mode parameter to weather ingestion for small AOI optimization. When enabled, reduces horizon to 24h, uses 6h steps, skips precipitation, and adds 0.5° spatial margin to download bbox while cropping output to original bbox."
     ],
-    "review_cycles": 4
+    "review_cycles": 1
   },
   "instruction": "Review the repo changes for this task. Do NOT implement. You may run: git status, git diff, tests. Output verdict approve|changes_requested plus change list.",
   "outbox_schema": {
