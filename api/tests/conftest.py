@@ -28,7 +28,23 @@ def pytest_configure(config):
 
 
 @pytest.fixture(scope="session")
-def check_likelihood_schema():
+def db_available():
+    """Check if database is available and skip tests if not.
+    
+    Usage:
+        def test_db_feature(db_available):
+            ...
+    """
+    from api.db import get_engine
+    try:
+        with get_engine().begin() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as e:
+        pytest.skip(f"Database not available: {e}")
+
+
+@pytest.fixture(scope="session")
+def check_likelihood_schema(db_available):
     """Check if fire likelihood schema columns exist in the database.
     
     Integration tests that use fire likelihood scoring require specific database

@@ -114,7 +114,7 @@ def test_mask_false_sources_custom_radius():
 
 
 @pytest.mark.integration
-def test_mask_false_sources_integration():
+def test_mask_false_sources_integration(check_likelihood_schema):
     """Integration test that validates spatial query against real database."""
     from sqlalchemy import text
     from api.db import get_engine

@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -5,7 +6,8 @@ from api.main import app
 client = TestClient(app)
 
 
-def test_get_risk_endpoint_returns_geojson_grid():
+@pytest.mark.integration
+def test_get_risk_endpoint_returns_geojson_grid(db_available):
     """Test that the /risk endpoint returns GeoJSON grid with multiple cells."""
     response = client.get(
         "/risk",
@@ -40,7 +42,8 @@ def test_get_risk_endpoint_returns_geojson_grid():
     assert risk_level in ["low", "medium", "high"]
 
 
-def test_get_risk_endpoint_grid_cells_cover_bbox():
+@pytest.mark.integration
+def test_get_risk_endpoint_grid_cells_cover_bbox(db_available):
     """Test that risk grid cells cover the requested bbox."""
     response = client.get(
         "/risk",
@@ -73,7 +76,8 @@ def test_get_risk_endpoint_grid_cells_cover_bbox():
     assert max(lats) >= 34.9
 
 
-def test_get_risk_endpoint_respects_cell_size():
+@pytest.mark.integration
+def test_get_risk_endpoint_respects_cell_size(db_available):
     """Test that cell_size_km parameter controls grid resolution."""
     # Test with large cells (should return fewer features)
     response_large = client.get(
