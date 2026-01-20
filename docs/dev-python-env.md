@@ -25,7 +25,7 @@ For a complete from-scratch setup (tool installation, `.env`, Docker, `make` wor
 
 ## 2. Canonical workflow
 
-Each top-level project manages its own `.venv` under the directory. The easiest way to sync everything (runtime + dev dependencies) is:
+Each top-level project manages its own virtual environment under the directory. On Windows we use `.venv-win` (to avoid clashing with WSL or other POSIX-created envs); elsewhere we use `.venv`. The easiest way to sync everything (runtime + dev dependencies) is:
 
 ```bash
 make install
@@ -35,9 +35,15 @@ Under the hood, each directory runs `uv sync --dev`. If you prefer to manage env
 
 ```bash
 cd <project>            # e.g. cd api
-uv sync                # creates/updates .venv and installs deps
+uv sync                # creates/updates the project venv and installs deps
 # run commands via uv to avoid manual activation
 uv run <command>       # e.g. uv run uvicorn api.main:app
+```
+
+On Windows, if you run `uv` directly instead of via `make`, set the environment once per shell so it uses the same venv path:
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = ".venv-win"
 ```
 
 If you prefer activating manually, use:
@@ -47,10 +53,10 @@ source .venv/bin/activate         # POSIX
 ```
 
 ```powershell
-.venv\Scripts\activate             # Windows PowerShell
+.venv-win\Scripts\activate         # Windows PowerShell
 ```
 
-Do not commit `.venv/` — this directory is local only.
+Do not commit `.venv/` or `.venv-win/` — these directories are local only.
 
 ---
 

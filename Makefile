@@ -4,6 +4,14 @@ PYTHON ?= python3
 UV ?= uv
 RALPH_TASK_FILE ?=
 
+# Avoid cross-OS venv collisions (e.g., WSL-created venvs on Windows).
+ifeq ($(OS),Windows_NT)
+    UV_PROJECT_ENVIRONMENT ?= .venv-win
+else
+    UV_PROJECT_ENVIRONMENT ?= .venv
+endif
+export UV_PROJECT_ENVIRONMENT
+
 # Ralph detection
 ifeq ($(OS),Windows_NT)
     # Windows (CMD or PowerShell)
@@ -159,4 +167,3 @@ hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG
 
 weather-bias: ## Run weather bias analysis (pass ARGS="--forecast-nc ... --truth-nc ...")
 	$(UV) run --project ml -m ml.weather_bias_analysis $(ARGS)
-
