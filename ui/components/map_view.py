@@ -133,6 +133,8 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}"
             )
             
+            # Color mapping: green (low) -> yellow (medium) -> red (high)
+            # Based on risk_score: 0.0-0.3 green, 0.3-0.6 yellow, 0.6-1.0 red
             layers.append(pdk.Layer(
                 "GeoJsonLayer",
                 data=risk_url,
@@ -140,8 +142,8 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 pickable=True,
                 stroked=True,
                 filled=True,
-                get_fill_color=[128, 0, 128, 60],  # semi-transparent purple
-                get_line_color=[128, 0, 128, 150],
+                get_fill_color="properties.risk_score < 0.3 ? [34, 139, 34, 80] : properties.risk_score < 0.6 ? [255, 215, 0, 100] : [220, 20, 60, 120]",
+                get_line_color="properties.risk_score < 0.3 ? [34, 139, 34, 180] : properties.risk_score < 0.6 ? [255, 215, 0, 180] : [220, 20, 60, 180]",
                 line_width_min_pixels=1,
             ))
 
@@ -154,7 +156,9 @@ def render_map_view() -> Optional[Dict[str, float]]:
             "html": "<b>ID:</b> {properties.id}<br/>"
                     "<b>Time:</b> {properties.acq_time}<br/>"
                     "<b>Likelihood:</b> {properties.fire_likelihood}<br/>"
-                    "<b>Intensity (FRP):</b> {properties.frp}",
+                    "<b>Intensity (FRP):</b> {properties.frp}<br/>"
+                    "<b>Risk Score:</b> {properties.risk_score}<br/>"
+                    "<b>Risk Level:</b> {properties.risk_level}",
             "style": {"color": "white", "backgroundColor": "#333"}
         },
     )

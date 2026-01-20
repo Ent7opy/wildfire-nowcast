@@ -16,7 +16,11 @@ def render_legend() -> None:
             )
             legend_items.append("Shaded layer: higher = more likely spread")
         if st.session_state.show_risk:
-            legend_items.append("🟣 **Risk index** (baseline) — static low risk across viewport")
+            legend_items.append("**🔥 Risk index** — fire risk heatmap:")
+            legend_items.append("  • 🟢 Low (0.0-0.3): minimal fire risk")
+            legend_items.append("  • 🟡 Medium (0.3-0.6): moderate fire risk")
+            legend_items.append("  • 🔴 High (0.6-1.0): elevated fire risk")
+            legend_items.append("  Based on land cover + weather conditions")
 
         if legend_items:
             for item in legend_items:
