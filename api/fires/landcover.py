@@ -9,7 +9,7 @@ from typing import Iterable
 import rasterio
 from rasterio.transform import rowcol
 
-from ingest.config import REPO_ROOT
+from api.config import REPO_ROOT
 
 LOGGER = logging.getLogger(__name__)
 
