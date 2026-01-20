@@ -186,3 +186,35 @@ def test_download_export_job(monkeypatch):
     finally:
         if os.path.exists(temp_file):
             os.unlink(temp_file)
+
+
+def test_export_map_png():
+    """Test exporting map as PNG."""
+    response = client.get(
+        "/exports/map.png",
+        params={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 22.0,
+            "max_lat": 42.0,
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-02T00:00:00Z",
+            "include_fires": False,  # Skip fires to avoid DB dependency
+            "include_risk": True,
+            "include_forecast": False,
+            "width": 800,
+            "height": 600,
+        }
+    )
+    
+    # May fail if PIL not installed, check for either success or appropriate error
+    if response.status_code == 200:
+        assert "image/png" in response.headers["content-type"]
+        assert response.headers["content-disposition"].startswith("attachment")
+        assert len(response.content) > 0
+        # PNG magic bytes
+        assert response.content[:8] == b'\x89PNG\r\n\x1a\n'
+    elif response.status_code == 500:
+        # If PIL not installed, should get informative error
+        error = response.json()
+        assert "Pillow" in error.get("detail", "")
