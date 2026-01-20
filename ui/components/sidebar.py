@@ -121,6 +121,28 @@ def render_sidebar() -> str:
         export_url,
         use_container_width=True,
     )
+    
+    # Export map as PNG
+    png_export_url = (
+        f"{api_public_base_url()}/exports/map.png?"
+        f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}&"
+        f"start_time={_isoformat(start_time)}&end_time={_isoformat(end_time)}&"
+        f"include_fires={'true' if st.session_state.show_fires else 'false'}&"
+        f"include_risk={'true' if st.session_state.show_risk else 'false'}&"
+        f"include_forecast={'true' if st.session_state.show_forecast else 'false'}"
+    )
+    
+    # Add run_id if forecast is enabled and available
+    if st.session_state.show_forecast:
+        run_id = st.session_state.get("last_forecast", {}).get("run", {}).get("id")
+        if run_id:
+            png_export_url += f"&run_id={run_id}"
+    
+    st.link_button(
+        "🖼️ Export map (PNG)",
+        png_export_url,
+        use_container_width=True,
+    )
 
     st.divider()
 

@@ -20,6 +20,7 @@ from api.exports import repo as jobs_repo
 from api.exports.worker import queue, export_task
 from api.fires import repo as fires_repo
 from api.forecast import repo as forecast_repo
+from api.exports.map_renderer import render_map_png
 
 exports_router = APIRouter(tags=["exports"])
 
@@ -155,6 +156,168 @@ def export_forecast_contours(run_id: int, format: str = Query("geojson", pattern
     
     fc = {"type": "FeatureCollection", "features": features}
     return _json_response(fc, f"forecast_run_{run_id}_contours.geojson")
+
+
+@exports_router.get("/risk/export")
+def export_risk(
+    min_lon: float = Query(..., description="Minimum longitude"),
+    min_lat: float = Query(..., description="Minimum latitude"),
+    max_lon: float = Query(..., description="Maximum longitude"),
+    max_lat: float = Query(..., description="Maximum latitude"),
+    format: str = Query("geojson", pattern="^(csv|geojson)$"),
+    cell_size_km: float = Query(10.0, ge=1.0, le=100.0, description="Grid cell size in kilometers"),
+    time: str = Query(None, description="Reference time for weather (ISO 8601)"),
+    include_weather: bool = Query(True, description="Include weather factors"),
+):
+    """Export fire risk grid for the requested bbox."""
+    from api.risk.grid import compute_risk_grid
+    
+    # Parse reference time if provided
+    ref_time = None
+    if time is not None:
+        try:
+            ref_time = datetime.fromisoformat(time.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    
+    # Compute risk grid
+    risk_data = compute_risk_grid(
+        min_lon=min_lon,
+        min_lat=min_lat,
+        max_lon=max_lon,
+        max_lat=max_lat,
+        cell_size_km=cell_size_km,
+        ref_time=ref_time,
+        include_weather=include_weather,
+    )
+    
+    if format == "geojson":
+        filename = f"risk_{min_lon}_{min_lat}_{max_lon}_{max_lat}.geojson"
+        return _json_response(risk_data, filename)
+    
+    if format == "csv":
+        # Convert grid features to CSV rows
+        rows = []
+        for feature in risk_data["features"]:
+            props = feature["properties"]
+            # Extract cell center from geometry
+            coords = feature["geometry"]["coordinates"][0]
+            center_lon = sum(c[0] for c in coords[:-1]) / 4
+            center_lat = sum(c[1] for c in coords[:-1]) / 4
+            
+            row = {
+                "center_lon": center_lon,
+                "center_lat": center_lat,
+                "risk_score": props["risk_score"],
+                "risk_level": props["risk_level"],
+            }
+            # Add component scores if available
+            if "components" in props:
+                for key, val in props["components"].items():
+                    row[f"component_{key}"] = val
+            
+            rows.append(row)
+        
+        filename = f"risk_{min_lon}_{min_lat}_{max_lon}_{max_lat}.csv"
+        return _stream_csv(rows, filename)
+
+
+@exports_router.get("/map.png")
+def export_map_png(
+    min_lon: float = Query(..., description="Minimum longitude"),
+    min_lat: float = Query(..., description="Minimum latitude"),
+    max_lon: float = Query(..., description="Maximum longitude"),
+    max_lat: float = Query(..., description="Maximum latitude"),
+    start_time: str = Query(None, description="Start time for fires (ISO 8601)"),
+    end_time: str = Query(None, description="End time for fires (ISO 8601)"),
+    run_id: int = Query(None, description="Forecast run ID"),
+    include_fires: bool = Query(True, description="Include fire detections"),
+    include_risk: bool = Query(True, description="Include risk heatmap"),
+    include_forecast: bool = Query(False, description="Include forecast contours"),
+    width: int = Query(1600, ge=400, le=4000, description="Image width in pixels"),
+    height: int = Query(900, ge=300, le=3000, description="Image height in pixels"),
+):
+    """Export current map view as PNG image.
+    
+    Renders a static map image with selected layers (fires, risk, forecast).
+    The image includes a legend and timestamp.
+    """
+    from api.risk.grid import compute_risk_grid
+    
+    bbox = (min_lon, min_lat, max_lon, max_lat)
+    
+    # Gather layer data
+    fires = None
+    if include_fires and start_time and end_time:
+        try:
+            dt_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            dt_end = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+            if dt_start.tzinfo is None:
+                dt_start = dt_start.replace(tzinfo=timezone.utc)
+            if dt_end.tzinfo is None:
+                dt_end = dt_end.replace(tzinfo=timezone.utc)
+            
+            fires = fires_repo.list_fire_detections_bbox_time(
+                bbox=bbox,
+                start_time=dt_start,
+                end_time=dt_end,
+                limit=5000,
+                columns=["lat", "lon", "frp"]
+            )
+        except Exception as e:
+            # If fires fail, just skip them
+            fires = None
+    
+    risk_grid = None
+    if include_risk:
+        try:
+            risk_grid = compute_risk_grid(
+                min_lon=min_lon,
+                min_lat=min_lat,
+                max_lon=max_lon,
+                max_lat=max_lat,
+                cell_size_km=10.0,
+                include_weather=True,
+            )
+        except Exception as e:
+            # If risk fails, skip it
+            risk_grid = None
+    
+    forecast_contours = None
+    if include_forecast and run_id:
+        try:
+            forecast_contours = forecast_repo.list_contours_for_run(run_id)
+        except Exception as e:
+            forecast_contours = None
+    
+    # Render PNG
+    try:
+        png_bytes = render_map_png(
+            bbox=bbox,
+            fires=fires,
+            risk_grid=risk_grid,
+            forecast_contours=forecast_contours,
+            width=width,
+            height=height,
+            title="Wildfire Nowcast & Forecast",
+        )
+        
+        # Return PNG response
+        filename = f"map_{min_lon}_{min_lat}_{max_lon}_{max_lat}.png"
+        response = Response(content=png_bytes, media_type="image/png")
+        response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+        return response
+        
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="PNG export requires Pillow library. Install with: pip install pillow"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate PNG: {str(e)}"
+        )
 
 
 # Async Exports
