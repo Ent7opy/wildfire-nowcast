@@ -264,7 +264,7 @@ def export_map_png(
                 limit=5000,
                 columns=["lat", "lon", "frp"]
             )
-        except Exception as e:
+        except Exception:
             # If fires fail, just skip them
             fires = None
     
@@ -279,7 +279,7 @@ def export_map_png(
                 cell_size_km=10.0,
                 include_weather=True,
             )
-        except Exception as e:
+        except Exception:
             # If risk fails, skip it
             risk_grid = None
     
@@ -287,7 +287,7 @@ def export_map_png(
     if include_forecast and run_id:
         try:
             forecast_contours = forecast_repo.list_contours_for_run(run_id)
-        except Exception as e:
+        except Exception:
             forecast_contours = None
     
     # Render PNG

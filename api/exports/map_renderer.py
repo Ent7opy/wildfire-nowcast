@@ -184,16 +184,7 @@ def _draw_risk_grid(draw: ImageDraw.ImageDraw, risk_grid: dict, bbox: tuple, wid
 def _draw_forecast_contours(draw: ImageDraw.ImageDraw, contours: list, bbox: tuple, width: int, height: int):
     """Draw forecast contour outlines."""
     # Simplified: just draw bounding polygons with different colors per horizon
-    horizon_colors = {
-        24: (0, 100, 255, 100),  # Blue for T+24h
-        48: (255, 165, 0, 100),  # Orange for T+48h
-        72: (255, 50, 50, 100),  # Red for T+72h
-    }
-    
     for contour in contours:
-        horizon = contour.get("horizon_hours", 24)
-        color = horizon_colors.get(horizon, (128, 128, 128, 100))
-        
         # Note: Real implementation would parse GeoJSON geometry
         # For MVP, skip complex polygon rendering
         pass

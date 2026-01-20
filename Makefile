@@ -41,8 +41,12 @@ test: ## Run unit tests (API + UI + ML + Ingest)
 	@echo "Running API tests..."
 	cd api && $(UV) run pytest
 	@echo "Running UI tests..."
+ifeq ($(OS),Windows_NT)
+	cd ui && $(UV) run pytest
+else
 	@if [ -L "ui/.venv/lib64" ]; then rm -rf ui/.venv; fi
 	cd ui && $(UV) run pytest
+endif
 	@echo "Running ML tests..."
 	cd ml && $(UV) run pytest
 	@echo "Running Ingest tests..."
@@ -52,8 +56,12 @@ lint: ## Run Ruff lint checks (API + UI + ML + Ingest)
 	@echo "Linting API..."
 	cd api && $(UV) run --no-sync ruff check .
 	@echo "Linting UI..."
+ifeq ($(OS),Windows_NT)
+	cd ui && $(UV) run --no-sync ruff check .
+else
 	@if [ -L "ui/.venv/lib64" ]; then rm -rf ui/.venv; fi
 	cd ui && $(UV) run --no-sync ruff check .
+endif
 	@echo "Linting ML..."
 	cd ml && $(UV) run --no-sync ruff check .
 	@echo "Linting Ingest..."
