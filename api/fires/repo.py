@@ -8,6 +8,12 @@ from typing import Iterable, Literal
 from sqlalchemy import text
 
 from api.db import get_engine
+from api.fires.scoring import (
+    compute_fire_likelihood,
+    compute_persistence_scores,
+    compute_weather_plausibility_scores,
+    mask_false_sources,
+)
 
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 
@@ -19,6 +25,10 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "lon": "lon",
     "frp": "frp",
     "confidence": "confidence",
+    "confidence_score": "confidence_score",
+    "persistence_score": "persistence_score",
+    "landcover_score": "landcover_score",
+    "weather_score": "weather_score",
     "brightness": "brightness",
     "bright_t31": "bright_t31",
     "scan": "scan",
@@ -27,6 +37,8 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "source": "source",
     "is_noise": "is_noise",
     "denoised_score": "denoised_score",
+    "false_source_masked": "false_source_masked",
+    "fire_likelihood": "fire_likelihood",
 }
 
 
@@ -39,7 +51,9 @@ def list_fire_detections_bbox_time(
     limit: int | None = None,
     order: Literal["asc", "desc"] = "asc",
     include_noise: bool = False,
+    include_masked: bool = False,
     min_confidence: float | None = None,
+    min_fire_likelihood: float | None = None,
 ) -> list[dict]:
     """List fire detections in a lon/lat bbox and acquisition time window.
 
@@ -48,6 +62,9 @@ def list_fire_detections_bbox_time(
     - Spatial filter uses GiST index-friendly predicates:
       `geom && envelope` plus `ST_Intersects(geom, envelope)`.
     - Denoiser: By default, filters out rows where `is_noise` is TRUE.
+    - False-source masking: By default, filters out rows where `false_source_masked` is TRUE.
+    - Filtering: min_confidence filters FIRMS confidence (0-100), min_fire_likelihood filters
+      composite likelihood score (0-1). Both include NULL values (not yet scored).
     """
 
     min_lon, min_lat, max_lon, max_lat = bbox
@@ -73,10 +90,21 @@ def list_fire_detections_bbox_time(
     if not include_noise:
         noise_predicate = "AND is_noise IS NOT TRUE"
 
+    # Masked filter: default to excluding detections near industrial sources.
+    # We use "IS NOT TRUE" to include NULLs (detections not yet checked).
+    masked_predicate = ""
+    if not include_masked:
+        masked_predicate = "AND false_source_masked IS NOT TRUE"
+
     confidence_predicate = ""
     if min_confidence is not None:
         # Include NULL confidence values when filtering (NULL means unknown, not 0)
         confidence_predicate = "AND (confidence IS NULL OR confidence >= :min_confidence)"
+    
+    likelihood_predicate = ""
+    if min_fire_likelihood is not None:
+        # Include NULL likelihood values when filtering (NULL means not yet scored)
+        likelihood_predicate = "AND (fire_likelihood IS NULL OR fire_likelihood >= :min_fire_likelihood)"
 
     limit_sql = ""
     # Ensure datetimes are timezone-aware (UTC) for database queries
@@ -100,6 +128,8 @@ def list_fire_detections_bbox_time(
     }
     if min_confidence is not None:
         params["min_confidence"] = float(min_confidence)
+    if min_fire_likelihood is not None:
+        params["min_fire_likelihood"] = float(min_fire_likelihood)
     if limit is not None:
         if limit <= 0:
             raise ValueError("limit must be positive.")
@@ -115,7 +145,9 @@ def list_fire_detections_bbox_time(
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
           {noise_predicate}
+          {masked_predicate}
           {confidence_predicate}
+          {likelihood_predicate}
         ORDER BY acq_time {order}
         {limit_sql}
         """
@@ -125,4 +157,258 @@ def list_fire_detections_bbox_time(
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
     return [dict(r) for r in rows]
+
+
+def update_false_source_masking(batch_id: int) -> int:
+    """Update false_source_masked column for detections in a batch.
+
+    Queries detections from the batch, uses mask_false_sources() to identify
+    detections near industrial sources, and updates the false_source_masked column.
+
+    Args:
+        batch_id: The ingest batch ID to process
+
+    Returns:
+        Number of detections marked as masked
+    """
+    # Query detections from the batch
+    stmt = text("""
+        SELECT id, lat, lon
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"batch_id": batch_id})
+        rows = result.mappings().all()
+
+    detections = [dict(r) for r in rows]
+    if not detections:
+        return 0
+
+    # Compute masking results
+    masked_results = mask_false_sources(detections)
+
+    # Update fire_detections table with masking results
+    update_stmt = text("""
+        UPDATE fire_detections
+        SET false_source_masked = :masked
+        WHERE id = :detection_id
+    """)
+
+    params = [
+        {"detection_id": det_id, "masked": is_masked}
+        for det_id, is_masked in masked_results.items()
+    ]
+
+    with get_engine().begin() as conn:
+        conn.execute(update_stmt, params)
+
+    # Count how many were marked as masked
+    masked_count = sum(1 for is_masked in masked_results.values() if is_masked)
+    return masked_count
+
+
+def update_persistence_scores(batch_id: int) -> int:
+    """Update persistence_score column for detections in a batch.
+
+    Queries detections from the batch, uses compute_persistence_scores()
+    to compute spatial-temporal clustering scores, and updates the persistence_score column.
+
+    Args:
+        batch_id: The ingest batch ID to process
+
+    Returns:
+        Number of detections with scores updated
+    """
+    # Query detections from the batch with required fields
+    stmt = text("""
+        SELECT id, lat, lon, acq_time, sensor
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"batch_id": batch_id})
+        rows = result.mappings().all()
+
+    detections = [dict(r) for r in rows]
+    if not detections:
+        return 0
+
+    # Compute persistence scores
+    persistence_scores = compute_persistence_scores(detections)
+
+    # Update fire_detections table with persistence scores
+    update_stmt = text("""
+        UPDATE fire_detections
+        SET persistence_score = :score
+        WHERE id = :detection_id
+    """)
+
+    params = [
+        {"detection_id": det_id, "score": score}
+        for det_id, score in persistence_scores.items()
+    ]
+
+    with get_engine().begin() as conn:
+        conn.execute(update_stmt, params)
+
+    return len(persistence_scores)
+
+
+def update_landcover_scores(batch_id: int) -> int:
+    """Update landcover_score column for detections in a batch.
+
+    Queries detections from the batch, uses compute_landcover_scores()
+    to compute land-cover plausibility scores, and updates the landcover_score column.
+
+    Args:
+        batch_id: The ingest batch ID to process
+
+    Returns:
+        Number of detections with scores updated
+    """
+    # Query detections from the batch with required fields
+    stmt = text("""
+        SELECT id, lat, lon
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"batch_id": batch_id})
+        rows = result.mappings().all()
+
+    detections = [dict(r) for r in rows]
+    if not detections:
+        return 0
+
+    # Import landcover module
+    from api.fires.landcover import compute_landcover_scores
+
+    # Compute landcover scores
+    landcover_scores = compute_landcover_scores(detections)
+
+    # Update fire_detections table with landcover scores
+    update_stmt = text("""
+        UPDATE fire_detections
+        SET landcover_score = :score
+        WHERE id = :detection_id
+    """)
+
+    params = [
+        {"detection_id": det_id, "score": score}
+        for det_id, score in landcover_scores.items()
+    ]
+
+    with get_engine().begin() as conn:
+        conn.execute(update_stmt, params)
+
+    return len(landcover_scores)
+
+
+def update_weather_scores(batch_id: int) -> int:
+    """Update weather_score column for detections in a batch.
+
+    Queries detections from the batch, uses compute_weather_plausibility_scores()
+    to compute weather plausibility scores, and updates the weather_score column.
+
+    Args:
+        batch_id: The ingest batch ID to process
+
+    Returns:
+        Number of detections with scores updated
+    """
+    # Query detections from the batch with required fields
+    stmt = text("""
+        SELECT id, lat, lon, acq_time
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"batch_id": batch_id})
+        rows = result.mappings().all()
+
+    detections = [dict(r) for r in rows]
+    if not detections:
+        return 0
+
+    # Compute weather plausibility scores
+    weather_scores = compute_weather_plausibility_scores(detections)
+
+    # Update fire_detections table with weather scores
+    update_stmt = text("""
+        UPDATE fire_detections
+        SET weather_score = :score
+        WHERE id = :detection_id
+    """)
+
+    params = [
+        {"detection_id": det_id, "score": score}
+        for det_id, score in weather_scores.items()
+    ]
+
+    with get_engine().begin() as conn:
+        conn.execute(update_stmt, params)
+
+    return len(weather_scores)
+
+
+def update_fire_likelihood(batch_id: int) -> int:
+    """Update fire_likelihood column for detections in a batch.
+
+    Queries detections from the batch with all component scores, uses compute_fire_likelihood()
+    to compute composite fire likelihood, and updates the fire_likelihood column.
+
+    Args:
+        batch_id: The ingest batch ID to process
+
+    Returns:
+        Number of detections with likelihood updated
+    """
+    # Query detections with all component scores
+    stmt = text("""
+        SELECT 
+            id, 
+            confidence_score, 
+            persistence_score, 
+            landcover_score, 
+            weather_score, 
+            false_source_masked
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+    """)
+
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"batch_id": batch_id})
+        rows = result.mappings().all()
+
+    if not rows:
+        return 0
+
+    # Compute fire likelihood for each detection
+    params = []
+    for row in rows:
+        likelihood = compute_fire_likelihood(
+            confidence_score=float(row["confidence_score"]) if row["confidence_score"] is not None else 0.5,
+            persistence_score=float(row["persistence_score"]) if row["persistence_score"] is not None else None,
+            landcover_score=float(row["landcover_score"]) if row["landcover_score"] is not None else None,
+            weather_score=float(row["weather_score"]) if row["weather_score"] is not None else None,
+            false_source_masked=bool(row["false_source_masked"]) if row["false_source_masked"] is not None else False,
+        )
+        params.append({"detection_id": row["id"], "likelihood": likelihood})
+
+    # Update fire_detections table with fire likelihood
+    update_stmt = text("""
+        UPDATE fire_detections
+        SET fire_likelihood = :likelihood
+        WHERE id = :detection_id
+    """)
+
+    with get_engine().begin() as conn:
+        conn.execute(update_stmt, params)
+
+    return len(params)
 

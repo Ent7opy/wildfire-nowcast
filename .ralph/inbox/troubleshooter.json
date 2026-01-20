@@ -1,38 +1,6 @@
 {
-  "goal_summary": "Transform the wildfire nowcast system from region-specific manual ingestion to a global Just-In-Time (JIT) pipeline where clicking any fire triggers automated background ingestion (terrain, weather) and forecast generation, providing worldwide coverage without pre-provisioned databases.",
-  "blocked_tasks": [
-    {
-      "id": "T16",
-      "title": "Add integration test for JIT pipeline end-to-end",
-      "priority": "P1",
-      "depends_on": [
-        "T10"
-      ],
-      "description": "In api/tests/test_jit_forecast_integration.py (new), create a test that: 1) POSTs to /forecast/jit with a small bbox (e.g., 10km x 10km), 2) polls /forecast/jit/{job_id} until completed, 3) asserts forecast results exist and contain valid rasters + contours. Use a small bbox to keep test runtime under 2 minutes. Mark as integration test.",
-      "files_likely": [
-        "api/tests/test_jit_forecast_integration.py"
-      ],
-      "acceptance": [
-        "Test exercises full JIT pipeline",
-        "Test asserts job completes successfully",
-        "Test validates forecast output structure",
-        "Test runs in <2 minutes",
-        "Test marked with @pytest.mark.integration or similar"
-      ],
-      "verification": [
-        "Would run: cd api && uv run pytest tests/test_jit_forecast_integration.py -v",
-        "Would run: make test"
-      ],
-      "status": "blocked",
-      "commits": [],
-      "notes": [
-        "worker: Created integration test for JIT pipeline that POSTs to /forecast/jit, polls status endpoint until completion, and validates forecast results contain rasters and contours. Test uses small bbox and mocks expensive operations to keep runtime manageable.",
-        "Review/Fix loop failed."
-      ],
-      "review_cycles": 0,
-      "unblock_attempts": 3
-    }
-  ],
+  "goal_summary": "Improve wildfire detection quality by replacing naive FIRMS confidence filtering with a composite Fire Likelihood Score that combines FIRMS confidence (weak prior), persistence filtering, land-cover plausibility, weather plausibility, and industrial false-source masking. Fix UI bugs (tooltip, details panel, coordinate extraction) and update UI to reflect new likelihood semantics.",
+  "blocked_tasks": [],
   "instruction": "Investigate the deadlocked tasks and propose a surgical unblocker task T99. Use git status, ls, etc. to diagnose.",
   "outbox_schema": {
     "unblocker_task": {

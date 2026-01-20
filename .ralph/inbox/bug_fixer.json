@@ -1,50 +1,13 @@
 {
   "goal_file": ".ralph/GOAL.md",
-  "goal_summary": "Transform the wildfire nowcast system from region-specific manual ingestion to a global Just-In-Time (JIT) pipeline where clicking any fire triggers automated background ingestion (terrain, weather) and forecast generation, providing worldwide coverage without pre-provisioned databases.",
-  "task": {
-    "id": "T18",
-    "title": "Add caching to prevent redundant ingestion for same region",
-    "priority": "P2",
-    "depends_on": [
-      "T05"
-    ],
-    "description": "In api/forecast/worker.py, before ingesting terrain or weather, check if recent data exists for the bbox (within last 6 hours for weather, indefinitely for terrain). If found, reuse existing data and skip ingestion. Use spatial index on weather_runs and terrain_features tables to query by bbox overlap.",
-    "files_likely": [
-      "api/forecast/worker.py",
-      "api/forecast/repository.py"
-    ],
-    "acceptance": [
-      "Second click in same region skips terrain ingestion",
-      "Weather reused if within freshness window (6 hours)",
-      "Spatial query uses PostGIS ST_Intersects or similar",
-      "Cache hit logged for observability"
-    ],
-    "verification": [
-      "Would run: manual test clicking same fire twice",
-      "Would run: inspect worker logs for 'cache hit'",
-      "Would run: make test"
-    ],
-    "status": "implemented",
-    "commits": [],
-    "notes": [
-      "worker: Added caching to prevent redundant ingestion for same region. Terrain is cached indefinitely using PostGIS spatial queries. Weather is cached for 6 hours. Cache hits are logged for observability.",
-      "worker: Added caching to prevent redundant ingestion for same region. Terrain is cached indefinitely using PostGIS spatial queries. Weather is cached for 6 hours. Cache hits are logged for observability."
-    ],
-    "review_cycles": 7,
-    "unblock_attempts": 0
-  },
+  "goal_summary": "Improve wildfire detection quality by replacing naive FIRMS confidence filtering with a composite Fire Likelihood Score that combines FIRMS confidence (weak prior), persistence filtering, land-cover plausibility, weather plausibility, and industrial false-source masking. Fix UI bugs (tooltip, details panel, coordinate extraction) and update UI to reflect new likelihood semantics.",
+  "task": null,
   "requested_changes": [
     {
       "severity": "must",
-      "title": "Spatial query uses ST_Intersects instead of ST_Contains, causing incorrect cache hits",
-      "evidence": "api/forecast/repo.py:179 - ST_Intersects(bbox, ST_MakeEnvelope(...)) allows partial overlap cache hits. Same issue at api/forecast/repo.py:217 for weather caching.",
-      "suggested_fix": "Replace ST_Intersects with ST_Contains to ensure cached bbox fully covers requested bbox. For terrain: `WHERE ST_Contains(bbox, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))`. For weather: `WHERE ST_Contains(ST_MakeEnvelope(bbox_min_lon, bbox_min_lat, bbox_max_lon, bbox_max_lat, 4326), ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))`. This prevents using cached data that only partially covers the requested region, which would result in incomplete terrain/weather data for the forecast."
-    },
-    {
-      "severity": "must",
-      "title": "Weather cache horizon validation occurs after DB query instead of within query",
-      "evidence": "api/forecast/worker.py:78 - Checks `cached_weather[\"horizon_hours\"] >= max_horizon` in Python after fetching from DB. The query at api/forecast/repo.py:195-219 returns most recent weather run without horizon validation.",
-      "suggested_fix": "Move horizon validation into SQL WHERE clause: `AND horizon_hours >= :required_horizon_hours`. This prevents returning weather runs with insufficient horizon coverage and ensures the cache hit is valid. Current implementation could cause a cache miss followed by re-ingestion even when adequate cached data exists with different timestamps."
+      "title": "Integration tests fail due to missing database migrations",
+      "evidence": "api/tests/test_fire_likelihood_integration.py::test_composite_likelihood_pipeline - Failed with: psycopg2.errors.UndefinedColumn: column \"false_source_masked\" of relation \"fire_detections\" does not exist",
+      "suggested_fix": "The test database needs to have migrations applied before running integration tests. Run 'make migrate' or document that integration tests require a migrated database with the new schema columns (persistence_score, landcover_score, weather_score, false_source_masked, fire_likelihood). Consider adding a pytest fixture or CI step that ensures migrations are applied before running integration tests, or mark these tests to skip if schema is not migrated."
     }
   ],
   "instruction": "Implement ONLY the requested changes. Do not expand scope. Do not commit.",

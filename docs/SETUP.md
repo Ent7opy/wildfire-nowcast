@@ -65,6 +65,7 @@ This runs `uv sync --dev` in `api/`, `ui/`, `ml/`, and `ingest/`.
 | Docker commands fail | Ensure Docker Desktop/Engine is running; check you can run `docker compose ps`. |
 | FIRMS ingest missing key | Ensure `.env` contains `FIRMS_MAP_KEY` and restart your shell. |
 | cfgrib/ecCodes errors | Install ecCodes (see prerequisites) and restart your shell. |
+| `Access is denied` deleting `.venv\lib64` on Windows | Delete the old `.venv` (or run `make clean-venv`) and re-run `make install`; avoid sharing venvs between WSL and Windows. |
 | Permission denied on clean | On Windows, run the terminal as Administrator if files are read-only. |
 
 ---

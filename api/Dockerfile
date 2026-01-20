@@ -9,7 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR $APP_HOME
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        libgdal36 \
+        gdal-bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./

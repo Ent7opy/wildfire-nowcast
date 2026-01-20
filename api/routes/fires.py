@@ -17,7 +17,9 @@ def _list_detections(
     start_time: datetime,
     end_time: datetime,
     min_confidence: Optional[float],
+    min_fire_likelihood: Optional[float],
     include_noise: bool,
+    include_masked: bool,
     include_denoiser_fields: bool,
     limit: Optional[int],
 ):
@@ -32,6 +34,12 @@ def _list_detections(
         "frp",
         "sensor",
         "source",
+        "confidence_score",
+        "persistence_score",
+        "landcover_score",
+        "weather_score",
+        "false_source_masked",
+        "fire_likelihood",
     ]
     if include_denoiser_fields:
         columns.extend(["denoised_score", "is_noise"])
@@ -42,8 +50,10 @@ def _list_detections(
         end_time=end_time,
         columns=columns,
         include_noise=include_noise,
+        include_masked=include_masked,
         limit=limit,
         min_confidence=min_confidence,
+        min_fire_likelihood=min_fire_likelihood,
     )
 
     return {"count": len(detections), "detections": detections}
@@ -57,8 +67,10 @@ async def get_fires(
     max_lat: float = Query(..., description="Maximum latitude (north boundary)"),
     start_time: datetime = Query(..., description="Start time for the query window (ISO 8601 format)"),
     end_time: datetime = Query(..., description="End time for the query window (ISO 8601 format)"),
-    min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0, description="Minimum FIRMS confidence (deprecated, use min_fire_likelihood)"),
+    min_fire_likelihood: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum fire likelihood score"),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
+    include_masked: bool = Query(False, description="Include detections near known industrial false-positive sources."),
     include_denoiser_fields: bool = Query(
         False, description="Include denoised_score and is_noise in response."
     ),
@@ -73,9 +85,11 @@ async def get_fires(
         start_time=start_time,
         end_time=end_time,
         include_noise=include_noise,
+        include_masked=include_masked,
         include_denoiser_fields=include_denoiser_fields,
         limit=limit,
         min_confidence=min_confidence,
+        min_fire_likelihood=min_fire_likelihood,
     )
 
 
@@ -87,8 +101,10 @@ async def get_detections(
     max_lat: float = Query(..., description="Maximum latitude (north boundary)"),
     start_time: datetime = Query(..., description="Start time for the query window (ISO 8601 format)"),
     end_time: datetime = Query(..., description="End time for the query window (ISO 8601 format)"),
-    min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0),
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=100.0, description="Minimum FIRMS confidence (deprecated, use min_fire_likelihood)"),
+    min_fire_likelihood: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum fire likelihood score"),
     include_noise: bool = Query(False, description="Include detections explicitly marked as noise."),
+    include_masked: bool = Query(False, description="Include detections near known industrial false-positive sources."),
     include_denoiser_fields: bool = Query(
         False, description="Include denoised_score and is_noise in response."
     ),
@@ -107,8 +123,10 @@ async def get_detections(
         start_time=start_time,
         end_time=end_time,
         include_noise=include_noise,
+        include_masked=include_masked,
         include_denoiser_fields=include_denoiser_fields,
         limit=limit,
         min_confidence=min_confidence,
+        min_fire_likelihood=min_fire_likelihood,
     )
 

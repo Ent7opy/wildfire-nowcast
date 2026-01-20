@@ -1,10 +1,22 @@
 {
   "goal_file": ".ralph/GOAL.md",
-  "goal_summary": "Transform the wildfire nowcast system from region-specific manual ingestion to a global Just-In-Time (JIT) pipeline where clicking any fire triggers automated background ingestion (terrain, weather) and forecast generation, providing worldwide coverage without pre-provisioned databases.",
+  "goal_summary": "Improve wildfire detection quality by replacing naive FIRMS confidence filtering with a composite Fire Likelihood Score that combines FIRMS confidence (weak prior), persistence filtering, land-cover plausibility, weather plausibility, and industrial false-source masking. Fix UI bugs (tooltip, details panel, coordinate extraction) and update UI to reflect new likelihood semantics.",
   "runnable_tasks": [
     {
+      "id": null,
+      "title": null,
+      "priority": null,
+      "depends_on": []
+    },
+    {
+      "id": null,
+      "title": null,
+      "priority": null,
+      "depends_on": []
+    },
+    {
       "id": "T99",
-      "title": "Unblock T16: Fix Python path for cross-module imports in api tests",
+      "title": "Unblock Worker: Remove malformed task objects from state.json",
       "priority": "P0",
       "depends_on": []
     }

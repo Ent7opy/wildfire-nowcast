@@ -11,7 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 DIR_PATTERNS = {"__pycache__", ".pytest_cache", ".mypy_cache"}
 FILE_EXTENSIONS = {".pyc", ".pyo", ".pyd"}
 GLOB_PATTERNS = ["*.egg-info"]
-VENV_DIRS = [ROOT / "api" / ".venv", ROOT / "ui" / ".venv", ROOT / "ml" / ".venv", ROOT / "ingest" / ".venv"]
+VENV_DIRS = [
+    ROOT / "api" / ".venv",
+    ROOT / "ui" / ".venv",
+    ROOT / "ml" / ".venv",
+    ROOT / "ingest" / ".venv",
+    ROOT / "api" / ".venv-win",
+    ROOT / "ui" / ".venv-win",
+    ROOT / "ml" / ".venv-win",
+    ROOT / "ingest" / ".venv-win",
+]
 
 
 def remove_path(path: Path) -> None:
@@ -45,4 +54,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

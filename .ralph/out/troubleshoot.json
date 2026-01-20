@@ -1,5 +1,21 @@
 {
-  "unblocker_task": null,
-  "diagnosis": "Task T16 has exceeded maximum unblock attempts (3 > 2) and the blocking issue is a code-level bug in the test implementation, not a configuration or environment issue.\n\nDiagnosis:\n1. Test file api/tests/test_jit_forecast_integration.py was successfully created and committed (commit 0e1a964)\n2. Python path configuration was fixed via api/tests/conftest.py (T99, commit 74b1abc)\n3. Pytest can successfully collect the integration tests without import errors\n4. However, test_jit_pipeline_invalid_bbox fails with KeyError on 'detail' field at line 258\n5. The test expects response.json()[\"detail\"] but the actual FastAPI response structure differs\n\nRoot cause:\nThe test code assumes FastAPI HTTPException errors return a response with a top-level 'detail' key. The actual response format needs to be investigated and the test assertions updated accordingly. This requires modifying test code to match the actual API response structure - a substantive code change beyond config/git-state fixes.\n\nFiles verified:\n- api/tests/test_jit_forecast_integration.py (committed, no uncommitted changes)\n- api/tests/conftest.py (committed, correctly adds workspace to sys.path)\n- api/routes/forecast.py (raises HTTPException with detail at line 158, but response format differs in test context)\n\nThis is a code correctness issue requiring human review of the FastAPI error response format and corresponding test assertion updates. Cannot be resolved with configuration-only changes.",
-  "status": "cannot_resolve"
+  "unblocker_task": {
+    "id": "T99",
+    "title": "Unblock Worker: Remove malformed task objects from state.json",
+    "priority": "P0",
+    "description": "The state.json file contains two malformed task objects at array positions 3 and 4 (lines 100-117) that lack required fields (id, title, priority, description, acceptance, verification). These null-field tasks prevent the worker from selecting valid work. Remove these two malformed objects from the tasks array, leaving only the three valid tasks (WN-FIRE-004, WN-FIRE-006, WN-FIRE-007). Ensure the resulting JSON is valid.",
+    "acceptance": [
+      "state.json tasks array contains exactly 3 task objects",
+      "All remaining tasks have valid id, title, priority, description fields",
+      "JSON syntax is valid (no trailing commas, proper structure)",
+      "File can be parsed successfully"
+    ],
+    "verification": [
+      "Would run: python -m json.tool .ralph/state.json > /dev/null (validates JSON syntax)",
+      "Would run: jq '.tasks | length' .ralph/state.json (should output 3)",
+      "Would run: jq '.tasks[] | select(.id == null)' .ralph/state.json (should output nothing)"
+    ]
+  },
+  "diagnosis": "Worker is blocked because state.json contains two task objects (array indices 3-4, lines 100-117) with only default/empty values. These tasks have status='todo' but are missing all required fields: id, title, priority, description, acceptance, verification. Worker cannot select a task without these fields. The worker's code inspection also suggests that the remaining valid tasks (WN-FIRE-006, WN-FIRE-007) may already be implemented, but the immediate blocker is the malformed task objects preventing task selection. Surgical fix: remove the two malformed objects from the tasks array in state.json.",
+  "status": "resolved"
 }

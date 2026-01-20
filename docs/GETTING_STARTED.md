@@ -113,9 +113,14 @@ See [`ingest/ingest_firms.md`](ingest/ingest_firms.md) for detailed options.
 2. You should see a map with fire detections (red markers/clusters)
 3. Use the sidebar to:
    - Adjust time window (last 6/12/24/48 hours)
-   - Filter by minimum confidence
-   - Toggle denoiser filtering
-   - Enable forecast/risk layers (if data is available)
+   - Filter by minimum fire likelihood
+   - Toggle noise filter
+   - Enable forecast/risk layers
+   - Export current view as CSV or PNG
+
+**Risk Layer**: Toggle "Risk index" to see a fire risk heatmap (green = low, yellow = medium, red = high). See [`risk_and_exports.md`](risk_and_exports.md) for details on how risk is computed.
+
+**Exports**: Use the export buttons to download fire data (CSV) or a static map image (PNG) of the current viewport.
 
 ### Step 6: Stop the Stack
 

@@ -81,13 +81,14 @@ def render_sidebar() -> str:
             key="pending_time_window",
         )
 
-        pending_min_confidence = st.slider(
-            "Minimum confidence",
+        pending_min_likelihood = st.slider(
+            "Minimum fire likelihood",
             min_value=0.0,
-            max_value=100.0,
-            value=float(st.session_state.fires_min_confidence),
-            step=5.0,
-            key="pending_min_confidence",
+            max_value=1.0,
+            value=float(st.session_state.fires_min_likelihood),
+            step=0.05,
+            key="pending_min_likelihood",
+            help="Composite score combining FIRMS confidence (20%), persistence (30%), land-cover plausibility (25%), and weather conditions (25%). Values <0.3 indicate low confidence, 0.3-0.6 uncertain, >0.6 likely real fire.",
         )
 
         pending_apply_denoiser = st.checkbox(
@@ -99,7 +100,7 @@ def render_sidebar() -> str:
         applied = st.form_submit_button("Apply filters", type="primary")
         if applied:
             st.session_state.time_window = pending_time_window
-            st.session_state.fires_min_confidence = float(pending_min_confidence)
+            st.session_state.fires_min_likelihood = float(pending_min_likelihood)
             st.session_state.fires_apply_denoiser = bool(pending_apply_denoiser)
 
     # Export fires button
@@ -118,6 +119,28 @@ def render_sidebar() -> str:
     st.link_button(
         "📥 Export fires (CSV)",
         export_url,
+        use_container_width=True,
+    )
+    
+    # Export map as PNG
+    png_export_url = (
+        f"{api_public_base_url()}/exports/map.png?"
+        f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}&"
+        f"start_time={_isoformat(start_time)}&end_time={_isoformat(end_time)}&"
+        f"include_fires={'true' if st.session_state.show_fires else 'false'}&"
+        f"include_risk={'true' if st.session_state.show_risk else 'false'}&"
+        f"include_forecast={'true' if st.session_state.show_forecast else 'false'}"
+    )
+    
+    # Add run_id if forecast is enabled and available
+    if st.session_state.show_forecast:
+        run_id = st.session_state.get("last_forecast", {}).get("run", {}).get("id")
+        if run_id:
+            png_export_url += f"&run_id={run_id}"
+    
+    st.link_button(
+        "🖼️ Export map (PNG)",
+        png_export_url,
         use_container_width=True,
     )
 

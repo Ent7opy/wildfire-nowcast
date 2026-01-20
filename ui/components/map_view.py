@@ -1,5 +1,6 @@
 """Map view component for wildfire dashboard using PyDeck."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
@@ -12,6 +13,8 @@ from config.constants import (
     DEFAULT_ZOOM_LEVEL,
     MAP_HEIGHT,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 # Constants for defaults if not in session state
 INITIAL_LAT = DEFAULT_MAP_CENTER[0]
@@ -60,13 +63,13 @@ def render_map_view() -> Optional[Dict[str, float]]:
     if st.session_state.show_fires:
         start_time, end_time = _current_time_range()
         include_noise = not bool(getattr(st.session_state, "fires_apply_denoiser", True))
-        min_confidence = float(getattr(st.session_state, "fires_min_confidence", 0.0))
+        min_likelihood = float(getattr(st.session_state, "fires_min_likelihood", 0.0))
         
         # Build query params for the tile URL
         params = {
             "start_time": _isoformat(start_time),
             "end_time": _isoformat(end_time),
-            "min_confidence": min_confidence,
+            "min_fire_likelihood": min_likelihood,
             "include_noise": str(include_noise).lower()
         }
         query_str = "&".join([f"{k}={v}" for k, v in params.items()])
@@ -130,6 +133,8 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}"
             )
             
+            # Color mapping: green (low) -> yellow (medium) -> red (high)
+            # Based on risk_score: 0.0-0.3 green, 0.3-0.6 yellow, 0.6-1.0 red
             layers.append(pdk.Layer(
                 "GeoJsonLayer",
                 data=risk_url,
@@ -137,8 +142,8 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 pickable=True,
                 stroked=True,
                 filled=True,
-                get_fill_color=[128, 0, 128, 60],  # semi-transparent purple
-                get_line_color=[128, 0, 128, 150],
+                get_fill_color="properties.risk_score < 0.3 ? [34, 139, 34, 80] : properties.risk_score < 0.6 ? [255, 215, 0, 100] : [220, 20, 60, 120]",
+                get_line_color="properties.risk_score < 0.3 ? [34, 139, 34, 180] : properties.risk_score < 0.6 ? [255, 215, 0, 180] : [220, 20, 60, 180]",
                 line_width_min_pixels=1,
             ))
 
@@ -148,9 +153,8 @@ def render_map_view() -> Optional[Dict[str, float]]:
         initial_view_state=st.session_state.map_view_state,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         tooltip={
-            "html": "<b>ID:</b> {id}<br/>"
-                    "<b>Time:</b> {acq_time}<br/>"
-                    "<b>Confidence:</b> {confidence}<br/>"
+            "html": "<b>Time:</b> {acq_time}<br/>"
+                    "<b>Sensor:</b> {sensor}<br/>"
                     "<b>Intensity (FRP):</b> {frp}",
             "style": {"color": "white", "backgroundColor": "#333"}
         },
@@ -172,10 +176,41 @@ def render_map_view() -> Optional[Dict[str, float]]:
         # Check fires layer
         selected_fires = event.selection.objects.get("fires", [])
         if selected_fires:
-            props = selected_fires[0]
-            # Save props for the details panel
-            st.session_state.selected_fire = props
+            feature = selected_fires[0]
+
+            # MVT layers may nest properties under a "properties" key
+            # Extract the properties dict if it exists, otherwise use feature directly
+            props = feature.get("properties", feature)
+
+            # Extract coordinates from properties or geometry
+            lat = props.get("lat")
+            lon = props.get("lon")
+
+            # Fallback to geometry.coordinates if properties missing
+            if (lat is None or lon is None) and "geometry" in feature:
+                geom = feature["geometry"]
+                if geom.get("type") == "Point" and "coordinates" in geom:
+                    coords = geom["coordinates"]
+                    if len(coords) >= 2:
+                        lon, lat = coords[0], coords[1]
+
+            # Log if coordinate extraction failed
+            if lat is None or lon is None:
+                LOGGER.warning(
+                    "Failed to extract coordinates from MVT feature. "
+                    "Feature structure: %s",
+                    feature
+                )
+
+            # Build a normalized feature dict with all properties at top level
+            normalized_feature = dict(props)
+            if lat is not None and lon is not None:
+                normalized_feature["lat"] = lat
+                normalized_feature["lon"] = lon
+
+            # Save normalized feature for the details panel
+            st.session_state.selected_fire = normalized_feature
             # Return coordinates for app level click tracking
-            return {"lat": props.get("lat"), "lng": props.get("lon")}
+            return {"lat": lat, "lng": lon}
             
     return None

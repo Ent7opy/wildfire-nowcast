@@ -29,6 +29,7 @@ class DetectionRecord:
     sensor: str | None
     source: str
     confidence: float | None
+    confidence_score: float | None
     brightness: float | None
     bright_t31: float | None
     frp: float | None
@@ -49,6 +50,7 @@ class DetectionRecord:
             "sensor": self.sensor,
             "source": self.source,
             "confidence": self.confidence,
+            "confidence_score": self.confidence_score,
             "brightness": self.brightness,
             "bright_t31": self.bright_t31,
             "frp": self.frp,
@@ -72,6 +74,7 @@ class FireDetection(BaseModel):
     sensor: str | None = None
     source: str
     confidence: float | None = None
+    confidence_score: float | None = None
     brightness: float | None = None
     bright_t31: float | None = None
     frp: float | None = None
@@ -94,6 +97,7 @@ class FireDetection(BaseModel):
             sensor=record.sensor,
             source=record.source,
             confidence=record.confidence,
+            confidence_score=record.confidence_score,
             brightness=record.brightness,
             bright_t31=record.bright_t31,
             frp=record.frp,

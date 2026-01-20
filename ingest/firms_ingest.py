@@ -101,6 +101,13 @@ def run_firms_ingest(
             inserted = repository.insert_detections(detections)
             skipped_duplicates = parsed_count - inserted
 
+            if inserted > 0:
+                _update_false_source_masking(batch_id)
+                _update_persistence_scores(batch_id)
+                _update_landcover_scores(batch_id)
+                _update_weather_scores(batch_id)
+                _update_fire_likelihood(batch_id)
+
             if config.denoiser_enabled and inserted > 0:
                 _run_denoiser_inference(batch_id, config)
 
@@ -145,6 +152,66 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     if not value:
         return None
     return [segment.strip() for segment in value.split(",") if segment.strip()]
+
+
+def _update_false_source_masking(batch_id: int) -> None:
+    """Update false_source_masked column for detections in the batch."""
+    try:
+        from api.fires.repo import update_false_source_masking
+
+        LOGGER.info("Updating false-source masking for batch %s", batch_id)
+        masked_count = update_false_source_masking(batch_id)
+        LOGGER.info("Marked %s detections as false sources in batch %s", masked_count, batch_id)
+    except Exception:
+        LOGGER.exception("Failed to update false-source masking for batch %s", batch_id)
+
+
+def _update_persistence_scores(batch_id: int) -> None:
+    """Update persistence_score column for detections in the batch."""
+    try:
+        from api.fires.repo import update_persistence_scores
+
+        LOGGER.info("Updating persistence scores for batch %s", batch_id)
+        updated_count = update_persistence_scores(batch_id)
+        LOGGER.info("Updated %s persistence scores in batch %s", updated_count, batch_id)
+    except Exception:
+        LOGGER.exception("Failed to update persistence scores for batch %s", batch_id)
+
+
+def _update_landcover_scores(batch_id: int) -> None:
+    """Update landcover_score column for detections in the batch."""
+    try:
+        from api.fires.repo import update_landcover_scores
+
+        LOGGER.info("Updating landcover scores for batch %s", batch_id)
+        updated_count = update_landcover_scores(batch_id)
+        LOGGER.info("Updated %s landcover scores in batch %s", updated_count, batch_id)
+    except Exception:
+        LOGGER.exception("Failed to update landcover scores for batch %s", batch_id)
+
+
+def _update_weather_scores(batch_id: int) -> None:
+    """Update weather_score column for detections in the batch."""
+    try:
+        from api.fires.repo import update_weather_scores
+
+        LOGGER.info("Updating weather scores for batch %s", batch_id)
+        updated_count = update_weather_scores(batch_id)
+        LOGGER.info("Updated %s weather scores in batch %s", updated_count, batch_id)
+    except Exception:
+        LOGGER.exception("Failed to update weather scores for batch %s", batch_id)
+
+
+def _update_fire_likelihood(batch_id: int) -> None:
+    """Update fire_likelihood column for detections in the batch."""
+    try:
+        from api.fires.repo import update_fire_likelihood
+
+        LOGGER.info("Updating fire likelihood for batch %s", batch_id)
+        updated_count = update_fire_likelihood(batch_id)
+        LOGGER.info("Updated %s fire likelihood scores in batch %s", updated_count, batch_id)
+    except Exception:
+        LOGGER.exception("Failed to update fire likelihood for batch %s", batch_id)
 
 
 def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> None:

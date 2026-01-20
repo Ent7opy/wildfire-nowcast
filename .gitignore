@@ -27,6 +27,7 @@ venv/
 env/
 ENV/
 .venv
+.venv-win/
 env.bak/
 venv.bak/
 
