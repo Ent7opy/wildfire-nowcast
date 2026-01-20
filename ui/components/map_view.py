@@ -153,12 +153,9 @@ def render_map_view() -> Optional[Dict[str, float]]:
         initial_view_state=st.session_state.map_view_state,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         tooltip={
-            "html": "<b>ID:</b> {properties.id}<br/>"
-                    "<b>Time:</b> {properties.acq_time}<br/>"
-                    "<b>Likelihood:</b> {properties.fire_likelihood}<br/>"
-                    "<b>Intensity (FRP):</b> {properties.frp}<br/>"
-                    "<b>Risk Score:</b> {properties.risk_score}<br/>"
-                    "<b>Risk Level:</b> {properties.risk_level}",
+            "html": "<b>Time:</b> {acq_time}<br/>"
+                    "<b>Sensor:</b> {sensor}<br/>"
+                    "<b>Intensity (FRP):</b> {frp}",
             "style": {"color": "white", "backgroundColor": "#333"}
         },
     )
@@ -181,9 +178,13 @@ def render_map_view() -> Optional[Dict[str, float]]:
         if selected_fires:
             feature = selected_fires[0]
 
+            # MVT layers may nest properties under a "properties" key
+            # Extract the properties dict if it exists, otherwise use feature directly
+            props = feature.get("properties", feature)
+
             # Extract coordinates from properties or geometry
-            lat = feature.get("lat")
-            lon = feature.get("lon")
+            lat = props.get("lat")
+            lon = props.get("lon")
 
             # Fallback to geometry.coordinates if properties missing
             if (lat is None or lon is None) and "geometry" in feature:
@@ -201,13 +202,14 @@ def render_map_view() -> Optional[Dict[str, float]]:
                     feature
                 )
 
-            # Add coordinates to feature dict for details panel
+            # Build a normalized feature dict with all properties at top level
+            normalized_feature = dict(props)
             if lat is not None and lon is not None:
-                feature["lat"] = lat
-                feature["lon"] = lon
+                normalized_feature["lat"] = lat
+                normalized_feature["lon"] = lon
 
-            # Save feature for the details panel
-            st.session_state.selected_fire = feature
+            # Save normalized feature for the details panel
+            st.session_state.selected_fire = normalized_feature
             # Return coordinates for app level click tracking
             return {"lat": lat, "lng": lon}
             
