@@ -44,6 +44,7 @@ Purpose: Give newcomers and contributors a single navigation point, reduce dupli
 ### Technical References
 - **[`grid.md`](grid.md)** – Analysis grid contract: CRS, indexing, terrain alignment
 - **[`spread_model_design.md`](spread_model_design.md)** – Spread model contract and implementation details
+- **[`risk_and_exports.md`](risk_and_exports.md)** – Fire risk index computation and export features (CSV, GeoJSON, PNG)
 
 ### API & JIT Forecasting
 - **JIT Forecasting Workflow** – Generate forecasts for any global location on-demand (see below)
