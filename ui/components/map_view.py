@@ -83,7 +83,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
             id="fires",
             pickable=True,
             auto_highlight=True,
-            get_fill_color="properties.frp > 100 ? [255, 255, 0, 230] : properties.frp > 50 ? [255, 165, 0, 210] : properties.frp > 20 ? [255, 69, 0, 190] : [220, 20, 60, 170]",
+            get_fill_color="properties.fire_likelihood >= 0.66 ? [255, 0, 0, 230] : properties.fire_likelihood >= 0.33 ? [255, 165, 0, 210] : [255, 255, 0, 190]",
             get_point_radius="properties.frp > 100 ? 12 : properties.frp > 50 ? 8 : properties.frp > 20 ? 5 : 3",
             point_radius_min_pixels=3,
             point_radius_max_pixels=12,
@@ -157,10 +157,10 @@ def render_map_view() -> Optional[Dict[str, float]]:
         initial_view_state=st.session_state.map_view_state,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         tooltip={
-            "html": "<b>Time:</b> {acq_time}<br/>"
-                    "<b>Sensor:</b> {sensor}<br/>"
-                    "<b>Intensity (FRP):</b> {frp}<br/>"
-                    "<b>Likelihood:</b> {fire_likelihood}",
+            "html": "<b>Time:</b> {properties.acq_time}<br/>"
+                    "<b>Sensor:</b> {properties.sensor}<br/>"
+                    "<b>Intensity (FRP):</b> {properties.frp}<br/>"
+                    "<b>Likelihood:</b> {properties.fire_likelihood}",
             "style": {"color": "white", "backgroundColor": "#333"}
         },
     )
