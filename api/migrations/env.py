@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
@@ -74,6 +75,28 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        # Alembic creates `alembic_version.version_num` as VARCHAR(32) by default.
+        # Our revision IDs are longer (e.g. "20260119_add_mvt_fires_likelihood_filter"),
+        # so ensure the table exists with a wider column (and widen it if already created).
+        with connection.begin():
+            connection.execute(
+                sa.text(
+                    """
+                    CREATE TABLE IF NOT EXISTS alembic_version (
+                        version_num VARCHAR(64) NOT NULL PRIMARY KEY
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                sa.text(
+                    """
+                    ALTER TABLE alembic_version
+                    ALTER COLUMN version_num TYPE VARCHAR(64)
+                    """
+                )
+            )
+
         context.configure(
             connection=connection, target_metadata=target_metadata
         )

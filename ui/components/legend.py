@@ -7,7 +7,7 @@ def render_legend() -> None:
     with st.expander("Legend", expanded=False):
         legend_items = []
         if st.session_state.show_fires:
-            legend_items.append("🔴 **Active fires** — satellite detections")
+            legend_items.append("🔥 **Active fires** — size and color indicate intensity (FRP)")
         if st.session_state.show_forecast:
             legend_items.append("🟠 **Forecast overlay** — spread outlook")
             legend_items.append(

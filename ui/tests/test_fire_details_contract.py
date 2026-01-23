@@ -28,6 +28,14 @@ FIRE_MAP_FEATURE_CONTRACT = {
         # Denoiser-specific properties (may not be present for all detections)
         "denoised_score": "ML denoiser confidence score (0-1)",
         "is_noise": "Boolean flag indicating if detection is classified as noise",
+
+        # Fire likelihood composite scoring properties
+        "fire_likelihood": "Composite fire likelihood score (0-1)",
+        "confidence_score": "Normalized FIRMS confidence (0-1)",
+        "persistence_score": "Spatial-temporal clustering score (0-1)",
+        "landcover_score": "Land-cover plausibility score (0-1)",
+        "weather_score": "Weather plausibility score (0-1)",
+        "false_source_masked": "Industrial false-positive mask flag",
     }
 }
 
@@ -166,6 +174,23 @@ def test_map_view_property_key_consistency():
     # Verify coordinate extraction (line 178-179 in map_view.py)
     lat_value = selected_fire.get("lat")
     lon_value = selected_fire.get("lon")
-    
+
     assert lat_value is not None, "lat coordinate must be present"
     assert lon_value is not None, "lon coordinate must be present"
+
+
+def test_tooltip_properties_in_contract():
+    """Test that all properties used in map tooltip are in the contract."""
+    # Properties referenced in map_view.py tooltip template
+    tooltip_properties = ["acq_time", "sensor", "frp", "fire_likelihood"]
+
+    all_contract_props = (
+        set(FIRE_MAP_FEATURE_CONTRACT["required"].keys())
+        | set(FIRE_MAP_FEATURE_CONTRACT["optional"].keys())
+    )
+
+    for prop in tooltip_properties:
+        assert prop in all_contract_props, (
+            f"Tooltip uses '{prop}' but it's not in the contract. "
+            "Update the contract or fix the tooltip template."
+        )

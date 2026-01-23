@@ -346,80 +346,22 @@ def build_spread_inputs(
     # 2. Load fires
     fire_start = forecast_reference_time - timedelta(hours=fire_lookback_hours)
     try:
-        # If region_name is None, we need to create fire heatmap manually using the grid
-        if region_name is None:
-            from api.fires.repo import list_fire_detections_bbox_time
-            from api.fires.grid_mapping import fires_to_indices, aggregate_indices_to_grid
-
-            cols = ["lat", "lon"]
-            if weight_by_denoised_score:
-                cols.append("denoised_score")
-
-            detections = list_fire_detections_bbox_time(
-                bbox=bbox,
-                start_time=fire_start,
-                end_time=forecast_reference_time,
-                columns=cols,
-                include_noise=False,
-            )
-            mapped = fires_to_indices(detections, grid, drop_outside=True)
-
-            if not mapped:
-                heatmap = aggregate_indices_to_grid(
-                    i=np.asarray([], dtype=int),
-                    j=np.asarray([], dtype=int),
-                    shape=(window.lat.size, window.lon.size),
-                    mode="max" if weight_by_denoised_score else "presence",
-                )
-            else:
-                i = np.asarray([r["i"] for r in mapped], dtype=int)
-                j = np.asarray([r["j"] for r in mapped], dtype=int)
-                # Adjust indices to window-relative
-                i_window = i - window.i0
-                j_window = j - window.j0
-                # Filter to window bounds
-                in_window = (i_window >= 0) & (i_window < window.lat.size) & (j_window >= 0) & (j_window < window.lon.size)
-                i_window = i_window[in_window]
-                j_window = j_window[in_window]
-
-                if weight_by_denoised_score:
-                    # Handle NULL denoised_score values: treat unscored detections as full-weight (1.0)
-                    # to avoid NaN poisoning in numpy arrays (same pattern as api/fires/service.py)
-                    values = np.asarray([(r.get("denoised_score") if r.get("denoised_score") is not None else 1.0) for r in mapped], dtype=np.float32)
-                    values = values[in_window]
-                    heatmap = aggregate_indices_to_grid(
-                        i=i_window,
-                        j=j_window,
-                        shape=(window.lat.size, window.lon.size),
-                        mode="max",
-                        values=values,
-                    )
-                else:
-                    heatmap = aggregate_indices_to_grid(
-                        i=i_window,
-                        j=j_window,
-                        shape=(window.lat.size, window.lon.size),
-                        mode="presence",
-                    )
-
-            from api.fires.service import FireHeatmapWindow
-            fires = FireHeatmapWindow(
-                grid=grid,
-                window=window,
-                heatmap=heatmap,
-                points=None,
-            )
-        else:
-            fires = get_fire_cells_heatmap(
-                region_name=region_name,
-                bbox=bbox,
-                start_time=fire_start,
-                end_time=forecast_reference_time,
-                weight_by_denoised_score=weight_by_denoised_score,
-                mode="max" if weight_by_denoised_score else "presence",
-                clip=True,
-            )
+        fires = get_fire_cells_heatmap(
+            region_name=region_name,
+            grid=grid if region_name is None else None,
+            bbox=bbox,
+            start_time=fire_start,
+            end_time=forecast_reference_time,
+            weight_by_denoised_score=weight_by_denoised_score,
+            mode="max" if weight_by_denoised_score else "presence",
+            clip=True,
+        )
     except Exception as e:
+        LOGGER.exception(
+            "Failed to load fire heatmap for region=%r bbox=%r",
+            region_name,
+            bbox,
+        )
         raise RuntimeError(
             f"Failed to load fire heatmap for region={region_name!r} bbox={bbox!r} "
             f"start_time={fire_start!r} end_time={forecast_reference_time!r}"

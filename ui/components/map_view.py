@@ -83,9 +83,13 @@ def render_map_view() -> Optional[Dict[str, float]]:
             id="fires",
             pickable=True,
             auto_highlight=True,
-            get_fill_color=[255, 0, 0, 200],
-            point_radius_min_pixels=4,
-            point_radius_max_pixels=10,
+            get_fill_color="properties.frp > 100 ? [255, 255, 0, 230] : properties.frp > 50 ? [255, 165, 0, 210] : properties.frp > 20 ? [255, 69, 0, 190] : [220, 20, 60, 170]",
+            get_point_radius="properties.frp > 100 ? 12 : properties.frp > 50 ? 8 : properties.frp > 20 ? 5 : 3",
+            point_radius_min_pixels=3,
+            point_radius_max_pixels=12,
+            stroked=True,
+            get_line_color=[255, 255, 255, 180],
+            line_width_min_pixels=1,
         ))
 
     # 2. Forecast Contours (MVT - using same proxy if available)
@@ -155,7 +159,8 @@ def render_map_view() -> Optional[Dict[str, float]]:
         tooltip={
             "html": "<b>Time:</b> {acq_time}<br/>"
                     "<b>Sensor:</b> {sensor}<br/>"
-                    "<b>Intensity (FRP):</b> {frp}",
+                    "<b>Intensity (FRP):</b> {frp}<br/>"
+                    "<b>Likelihood:</b> {fire_likelihood}",
             "style": {"color": "white", "backgroundColor": "#333"}
         },
     )

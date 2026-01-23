@@ -4,6 +4,15 @@ This test validates the full JIT pipeline flow from API request to completion,
 including status polling and result validation. Uses a small bbox and mocks
 expensive operations (real terrain/weather downloads) to keep runtime manageable.
 """
+import sys
+from pathlib import Path
+
+# Add workspace root to sys.path for ingest/ml imports
+# Must be done before any other imports that might trigger worker task loading
+workspace_root = Path(__file__).resolve().parent.parent.parent
+if str(workspace_root) not in sys.path:
+    sys.path.insert(0, str(workspace_root))
+
 import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -20,7 +29,6 @@ client = TestClient(app)
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Integration test requires ingest/ml dependencies not installed in api environment")
 def test_jit_pipeline_end_to_end():
     """Test full JIT pipeline: POST /forecast/jit -> poll status -> validate results.
     
@@ -189,7 +197,6 @@ def test_jit_pipeline_end_to_end():
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Integration test requires ingest/ml dependencies not installed in api environment")
 def test_jit_pipeline_handles_errors():
     """Test JIT pipeline properly handles and reports errors.
     
@@ -248,7 +255,6 @@ def test_jit_pipeline_handles_errors():
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Integration test requires ingest/ml dependencies not installed in api environment")
 def test_jit_pipeline_invalid_bbox():
     """Test JIT pipeline rejects invalid bbox format."""
     # Invalid bbox (only 3 elements instead of 4)
@@ -258,11 +264,10 @@ def test_jit_pipeline_invalid_bbox():
     )
     
     assert response.status_code == 400
-    assert "bbox must have exactly 4 elements" in response.json()["detail"]
+    assert "bbox must have exactly 4 elements" in response.json()["message"]
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Integration test requires ingest/ml dependencies not installed in api environment")
 def test_jit_pipeline_status_not_found():
     """Test status endpoint returns 404 for non-existent job."""
     non_existent_job_id = uuid4()
@@ -271,11 +276,10 @@ def test_jit_pipeline_status_not_found():
         response = client.get(f"/forecast/jit/{non_existent_job_id}")
         
         assert response.status_code == 404
-        assert "Job not found" in response.json()["detail"]
+        assert "Job not found" in response.json()["message"]
 
 
 @pytest.mark.integration
-@pytest.mark.skip(reason="Integration test requires ingest/ml dependencies not installed in api environment")
 def test_jit_pipeline_caching_behavior():
     """Test caching behavior for terrain and weather ingestion.
     
