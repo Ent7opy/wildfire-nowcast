@@ -19,10 +19,22 @@ def main() -> None:
     st.markdown(
         """
         <style>
+          /* CSS Custom Properties (for future theming capabilities) */
+          :root {
+            --fire-high: rgb(255, 0, 0);
+            --fire-medium: rgb(255, 165, 0);
+            --fire-low: rgb(255, 255, 0);
+            --risk-low: rgb(34, 139, 34);
+            --risk-medium: rgb(255, 215, 0);
+            --risk-high: rgb(220, 20, 60);
+            --tooltip-bg: #333;
+            --tooltip-text: white;
+          }
+
           /* Tighten overall top spacing a bit */
           .block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
 
-          /* Make sidebars feel less “boilerplate” */
+          /* Make sidebars feel less "boilerplate" */
           section[data-testid="stSidebar"] .block-container { padding-top: 1.25rem; }
 
           /* Slightly tighten caption spacing */

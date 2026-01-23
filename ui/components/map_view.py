@@ -13,6 +13,16 @@ from config.constants import (
     DEFAULT_ZOOM_LEVEL,
     MAP_HEIGHT,
 )
+from config.theme import (
+    FireColors,
+    FireThresholds,
+    RiskColors,
+    RiskThresholds,
+    ForecastColors,
+    PointSizing,
+    MapConfig,
+    UIColors,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,12 +93,12 @@ def render_map_view() -> Optional[Dict[str, float]]:
             id="fires",
             pickable=True,
             auto_highlight=True,
-            get_fill_color="properties.fire_likelihood >= 0.66 ? [255, 0, 0, 230] : properties.fire_likelihood >= 0.33 ? [255, 165, 0, 210] : [255, 255, 0, 190]",
-            get_point_radius="properties.frp > 100 ? 12 : properties.frp > 50 ? 8 : properties.frp > 20 ? 5 : 3",
-            point_radius_min_pixels=3,
-            point_radius_max_pixels=12,
+            get_fill_color=f"properties.fire_likelihood >= {FireThresholds.HIGH} ? {FireColors.HIGH_FILL} : properties.fire_likelihood >= {FireThresholds.MEDIUM} ? {FireColors.MEDIUM_FILL} : {FireColors.LOW_FILL}",
+            get_point_radius=f"properties.frp > {PointSizing.LARGE_FRP} ? {PointSizing.LARGE_SIZE} : properties.frp > {PointSizing.MEDIUM_FRP} ? {PointSizing.MEDIUM_SIZE} : properties.frp > {PointSizing.SMALL_FRP} ? {PointSizing.SMALL_SIZE} : {PointSizing.MIN_SIZE}",
+            point_radius_min_pixels=PointSizing.MIN_PIXELS,
+            point_radius_max_pixels=PointSizing.MAX_PIXELS,
             stroked=True,
-            get_line_color=[255, 255, 255, 180],
+            get_line_color=FireColors.OUTLINE,
             line_width_min_pixels=1,
         ))
 
@@ -106,9 +116,10 @@ def render_map_view() -> Optional[Dict[str, float]]:
             "MVTLayer",
             data=contour_url,
             id="forecast_contours",
-            pickable=True,
-            get_fill_color=[255, 165, 0, 40], # semi-transparent orange
-            get_line_color=[255, 165, 0, 200],
+            # Keep this overlay non-interactive so it doesn't override the fires tooltip/picking.
+            pickable=False,
+            get_fill_color=ForecastColors.FILL,  # semi-transparent orange
+            get_line_color=ForecastColors.STROKE,
             get_line_width=2,
             line_width_min_pixels=1,
         ))
@@ -143,11 +154,12 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 "GeoJsonLayer",
                 data=risk_url,
                 id="risk",
-                pickable=True,
+                # Tooltip is fire-specific; keep risk polygons non-interactive for now.
+                pickable=False,
                 stroked=True,
                 filled=True,
-                get_fill_color="properties.risk_score < 0.3 ? [34, 139, 34, 80] : properties.risk_score < 0.6 ? [255, 215, 0, 100] : [220, 20, 60, 120]",
-                get_line_color="properties.risk_score < 0.3 ? [34, 139, 34, 180] : properties.risk_score < 0.6 ? [255, 215, 0, 180] : [220, 20, 60, 180]",
+                get_fill_color=f"properties.risk_score < {RiskThresholds.MEDIUM} ? {RiskColors.LOW_FILL} : properties.risk_score < {RiskThresholds.HIGH} ? {RiskColors.MEDIUM_FILL} : {RiskColors.HIGH_FILL}",
+                get_line_color=f"properties.risk_score < {RiskThresholds.MEDIUM} ? {RiskColors.LOW_STROKE} : properties.risk_score < {RiskThresholds.HIGH} ? {RiskColors.MEDIUM_STROKE} : {RiskColors.HIGH_STROKE}",
                 line_width_min_pixels=1,
             ))
 
@@ -157,19 +169,19 @@ def render_map_view() -> Optional[Dict[str, float]]:
         initial_view_state=st.session_state.map_view_state,
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
         tooltip={
-            "html": "<b>Time:</b> {properties.acq_time}<br/>"
-                    "<b>Sensor:</b> {properties.sensor}<br/>"
-                    "<b>Intensity (FRP):</b> {properties.frp}<br/>"
-                    "<b>Likelihood:</b> {properties.fire_likelihood}",
-            "style": {"color": "white", "backgroundColor": "#333"}
+            "html": "<b>Time:</b> {acq_time}<br/>"
+                    "<b>Sensor:</b> {sensor}<br/>"
+                    "<b>Intensity (FRP):</b> {frp}<br/>"
+                    "<b>Likelihood:</b> {fire_likelihood}",
+            "style": {"color": UIColors.TOOLTIP_TEXT, "backgroundColor": UIColors.TOOLTIP_BG}
         },
     )
 
     # Render with selection support
     # Note: st.pydeck_chart selection support requires streamlit >= 1.35.0
     event = st.pydeck_chart(
-        deck, 
-        height=MAP_HEIGHT, 
+        deck,
+        height=MapConfig.HEIGHT, 
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-object",

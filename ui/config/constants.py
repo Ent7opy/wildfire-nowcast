@@ -2,10 +2,12 @@
 
 from typing import List
 
-# Map defaults
-DEFAULT_MAP_CENTER = [20.0, 0.0]  # Center of world map
-DEFAULT_ZOOM_LEVEL = 2  # Zoomed out to show more of the world
-MAP_HEIGHT = 600
+from config.theme import MapConfig
+
+# Map defaults (imported from theme for centralized design system)
+DEFAULT_MAP_CENTER = MapConfig.DEFAULT_CENTER
+DEFAULT_ZOOM_LEVEL = MapConfig.DEFAULT_ZOOM
+MAP_HEIGHT = MapConfig.HEIGHT
 
 # Time windows (used for fires filtering)
 TIME_WINDOW_OPTIONS = ["Last 6 hours", "Last 12 hours", "Last 24 hours", "Last 48 hours"]
