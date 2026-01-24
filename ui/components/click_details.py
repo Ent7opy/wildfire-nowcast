@@ -16,6 +16,43 @@ from api_client import (
 
 logger = logging.getLogger(__name__)
 
+
+def _render_progress_bar(label: str, value: float, max_value: float = 1.0) -> str:
+    """Generate HTML for a horizontal progress bar.
+
+    Args:
+        label: Text label for the bar
+        value: Current value (0.0-1.0)
+        max_value: Maximum value (default 1.0)
+
+    Returns:
+        HTML string for the progress bar
+    """
+    from config.theme import FireThresholds
+
+    percentage = (value / max_value) * 100
+
+    # Color based on value (using fire likelihood thresholds)
+    if value >= FireThresholds.HIGH:
+        color = "#DC143C"  # Crimson (high)
+    elif value >= FireThresholds.MEDIUM:
+        color = "#FFA500"  # Orange (medium)
+    else:
+        color = "#FFD700"  # Gold (low)
+
+    return f"""
+    <div style="margin: 6px 0;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+            <span style="font-size: 12px; color: #555;">{label}</span>
+            <span style="font-size: 12px; font-weight: bold;">{value:.3f}</span>
+        </div>
+        <div style="width: 100%; background: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden;">
+            <div style="width: {percentage}%; background: {color}; height: 100%; transition: width 0.3s ease;"></div>
+        </div>
+    </div>
+    """
+
+
 def _parse_time(value: Any) -> Optional[datetime]:
     if value is None:
         return None
@@ -68,26 +105,45 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
         st.write("**Fire Likelihood**")
         try:
             likelihood_val = float(fire_likelihood)
-            st.write(f"**Composite Score:** {likelihood_val:.3f}")
-            
-            # Display component scores
+
+            # Composite score with progress bar
+            composite_html = _render_progress_bar("Composite Score", likelihood_val)
+            st.markdown(composite_html, unsafe_allow_html=True)
+
+            # Component scores with smaller progress bars
+            st.caption("**Component Breakdown:**")
+
+            component_bars = []
+
             confidence_score = det.get("confidence_score")
-            persistence_score = det.get("persistence_score")
-            landcover_score = det.get("landcover_score")
-            weather_score = det.get("weather_score")
-            false_source_masked = det.get("false_source_masked")
-            
             if confidence_score is not None:
-                st.caption(f"Confidence: {float(confidence_score):.3f}")
+                component_bars.append(_render_progress_bar("Confidence (20%)", float(confidence_score)))
+
+            persistence_score = det.get("persistence_score")
             if persistence_score is not None:
-                st.caption(f"Persistence: {float(persistence_score):.3f}")
+                component_bars.append(_render_progress_bar("Persistence (30%)", float(persistence_score)))
+
+            landcover_score = det.get("landcover_score")
             if landcover_score is not None:
-                st.caption(f"Land Cover: {float(landcover_score):.3f}")
+                component_bars.append(_render_progress_bar("Land Cover (25%)", float(landcover_score)))
+
+            weather_score = det.get("weather_score")
             if weather_score is not None:
-                st.caption(f"Weather: {float(weather_score):.3f}")
+                component_bars.append(_render_progress_bar("Weather (25%)", float(weather_score)))
+
+            if component_bars:
+                components_html = f"""
+                <div style="margin-top: 8px; padding: 8px; background: #f8f9fa; border-radius: 4px;">
+                    {''.join(component_bars)}
+                </div>
+                """
+                st.markdown(components_html, unsafe_allow_html=True)
+
+            false_source_masked = det.get("false_source_masked")
             if false_source_masked is not None:
                 masked_str = "Yes" if false_source_masked else "No"
                 st.caption(f"Industrial Source Masked: {masked_str}")
+
         except (ValueError, TypeError):
             st.write(f"**Composite Score:** {fire_likelihood}")
 
