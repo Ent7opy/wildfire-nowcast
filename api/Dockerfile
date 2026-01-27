@@ -13,6 +13,7 @@ RUN apt-get update \
         curl \
         libgdal36 \
         gdal-bin \
+        libeccodes0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./

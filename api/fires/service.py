@@ -126,11 +126,12 @@ class FireHeatmapWindow:
 
 
 def get_fire_cells_heatmap(
-    region_name: str,
+    region_name: str | None,
     bbox: BBox,
     start_time: datetime,
     end_time: datetime,
     *,
+    grid: GridSpec | None = None,
     mode: Mode = "count",
     value_col: str | None = None,
     clip: bool = True,
@@ -144,6 +145,8 @@ def get_fire_cells_heatmap(
     Mapping is always performed on the **region** GridSpec (stable origin/extent). The
     output heatmap is then computed on the **AOI window** to keep arrays small.
 
+    If region_name is None, a grid must be provided.
+
     Weighting:
     - If `weight_by_denoised_score` is True, `mode` defaults to "sum" and `value_col`
       defaults to "denoised_score" (unless explicitly provided).
@@ -151,7 +154,11 @@ def get_fire_cells_heatmap(
       score, those are treated as full-weight (1.0) to avoid NaN poisoning.
     """
 
-    grid = get_region_grid_spec(region_name)
+    if grid is None:
+        if region_name is None:
+            raise ValueError("Either region_name or grid must be provided.")
+        grid = get_region_grid_spec(region_name)
+
     win = get_grid_window_for_bbox(grid, bbox, clip=clip)
 
     # Handle weighting shortcut.

@@ -568,22 +568,25 @@ def _validate_weather_dataset(
     )
 
 
+def snap_to_gfs_cycle(dt: datetime) -> datetime:
+    """Snap a datetime to the latest preceding GFS cycle (00, 06, 12, 18 UTC)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    hour_block = (dt.hour // 6) * 6
+    return dt.replace(hour=hour_block, minute=0, second=0, microsecond=0)
+
+
 def _resolve_run_time(cli_value: str | None, configured: datetime | None) -> datetime:
     """Pick run_time from CLI, config, or latest 6h cycle."""
     if cli_value:
         value = cli_value.rstrip("Z")
         run_dt = datetime.fromisoformat(value)
-        if run_dt.tzinfo is None:
-            run_dt = run_dt.replace(tzinfo=timezone.utc)
-        return run_dt.astimezone(timezone.utc)
+        return snap_to_gfs_cycle(run_dt)
     if configured:
-        if configured.tzinfo is None:
-            configured = configured.replace(tzinfo=timezone.utc)
-        return configured.astimezone(timezone.utc)
+        return snap_to_gfs_cycle(configured)
 
-    now = datetime.now(timezone.utc)
-    hour_block = (now.hour // 6) * 6
-    return now.replace(hour=hour_block, minute=0, second=0, microsecond=0)
+    return snap_to_gfs_cycle(datetime.now(timezone.utc))
 
 
 def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
@@ -674,9 +677,20 @@ def ingest_weather_for_bbox(
         Exception: If the ingestion fails after fallback attempts.
     """
     output_dir = Path(output_dir)
-    if forecast_time.tzinfo is None:
-        forecast_time = forecast_time.replace(tzinfo=timezone.utc)
-    forecast_time = forecast_time.astimezone(timezone.utc)
+    original_time = forecast_time
+    forecast_time = snap_to_gfs_cycle(forecast_time)
+    
+    # Adjust horizon to cover the original requested time range if we snapped back
+    if original_time > forecast_time:
+        diff_hours = (original_time - forecast_time).total_seconds() / 3600
+        # Increase horizon by at least the difference, rounded up to next step
+        horizon_hours += int(np.ceil(diff_hours))
+        LOGGER.info(
+            "Snapped forecast_time %s -> %s, increased horizon to %dh to maintain coverage",
+            original_time.isoformat(),
+            forecast_time.isoformat(),
+            horizon_hours,
+        )
 
     # Apply patch mode optimizations for small AOIs
     if patch_mode:

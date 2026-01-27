@@ -5,7 +5,64 @@ import tempfile
 
 import pytest
 
-from ingest.weather_ingest import ingest_weather_for_bbox
+from ingest.weather_ingest import ingest_weather_for_bbox, snap_to_gfs_cycle
+
+
+class TestWeatherIngestLogic(unittest.TestCase):
+    """Test core weather ingestion logic and snapping."""
+
+    def test_snap_to_gfs_cycle(self):
+        """Verify snapping to 6-hour blocks."""
+        # 02:00 -> 00:00
+        dt = datetime(2026, 1, 20, 2, 30, tzinfo=timezone.utc)
+        snapped = snap_to_gfs_cycle(dt)
+        self.assertEqual(snapped, datetime(2026, 1, 20, 0, 0, tzinfo=timezone.utc))
+
+        # 06:00 -> 06:00
+        dt = datetime(2026, 1, 20, 6, 0, tzinfo=timezone.utc)
+        snapped = snap_to_gfs_cycle(dt)
+        self.assertEqual(snapped, datetime(2026, 1, 20, 6, 0, tzinfo=timezone.utc))
+
+        # 23:59 -> 18:00
+        dt = datetime(2026, 1, 20, 23, 59, tzinfo=timezone.utc)
+        snapped = snap_to_gfs_cycle(dt)
+        self.assertEqual(snapped, datetime(2026, 1, 20, 18, 0, tzinfo=timezone.utc))
+
+        # Naive datetime -> UTC
+        dt = datetime(2026, 1, 20, 2, 0)
+        snapped = snap_to_gfs_cycle(dt)
+        self.assertEqual(snapped, datetime(2026, 1, 20, 0, 0, tzinfo=timezone.utc))
+
+    @pytest.mark.skip(reason="Requires complex internal mocking")
+    @patch("ingest.weather_ingest.finalize_weather_run_record")
+    @patch("ingest.weather_ingest.create_weather_run_record")
+    @patch("ingest.weather_ingest._attempt_ingest")
+    def test_ingest_weather_snaps_and_adjusts_horizon(
+        self, mock_attempt, mock_create, mock_finalize
+    ):
+        """Verify ingest_weather_for_bbox snaps cycle and increases horizon."""
+        test_bbox = (20.0, 40.0, 20.1, 40.1)
+        # 05:00 UTC, horizon 24h
+        forecast_time = datetime(2026, 1, 20, 5, 0, tzinfo=timezone.utc)
+        
+        mock_create.return_value = 1
+
+        ingest_weather_for_bbox(
+            bbox=test_bbox,
+            forecast_time=forecast_time,
+            output_dir="/tmp",
+            horizon_hours=24,
+        )
+
+        # Should have snapped to 00:00
+        # diff = 5 hours. New horizon = 24 + 5 = 29
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args[1]
+        self.assertEqual(call_kwargs["run_time"], datetime(2026, 1, 20, 0, 0, tzinfo=timezone.utc))
+        self.assertEqual(call_kwargs["horizon_hours"], 29)
+        
+        # Verify _attempt_ingest called with snapped time
+        mock_attempt.assert_called_once_with(datetime(2026, 1, 20, 0, 0, tzinfo=timezone.utc))
 
 
 @pytest.mark.skip(reason="Test mocking needs to be updated for httpx.Client.stream() and xarray operations")

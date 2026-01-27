@@ -7,6 +7,8 @@ services:
     volumes:
       - ./api:/app/api:delegated
       - ./data:/app/data
+      - ./ingest:/app/ingest:delegated
+      - ./ml:/app/ml:delegated
       - /app/api/.venv
     environment:
       APP_ENV: dev
@@ -98,6 +100,8 @@ services:
     volumes:
       - ./api:/app/api:delegated
       - ./data:/app/data
+      - ./ingest:/app/ingest:delegated
+      - ./ml:/app/ml:delegated
       - /app/api/.venv
     environment:
       APP_ENV: dev

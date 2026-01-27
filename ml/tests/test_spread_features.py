@@ -213,13 +213,38 @@ def test_load_weather_cube_aligns_and_sets_coords(mock_open, mock_get_run, _mock
 
 
 @patch("ml.spread_features._get_latest_weather_run")
-@patch("api.fires.repo.list_fire_detections_bbox_time")
-def test_build_spread_inputs_with_region_name_none(mock_list_fires, mock_get_weather_run):
+@patch("ml.spread_features.get_fire_cells_heatmap")
+def test_build_spread_inputs_with_region_name_none(mock_get_fire_heatmap, mock_get_weather_run):
     """Verify build_spread_inputs works with region_name=None (bbox-only mode)."""
     bbox = (20.0, 40.0, 21.0, 41.0)
     ref_time = datetime(2025, 12, 26, 12, 0, 0, tzinfo=timezone.utc)
 
-    mock_list_fires.return_value = []
+    # Create expected grid and window for the bbox
+    from api.core.grid import GridSpec, GridWindow
+    expected_grid = GridSpec(
+        crs="EPSG:4326",
+        cell_size_deg=0.01,
+        origin_lat=40.0,
+        origin_lon=20.0,
+        n_lat=100,
+        n_lon=100,
+    )
+    expected_window = GridWindow(
+        i0=0,
+        i1=100,
+        j0=0,
+        j1=100,
+        lat=np.linspace(40.005, 40.995, 100),
+        lon=np.linspace(20.005, 20.995, 100),
+    )
+
+    # Mock fire heatmap return value
+    mock_fire_heatmap = FireHeatmapWindow(
+        grid=expected_grid,
+        window=expected_window,
+        heatmap=np.zeros((100, 100), dtype=np.float32),
+    )
+    mock_get_fire_heatmap.return_value = mock_fire_heatmap
     mock_get_weather_run.return_value = None
 
     inputs = build_spread_inputs(

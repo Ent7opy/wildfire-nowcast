@@ -66,6 +66,7 @@ lerna-debug.log*
 # IDEs
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -106,6 +107,8 @@ data/denoiser/snapshots/
 data/denoiser/*.parquet
 data/forecasts/
 data/hindcasts/
+data/terrain/bbox_*/
+data/dem/bbox_*/
 data/dem/bulgaria/
 data/dem/test_region/
 data/dem/smoke_grid/
