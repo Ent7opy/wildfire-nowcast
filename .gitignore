@@ -66,6 +66,7 @@ lerna-debug.log*
 # IDEs
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
