@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(python -c:*)",
+      "Bash(where:*)",
+      "Bash(C:UsersvanyoAppDataLocalProgramsPythonPython312python.exe -c \"from config import theme; print\\(''Theme module loaded successfully''\\)\")",
+      "Bash(\"C:\\\\Users\\\\vanyo\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" -c \"from config import theme; print\\(''SUCCESS''\\)\")",
+      "Bash(\"C:\\\\Users\\\\vanyo\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" -c \"from components import map_view, legend; from config import constants; print\\(''All modules imported successfully''\\)\")",
+      "Bash(\"C:\\\\Users\\\\vanyo\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" -m py_compile components/map_view.py components/legend.py config/constants.py config/theme.py)",
+      "Bash(git -C C:Projectswildfire-nowcast diff --stat)",
+      "Bash(py --version:*)",
+      "Bash(py -c:*)",
+      "Bash(\"C:/Projects/wildfire-nowcast/ui/.venv-win/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, ''C:/Projects/wildfire-nowcast/ui''\\); import app; print\\(''Import successful''\\)\")",
+      "Bash(\"C:/Projects/wildfire-nowcast/ui/.venv-win/Scripts/python.exe\":*)",
+      "Bash(\"C:/Projects/wildfire-nowcast/ui/.venv-win/Scripts/python.exe\" -c:*)",
+      "Bash(\"C:/Projects/wildfire-nowcast/ui/.venv-win/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, ''C:/Projects/wildfire-nowcast/ui''\\); from components.sidebar import render_sidebar, _apply_preset, _get_matching_preset; print\\(''Imports successful''\\)\")"
+    ]
+  }
+}

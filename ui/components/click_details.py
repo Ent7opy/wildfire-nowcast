@@ -40,17 +40,7 @@ def _render_progress_bar(label: str, value: float, max_value: float = 1.0) -> st
     else:
         color = "#FFD700"  # Gold (low)
 
-    return f"""
-    <div style="margin: 6px 0;">
-        <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-            <span style="font-size: 12px; color: #555;">{label}</span>
-            <span style="font-size: 12px; font-weight: bold;">{value:.3f}</span>
-        </div>
-        <div style="width: 100%; background: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden;">
-            <div style="width: {percentage}%; background: {color}; height: 100%; transition: width 0.3s ease;"></div>
-        </div>
-    </div>
-    """
+    return f'<div style="margin: 6px 0;"><div style="display: flex; justify-content: space-between; margin-bottom: 2px;"><span style="font-size: 12px; color: rgba(255,255,255,0.7);">{label}</span><span style="font-size: 12px; font-weight: bold; color: rgba(255,255,255,0.9);">{value:.3f}</span></div><div style="width: 100%; background: rgba(255,255,255,0.2); border-radius: 4px; height: 8px; overflow: hidden;"><div style="width: {percentage}%; background: {color}; height: 100%;"></div></div></div>'
 
 
 def _parse_time(value: Any) -> Optional[datetime]:
@@ -132,11 +122,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
                 component_bars.append(_render_progress_bar("Weather (25%)", float(weather_score)))
 
             if component_bars:
-                components_html = f"""
-                <div style="margin-top: 8px; padding: 8px; background: #f8f9fa; border-radius: 4px;">
-                    {''.join(component_bars)}
-                </div>
-                """
+                components_html = '<div style="margin-top: 8px; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; border: 1px solid rgba(255,255,255,0.1);">' + ''.join(component_bars) + '</div>'
                 st.markdown(components_html, unsafe_allow_html=True)
 
             false_source_masked = det.get("false_source_masked")
