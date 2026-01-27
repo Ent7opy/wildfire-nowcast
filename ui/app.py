@@ -6,7 +6,6 @@ from config.constants import TIME_WINDOW_OPTIONS
 # Import components
 from components.sidebar import render_sidebar
 from components.map_view import render_map_view
-from components.legend import render_legend
 from components.click_details import render_click_details
 from components.forecast_status import render_forecast_status_polling
 

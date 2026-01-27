@@ -11,7 +11,6 @@ from runtime_config import api_public_base_url
 from config.constants import (
     DEFAULT_MAP_CENTER,
     DEFAULT_ZOOM_LEVEL,
-    MAP_HEIGHT,
 )
 from config.theme import (
     FireColors,

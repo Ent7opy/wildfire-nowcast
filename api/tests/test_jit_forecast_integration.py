@@ -13,17 +13,17 @@ workspace_root = Path(__file__).resolve().parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
-import time
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
-from uuid import uuid4
+import time  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+from uuid import uuid4  # noqa: E402
 
-import numpy as np
-import pytest
-import xarray as xr
-from fastapi.testclient import TestClient
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+import xarray as xr  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
-from api.main import app
+from api.main import app  # noqa: E402
 
 client = TestClient(app)
 
