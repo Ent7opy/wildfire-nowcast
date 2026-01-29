@@ -1,7 +1,19 @@
 """Legend component for map layers."""
 
 from state import app_state
-from config.theme import RiskThresholds
+from config.theme import FireColors, RiskColors, RiskThresholds
+
+
+def _color_swatch(rgb: list, label: str) -> str:
+    """Generate HTML for a colored dot + label pair."""
+    r, g, b = rgb[:3]
+    return (
+        f'<div style="display:flex;align-items:center;gap:8px;margin:4px 0;">'
+        f'<span style="display:inline-block;width:10px;height:10px;'
+        f'border-radius:50%;background:rgb({r},{g},{b});'
+        f'box-shadow:0 0 4px rgba({r},{g},{b},0.5);flex-shrink:0;"></span>'
+        f'<span style="color:#e0e0e0;font-size:12px;">{label}</span></div>'
+    )
 
 
 def get_legend_html() -> str:
@@ -9,33 +21,54 @@ def get_legend_html() -> str:
     legend_items = []
 
     if app_state.layers.show_fires:
-        legend_items.append("🔥 <strong>Active fires</strong> — size and color indicate intensity (FRP)")
+        legend_items.append(
+            '<div style="font-weight:600;color:#e0e0e0;font-size:13px;margin-bottom:4px;">'
+            'Active fires</div>'
+        )
+        legend_items.append(_color_swatch(FireColors.VERY_HIGH, "Very high likelihood"))
+        legend_items.append(_color_swatch(FireColors.HIGH, "High likelihood"))
+        legend_items.append(_color_swatch(FireColors.MEDIUM, "Medium likelihood"))
+        legend_items.append(_color_swatch(FireColors.LOW, "Low likelihood"))
+        legend_items.append(_color_swatch(FireColors.VERY_LOW, "Very low likelihood"))
+        legend_items.append(_color_swatch(FireColors.UNSCORED, "Unscored"))
+        legend_items.append(
+            '<div style="color:rgba(255,255,255,0.5);font-size:11px;margin-top:2px;">'
+            'Size indicates intensity (FRP)</div>'
+        )
 
     if app_state.layers.show_forecast:
-        legend_items.append("🟠 <strong>Forecast overlay</strong> — spread outlook")
-        legend_items.append("<strong>Contours by horizon:</strong> T+24h (blue), T+48h (orange), T+72h (red)")
-        legend_items.append("Shaded layer: higher = more likely spread")
+        legend_items.append(
+            '<div style="font-weight:600;color:#e0e0e0;font-size:13px;margin:8px 0 4px;">'
+            'Forecast overlay</div>'
+        )
+        legend_items.append(_color_swatch([255, 165, 0], "Spread outlook"))
+        legend_items.append(
+            '<div style="color:rgba(255,255,255,0.5);font-size:11px;">'
+            'T+24h, T+48h, T+72h contours</div>'
+        )
 
     if app_state.layers.show_risk:
-        legend_items.append("🔥 <strong>Risk index</strong> — fire risk heatmap:")
-        legend_items.append(f"  • 🟢 Low (0.0-{RiskThresholds.MEDIUM}): minimal fire risk")
-        legend_items.append(f"  • 🟡 Medium ({RiskThresholds.MEDIUM}-{RiskThresholds.HIGH}): moderate fire risk")
-        legend_items.append(f"  • 🔴 High ({RiskThresholds.HIGH}-1.0): elevated fire risk")
-        legend_items.append("  Based on land cover + weather conditions")
+        legend_items.append(
+            '<div style="font-weight:600;color:#e0e0e0;font-size:13px;margin:8px 0 4px;">'
+            'Risk index</div>'
+        )
+        legend_items.append(_color_swatch(RiskColors.LOW, f"Low (0.0\u2013{RiskThresholds.MEDIUM})"))
+        legend_items.append(_color_swatch(RiskColors.MEDIUM, f"Medium ({RiskThresholds.MEDIUM}\u2013{RiskThresholds.HIGH})"))
+        legend_items.append(_color_swatch(RiskColors.HIGH, f"High ({RiskThresholds.HIGH}\u20131.0)"))
 
     if not legend_items:
-        return ""  # Don't show legend if no layers active
+        return ""
 
-    items_html = "".join([f"<div style='margin: 4px 0;'>{item}</div>" for item in legend_items])
+    items_html = "".join(legend_items)
 
     return f"""
     <div id="floating-legend">
-        <div style="font-weight: bold; margin-bottom: 8px; font-size: 14px;">Legend</div>
+        <div style="font-weight:700;margin-bottom:8px;font-size:14px;color:#e0e0e0;">Legend</div>
         {items_html}
     </div>
     """
 
 
 def render_legend() -> None:
-    """Render the map legend based on active layers (deprecated - now rendered as floating overlay in app.py)."""
+    """Deprecated - now rendered as floating overlay in app.py."""
     pass

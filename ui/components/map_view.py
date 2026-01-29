@@ -17,6 +17,7 @@ from config.theme import (
     PointSizing,
     MapConfig,
     UIColors,
+    DarkTheme,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -44,18 +45,42 @@ def render_map_view() -> Optional[Dict[str, float]]:
 
         tile_url = f"{api_public_base_url()}/tiles/fires/{{z}}/{{x}}/{{y}}.pbf?{query_str}"
 
+        # 5-tier graduated color: deep red → red → ember orange → amber → yellow
+        # The final `>= 0` guard separates real low-likelihood fires (yellow) from
+        # NULL/unscored fires (gray) — JS treats `null >= 0.2` as false but also
+        # `null >= 0` as false, so NULLs fall through to UNSCORED_FILL.
+        fill_color_expr = (
+            f"properties.fire_likelihood >= {FireThresholds.VERY_HIGH} ? {FireColors.VERY_HIGH_FILL} : "
+            f"properties.fire_likelihood >= {FireThresholds.HIGH} ? {FireColors.HIGH_FILL} : "
+            f"properties.fire_likelihood >= {FireThresholds.MEDIUM} ? {FireColors.MEDIUM_FILL} : "
+            f"properties.fire_likelihood >= {FireThresholds.LOW} ? {FireColors.LOW_FILL} : "
+            f"properties.fire_likelihood >= 0 ? {FireColors.VERY_LOW_FILL} : "
+            f"{FireColors.UNSCORED_FILL}"
+        )
+
+        # Conditional outline: ember orange glow for high-confidence, subtle white otherwise
+        # Same NULL guard: unscored fires get the default outline.
+        line_color_expr = (
+            f"properties.fire_likelihood >= {FireThresholds.HIGH} ? "
+            f"{FireColors.OUTLINE_HIGH} : {FireColors.OUTLINE_DEFAULT}"
+        )
+
+        # Include filter params in the layer ID so deck.gl fully recreates
+        # the layer (and refetches tiles) when filters change.
+        fires_layer_id = f"fires-{min_likelihood}-{include_noise}-{isoformat(start_time)}"
+
         layers.append(pdk.Layer(
             "MVTLayer",
             data=tile_url,
-            id="fires",
+            id=fires_layer_id,
             pickable=True,
             auto_highlight=True,
-            get_fill_color=f"properties.fire_likelihood >= {FireThresholds.HIGH} ? {FireColors.HIGH_FILL} : properties.fire_likelihood >= {FireThresholds.MEDIUM} ? {FireColors.MEDIUM_FILL} : {FireColors.LOW_FILL}",
+            get_fill_color=fill_color_expr,
             get_point_radius=f"properties.frp > {PointSizing.LARGE_FRP} ? {PointSizing.LARGE_SIZE} : properties.frp > {PointSizing.MEDIUM_FRP} ? {PointSizing.MEDIUM_SIZE} : properties.frp > {PointSizing.SMALL_FRP} ? {PointSizing.SMALL_SIZE} : {PointSizing.MIN_SIZE}",
             point_radius_min_pixels=PointSizing.MIN_PIXELS,
             point_radius_max_pixels=PointSizing.MAX_PIXELS,
             stroked=True,
-            get_line_color=FireColors.OUTLINE,
+            get_line_color=line_color_expr,
             line_width_min_pixels=1,
         ))
 
@@ -111,17 +136,33 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 line_width_min_pixels=1,
             ))
 
-    # Create the Deck
+    # Create the Deck with dark basemap
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=st.session_state.map_view_state,
-        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        map_style=MapConfig.BASEMAP_DARK,
         tooltip={
-            "html": "<b>Time:</b> {acq_time}<br/>"
-                    "<b>Sensor:</b> {sensor}<br/>"
-                    "<b>Intensity (FRP):</b> {frp}<br/>"
-                    "<b>Likelihood:</b> {fire_likelihood}",
-            "style": {"color": UIColors.TOOLTIP_TEXT, "backgroundColor": UIColors.TOOLTIP_BG}
+            "html": (
+                '<div style="font-family:Inter,sans-serif;padding:2px;">'
+                '<div style="font-size:13px;font-weight:600;color:#ff6b35;margin-bottom:4px;">'
+                'Fire Detection</div>'
+                '<div style="font-size:12px;color:#e0e0e0;">'
+                '<b>Time:</b> {acq_time}<br/>'
+                '<b>Sensor:</b> {sensor}<br/>'
+                '<b>FRP:</b> {frp} MW<br/>'
+                '<b>Likelihood:</b> {fire_likelihood}<br/>'
+                '<b>Confidence:</b> {confidence}'
+                '</div></div>'
+            ),
+            "style": {
+                "color": UIColors.TOOLTIP_TEXT,
+                "backgroundColor": UIColors.TOOLTIP_BG,
+                "borderRadius": "8px",
+                "border": f"1px solid {DarkTheme.BORDER_SUBTLE}",
+                "boxShadow": "0 4px 12px rgba(0,0,0,0.3)",
+                "fontSize": "12px",
+                "padding": "8px 12px",
+            },
         },
     )
 
@@ -137,11 +178,33 @@ def render_map_view() -> Optional[Dict[str, float]]:
 
     # Handle interactions
     if event and event.selection:
-        selected_fires = event.selection.objects.get("fires", [])
+        all_keys = list(event.selection.objects.keys())
+        LOGGER.debug("Selection event objects keys: %s", all_keys)
+
+        # Find selected fire objects by matching layer ID prefix, then fall back
+        selected_fires = []
+        for key, objects in event.selection.objects.items():
+            if objects and key.startswith("fires"):
+                selected_fires = objects
+                break
+        if not selected_fires:
+            for key, objects in event.selection.objects.items():
+                if objects:
+                    LOGGER.debug(
+                        "No objects under 'fires*'; using key '%s' (%d objects)",
+                        key,
+                        len(objects),
+                    )
+                    selected_fires = objects
+                    break
+
         if selected_fires:
             feature = selected_fires[0]
+            LOGGER.debug("Selected feature keys: %s", list(feature.keys()))
 
             props = feature.get("properties", feature)
+            if "properties" not in feature:
+                LOGGER.debug("Feature has no 'properties' key — using feature dict directly")
 
             lat = props.get("lat")
             lon = props.get("lon")
