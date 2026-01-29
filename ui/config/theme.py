@@ -15,38 +15,52 @@ Usage Examples:
 class FireColors:
     """Colors for fire severity visualization based on likelihood thresholds.
 
-    Fire points are colored based on their likelihood score:
-    - High likelihood (>=0.66): Red
-    - Medium likelihood (0.33-0.66): Orange
-    - Low likelihood (<0.33): Yellow
+    Fire points use a 5-tier graduated color scheme from yellow to deep red:
+    - Very high (>=0.8): Deep red
+    - High (>=0.6): Red
+    - Medium (>=0.4): Ember orange
+    - Low (>=0.2): Amber
+    - Very low (<0.2): Yellow
 
-    Each color has a FILL variant with opacity for map rendering.
+    Each tier has a FILL variant with opacity for map rendering.
     """
-    # Base RGB colors (no alpha channel)
-    HIGH = [255, 0, 0]        # Red - high likelihood
-    MEDIUM = [255, 165, 0]    # Orange - medium likelihood
-    LOW = [255, 255, 0]       # Yellow - low likelihood
+    # 5-tier gradient colors (RGBA for PyDeck)
+    VERY_HIGH_FILL = [220, 38, 38, 240]    # Deep red (>=0.8)
+    HIGH_FILL = [239, 68, 68, 230]         # Red (>=0.6)
+    MEDIUM_FILL = [255, 107, 53, 220]      # Ember orange (>=0.4)
+    LOW_FILL = [251, 191, 36, 200]         # Amber (>=0.2)
+    VERY_LOW_FILL = [253, 224, 71, 180]    # Yellow (<0.2)
 
-    # Map layer variants with opacity (RGBA format for PyDeck)
-    HIGH_FILL = [255, 0, 0, 230]        # High opacity red
-    MEDIUM_FILL = [255, 165, 0, 210]    # High opacity orange
-    LOW_FILL = [255, 255, 0, 190]       # High opacity yellow
+    # Base RGB colors (no alpha) for legend swatches
+    VERY_HIGH = [220, 38, 38]
+    HIGH = [239, 68, 68]
+    MEDIUM = [255, 107, 53]
+    LOW = [251, 191, 36]
+    VERY_LOW = [253, 224, 71]
 
-    # Outline for fire points (white with transparency)
-    OUTLINE = [255, 255, 255, 180]
+    # Unscored / NULL fire_likelihood (gray — visually distinct from yellow)
+    UNSCORED_FILL = [128, 128, 128, 150]
+    UNSCORED = [128, 128, 128]
+
+    # Outline colors (conditional by confidence)
+    OUTLINE_HIGH = [255, 107, 53, 200]     # Ember orange glow for high-confidence
+    OUTLINE_DEFAULT = [255, 255, 255, 100] # Subtle white for lower confidence
 
 
 class FireThresholds:
-    """Likelihood thresholds for fire severity classification.
+    """Likelihood thresholds for 5-tier fire severity classification.
 
-    These values determine when a fire point transitions between
-    low/medium/high severity visualization:
-    - fire_likelihood >= 0.66: High (red)
-    - fire_likelihood >= 0.33: Medium (orange)
-    - fire_likelihood < 0.33: Low (yellow)
+    These values determine graduated color transitions:
+    - fire_likelihood >= 0.8: Very high (deep red)
+    - fire_likelihood >= 0.6: High (red)
+    - fire_likelihood >= 0.4: Medium (ember orange)
+    - fire_likelihood >= 0.2: Low (amber)
+    - fire_likelihood < 0.2: Very low (yellow)
     """
-    HIGH = 0.66      # Threshold for high likelihood classification
-    MEDIUM = 0.33    # Threshold for medium likelihood classification
+    VERY_HIGH = 0.8  # Deep red threshold
+    HIGH = 0.6       # Red threshold
+    MEDIUM = 0.4     # Ember orange threshold
+    LOW = 0.2        # Amber threshold
 
 
 class RiskColors:
@@ -133,6 +147,8 @@ class MapConfig:
     HEIGHT = 600                    # Map height in pixels
     DEFAULT_CENTER = [20.0, 0.0]   # [lat, lon] - Center of world map
     DEFAULT_ZOOM = 2               # Initial zoom level (world view)
+    BASEMAP_DARK = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+    BASEMAP_LIGHT = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
 
 class UIColors:
@@ -140,8 +156,31 @@ class UIColors:
 
     These colors are used for tooltips, backgrounds, and other UI chrome.
     """
-    TOOLTIP_BG = "#333"       # Dark gray background for map tooltips
-    TOOLTIP_TEXT = "white"    # White text for map tooltips
+    TOOLTIP_BG = "#252930"    # Card background for map tooltips
+    TOOLTIP_TEXT = "#e0e0e0"  # Light text for map tooltips
+
+
+class DarkTheme:
+    """Dark theme color tokens for UI backgrounds, text, and accents."""
+    BG_PRIMARY = "#0a1628"       # Main background (navy)
+    BG_SECONDARY = "#1a1d29"     # Sidebar / secondary (charcoal)
+    BG_CARD = "#252930"          # Card backgrounds
+    ACCENT_EMBER = "#ff6b35"     # Primary accent (ember orange)
+    ACCENT_WARNING = "#e63946"   # Warning red
+    ACCENT_AMBER = "#fbbf24"     # Medium-priority amber
+    TEXT_PRIMARY = "#e0e0e0"     # Primary text
+    TEXT_SECONDARY = "rgba(255,255,255,0.7)"  # Muted text
+    BORDER_SUBTLE = "rgba(255,255,255,0.08)"  # Subtle borders
+
+
+class Typography:
+    """Font and sizing tokens."""
+    FONT_STACK = "'Inter', -apple-system, 'Segoe UI', 'Roboto', sans-serif"
+    HEADER_SIZE = "18px"
+    HEADER_WEIGHT = "600"
+    BODY_SIZE = "14px"
+    BODY_LINE_HEIGHT = "16px"
+    CAPTION_SIZE = "12px"
 
 
 class FilterPresets:
@@ -154,9 +193,11 @@ class FilterPresets:
     """
 
     # Preset format: (name, hours_start, hours_end, min_likelihood, apply_denoiser)
-    LAST_HOUR_HIGH = ("Last Hour High", 1, 0, 0.66, True)       # Last 1h, high confidence
+    # NOTE: "High" presets align with FireThresholds.HIGH (0.6) so all passing
+    # fires are guaranteed to render as red or deep red on the map.
+    LAST_HOUR_HIGH = ("Last Hour High", 1, 0, 0.6, True)        # Last 1h, high confidence
     LAST_6H_MEDIUM = ("Last 6h Medium+", 6, 0, 0.33, True)      # Last 6h, medium+ confidence
-    LAST_24H_HIGH = ("Last 24h High", 24, 0, 0.66, True)        # Last 24h, high confidence
+    LAST_24H_HIGH = ("Last 24h High", 24, 0, 0.6, True)         # Last 24h, high confidence
     LAST_24H_ALL = ("Last 24h All", 24, 0, 0.0, False)          # Last 24h, all fires
     CUSTOM = ("Custom", None, None, None, None)                  # User-defined filters
 
