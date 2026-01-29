@@ -1,7 +1,8 @@
 """Main Streamlit application for Wildfire Nowcast & Forecast."""
 
 import streamlit as st
-from config.constants import TIME_WINDOW_OPTIONS
+
+from state import app_state
 
 # Import components
 from components.sidebar import render_sidebar
@@ -9,69 +10,6 @@ from components.map_view import render_map_view
 from components.click_details import render_click_details
 from components.forecast_status import render_forecast_status_polling
 
-
-def _get_matching_preset() -> str | None:
-    """Return the name of a preset that matches current filter state, or None."""
-    from config.theme import FilterPresets
-
-    current_start = st.session_state.get("time_range_hours_start", 24)
-    current_end = st.session_state.get("time_range_hours_end", 0)
-    current_likelihood = st.session_state.get("fires_min_likelihood", 0.0)
-    current_denoiser = st.session_state.get("fires_apply_denoiser", True)
-
-    for name, hours_start, hours_end, likelihood, denoiser in FilterPresets.all_presets():
-        if (hours_start == current_start and
-            hours_end == current_end and
-            abs(likelihood - current_likelihood) < 0.01 and
-            denoiser == current_denoiser):
-            return name
-    return None
-
-
-def _load_filters_from_url():
-    """Load filter state from URL query parameters on first load."""
-    params = st.query_params
-
-    # Load individual filter values from URL
-    if "start" in params:
-        try:
-            st.session_state.time_range_hours_start = int(params["start"])
-        except ValueError:
-            pass
-    if "end" in params:
-        try:
-            st.session_state.time_range_hours_end = int(params["end"])
-        except ValueError:
-            pass
-    if "likelihood" in params:
-        try:
-            st.session_state.fires_min_likelihood = float(params["likelihood"])
-        except ValueError:
-            pass
-    if "denoiser" in params:
-        st.session_state.fires_apply_denoiser = params["denoiser"].lower() == "true"
-
-    # Compute time_window string from loaded values
-    start_hours = st.session_state.get("time_range_hours_start", 24)
-    end_hours = st.session_state.get("time_range_hours_end", 0)
-    hours_window = start_hours - end_hours
-    if hours_window <= 6:
-        st.session_state.time_window = "Last 6 hours"
-    elif hours_window <= 12:
-        st.session_state.time_window = "Last 12 hours"
-    elif hours_window <= 24:
-        st.session_state.time_window = "Last 24 hours"
-    else:
-        st.session_state.time_window = "Last 48 hours"
-
-    # Determine active preset based on loaded filter values
-    # This ensures preset button highlights correctly when loading from URL
-    matching_preset = _get_matching_preset()
-    if matching_preset:
-        st.session_state.active_preset = matching_preset
-    elif any(key in params for key in ["start", "end", "likelihood", "denoiser"]):
-        # If URL has filter params but they don't match any preset, mark as Custom
-        st.session_state.active_preset = "Custom"
 
 def main() -> None:
     """Main application entry point."""
@@ -123,33 +61,8 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # Load filters from URL on first load (before setting defaults)
-    if "time_window" not in st.session_state:
-        _load_filters_from_url()
-
-    # Initialize session state with defaults for any missing values
-    if "time_window" not in st.session_state:
-        st.session_state.time_window = TIME_WINDOW_OPTIONS[0]
-    if "fires_min_likelihood" not in st.session_state:
-        st.session_state.fires_min_likelihood = 0.0
-    if "fires_apply_denoiser" not in st.session_state:
-        st.session_state.fires_apply_denoiser = True
-    if "time_range_hours_start" not in st.session_state:
-        st.session_state.time_range_hours_start = 24  # 24 hours ago
-    if "time_range_hours_end" not in st.session_state:
-        st.session_state.time_range_hours_end = 0  # Now
-    if "active_preset" not in st.session_state:
-        st.session_state.active_preset = None
-    if "show_fires" not in st.session_state:
-        st.session_state.show_fires = True
-    if "show_forecast" not in st.session_state:
-        st.session_state.show_forecast = False
-    if "show_risk" not in st.session_state:
-        st.session_state.show_risk = False
-    if "last_click" not in st.session_state:
-        st.session_state.last_click = None
-    if "selected_fire" not in st.session_state:
-        st.session_state.selected_fire = None
+    # Initialize centralized state (loads URL params on first run, restores on reruns)
+    app_state.initialize()
 
     # App identity
     st.title("Wildfire Nowcast & Forecast")
@@ -167,18 +80,18 @@ def main() -> None:
         render_sidebar()
 
     # Check for ongoing JIT forecast polling - display as status banner
-    if st.session_state.get("jit_job_id"):
+    if app_state.forecast_job.job_id:
         with st.container():
-            render_forecast_status_polling(st.session_state.jit_job_id)
+            render_forecast_status_polling(app_state.forecast_job.job_id)
 
     # Main content area - Map and details
     st.subheader("Map")
 
     # Active filters summary
-    filter_state = "on" if st.session_state.fires_apply_denoiser else "off"
+    filter_state = "on" if app_state.filters.apply_denoiser else "off"
     st.caption(
-        f"**Fires filters:** {st.session_state.time_window}, "
-        f"likelihood at least {st.session_state.fires_min_likelihood:.2f}, "
+        f"**Fires filters:** {app_state.time_window}, "
+        f"likelihood at least {app_state.filters.min_likelihood:.2f}, "
         f"noise filter {filter_state}"
     )
 
@@ -186,14 +99,8 @@ def main() -> None:
     col_map, col_details = st.columns([3, 1], gap="large")
     with col_map:
         click_coords = render_map_view()
-        # Only update last_click if click actually happened
-        if click_coords is not None:
-            # Check if click is actually different to avoid unnecessary updates
-            current_click = st.session_state.get("last_click")
-            if (current_click is None or
-                current_click.get("lat") != click_coords.get("lat") or
-                current_click.get("lng") != click_coords.get("lng")):
-                st.session_state.last_click = click_coords
+        app_state.selection.update_click(click_coords)
+        app_state._persist()
 
         # Render floating legend overlay
         from components.legend import get_legend_html
@@ -203,7 +110,7 @@ def main() -> None:
 
     with col_details:
         st.subheader("Details")
-        render_click_details(st.session_state.last_click)
+        render_click_details(app_state.selection.last_click)
 
 if __name__ == "__main__":
     main()

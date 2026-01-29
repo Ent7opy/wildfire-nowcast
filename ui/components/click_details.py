@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 import streamlit as st
 
+from state import app_state
 from api_client import (
     ApiError,
     ApiUnavailableError,
@@ -62,8 +63,8 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
     """Render details for the selected fire based on PyDeck selection."""
     st.subheader("Fire details")
 
-    # Use the selected fire from session state (set by map_view)
-    det = st.session_state.get("selected_fire")
+    # Use the selected fire from state manager (set by map_view)
+    det = app_state.selection.selected_fire
 
     if not det:
         if last_click is None:
@@ -183,7 +184,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
         )
         
         # Disable button if a JIT forecast is currently running
-        is_forecast_running = st.session_state.get("jit_job_id") is not None
+        is_forecast_running = app_state.forecast_job.job_id is not None
         
         if st.button(
             "Generate Spread Forecast",
@@ -210,7 +211,8 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
                 
                 job_id = job_data.get("job_id")
                 if job_id:
-                    st.session_state.jit_job_id = job_id
+                    app_state.forecast_job.start(job_id)
+                    app_state._persist()
                     st.success("Forecast job queued successfully!")
                     st.rerun()
                 else:

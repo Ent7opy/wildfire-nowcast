@@ -1,7 +1,6 @@
 """Legend component for map layers."""
 
-import streamlit as st
-
+from state import app_state
 from config.theme import RiskThresholds
 
 
@@ -9,15 +8,15 @@ def get_legend_html() -> str:
     """Generate HTML for floating legend based on active layers."""
     legend_items = []
 
-    if st.session_state.show_fires:
+    if app_state.layers.show_fires:
         legend_items.append("🔥 <strong>Active fires</strong> — size and color indicate intensity (FRP)")
 
-    if st.session_state.show_forecast:
+    if app_state.layers.show_forecast:
         legend_items.append("🟠 <strong>Forecast overlay</strong> — spread outlook")
         legend_items.append("<strong>Contours by horizon:</strong> T+24h (blue), T+48h (orange), T+72h (red)")
         legend_items.append("Shaded layer: higher = more likely spread")
 
-    if st.session_state.show_risk:
+    if app_state.layers.show_risk:
         legend_items.append("🔥 <strong>Risk index</strong> — fire risk heatmap:")
         legend_items.append(f"  • 🟢 Low (0.0-{RiskThresholds.MEDIUM}): minimal fire risk")
         legend_items.append(f"  • 🟡 Medium ({RiskThresholds.MEDIUM}-{RiskThresholds.HIGH}): moderate fire risk")
@@ -39,5 +38,4 @@ def get_legend_html() -> str:
 
 def render_legend() -> None:
     """Render the map legend based on active layers (deprecated - now rendered as floating overlay in app.py)."""
-    # Keep for backward compatibility but functionality moved to get_legend_html()
     pass
