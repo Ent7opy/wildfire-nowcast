@@ -485,9 +485,17 @@ def train_baseline(config: Dict[str, Any]):
 def main():
     parser = argparse.ArgumentParser(description="Train denoiser baseline model.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
+    parser.add_argument(
+        "--snapshot-path",
+        type=str,
+        default=None,
+        help="Override snapshot_path from config (useful for pipeline automation).",
+    )
     args = parser.parse_args()
-    
+
     config = load_config(args.config)
+    if args.snapshot_path:
+        config["snapshot_path"] = args.snapshot_path
     train_baseline(config)
 
 if __name__ == "__main__":
