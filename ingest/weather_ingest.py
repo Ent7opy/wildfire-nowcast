@@ -133,6 +133,54 @@ def _response_snippet(response: httpx.Response, limit: int = 400) -> str:
     return text[:limit] if text else ""
 
 
+def _validate_grib_file(path: Path) -> None:
+    """Validate GRIB file integrity by attempting to open it with cfgrib.
+    
+    This function performs basic validation to detect corrupted or partial
+    downloads before they are processed further.
+    
+    Args:
+        path: Path to the GRIB file to validate
+        
+    Raises:
+        ValueError: If the file is corrupted or cannot be read as GRIB
+        FileNotFoundError: If the file does not exist
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"GRIB file not found: {path}")
+    
+    # Check file is non-empty
+    file_size = path.stat().st_size
+    if file_size == 0:
+        raise ValueError(f"GRIB file is empty: {path}")
+    
+    # Minimum GRIB2 file size (GRIB header + some data + End section)
+    # A valid GRIB2 file needs at least ~100 bytes
+    MIN_GRIB_SIZE = 100
+    if file_size < MIN_GRIB_SIZE:
+        raise ValueError(
+            f"GRIB file too small ({file_size} bytes, min {MIN_GRIB_SIZE}): {path}"
+        )
+    
+    # Try to open with cfgrib to verify it's a valid GRIB file
+    try:
+        import cfgrib
+        # Open with backend to validate without loading full dataset
+        ds = xr.open_dataset(
+            path,
+            engine="cfgrib",
+            backend_kwargs={"indexpath": ""},
+        )
+        # Verify we can access at least one variable
+        if len(ds.data_vars) == 0:
+            raise ValueError(f"GRIB file contains no data variables: {path}")
+        ds.close()
+    except Exception as exc:
+        raise ValueError(f"GRIB file validation failed for {path}: {exc}") from exc
+    
+    LOGGER.debug("GRIB file validated: %s (%d bytes)", path, file_size)
+
+
 def _extract_error_context(exc: Exception) -> dict:
     """Normalize HTTP error details for logging/metadata."""
     context: dict = {"error": str(exc)}
@@ -243,12 +291,27 @@ def download_grib_files(
                             with target_path.open("wb") as fh:
                                 for chunk in response.iter_bytes():
                                     fh.write(chunk)
+                        
+                        # Validate downloaded GRIB file integrity
+                        try:
+                            _validate_grib_file(target_path)
+                        except (ValueError, FileNotFoundError) as validation_exc:
+                            LOGGER.error(
+                                "GRIB file validation failed for %s: %s",
+                                target_path,
+                                validation_exc,
+                            )
+                            # Remove invalid file to allow retry
+                            target_path.unlink(missing_ok=True)
+                            raise validation_exc
+                        
                         LOGGER.info(
-                            "Downloaded GFS GRIB",
+                            "Downloaded and validated GFS GRIB",
                             extra={
                                 "url": url,
                                 "forecast_hour": forecast_hour,
                                 "target_path": str(target_path),
+                                "file_size": target_path.stat().st_size,
                             },
                         )
                         paths.append(target_path)
@@ -309,7 +372,11 @@ def _open_variable_dataset(
     grib_paths: Iterable[Path],
     short_name: str,
 ) -> xr.Dataset:
-    """Open GRIB files for a specific shortName via cfgrib."""
+    """Open GRIB files for a specific shortName via cfgrib.
+    
+    Uses context managers to ensure files are properly closed even if errors occur,
+    preventing file handle leaks during batch processing.
+    """
     # Some backends may expose slightly different names; map a few alternates.
     alt_names: dict[str, list[str]] = {
         "10u": ["u10", "UGRD_10maboveground"],
@@ -320,57 +387,74 @@ def _open_variable_dataset(
     }
 
     datasets: list[xr.Dataset] = []
-    for path in grib_paths:
-        ds_single = xr.open_dataset(
-            path,
-            engine="cfgrib",
-            chunks=None,  # ensure eager arrays, no dask
-            backend_kwargs={
-                "filter_by_keys": {"shortName": short_name},
-                "indexpath": "",
-            },
-        )
-        ds_single.load()  # materialize into memory to avoid chunk manager issues
+    opened_datasets: list[xr.Dataset] = []  # Track for cleanup on error
+    
+    try:
+        for path in grib_paths:
+            # Use context manager to ensure file is closed after loading
+            with xr.open_dataset(
+                path,
+                engine="cfgrib",
+                chunks=None,  # ensure eager arrays, no dask
+                backend_kwargs={
+                    "filter_by_keys": {"shortName": short_name},
+                    "indexpath": "",
+                },
+            ) as ds_single:
+                ds_single.load()  # materialize into memory to avoid chunk manager issues
+                
+                # Make a copy to preserve data after context manager closes the file
+                ds_single = ds_single.copy()
+                
+                if short_name not in ds_single.data_vars:
+                    # Try renaming if only one variable exists or an alternate name is present.
+                    alt_candidates = alt_names.get(short_name, [])
+                    found_name = None
+                    for candidate in alt_candidates:
+                        if candidate in ds_single.data_vars:
+                            found_name = candidate
+                            break
+                    if found_name is None and len(ds_single.data_vars) == 1:
+                        found_name = list(ds_single.data_vars.keys())[0]
+                    if found_name:
+                        ds_single = ds_single.rename({found_name: short_name})
+                
+                opened_datasets.append(ds_single)
+                datasets.append(ds_single)
 
-        if short_name not in ds_single.data_vars:
-            # Try renaming if only one variable exists or an alternate name is present.
-            alt_candidates = alt_names.get(short_name, [])
-            found_name = None
-            for candidate in alt_candidates:
-                if candidate in ds_single.data_vars:
-                    found_name = candidate
-                    break
-            if found_name is None and len(ds_single.data_vars) == 1:
-                found_name = list(ds_single.data_vars.keys())[0]
-            if found_name:
-                ds_single = ds_single.rename({found_name: short_name})
+        if not datasets:
+            raise ValueError(f"No datasets opened for shortName={short_name}")
 
-        datasets.append(ds_single)
+        ds = xr.concat(datasets, dim="step")
+        if "number" in ds.dims:
+            ds = ds.squeeze("number", drop=True)
+        if "valid_time" in ds:
+            valid_time = ds["valid_time"]
+        elif "time" in ds and "step" in ds:
+            valid_time = ds["time"] + ds["step"]
+        else:
+            raise ValueError(f"Cannot resolve valid_time for shortName={short_name}")
 
-    if not datasets:
-        raise ValueError(f"No datasets opened for shortName={short_name}")
-
-    ds = xr.concat(datasets, dim="step")
-    if "number" in ds.dims:
-        ds = ds.squeeze("number", drop=True)
-    if "valid_time" in ds:
-        valid_time = ds["valid_time"]
-    elif "time" in ds and "step" in ds:
-        valid_time = ds["time"] + ds["step"]
-    else:
-        raise ValueError(f"Cannot resolve valid_time for shortName={short_name}")
-
-    ds = ds.assign_coords(time=("step", valid_time.data))
-    ds = ds.swap_dims({"step": "time"})
-    drop_vars = [var for var in ("step", "valid_time") if var in ds]
-    ds = ds.drop_vars(drop_vars, errors="ignore")
-    if "heightAboveGround" in ds.dims:
-        ds = ds.squeeze("heightAboveGround", drop=True)
-    if "heightAboveGround" in ds.coords:
-        ds = ds.drop_vars("heightAboveGround", errors="ignore")
-    if "surface" in ds.dims:
-        ds = ds.squeeze("surface", drop=True)
-    return ds
+        ds = ds.assign_coords(time=("step", valid_time.data))
+        ds = ds.swap_dims({"step": "time"})
+        drop_vars = [var for var in ("step", "valid_time") if var in ds]
+        ds = ds.drop_vars(drop_vars, errors="ignore")
+        if "heightAboveGround" in ds.dims:
+            ds = ds.squeeze("heightAboveGround", drop=True)
+        if "heightAboveGround" in ds.coords:
+            ds = ds.drop_vars("heightAboveGround", errors="ignore")
+        if "surface" in ds.dims:
+            ds = ds.squeeze("surface", drop=True)
+        return ds
+        
+    except Exception:
+        # Clean up any opened datasets on error to prevent resource leaks
+        for ds in opened_datasets:
+            try:
+                ds.close()
+            except Exception:
+                pass  # Best effort cleanup
+        raise
 
 
 def build_weather_dataset(
@@ -654,6 +738,7 @@ def ingest_weather_for_bbox(
     model_name: str = "gfs_0p25",
     request_timeout_seconds: int = 60,
     patch_mode: bool = False,
+    max_fallback_age_hours: int = 12,
 ) -> int:
     """Ingest weather data for the given bbox and forecast time.
 
@@ -669,6 +754,9 @@ def ingest_weather_for_bbox(
         patch_mode: Enable optimizations for small AOIs (<50km x 50km).
                     Reduces horizon to 24h, uses 6h steps, skips precipitation,
                     and adds spatial margin for subsetting. (default: False).
+        max_fallback_age_hours: Maximum age in hours for fallback weather data.
+            If the fallback cycle is older than this, a warning is logged but
+            ingestion continues. Set to 0 to disable fallback entirely.
 
     Returns:
         weather_run_id: The database ID of the created weather run record.
@@ -832,20 +920,62 @@ def ingest_weather_for_bbox(
     except httpx.HTTPStatusError as exc:
         error_ctx = _extract_error_context(exc)
         prev_run_time = forecast_time - timedelta(hours=6)
+        
+        # Check if fallback would exceed max age
+        if max_fallback_age_hours > 0:
+            fallback_age_hours = (forecast_time - prev_run_time).total_seconds() / 3600
+            if fallback_age_hours > max_fallback_age_hours:
+                LOGGER.error(
+                    "Fallback cycle %s would be %.1f hours old, exceeding max age of %d hours. "
+                    "Not attempting fallback.",
+                    prev_run_time.isoformat(),
+                    fallback_age_hours,
+                    max_fallback_age_hours,
+                )
+                finalize_weather_run_record(
+                    run_id=run_id,
+                    storage_path=storage_path,
+                    status="failed",
+                    run_time=forecast_time,
+                    extra_metadata={
+                        "error": str(exc),
+                        "fallback_skipped": True,
+                        "fallback_age_hours": fallback_age_hours,
+                        "max_fallback_age_hours": max_fallback_age_hours,
+                    },
+                )
+                raise RuntimeError(
+                    f"Weather ingest failed: primary cycle unavailable and fallback "
+                    f"({fallback_age_hours:.1f}h old) exceeds max age ({max_fallback_age_hours}h)"
+                ) from exc
+        
         LOGGER.warning(
             "Primary cycle %s failed (status %s). Falling back to previous cycle %s",
             forecast_time.isoformat(),
             error_ctx.get("status_code", "unknown"),
             prev_run_time.isoformat(),
         )
+        
         try:
             _attempt_ingest(prev_run_time)
+            fallback_age_hours = (forecast_time - prev_run_time).total_seconds() / 3600
+            if fallback_age_hours > 6:  # Warn if using data older than standard 6h cycle
+                LOGGER.warning(
+                    "Using fallback weather data that is %.1f hours old. "
+                    "Forecasts may be less accurate.",
+                    fallback_age_hours,
+                    extra={
+                        "fallback_age_hours": fallback_age_hours,
+                        "max_recommended_age_hours": 6,
+                    },
+                )
             LOGGER.info(
                 "Weather ingest completed via fallback cycle",
                 extra={
                     "run_id": run_id,
                     "storage_path": storage_path,
                     "fallback_run_time": prev_run_time.isoformat(),
+                    "fallback_age_hours": fallback_age_hours,
                 },
             )
             return run_id
