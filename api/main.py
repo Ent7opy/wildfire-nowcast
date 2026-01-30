@@ -54,12 +54,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    # Only include internal details in development environment
+    # Use explicit check to prevent information leakage in production
+    include_details = settings.environment.lower() in ("dev", "development", "local", "debug")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=ErrorResponse(
             code="internal_error",
             message="Internal Server Error",
-            details=str(exc) if settings.environment == "dev" else None,
+            details=str(exc) if include_details else None,
         ).model_dump(),
     )
 
