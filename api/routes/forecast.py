@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import re
 from urllib.parse import quote_plus
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel
 
 from api.config import settings
+from api.fires.repo import validate_bbox
 from api.forecast import repo
 from api.forecast.worker import queue, run_jit_forecast_pipeline, handle_jit_pipeline_failure
 
@@ -41,7 +44,7 @@ class JitForecastResponse(BaseModel):
     status: str
 
 
-@forecast_router.get("")
+@forecast_router.get("", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
 async def get_forecast(
     min_lon: float,
     min_lat: float,
@@ -115,7 +118,12 @@ async def get_forecast(
     }
 
 
-@forecast_router.post("/jit", response_model=JitForecastResponse, status_code=status.HTTP_202_ACCEPTED)
+@forecast_router.post(
+    "/jit",
+    response_model=JitForecastResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=10, seconds=60))],
+)
 def create_jit_forecast(request: JitForecastRequest):
     """Enqueue a JIT forecast pipeline for arbitrary bbox.
 
@@ -160,6 +168,12 @@ def create_jit_forecast(request: JitForecastRequest):
 
     bbox = tuple(request.bbox)
 
+    # Validate bbox coordinates
+    try:
+        validate_bbox(bbox)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     forecast_params = {
         "forecast_reference_time": request.forecast_reference_time,
         "horizons_hours": request.horizons_hours or [24, 48, 72],
@@ -185,7 +199,7 @@ def create_jit_forecast(request: JitForecastRequest):
         )
 
 
-@forecast_router.get("/jit/{job_id}")
+@forecast_router.get("/jit/{job_id}", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
 def get_jit_forecast_status(job_id: UUID):
     """Get JIT forecast job status.
 
@@ -270,6 +284,55 @@ def get_jit_forecast_status(job_id: UUID):
     return response
 
 
+def _parse_iso8601_datetime(value: str) -> datetime:
+    """Parse ISO 8601 datetime string with robust handling of various formats.
+    
+    Handles:
+    - 'Z' suffix (UTC) - converted to '+00:00' for fromisoformat compatibility
+    - No timezone (assumes UTC)
+    - Various timezone offset formats (+00:00, +0000, etc.)
+    
+    Args:
+        value: ISO 8601 datetime string
+        
+    Returns:
+        Timezone-aware datetime in UTC
+        
+    Raises:
+        ValueError: If the string cannot be parsed as a valid datetime
+    """
+    if not value or not value.strip():
+        raise ValueError("Empty datetime string")
+    
+    value = value.strip()
+    
+    # Handle 'Z' suffix - replace with +00:00 for fromisoformat compatibility
+    if value.endswith('Z'):
+        value = value[:-1] + '+00:00'
+    
+    # Handle +0000 format (without colon) - convert to +00:00
+    # Match patterns like +0000, -0500, +0530 at the end of the string
+    tz_pattern = r'([+-])(\d{2})(\d{2})$'
+    match = re.search(tz_pattern, value)
+    if match and ':00' not in value[-6:]:  # Only if not already in +00:00 format
+        sign, hours, minutes = match.groups()
+        value = value[:match.start()] + f"{sign}{hours}:{minutes}"
+    
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as e:
+        raise ValueError(f"Invalid ISO 8601 datetime format: {value}") from e
+    
+    # If no timezone was specified, assume UTC
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        # Convert to UTC
+        parsed = parsed.astimezone(timezone.utc)
+    
+    return parsed
+
+
 @forecast_router.post("/generate")
 def generate_forecast_endpoint(request: GenerateForecastRequest):
     """Generate a spread forecast on-the-fly for a given bbox and persist it.
@@ -303,11 +366,9 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
     else:
         horizons = [24, 48, 72]
 
-    # Parse forecast_reference_time
+    # Parse forecast_reference_time with robust ISO 8601 handling
     if request.forecast_reference_time:
-        forecast_reference_time = datetime.fromisoformat(request.forecast_reference_time.replace("Z", "+00:00"))
-        if forecast_reference_time.tzinfo is None:
-            forecast_reference_time = forecast_reference_time.replace(tzinfo=timezone.utc)
+        forecast_reference_time = _parse_iso8601_datetime(request.forecast_reference_time)
     else:
         forecast_reference_time = datetime.now(timezone.utc)
 
