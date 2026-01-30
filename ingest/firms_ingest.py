@@ -193,22 +193,44 @@ def _update_all_scoring_atomic(batch_id: int) -> None:
 
 
 def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> None:
-    """Trigger denoiser inference via subprocess."""
+    """Trigger denoiser inference via subprocess or direct module call."""
     if not config.denoiser_model_run_dir:
         LOGGER.warning(
             "Denoiser is enabled but DENOISER_MODEL_RUN_DIR is not set. Skipping inference."
         )
         return
 
-    LOGGER.info("Starting denoiser inference for batch %s", batch_id)
+    LOGGER.info(
+        "Starting denoiser inference for batch %s (method=%s)",
+        batch_id,
+        config.denoiser_invoke_method,
+    )
 
-    cmd = [
-        "uv",
-        "run",
-        "--project",
-        "ml",
-        "-m",
-        "ml.denoiser_inference",
+    # Use direct module import if configured
+    if config.denoiser_invoke_method == "module":
+        _run_denoiser_module_direct(batch_id, config)
+        return
+
+    # Build command based on invocation method
+    if config.denoiser_invoke_method == "python":
+        # Use Python directly - works in containerized environments without uv
+        cmd = [
+            sys.executable,
+            "-m",
+            "ml.denoiser_inference",
+        ]
+    else:
+        # Default: uv run (original behavior)
+        cmd = [
+            "uv",
+            "run",
+            "--project",
+            "ml",
+            "-m",
+            "ml.denoiser_inference",
+        ]
+
+    cmd.extend([
         "--batch-id",
         str(batch_id),
         "--model-run",
@@ -217,7 +239,7 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
         str(config.denoiser_threshold),
         "--batch-size",
         str(config.denoiser_batch_size),
-    ]
+    ])
 
     if config.denoiser_region:
         cmd.extend(["--region", config.denoiser_region])
@@ -253,6 +275,61 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
             e.stdout,
             e.stderr,
         )
+        raise RuntimeError(f"Denoiser inference failed for batch {batch_id}") from e
+
+
+def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") -> None:
+    """Run denoiser inference by directly importing the module (no subprocess).
+    
+    This avoids subprocess overhead and works in environments where uv/python
+    command-line invocation is problematic.
+    """
+    try:
+        # Import the denoiser inference module
+        from ml.denoiser_inference import main as denoiser_main
+        
+        # Build arguments as if they came from command line
+        argv = [
+            "--batch-id", str(batch_id),
+            "--model-run", config.denoiser_model_run_dir,
+            "--threshold", str(config.denoiser_threshold),
+            "--batch-size", str(config.denoiser_batch_size),
+        ]
+        if config.denoiser_region:
+            argv.extend(["--region", config.denoiser_region])
+        
+        # Capture the result - the module should return stats or print JSON
+        # We need to capture stdout to get the JSON output
+        import io
+        from contextlib import redirect_stdout
+        
+        f = io.StringIO()
+        with redirect_stdout(f):
+            denoiser_main(argv)
+        
+        output = f.getvalue().strip()
+        last_line = output.splitlines()[-1] if output else ""
+        if last_line.startswith("{") and last_line.endswith("}"):
+            stats = json.loads(last_line)
+            log_event(
+                LOGGER,
+                "firms.denoiser_inference",
+                "Denoiser inference complete (direct module)",
+                **stats,
+            )
+        else:
+            LOGGER.warning("Denoiser inference finished but no JSON summary found in output.")
+            
+    except ImportError as e:
+        LOGGER.error(
+            "Failed to import ml.denoiser_inference for direct module invocation: %s",
+            e
+        )
+        raise RuntimeError(
+            f"Denoiser module not available for direct invocation: {e}"
+        ) from e
+    except Exception as e:
+        LOGGER.error("Denoiser inference failed for batch %s: %s", batch_id, e)
         raise RuntimeError(f"Denoiser inference failed for batch {batch_id}") from e
 
 
