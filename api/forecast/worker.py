@@ -1,14 +1,17 @@
 """RQ worker tasks for JIT forecast pipeline."""
 import logging
 import os
+import shutil
 import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote_plus
 from uuid import UUID
 
 from redis import Redis
+from redis.lock import Lock as RedisLock
 from rq import Queue
 
 from api.config import settings
@@ -24,6 +27,39 @@ logger = logging.getLogger(__name__)
 REDIS_URL = f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}"
 redis_conn = Redis.from_url(REDIS_URL)
 queue = Queue(connection=redis_conn, default_timeout=120)
+
+# Lock timeout in seconds for cache operations
+CACHE_LOCK_TIMEOUT = 300  # 5 minutes
+
+
+def _acquire_cache_lock(lock_key: str, timeout: int = CACHE_LOCK_TIMEOUT) -> Optional[RedisLock]:
+    """Acquire a distributed lock for cache operations.
+    
+    Args:
+        lock_key: Unique key for the lock
+        timeout: Lock timeout in seconds
+        
+    Returns:
+        RedisLock if acquired, None otherwise
+    """
+    lock = RedisLock(redis_conn, lock_key, timeout=timeout, blocking_timeout=5)
+    if lock.acquire():
+        return lock
+    return None
+
+
+def _cleanup_run_artifacts(run_dir: Path) -> None:
+    """Clean up intermediate artifacts on forecast failure.
+    
+    Args:
+        run_dir: Directory containing forecast artifacts
+    """
+    if run_dir.exists() and run_dir.is_dir():
+        try:
+            shutil.rmtree(run_dir)
+            logger.info(f"Cleaned up forecast artifacts at {run_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up forecast artifacts at {run_dir}: {e}")
 
 
 def handle_jit_pipeline_failure(job, connection, type, value, traceback):
@@ -42,24 +78,50 @@ def handle_jit_pipeline_failure(job, connection, type, value, traceback):
 def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, float], forecast_params: dict):
     """Execute JIT forecast pipeline: ingest terrain -> weather -> run forecast."""
     logger.info(f"JIT forecast pipeline started: job_id={job_id}, bbox={bbox}")
+    
+    run_dir: Optional[Path] = None
+    run_id: Optional[int] = None
 
     try:
         from ingest.dem_preprocess import ingest_terrain_for_bbox
         from ingest.weather_ingest import ingest_weather_for_bbox
 
-        # Check for cached terrain
+        # Check for cached terrain with distributed lock to prevent race conditions
+        terrain_lock_key = f"jit:terrain:lock:{bbox[0]}:{bbox[1]}:{bbox[2]}:{bbox[3]}"
         cached_terrain = repo.find_cached_terrain(bbox)
+        
         if cached_terrain:
             terrain_id = cached_terrain["id"]
             logger.info(f"JIT job {job_id}: cache hit for terrain, terrain_id={terrain_id}")
         else:
-            repo.update_jit_job_status(job_id, "ingesting_terrain")
-            logger.info(f"JIT job {job_id}: starting terrain ingestion")
+            # Acquire lock to prevent duplicate terrain ingestion
+            terrain_lock = _acquire_cache_lock(terrain_lock_key)
+            if terrain_lock is None:
+                logger.warning(f"JIT job {job_id}: could not acquire terrain lock, checking cache again")
+                # Another worker may have ingested terrain, check cache again
+                cached_terrain = repo.find_cached_terrain(bbox)
+                if cached_terrain:
+                    terrain_id = cached_terrain["id"]
+                    logger.info(f"JIT job {job_id}: cache hit for terrain after lock retry, terrain_id={terrain_id}")
+                else:
+                    raise RuntimeError("Could not acquire terrain lock and no cached terrain found")
+            else:
+                try:
+                    # Double-check cache after acquiring lock
+                    cached_terrain = repo.find_cached_terrain(bbox)
+                    if cached_terrain:
+                        terrain_id = cached_terrain["id"]
+                        logger.info(f"JIT job {job_id}: cache hit for terrain after lock, terrain_id={terrain_id}")
+                    else:
+                        repo.update_jit_job_status(job_id, "ingesting_terrain")
+                        logger.info(f"JIT job {job_id}: starting terrain ingestion")
 
-            terrain_output_dir = REPO_ROOT / "data" / "terrain"
-            terrain_output_dir.mkdir(parents=True, exist_ok=True)
-            terrain_id = ingest_terrain_for_bbox(bbox, terrain_output_dir)
-            logger.info(f"JIT job {job_id}: terrain ingestion completed, terrain_id={terrain_id}")
+                        terrain_output_dir = REPO_ROOT / "data" / "terrain"
+                        terrain_output_dir.mkdir(parents=True, exist_ok=True)
+                        terrain_id = ingest_terrain_for_bbox(bbox, terrain_output_dir)
+                        logger.info(f"JIT job {job_id}: terrain ingestion completed, terrain_id={terrain_id}")
+                finally:
+                    terrain_lock.release()
 
         # Parse forecast_reference_time or use current time
         if forecast_params.get("forecast_reference_time"):
@@ -74,25 +136,48 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
         horizons_hours = forecast_params.get("horizons_hours", [24, 48, 72])
         max_horizon = max(horizons_hours)
 
-        # Check for cached weather (within 6 hour freshness window)
+        # Check for cached weather (within 6 hour freshness window) with distributed lock
+        weather_lock_key = f"jit:weather:lock:{bbox[0]}:{bbox[1]}:{bbox[2]}:{bbox[3]}:{forecast_time.isoformat()}"
         cached_weather = repo.find_cached_weather(bbox, freshness_hours=6, required_horizon_hours=max_horizon)
+        
         if cached_weather:
             weather_run_id = cached_weather["id"]
             logger.info(f"JIT job {job_id}: cache hit for weather, weather_run_id={weather_run_id}")
         else:
-            repo.update_jit_job_status(job_id, "ingesting_weather")
-            logger.info(f"JIT job {job_id}: starting weather ingestion")
+            # Acquire lock to prevent duplicate weather ingestion
+            weather_lock = _acquire_cache_lock(weather_lock_key)
+            if weather_lock is None:
+                logger.warning(f"JIT job {job_id}: could not acquire weather lock, checking cache again")
+                # Another worker may have ingested weather, check cache again
+                cached_weather = repo.find_cached_weather(bbox, freshness_hours=6, required_horizon_hours=max_horizon)
+                if cached_weather:
+                    weather_run_id = cached_weather["id"]
+                    logger.info(f"JIT job {job_id}: cache hit for weather after lock retry, weather_run_id={weather_run_id}")
+                else:
+                    raise RuntimeError("Could not acquire weather lock and no cached weather found")
+            else:
+                try:
+                    # Double-check cache after acquiring lock
+                    cached_weather = repo.find_cached_weather(bbox, freshness_hours=6, required_horizon_hours=max_horizon)
+                    if cached_weather:
+                        weather_run_id = cached_weather["id"]
+                        logger.info(f"JIT job {job_id}: cache hit for weather after lock, weather_run_id={weather_run_id}")
+                    else:
+                        repo.update_jit_job_status(job_id, "ingesting_weather")
+                        logger.info(f"JIT job {job_id}: starting weather ingestion")
 
-            weather_output_dir = REPO_ROOT / "data" / "weather"
-            weather_output_dir.mkdir(parents=True, exist_ok=True)
+                        weather_output_dir = REPO_ROOT / "data" / "weather"
+                        weather_output_dir.mkdir(parents=True, exist_ok=True)
 
-            weather_run_id = ingest_weather_for_bbox(
-                bbox=bbox,
-                forecast_time=forecast_time,
-                output_dir=weather_output_dir,
-                horizon_hours=max_horizon,
-            )
-            logger.info(f"JIT job {job_id}: weather ingestion completed, weather_run_id={weather_run_id}")
+                        weather_run_id = ingest_weather_for_bbox(
+                            bbox=bbox,
+                            forecast_time=forecast_time,
+                            output_dir=weather_output_dir,
+                            horizon_hours=max_horizon,
+                        )
+                        logger.info(f"JIT job {job_id}: weather ingestion completed, weather_run_id={weather_run_id}")
+                finally:
+                    weather_lock.release()
 
         repo.update_jit_job_status(job_id, "running_forecast")
         logger.info(f"JIT job {job_id}: starting forecast")
@@ -196,8 +281,12 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             logger.info(f"JIT forecast pipeline completed: job_id={job_id}, run_id={run_id}")
 
         except Exception as forecast_error:
-            # Mark forecast run as failed
-            finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(forecast_error)})
+            # Mark forecast run as failed and clean up artifacts
+            if run_id is not None:
+                finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(forecast_error)})
+            # Clean up intermediate artifacts
+            if run_dir is not None:
+                _cleanup_run_artifacts(run_dir)
             raise
 
     except Exception as e:
@@ -206,3 +295,6 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             f"JIT forecast pipeline failed: job_id={job_id}, error={error_msg}\n{traceback.format_exc()}"
         )
         repo.update_jit_job_status(job_id, "failed", error=error_msg)
+        # Clean up any artifacts if they were created
+        if run_dir is not None:
+            _cleanup_run_artifacts(run_dir)
