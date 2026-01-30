@@ -145,6 +145,8 @@ def _fetch_aggregate_stats(
 
 def _render_aggregate_stats() -> None:
     """Render aggregate statistics when no fire is selected."""
+    from config.theme import DarkTheme
+
     bbox = app_state.viewport_bbox
     start_time, end_time = app_state.time_range
 
@@ -166,33 +168,61 @@ def _render_aggregate_stats() -> None:
     count = data.get("count", 0)
     detections = data.get("detections", [])
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Active fires", count)
-    with col2:
-        if detections:
-            max_lh = max(
-                (float(d.get("fire_likelihood") or 0) for d in detections),
-                default=0,
-            )
-            st.metric("Highest confidence", f"{max_lh:.2f}")
-        else:
-            st.metric("Highest confidence", "N/A")
+    # Compute derived values
+    max_lh: float | None = None
+    most_recent_str = "N/A"
+    if detections:
+        max_lh = max(
+            (float(d.get("fire_likelihood") or 0) for d in detections),
+            default=0,
+        )
+        times = [_parse_time(d.get("acq_time")) for d in detections]
+        valid_times = [t for t in times if t is not None]
+        if valid_times:
+            most_recent_str = max(valid_times).strftime("%H:%M UTC")
 
-    col3, col4 = st.columns(2)
-    with col3:
-        if detections:
-            times = [_parse_time(d.get("acq_time")) for d in detections]
-            valid_times = [t for t in times if t is not None]
-            if valid_times:
-                most_recent = max(valid_times)
-                st.metric("Most recent", most_recent.strftime("%H:%M UTC"))
-            else:
-                st.metric("Most recent", "N/A")
-        else:
-            st.metric("Most recent", "N/A")
-    with col4:
-        st.metric("Time window", app_state.time_window)
+    # ── Hero: Active fire count ──────────────────────────────────
+    st.markdown(
+        f'<div style="text-align:center;padding:16px 0 8px;">'
+        f'<div style="font-size:42px;font-weight:700;color:{DarkTheme.ACCENT_EMBER};'
+        f'line-height:1;">{count}</div>'
+        f'<div style="font-size:12px;color:rgba(255,255,255,0.5);'
+        f'margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">'
+        f'Active fires</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Confidence gauge ─────────────────────────────────────────
+    if max_lh is not None and max_lh > 0:
+        st.markdown(
+            f'<div style="font-size:12px;color:rgba(255,255,255,0.5);'
+            f'text-transform:uppercase;letter-spacing:0.5px;'
+            f'text-align:center;margin-top:8px;">Highest confidence</div>',
+            unsafe_allow_html=True,
+        )
+        gauge_html = _render_confidence_gauge(max_lh)
+        st.markdown(gauge_html, unsafe_allow_html=True)
+    else:
+        _render_stat_row("Highest confidence", "N/A")
+
+    # ── Stat rows ────────────────────────────────────────────────
+    _render_stat_row("Most recent", most_recent_str)
+    _render_stat_row("Time window", app_state.time_window)
+
+
+def _render_stat_row(label: str, value: str) -> None:
+    """Render a single label + value row."""
+    st.markdown(
+        f'<div style="display:flex;justify-content:space-between;'
+        f'align-items:center;padding:10px 0;'
+        f'border-top:1px solid rgba(255,255,255,0.06);">'
+        f'<span style="font-size:12px;color:rgba(255,255,255,0.5);'
+        f'text-transform:uppercase;letter-spacing:0.5px;">{label}</span>'
+        f'<span style="font-size:15px;font-weight:600;'
+        f'color:#e0e0e0;">{value}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
