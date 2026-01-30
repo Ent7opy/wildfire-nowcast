@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +23,11 @@ VALID_LAT_RANGE = (-90.0, 90.0)
 VALID_LON_RANGE = (-180.0, 180.0)
 CONFIDENCE_RANGE = (0.0, 100.0)
 BRIGHTNESS_RANGE = (200.0, 500.0)
+
+# Rate limit handling constants
+MAX_RETRIES = 3
+BACKOFF_BASE_SECONDS = 2.0
+RATE_LIMIT_STATUS_CODE = 429
 
 
 class FIRMSClientError(RuntimeError):
@@ -62,23 +68,117 @@ def fetch_csv_rows(
     day_range: int,
     timeout_seconds: float,
     date: str | None = None,
+    max_retries: int = MAX_RETRIES,
+    backoff_base_seconds: float = BACKOFF_BASE_SECONDS,
 ) -> List[Dict[str, str]]:
-    """Download FIRMS CSV rows."""
+    """Download FIRMS CSV rows with rate limit handling and exponential backoff.
+    
+    Args:
+        map_key: FIRMS API key
+        source: Data source (e.g., VIIRS_SNPP_NRT)
+        bbox: Bounding box string "west,south,east,north"
+        day_range: Number of days to fetch
+        timeout_seconds: HTTP request timeout
+        date: Optional specific date
+        max_retries: Maximum number of retries for rate limit (429) errors
+        backoff_base_seconds: Base backoff time, doubled each retry
+        
+    Returns:
+        List of CSV rows as dictionaries
+        
+    Raises:
+        FIRMSClientError: If the request fails after all retries
+    """
     url = build_firms_url(map_key, source, bbox, day_range, date=date)
     # Avoid logging sensitive API tokens.
     safe_url = redact_firms_url(url, map_key)
-    LOGGER.info("Requesting FIRMS CSV", extra={"source": source, "url": safe_url})
-    try:
-        response = httpx.get(url, timeout=timeout_seconds)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:  # pragma: no cover - network error path
-        raise FIRMSClientError(f"Failed to fetch FIRMS data: {exc}") from exc
-
-    text_stream = io.StringIO(response.text)
-    reader = csv.DictReader(text_stream)
-    rows = list(reader)
-    LOGGER.info("Fetched %s rows from FIRMS", len(rows), extra={"source": source})
-    return rows
+    
+    last_exception: Exception | None = None
+    
+    for attempt in range(max_retries + 1):
+        LOGGER.info(
+            "Requesting FIRMS CSV",
+            extra={
+                "source": source,
+                "url": safe_url,
+                "attempt": attempt + 1,
+                "max_retries": max_retries,
+            },
+        )
+        
+        try:
+            response = httpx.get(url, timeout=timeout_seconds)
+            
+            # Handle rate limit (429) with exponential backoff
+            if response.status_code == RATE_LIMIT_STATUS_CODE:
+                if attempt < max_retries:
+                    sleep_seconds = backoff_base_seconds * (2 ** attempt)
+                    LOGGER.warning(
+                        "FIRMS API rate limit hit (429), retrying after %.1f seconds (attempt %d/%d)",
+                        sleep_seconds,
+                        attempt + 1,
+                        max_retries,
+                        extra={
+                            "source": source,
+                            "attempt": attempt + 1,
+                            "backoff_seconds": sleep_seconds,
+                        },
+                    )
+                    time.sleep(sleep_seconds)
+                    continue
+                else:
+                    raise FIRMSClientError(
+                        f"FIRMS API rate limit exceeded after {max_retries} retries. "
+                        "Consider reducing request frequency or day_range."
+                    )
+            
+            response.raise_for_status()
+            
+            text_stream = io.StringIO(response.text)
+            reader = csv.DictReader(text_stream)
+            rows = list(reader)
+            LOGGER.info(
+                "Fetched %s rows from FIRMS",
+                len(rows),
+                extra={
+                    "source": source,
+                    "attempts": attempt + 1,
+                },
+            )
+            return rows
+            
+        except httpx.HTTPStatusError as exc:
+            last_exception = exc
+            # Don't retry on client errors (4xx) except rate limit (handled above)
+            if 400 <= exc.response.status_code < 500 and exc.response.status_code != RATE_LIMIT_STATUS_CODE:
+                raise FIRMSClientError(f"FIRMS API client error: {exc}") from exc
+            # Retry on server errors (5xx) if we have retries left
+            if exc.response.status_code >= 500 and attempt < max_retries:
+                sleep_seconds = backoff_base_seconds * (2 ** attempt)
+                LOGGER.warning(
+                    "FIRMS API server error (%s), retrying after %.1f seconds",
+                    exc.response.status_code,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+                continue
+            raise FIRMSClientError(f"Failed to fetch FIRMS data: {exc}") from exc
+            
+        except httpx.HTTPError as exc:  # pragma: no cover - network error path
+            last_exception = exc
+            if attempt < max_retries:
+                sleep_seconds = backoff_base_seconds * (2 ** attempt)
+                LOGGER.warning(
+                    "FIRMS request failed (%s), retrying after %.1f seconds",
+                    exc,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+                continue
+            raise FIRMSClientError(f"Failed to fetch FIRMS data after {max_retries} retries: {exc}") from exc
+    
+    # This should not be reached, but just in case
+    raise FIRMSClientError(f"Failed to fetch FIRMS data: {last_exception}")
 
 
 def parse_detection_rows(
