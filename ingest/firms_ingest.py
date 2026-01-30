@@ -40,6 +40,16 @@ def run_firms_ingest(
 ) -> int:
     """Run the FIRMS ingestion pipeline."""
     config = ingest_settings
+
+    # Validate FIRMS API key is configured
+    if not config.map_key or config.map_key.strip() == "":
+        LOGGER.error(
+            "FIRMS_MAP_KEY environment variable is required but not set.\n"
+            "  1. Get a free API key at: https://firms.modaps.eosdis.nasa.gov/api/\n"
+            "  2. Copy .env.example to .env and add your key: FIRMS_MAP_KEY=your_key_here\n"
+            "  3. Or set it directly: export FIRMS_MAP_KEY=your_key_here"
+        )
+        return 2
     bbox = _resolve_area(area) if area else config.resolved_area
     effective_day_range = day_range if day_range is not None else config.day_range
     source_list = _resolve_sources(sources) or config.sources
@@ -102,11 +112,7 @@ def run_firms_ingest(
             skipped_duplicates = parsed_count - inserted
 
             if inserted > 0:
-                _update_false_source_masking(batch_id)
-                _update_persistence_scores(batch_id)
-                _update_landcover_scores(batch_id)
-                _update_weather_scores(batch_id)
-                _update_fire_likelihood(batch_id)
+                _update_all_scoring_atomic(batch_id)
 
             if config.denoiser_enabled and inserted > 0:
                 _run_denoiser_inference(batch_id, config)
@@ -154,64 +160,36 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     return [segment.strip() for segment in value.split(",") if segment.strip()]
 
 
-def _update_false_source_masking(batch_id: int) -> None:
-    """Update false_source_masked column for detections in the batch."""
+def _update_all_scoring_atomic(batch_id: int) -> None:
+    """Update all scoring columns for detections in the batch atomically.
+    
+    This function wraps all scoring updates (false source masking, persistence,
+    landcover, weather, and fire likelihood) in a single database transaction.
+    This ensures atomicity - either all scores are updated or none are - and
+    prevents connection pool exhaustion during batch processing.
+    
+    Addresses: INGEST-004 (Scoring Updates Not Atomic), CRIT-003 (Connection Pool Exhaustion)
+    
+    Args:
+        batch_id: The ingest batch ID to process
+    """
     try:
-        from api.fires.repo import update_false_source_masking
+        from api.fires.repo import update_all_scoring_for_batch
 
-        LOGGER.info("Updating false-source masking for batch %s", batch_id)
-        masked_count = update_false_source_masking(batch_id)
-        LOGGER.info("Marked %s detections as false sources in batch %s", masked_count, batch_id)
+        LOGGER.info("Updating all scoring for batch %s (atomic transaction)", batch_id)
+        counts = update_all_scoring_for_batch(batch_id)
+        LOGGER.info(
+            "Batch %s scoring complete: masked=%s, persistence=%s, landcover=%s, weather=%s, likelihood=%s",
+            batch_id,
+            counts["masked_count"],
+            counts["persistence_count"],
+            counts["landcover_count"],
+            counts["weather_count"],
+            counts["likelihood_count"],
+        )
     except Exception:
-        LOGGER.exception("Failed to update false-source masking for batch %s", batch_id)
-
-
-def _update_persistence_scores(batch_id: int) -> None:
-    """Update persistence_score column for detections in the batch."""
-    try:
-        from api.fires.repo import update_persistence_scores
-
-        LOGGER.info("Updating persistence scores for batch %s", batch_id)
-        updated_count = update_persistence_scores(batch_id)
-        LOGGER.info("Updated %s persistence scores in batch %s", updated_count, batch_id)
-    except Exception:
-        LOGGER.exception("Failed to update persistence scores for batch %s", batch_id)
-
-
-def _update_landcover_scores(batch_id: int) -> None:
-    """Update landcover_score column for detections in the batch."""
-    try:
-        from api.fires.repo import update_landcover_scores
-
-        LOGGER.info("Updating landcover scores for batch %s", batch_id)
-        updated_count = update_landcover_scores(batch_id)
-        LOGGER.info("Updated %s landcover scores in batch %s", updated_count, batch_id)
-    except Exception:
-        LOGGER.exception("Failed to update landcover scores for batch %s", batch_id)
-
-
-def _update_weather_scores(batch_id: int) -> None:
-    """Update weather_score column for detections in the batch."""
-    try:
-        from api.fires.repo import update_weather_scores
-
-        LOGGER.info("Updating weather scores for batch %s", batch_id)
-        updated_count = update_weather_scores(batch_id)
-        LOGGER.info("Updated %s weather scores in batch %s", updated_count, batch_id)
-    except Exception:
-        LOGGER.exception("Failed to update weather scores for batch %s", batch_id)
-
-
-def _update_fire_likelihood(batch_id: int) -> None:
-    """Update fire_likelihood column for detections in the batch."""
-    try:
-        from api.fires.repo import update_fire_likelihood
-
-        LOGGER.info("Updating fire likelihood for batch %s", batch_id)
-        updated_count = update_fire_likelihood(batch_id)
-        LOGGER.info("Updated %s fire likelihood scores in batch %s", updated_count, batch_id)
-    except Exception:
-        LOGGER.exception("Failed to update fire likelihood for batch %s", batch_id)
+        LOGGER.exception("Failed to update scoring for batch %s", batch_id)
+        raise  # Re-raise to ensure batch failure is recorded
 
 
 def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> None:
