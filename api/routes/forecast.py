@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 import re
+from typing import AsyncGenerator
 from urllib.parse import quote_plus
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel
 
@@ -284,6 +287,161 @@ def get_jit_forecast_status(job_id: UUID):
     return response
 
 
+async def _job_status_event_stream(
+    job_id: UUID,
+    poll_interval: float = 2.0,
+    max_duration: float = 300.0,  # 5 minutes max
+) -> AsyncGenerator[str, None]:
+    """Generate SSE events for JIT forecast job status updates.
+    
+    Streams job status updates as Server-Sent Events for real-time
+    progress monitoring without polling.
+    
+    Args:
+        job_id: UUID of the JIT forecast job to monitor
+        poll_interval: Seconds between status checks (default: 2.0)
+        max_duration: Maximum seconds to keep stream open (default: 300)
+        
+    Yields:
+        SSE formatted event strings with job status updates
+    """
+    start_time = asyncio.get_event_loop().time()
+    last_status = None
+    
+    status_messages = {
+        "pending": "Job is queued and waiting to start...",
+        "ingesting_terrain": "Downloading terrain data...",
+        "ingesting_weather": "Fetching weather data...",
+        "running_forecast": "Generating spread forecast...",
+        "completed": "Forecast complete!",
+        "failed": "Job failed"
+    }
+    
+    try:
+        while True:
+            # Check for timeout
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > max_duration:
+                yield f"event: timeout\ndata: {json.dumps({'message': 'Stream timeout - check status endpoint'})}\n\n"
+                break
+            
+            # Get current job status
+            job = repo.get_jit_job(job_id)
+            
+            if not job:
+                yield f"event: error\ndata: {json.dumps({'message': 'Job not found'})}\n\n"
+                break
+            
+            current_status = job["status"]
+            
+            # Only send update if status changed
+            if current_status != last_status:
+                last_status = current_status
+                
+                event_data = {
+                    "job_id": str(job_id),
+                    "status": current_status,
+                    "progress_message": status_messages.get(current_status, "Processing..."),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                
+                if job.get("result"):
+                    event_data["result"] = job["result"]
+                
+                if job.get("error"):
+                    event_data["error"] = job["error"]
+                
+                yield f"event: status\ndata: {json.dumps(event_data)}\n\n"
+                
+                # End stream if job is complete or failed
+                if current_status in ("completed", "failed"):
+                    break
+            
+            # Wait before next poll
+            await asyncio.sleep(poll_interval)
+            
+    except asyncio.CancelledError:
+        # Client disconnected
+        yield f"event: close\ndata: {json.dumps({'message': 'Client disconnected'})}\n\n"
+    except Exception as e:
+        yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+
+@forecast_router.get(
+    "/jit/{job_id}/stream",
+    response_class=StreamingResponse,
+    dependencies=[Depends(RateLimiter(times=10, seconds=60))],
+)
+async def stream_jit_forecast_status(
+    job_id: UUID,
+    poll_interval: float = 2.0,
+):
+    """Stream JIT forecast job status updates via Server-Sent Events (SSE).
+    
+    Provides real-time status updates for long-running JIT forecast jobs
+    without requiring repeated polling. The connection remains open until
+    the job completes, fails, or times out (5 minutes max).
+    
+    Args:
+        job_id: UUID of the JIT forecast job to monitor
+        poll_interval: Seconds between status checks (default: 2.0, min: 1.0, max: 10.0)
+        
+    Returns:
+        StreamingResponse with SSE content type for real-time updates
+        
+    Example:
+        ```javascript
+        // Browser client example
+        const eventSource = new EventSource('/forecast/jit/550e8400-e29b-41d4-a716-446655440000/stream');
+        
+        eventSource.addEventListener('status', (e) => {
+            const data = JSON.parse(e.data);
+            console.log('Status:', data.status);
+            console.log('Message:', data.progress_message);
+            
+            if (data.status === 'completed') {
+                console.log('Result:', data.result);
+                eventSource.close();
+            }
+        });
+        
+        eventSource.addEventListener('error', (e) => {
+            console.error('Error:', JSON.parse(e.data));
+            eventSource.close();
+        });
+        ```
+        
+    Events:
+        - status: Job status update (queued, ingesting_terrain, ingesting_weather,
+                 running_forecast, completed, failed)
+        - completed: Job finished successfully (includes result)
+        - failed: Job failed (includes error details)
+        - error: Stream error (includes error message)
+        - timeout: Stream timed out after 5 minutes
+        - close: Stream closed (client disconnected)
+    """
+    # Validate poll_interval
+    poll_interval = max(1.0, min(poll_interval, 10.0))
+    
+    # Check job exists before starting stream
+    job = repo.get_jit_job(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found"
+        )
+    
+    return StreamingResponse(
+        _job_status_event_stream(job_id, poll_interval=poll_interval),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering for SSE
+        },
+    )
+
+
 def _parse_iso8601_datetime(value: str) -> datetime:
     """Parse ISO 8601 datetime string with robust handling of various formats.
     
@@ -420,6 +578,9 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                 "weather_bias_corrector_path",
                 "calibration_applied",
                 "calibration_source",
+                "weather_fallback_used",
+                "weather_fallback_reason",
+                "terrain_fallback_used",
             ):
                 if k in attrs:
                     extra_meta[k] = attrs.get(k)
@@ -449,6 +610,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                 "forecast_reference_time": forecast_reference_time.isoformat(),
                 "region_name": request.region_name,
                 "status": "completed",
+                "metadata": extra_meta if extra_meta else None,
             },
             "rasters": raster_records,
             "contours": {"type": "FeatureCollection", "features": [
