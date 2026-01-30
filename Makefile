@@ -1,4 +1,4 @@
-.PHONY: help dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval hindcast-build weather-bias ralph-init ralph-plan ralph-run ralph-status
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-label-v2 denoiser-train-v2 denoiser-pipeline-v2 ingest-nifc-perimeters hindcast-build weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -23,7 +23,61 @@ endif
 
 help: ## Show this help message
 	@echo "Available commands:"
-	@$(PYTHON) -c "import re; [print(f'  {m[0]:<15} {m[1]}') for m in re.findall(r'^([a-zA-Z_-]+):.*?## (.*)$$', open('Makefile').read(), re.MULTILINE)]"
+	@$(PYTHON) -c "import re; [print(f'  {m[0]:<20} {m[1]}') for m in re.findall(r'^([a-zA-Z_-]+):.*?## (.*)$$', open('Makefile').read(), re.MULTILINE)]"
+
+doctor: ## Check development environment and dependencies
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -Command "Write-Host '[CHECK] Development environment' -ForegroundColor Cyan; Write-Host ''; \
+	Write-Host 'Checking Python...'; \
+	try { python --version | ForEach-Object { Write-Host \"  [OK] $_\" } } catch { Write-Host '  [FAIL] Python not found' -ForegroundColor Red }; \
+	Write-Host ''; \
+	Write-Host 'Checking uv...'; \
+	try { uv --version | ForEach-Object { Write-Host \"  [OK] $_\" } } catch { Write-Host '  [FAIL] uv not found. Install: https://astral.sh/uv' -ForegroundColor Red }; \
+	Write-Host ''; \
+	Write-Host 'Checking Docker...'; \
+	try { docker --version | ForEach-Object { Write-Host \"  [OK] Docker: $_\" } } catch { Write-Host '  [FAIL] Docker not found' -ForegroundColor Red }; \
+	try { docker compose version | ForEach-Object { Write-Host \"  [OK] Docker Compose: $_\" } } catch { Write-Host '  [FAIL] Docker Compose not found' -ForegroundColor Red }; \
+	Write-Host ''; \
+	Write-Host 'Checking .env file...'; \
+	if (Test-Path .env) { Write-Host '  [OK] .env file exists' } else { Write-Host '  [WARN] .env file missing (copy from .env.example)' -ForegroundColor Yellow }; \
+	Write-Host ''; \
+	Write-Host 'Checking FIRMS_MAP_KEY...'; \
+	if (Test-Path .env) { \
+		$$content = Get-Content .env -Raw; \
+		if ($$content -match 'FIRMS_MAP_KEY=([^\s]+)' -and $$matches[1] -ne 'your_firms_api_key_here') { \
+			Write-Host '  [OK] FIRMS_MAP_KEY is set' \
+		} else { \
+			Write-Host '  [WARN] FIRMS_MAP_KEY not configured' -ForegroundColor Yellow \
+		} \
+	} else { \
+		Write-Host '  [WARN] Cannot check (no .env file)' -ForegroundColor Yellow \
+	}; \
+	Write-Host ''; \
+	Write-Host 'Done.'"
+else
+	@echo "[CHECK] Development environment"
+	@echo ""
+	@echo "Checking Python..."
+	@$(PYTHON) --version 2>/dev/null && echo "  [OK]" || echo "  [FAIL] Python not found"
+	@echo ""
+	@echo "Checking uv..."
+	@$(UV) --version 2>/dev/null && echo "  [OK]" || echo "  [FAIL] uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+	@echo ""
+	@echo "Checking Docker..."
+	@docker --version 2>/dev/null && echo "  [OK] Docker installed" || echo "  [FAIL] Docker not found"
+	@docker compose version 2>/dev/null && echo "  [OK] Docker Compose installed" || echo "  [FAIL] Docker Compose not found"
+	@echo ""
+	@echo "Checking .env file..."
+	@if [ -f .env ]; then echo "  [OK] .env file exists"; else echo "  [WARN] .env file missing (copy from .env.example)"; fi
+	@echo ""
+	@echo "Checking FIRMS_MAP_KEY..."
+	@if [ -f .env ]; then grep -q "FIRMS_MAP_KEY=" .env && grep "FIRMS_MAP_KEY=" .env | grep -qv "your_firms_api_key_here" && echo "  [OK] FIRMS_MAP_KEY is set" || echo "  [WARN] FIRMS_MAP_KEY not configured"; else echo "  [WARN] Cannot check (no .env file)"; fi
+	@echo ""
+	@echo "Done."
+endif
+
+health-check: ## Check if stack services are running (API, UI, DB)
+	@$(PYTHON) scripts/health_check.py
 
 install: ## Install dependencies for all subprojects (with dev extras)
 	cd api && $(UV) sync --dev
@@ -169,6 +223,44 @@ denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="model
 	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v1/<run_id>"))
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT="data/denoiser/snapshots/<run>" or a labeled parquet))
 	$(UV) run --project ml -m ml.eval_denoiser --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) $(if $(OUT),--out $(OUT),) $(ARGS)
+
+ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 --year 2025")
+	$(UV) run --project ingest -m ingest.nifc_perimeters_ingest $(ARGS)
+
+denoiser-label-v2: ## Run ground-truth labeling v2 (pass ARGS="--bbox ... --start ... --end ...")
+	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)
+
+denoiser-train-v2: ## Train denoiser v2 (pass CONFIG="configs/denoiser_train_v2.yaml")
+	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v2.yaml)
+
+# ── Denoiser v2 end-to-end pipeline ─────────────────────────────────────
+# Usage:
+#   make denoiser-pipeline-v2 BBOX="-125 24 -66 50" START=2024-01-01 END=2025-01-01 YEARS="--year 2024 --year 2025"
+#
+# This runs: migrate → ingest perimeters → label → snapshot → train.
+BBOX ?= -125 24 -66 50
+START ?= 2024-01-01
+END ?= 2025-01-01
+YEARS ?= --year 2024 --year 2025
+DENOISER_V2_VERSION ?= v2.0.0
+
+denoiser-pipeline-v2: ## End-to-end denoiser v2: migrate → ingest perimeters → label → snapshot → train
+	@echo "=== Step 1/5: Running migrations ==="
+	$(MAKE) migrate
+	@echo ""
+	@echo "=== Step 2/5: Ingesting NIFC fire perimeters ==="
+	$(MAKE) ingest-nifc-perimeters ARGS="$(YEARS) --bbox $(BBOX)"
+	@echo ""
+	@echo "=== Step 3/5: Labeling detections with ground truth (v2) ==="
+	$(MAKE) denoiser-label-v2 ARGS="--bbox $(BBOX) --start $(START) --end $(END)"
+	@echo ""
+	@echo "=== Step 4/5: Exporting training snapshot ==="
+	$(MAKE) denoiser-snapshot ARGS="--bbox $(BBOX) --start $(START) --end $(END) --version $(DENOISER_V2_VERSION)"
+	@echo ""
+	@echo "=== Step 5/5: Training denoiser v2 (auto-detecting latest snapshot) ==="
+	$(UV) run --project ml -m ml.train_denoiser \
+		--config configs/denoiser_train_v2.yaml \
+		--snapshot-path "$$($(PYTHON) scripts/latest_snapshot.py)"
 
 hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG="configs/hindcast_smoke_grid_balkans_mvp.yaml")
 	$(UV) run --project ml -m ml.spread.hindcast_builder --config $(if $(CONFIG),$(CONFIG),configs/hindcast_smoke_grid_balkans_mvp.yaml) $(ARGS)
