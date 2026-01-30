@@ -37,6 +37,9 @@ class SpreadInputs:
     terrain: TerrainWindow
     forecast_reference_time: datetime
     horizons_hours: Sequence[int] = DEFAULT_HORIZONS_HOURS
+    # Metadata flags for error handling and observability
+    weather_fallback_used: bool = False
+    terrain_fallback_used: bool = False
 
     def to_model_input(self) -> SpreadModelInput:
         """Convert to the canonical SpreadModelInput expected by models."""
@@ -137,7 +140,10 @@ def _load_weather_cube(
             "No completed weather run found for ref_time=%s and bbox=%s; using calm fallback.",
             ref_time, bbox
         )
-        return _create_fallback_weather(window, ref_time, horizons_hours)
+        ds = _create_fallback_weather(window, ref_time, horizons_hours)
+        ds.attrs["weather_fallback_used"] = True
+        ds.attrs["weather_fallback_reason"] = "no_weather_run_found"
+        return ds
 
     path = Path(run["storage_path"])
     # Resolve relative path if needed (mirroring inspect_weather_run.py pattern)
@@ -147,11 +153,18 @@ def _load_weather_cube(
 
     if not path.exists():
         LOGGER.warning("Weather run %s file missing at %s; using calm fallback.", run["id"], path)
-        return _create_fallback_weather(window, ref_time, horizons_hours)
+        ds = _create_fallback_weather(window, ref_time, horizons_hours)
+        ds.attrs["weather_fallback_used"] = True
+        ds.attrs["weather_fallback_reason"] = f"weather_file_missing:{run['id']}"
+        return ds
 
     ds = None
     try:
-        ds = xr.open_dataset(path)
+        # Use chunked/lazy loading to avoid loading entire dataset into memory
+        # Chunk along time dimension for efficient slicing of forecast windows
+        # This prevents memory issues with large weather files
+        chunks = {"time": "auto", "lat": -1, "lon": -1}
+        ds = xr.open_dataset(path, chunks=chunks)
 
         missing_coords = [c for c in ("lat", "lon", "time") if c not in ds.coords]
         if missing_coords:
@@ -160,7 +173,10 @@ def _load_weather_cube(
                 path,
                 missing_coords,
             )
-            return _create_fallback_weather(window, ref_time, horizons_hours)
+            ds_fallback = _create_fallback_weather(window, ref_time, horizons_hours)
+            ds_fallback.attrs["weather_fallback_used"] = True
+            ds_fallback.attrs["weather_fallback_reason"] = f"missing_coords:{','.join(missing_coords)}"
+            return ds_fallback
 
         missing_vars = [v for v in ("u10", "v10") if v not in ds.data_vars]
         if missing_vars:
@@ -169,7 +185,10 @@ def _load_weather_cube(
                 path,
                 missing_vars,
             )
-            return _create_fallback_weather(window, ref_time, horizons_hours)
+            ds_fallback = _create_fallback_weather(window, ref_time, horizons_hours)
+            ds_fallback.attrs["weather_fallback_used"] = True
+            ds_fallback.attrs["weather_fallback_reason"] = f"missing_vars:{','.join(missing_vars)}"
+            return ds_fallback
 
         # 1) Align to AOI window coords.
         #
@@ -210,10 +229,15 @@ def _load_weather_cube(
         ds_final = _maybe_apply_weather_bias_correction(
             ds_final, weather_bias_corrector_path=weather_bias_corrector_path
         )
+        # Mark as not using fallback when successfully loaded
+        ds_final.attrs["weather_fallback_used"] = False
         return ds_final
     except Exception:
         LOGGER.exception("Failed to load/align weather dataset from %s; using fallback.", path)
-        return _create_fallback_weather(window, ref_time, horizons_hours)
+        ds_fallback = _create_fallback_weather(window, ref_time, horizons_hours)
+        ds_fallback.attrs["weather_fallback_used"] = True
+        ds_fallback.attrs["weather_fallback_reason"] = f"load_exception:{path.name}"
+        return ds_fallback
     finally:
         if ds is not None:
             try:
@@ -371,6 +395,7 @@ def build_spread_inputs(
     _assert_same_window(expected=window, actual=fires.window, label="active_fires")
 
     # 3. Load terrain (optional - create empty terrain if region_name is None or terrain unavailable)
+    terrain_fallback_used = False
     if region_name is None:
         # Create empty terrain for location-based forecasting
         LOGGER.info("No region_name provided; using empty terrain (terrain features disabled)")
@@ -383,6 +408,7 @@ def build_spread_inputs(
             valid_data_mask=np.ones((window.lat.size, window.lon.size), dtype=bool),
             aoi_mask=None,
         )
+        terrain_fallback_used = True
     else:
         try:
             terrain = load_terrain_window(
@@ -393,8 +419,10 @@ def build_spread_inputs(
             )
         except Exception as e:
             LOGGER.warning(
-                f"Failed to load terrain for region={region_name!r} bbox={bbox!r}; using empty terrain",
-                exc_info=e
+                "Failed to load terrain for region=%r bbox=%r; using empty terrain. Error: %s",
+                region_name,
+                bbox,
+                e,
             )
             # Fallback to empty terrain if region exists but terrain load fails
             from api.terrain.window import TerrainWindow
@@ -406,6 +434,7 @@ def build_spread_inputs(
                 valid_data_mask=np.ones((window.lat.size, window.lon.size), dtype=bool),
                 aoi_mask=None,
             )
+            terrain_fallback_used = True
     _assert_same_window(expected=window, actual=terrain.window, label="terrain")
 
     # 4. Load weather
@@ -436,6 +465,15 @@ def build_spread_inputs(
     ):
         raise ValueError("weather_cube.lon does not match window.lon")
 
+    # Check if weather fallback was used (from weather cube attributes)
+    weather_fallback_used = bool(getattr(weather, "attrs", {}).get("weather_fallback_used", False))
+    if weather_fallback_used:
+        LOGGER.warning(
+            "Forecast using fallback weather data (zero-wind). "
+            "Weather fallback reason: %s",
+            getattr(weather, "attrs", {}).get("weather_fallback_reason", "unknown"),
+        )
+
     return SpreadInputs(
         grid=grid,
         window=window,
@@ -444,5 +482,7 @@ def build_spread_inputs(
         terrain=terrain,
         forecast_reference_time=forecast_reference_time,
         horizons_hours=horizons_hours,
+        weather_fallback_used=weather_fallback_used,
+        terrain_fallback_used=terrain_fallback_used,
     )
 

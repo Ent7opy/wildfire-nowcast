@@ -170,6 +170,14 @@ def run_spread_forecast(
         ),
     )
 
+    # 4a. Annotate fallback information for observability
+    forecast = _annotate_fallback_info(
+        forecast,
+        weather_fallback_used=inputs_package.weather_fallback_used,
+        weather_fallback_reason=getattr(inputs_package.weather_cube, "attrs", {}).get("weather_fallback_reason"),
+        terrain_fallback_used=inputs_package.terrain_fallback_used,
+    )
+
     # 4b. Calibrate probabilities (default behavior).
     # - If the model already has an embedded calibrator, we treat it as authoritative.
     # - Otherwise, we try to load an operational calibrator and apply it here.
@@ -357,6 +365,51 @@ def _annotate_weather_bias(
             "weather_bias_corrector_path": weather_bias_corrector_path,
         },
     )
+    return forecast
+
+
+def _annotate_fallback_info(
+    forecast: SpreadForecast,
+    *,
+    weather_fallback_used: bool,
+    weather_fallback_reason: str | None,
+    terrain_fallback_used: bool,
+) -> SpreadForecast:
+    """Annotate forecast with fallback information for observability.
+    
+    This helps users understand if the forecast was generated using fallback
+    data (e.g., zero-wind weather or empty terrain), which may affect accuracy.
+    """
+    try:
+        attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+        attrs.update(
+            {
+                "weather_fallback_used": bool(weather_fallback_used),
+                "weather_fallback_reason": weather_fallback_reason,
+                "terrain_fallback_used": bool(terrain_fallback_used),
+            }
+        )
+        forecast.probabilities.attrs = attrs
+    except Exception:  # pragma: no cover
+        pass
+
+    if weather_fallback_used:
+        LOGGER.warning(
+            "Forecast generated with fallback weather data (zero-wind). "
+            "Reason: %s. Forecast accuracy may be reduced.",
+            weather_fallback_reason or "unknown",
+            extra={
+                "weather_fallback_used": True,
+                "weather_fallback_reason": weather_fallback_reason,
+            },
+        )
+    if terrain_fallback_used:
+        LOGGER.warning(
+            "Forecast generated with fallback terrain data (empty). "
+            "Terrain-based spread factors are disabled.",
+            extra={"terrain_fallback_used": True},
+        )
+
     return forecast
 
 
