@@ -9,7 +9,7 @@ See `docs/spread_model_design.md` for a higher-level description, assumptions, a
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from datetime import timezone
 from typing import Sequence
@@ -59,6 +59,30 @@ class HeuristicSpreadV0Config:
     enable_slope_bias: bool = False
     slope_influence: float = 0.35  # unitless strength (0 disables); typical 0.1–0.6
     slope_reference_deg: float = 30.0  # slope at which bias is near full strength
+
+    def __post_init__(self):
+        """Validate configuration constraints."""
+        # Validate max_kernel_size constraints (must be >= 7 and odd)
+        if self.max_kernel_size < 7:
+            raise ValueError(f"max_kernel_size must be >= 7; got {self.max_kernel_size}")
+        if self.max_kernel_size % 2 == 0:
+            raise ValueError(f"max_kernel_size must be odd; got {self.max_kernel_size}")
+        
+        # Validate base_spread_km_h is positive
+        if self.base_spread_km_h <= 0:
+            raise ValueError(f"base_spread_km_h must be positive; got {self.base_spread_km_h}")
+        
+        # Validate wind_elongation_factor is reasonable (must be >= 1.0)
+        if self.wind_elongation_factor < 1.0:
+            raise ValueError(f"wind_elongation_factor must be >= 1.0; got {self.wind_elongation_factor}")
+        
+        # Validate slope_influence is in valid range [0.0, 1.0]
+        if not 0.0 <= self.slope_influence <= 1.0:
+            raise ValueError(f"slope_influence must be in [0.0, 1.0]; got {self.slope_influence}")
+        
+        # Validate distance_decay_km is positive
+        if self.distance_decay_km <= 0:
+            raise ValueError(f"distance_decay_km must be positive; got {self.distance_decay_km}")
 
 class HeuristicSpreadModelV0(SpreadModel):
     """Simple rule-based spread model using wind bias."""
@@ -180,6 +204,10 @@ class HeuristicSpreadModelV0(SpreadModel):
             # 5. Convolve
             # Use mode='same' to keep output size matching input
             # fftconvolve is generally faster for these kernel sizes
+            # NOTE: fftconvolve with mode='same' can introduce boundary artifacts at edges.
+            # This is a known trade-off for performance. For critical edge accuracy,
+            # consider using direct convolution (scipy.signal.convolve2d) with appropriate
+            # padding, or pad the input before convolution and trim after.
             prob_grid = fftconvolve(fire_mask, kernel, mode="same").astype(np.float32, copy=False)
                 
             # 6. Apply masks and normalize
@@ -236,6 +264,8 @@ class HeuristicSpreadModelV0(SpreadModel):
             probabilities=da,
             forecast_reference_time=inputs.forecast_reference_time,
             horizons_hours=horizons,
+            model_name="HeuristicSpreadModelV0",
+            model_version="0.1.0",
         )
 
     def _generate_kernel(
@@ -302,7 +332,14 @@ class HeuristicSpreadModelV0(SpreadModel):
             eff_dist = eff_dist * (1.0 - bias * cos_diff)
             
             # Additionally, stretch the whole thing proportional to wind speed
-            wind_scale = 1.0 + (wind_speed * self.config.wind_influence_km_h_per_ms / (self.config.base_spread_km_h + 1e-6))
+            # Use explicit check for positive base_spread_km_h to avoid division issues
+            # (base_spread_km_h is validated in __post_init__, but we keep this safe)
+            base_spread = self.config.base_spread_km_h
+            if base_spread <= 0:
+                # This should not happen due to __post_init__ validation, but handle gracefully
+                wind_scale = 1.0 + (wind_speed * self.config.wind_influence_km_h_per_ms)
+            else:
+                wind_scale = 1.0 + (wind_speed * self.config.wind_influence_km_h_per_ms / base_spread)
             eff_dist = eff_dist / wind_scale
 
         # Optional upslope bias (terrain-driven). Uses window-mean slope/aspect.

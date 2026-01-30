@@ -42,6 +42,8 @@ class SpreadForecast:
     probabilities: xr.DataArray  # Dims: (time, lat, lon), Values: [0, 1]
     forecast_reference_time: datetime
     horizons_hours: Sequence[int]
+    model_name: str = "unknown"  # Name of the model that produced this forecast
+    model_version: str = ""      # Version string for model reproducibility
     
     def validate(self) -> None:
         """Enforce dimensions, coordinates, and value ranges."""
