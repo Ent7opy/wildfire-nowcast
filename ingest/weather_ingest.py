@@ -487,9 +487,11 @@ def build_weather_dataset(
         ds = ds.rename({"longitude": "lon"})
     ds = ds.transpose("time", "lat", "lon")
 
-    # Normalize time coordinates to UTC ns precision to avoid tz/precision warnings.
-    run_time_utc = run_time.astimezone(timezone.utc).replace(tzinfo=None)
-    run_time64 = np.datetime64(run_time_utc, "ns")
+    # Normalize time coordinates to UTC ms precision to avoid tz/precision warnings.
+    # Use explicit UTC handling - convert to UTC first, then create numpy datetime64
+    run_time_utc = run_time.astimezone(timezone.utc)
+    # Use 'ms' precision to avoid nanosecond overflow issues with some xarray versions
+    run_time64 = np.datetime64(run_time_utc.replace(tzinfo=None), "ms")
     ds = ds.assign_coords(time=ds["time"].astype("datetime64[ns]"))
     ds = ds.assign_coords(forecast_reference_time=run_time64)
     lead_time = (ds["time"].values - run_time64) / np.timedelta64(1, "h")
