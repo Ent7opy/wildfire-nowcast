@@ -73,8 +73,11 @@ def list_fire_detections_bbox_time(
     include_masked: bool = False,
     min_confidence: float | None = None,
     min_fire_likelihood: float | None = None,
-) -> list[dict]:
+    cursor_after_id: int | None = None,
+) -> dict:
     """List fire detections in a lon/lat bbox and acquisition time window.
+
+    Supports cursor-based pagination for efficient retrieval of large result sets.
 
     Notes
     - Time filter uses `BETWEEN` (inclusive bounds).
@@ -84,6 +87,8 @@ def list_fire_detections_bbox_time(
     - False-source masking: By default, filters out rows where `false_source_masked` is TRUE.
     - Filtering: min_confidence filters FIRMS confidence (0-100), min_fire_likelihood filters
       composite likelihood score (0-1). Both include NULL values (not yet scored).
+    - Pagination: Use cursor_after_id from previous response to fetch next page.
+      Returns at most `limit` rows per request (default: 1000, max: 10000).
     """
 
     min_lon, min_lat, max_lon, max_lat = bbox
@@ -128,7 +133,23 @@ def list_fire_detections_bbox_time(
         # Include NULL likelihood values when filtering (NULL means not yet scored)
         likelihood_predicate = "AND (fire_likelihood IS NULL OR fire_likelihood >= :min_fire_likelihood)"
 
-    limit_sql = ""
+    # Apply default limit for pagination if not specified
+    # This prevents unbounded queries that could cause memory issues
+    if limit is None:
+        limit = 1000
+    if limit <= 0 or limit > 10000:
+        raise ValueError("limit must be between 1 and 10000.")
+    
+    limit_sql = "\n        LIMIT :limit"
+    
+    # Cursor-based pagination: fetch rows after a specific ID
+    # This enables efficient pagination for large result sets
+    cursor_predicate = ""
+    if cursor_after_id is not None:
+        if cursor_after_id <= 0:
+            raise ValueError("cursor_after_id must be positive.")
+        cursor_predicate = "AND id > :cursor_after_id"
+    
     # Ensure datetimes are timezone-aware (UTC) for database queries
     if start_time.tzinfo is None:
         start_time = start_time.replace(tzinfo=timezone.utc)
@@ -147,16 +168,14 @@ def list_fire_detections_bbox_time(
         "min_lat": float(min_lat),
         "max_lon": float(max_lon),
         "max_lat": float(max_lat),
+        "limit": int(limit) + 1,  # Fetch one extra to determine if there's a next page
     }
     if min_confidence is not None:
         params["min_confidence"] = float(min_confidence)
     if min_fire_likelihood is not None:
         params["min_fire_likelihood"] = float(min_fire_likelihood)
-    if limit is not None:
-        if limit <= 0:
-            raise ValueError("limit must be positive.")
-        limit_sql = "\n        LIMIT :limit"
-        params["limit"] = int(limit)
+    if cursor_after_id is not None:
+        params["cursor_after_id"] = int(cursor_after_id)
 
     stmt = text(
         f"""
@@ -170,7 +189,8 @@ def list_fire_detections_bbox_time(
           {masked_predicate}
           {confidence_predicate}
           {likelihood_predicate}
-        ORDER BY acq_time {order}
+          {cursor_predicate}
+        ORDER BY acq_time {order}, id {order}
         {limit_sql}
         """
     )
@@ -178,7 +198,25 @@ def list_fire_detections_bbox_time(
     with get_engine().begin() as conn:
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
-    return [dict(r) for r in rows]
+    
+    # Determine if there's a next page and extract the cursor
+    has_more = len(rows) > limit
+    if has_more:
+        # Remove the extra row used for pagination detection
+        rows = rows[:limit]
+    
+    next_cursor = None
+    if has_more and rows:
+        # Use the last row's ID as the next cursor
+        last_row = dict(rows[-1])
+        next_cursor = last_row.get("id")
+    
+    return {
+        "data": [dict(r) for r in rows],
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "limit": limit,
+    }
 
 
 def update_false_source_masking(batch_id: int, conn: Connection | None = None) -> int:
@@ -450,6 +488,7 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
             return 0
 
         # Compute fire likelihood for each detection
+        # NULL handling is centralized in compute_fire_likelihood() - pass None values directly
         params = []
         for row in rows:
             likelihood = compute_fire_likelihood(

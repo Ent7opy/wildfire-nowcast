@@ -14,7 +14,7 @@ def test_get_detections_endpoint_basic(monkeypatch):
     mock_detections = [
         {"id": 1, "lat": 42.0, "lon": 21.0, "acq_time": datetime(2025, 1, 1, tzinfo=timezone.utc)}
     ]
-    mock_list = MagicMock(return_value=mock_detections)
+    mock_list = MagicMock(return_value={"data": mock_detections, "next_cursor": None, "has_more": False, "limit": 1000})
     # Monkeypatch where it's used
     monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
 
@@ -44,7 +44,7 @@ def test_get_detections_endpoint_basic(monkeypatch):
 
 def test_get_fires_endpoint_alias(monkeypatch):
     """Test that the /fires endpoint aliases /fires/detections."""
-    mock_list = MagicMock(return_value=[])
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
     monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
 
     response = client.get(
@@ -67,7 +67,7 @@ def test_get_fires_endpoint_alias(monkeypatch):
 
 def test_get_detections_endpoint_with_min_confidence(monkeypatch):
     """Test that min_confidence is passed to repo."""
-    mock_list = MagicMock(return_value=[])
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
     monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
 
     client.get(
@@ -89,7 +89,7 @@ def test_get_detections_endpoint_with_min_confidence(monkeypatch):
 
 def test_get_detections_endpoint_with_denoiser_fields(monkeypatch):
     """Test that include_denoiser_fields adds columns."""
-    mock_list = MagicMock(return_value=[])
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
     monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
 
     client.get(
@@ -109,7 +109,7 @@ def test_get_detections_endpoint_with_denoiser_fields(monkeypatch):
 
 def test_get_detections_endpoint_with_include_noise(monkeypatch):
     """Test that include_noise is passed to repo."""
-    mock_list = MagicMock(return_value=[])
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
     monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
 
     client.get(

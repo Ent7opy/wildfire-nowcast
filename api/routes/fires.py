@@ -57,7 +57,7 @@ def _list_detections(
     if include_denoiser_fields:
         columns.extend(FIRE_DETECTION_DENOISER_COLUMNS)
 
-    detections = list_fire_detections_bbox_time(
+    result = list_fire_detections_bbox_time(
         bbox=(min_lon, min_lat, max_lon, max_lat),
         start_time=start_time,
         end_time=end_time,
@@ -68,6 +68,7 @@ def _list_detections(
         min_confidence=min_confidence,
         min_fire_likelihood=min_fire_likelihood,
     )
+    detections = result["data"]
 
     return {"count": len(detections), "detections": detections}
 
