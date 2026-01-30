@@ -18,6 +18,7 @@ import numpy as np
 from ml.calibration import SpreadProbabilityCalibrator
 from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadForecast, SpreadModel
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0
+from ml.weather_bias_correction import resolve_weather_bias_corrector_path_full
 
 # Lazily imported to avoid pulling heavy DB/raster deps at module import time.
 # Kept as a module attribute so tests can patch `ml.spread.service.build_spread_inputs`.
@@ -259,35 +260,16 @@ def _resolve_latest_run_dir(root: Path) -> Path | None:
 
 
 def _resolve_weather_bias_corrector_path(region_name: str) -> Path | None:
-    # 1) Explicit file env var wins.
-    if (p := os.environ.get(WEATHER_BIAS_CORRECTOR_PATH_ENV)):
-        return Path(p)
-
-    # 2) Region-aware root, else global root.
-    root_env = os.environ.get(WEATHER_BIAS_CORRECTOR_ROOT_ENV)
-    roots: list[Path] = []
-    if root_env:
-        roots.append(Path(root_env) / region_name)
-        roots.append(Path(root_env))
-
-    # 3) Conventional default under repo: models/weather_bias_corrector
-    repo_root = Path(__file__).resolve().parents[2]
-    roots.append(repo_root / "models" / "weather_bias_corrector" / region_name)
-    roots.append(repo_root / "models" / "weather_bias_corrector")
-
-    for root in roots:
-        latest = _resolve_latest_run_dir(root)
-        if latest is None:
-            # Also allow the root itself to be a run directory.
-            latest = root if root.is_dir() else None
-        if latest is None:
-            continue
-        candidate = latest / "weather_bias_corrector.json"
-        if candidate.exists():
-            return candidate
-        if latest.is_file() and latest.name.endswith(".json"):
-            return latest
-    return None
+    """Resolve weather bias corrector path using centralized resolution.
+    
+    Delegates to ml.weather_bias_correction.resolve_weather_bias_corrector_path_full
+    to ensure consistent path resolution across the codebase.
+    """
+    return resolve_weather_bias_corrector_path_full(
+        region_name,
+        explicit_path_env=WEATHER_BIAS_CORRECTOR_PATH_ENV,
+        root_env=WEATHER_BIAS_CORRECTOR_ROOT_ENV,
+    )
 
 
 def _resolve_spread_calibrator_run_dir(region_name: str) -> Path | None:
@@ -326,6 +308,8 @@ def _annotate_forecast(
     calibration_source: str,
     calibration_run_id: str | None,
     calibration_run_dir: str | None,
+    has_uncalibrated_horizons: bool = False,
+    uncalibrated_horizons: list[int] | None = None,
 ) -> SpreadForecast:
     # Store operational details on the output array for downstream persistence/debugging.
     try:
@@ -336,6 +320,10 @@ def _annotate_forecast(
                 "calibration_source": str(calibration_source),
                 "calibration_run_id": calibration_run_id,
                 "calibration_run_dir": calibration_run_dir,
+                "has_uncalibrated_horizons": has_uncalibrated_horizons,
+                "uncalibrated_horizons": uncalibrated_horizons if uncalibrated_horizons else [],
+                "model_name": forecast.model_name,
+                "model_version": forecast.model_version,
             }
         )
         forecast.probabilities.attrs = attrs
@@ -382,7 +370,9 @@ def _apply_spread_calibration(
     # Apply per-horizon calibration to preserve the (time,lat,lon) contract.
     horizons = list(forecast.horizons_hours)
     missing_h = [int(h) for h in horizons if int(h) not in calibrator.per_horizon_models]
-    if missing_h:
+    has_uncalibrated_horizons = len(missing_h) > 0
+    
+    if has_uncalibrated_horizons:
         LOGGER.warning(
             "Calibration missing for some horizons; returning raw probabilities for those horizons.",
             extra={"region": region_name, "missing_horizons_hours": missing_h},
@@ -408,6 +398,7 @@ def _apply_spread_calibration(
             "calibrator_run_dir": str(calibrator_run_dir),
             "calibrator_run_id": meta.get("run_id"),
             "calibrator_method": meta.get("method"),
+            "uncalibrated_horizons": missing_h if has_uncalibrated_horizons else [],
         },
     )
 
@@ -415,6 +406,8 @@ def _apply_spread_calibration(
         probabilities=out,
         forecast_reference_time=forecast.forecast_reference_time,
         horizons_hours=forecast.horizons_hours,
+        model_name=forecast.model_name,
+        model_version=forecast.model_version,
     )
     forecast.validate()
 
@@ -424,5 +417,7 @@ def _apply_spread_calibration(
         calibration_source="service",
         calibration_run_id=meta.get("run_id"),
         calibration_run_dir=str(calibrator_run_dir),
+        has_uncalibrated_horizons=has_uncalibrated_horizons,
+        uncalibrated_horizons=missing_h if has_uncalibrated_horizons else [],
     )
 

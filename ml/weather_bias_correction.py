@@ -188,3 +188,82 @@ def resolve_weather_bias_corrector_path(
         return None
     return Path(env)
 
+
+def _resolve_latest_run_dir(root: Path) -> Path | None:
+    """Return the latest run directory under root (by mtime), if any."""
+    if not root.exists() or not root.is_dir():
+        return None
+    candidates = [p for p in root.iterdir() if p.is_dir()]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def resolve_weather_bias_corrector_path_full(
+    region_name: str | None,
+    *,
+    explicit_path_env: str = WEATHER_BIAS_CORRECTOR_ENV,
+    root_env: str = "WEATHER_BIAS_CORRECTOR_ROOT",
+    default_repo_subpath: str = "models/weather_bias_corrector",
+) -> Path | None:
+    """Resolve weather bias corrector path with full fallback chain.
+    
+    This centralizes the path resolution logic to ensure consistency between
+    the spread service and other consumers.
+    
+    Resolution order:
+    1. Explicit file path from environment variable
+    2. Region-specific directory under root environment variable
+    3. Global directory under root environment variable  
+    4. Region-specific directory under conventional repo path
+    5. Global directory under conventional repo path
+    
+    Parameters
+    ----------
+    region_name : str | None
+        Region name for region-aware resolution. If None, skips region-specific paths.
+    explicit_path_env : str
+        Environment variable name for explicit file path.
+    root_env : str
+        Environment variable name for root directory.
+    default_repo_subpath : str
+        Default subpath under repo root to search.
+        
+    Returns
+    -------
+    Path | None
+        Path to weather_bias_corrector.json if found, None otherwise.
+    """
+    # 1) Explicit file env var wins.
+    if (p := os.environ.get(explicit_path_env)):
+        return Path(p)
+
+    # 2) Region-aware root, else global root.
+    root_env_val = os.environ.get(root_env)
+    roots: list[Path] = []
+    if root_env_val:
+        if region_name:
+            roots.append(Path(root_env_val) / region_name)
+        roots.append(Path(root_env_val))
+
+    # 3) Conventional default under repo
+    repo_root = Path(__file__).resolve().parents[1]
+    if region_name:
+        roots.append(repo_root / default_repo_subpath / region_name)
+    roots.append(repo_root / default_repo_subpath)
+
+    for root in roots:
+        latest = _resolve_latest_run_dir(root)
+        if latest is None:
+            # Also allow the root itself to be a run directory.
+            latest = root if root.is_dir() else None
+        if latest is None:
+            continue
+        candidate = latest / "weather_bias_corrector.json"
+        if candidate.exists():
+            return candidate
+        if latest.is_file() and latest.name.endswith(".json"):
+            return latest
+    return None
+
