@@ -18,17 +18,25 @@ def test_mask_false_sources_detection_near_industrial():
         }
     ]
 
-    # Mock database query to return detection_id 1 as near industrial source
+    # Mock count check result (table exists and has data)
+    mock_count_result = MagicMock()
+    mock_count_result.mappings.return_value.first.return_value = {"count": 5}
+
+    # Mock main query result to return detection_id 1 as near industrial source
     mock_result = MagicMock()
     mock_result.mappings.return_value.all.return_value = [
         {"detection_id": 1}
     ]
 
     mock_conn = MagicMock()
-    mock_conn.__enter__.return_value.execute.return_value = mock_result
+    mock_conn.__enter__.return_value.execute.return_value = mock_count_result
+
+    mock_begin_conn = MagicMock()
+    mock_begin_conn.__enter__.return_value.execute.return_value = mock_result
 
     with patch("api.fires.scoring.get_engine") as mock_engine:
-        mock_engine.return_value.begin.return_value = mock_conn
+        mock_engine.return_value.connect.return_value = mock_conn
+        mock_engine.return_value.begin.return_value = mock_begin_conn
         masked = mask_false_sources(detections)
 
     assert 1 in masked
@@ -45,15 +53,23 @@ def test_mask_false_sources_detection_far_from_industrial():
         }
     ]
 
+    # Mock count check result (table exists and has data)
+    mock_count_result = MagicMock()
+    mock_count_result.mappings.return_value.first.return_value = {"count": 5}
+
     # Mock database query to return empty result (no nearby industrial sources)
     mock_result = MagicMock()
     mock_result.mappings.return_value.all.return_value = []
 
     mock_conn = MagicMock()
-    mock_conn.__enter__.return_value.execute.return_value = mock_result
+    mock_conn.__enter__.return_value.execute.return_value = mock_count_result
+
+    mock_begin_conn = MagicMock()
+    mock_begin_conn.__enter__.return_value.execute.return_value = mock_result
 
     with patch("api.fires.scoring.get_engine") as mock_engine:
-        mock_engine.return_value.begin.return_value = mock_conn
+        mock_engine.return_value.connect.return_value = mock_conn
+        mock_engine.return_value.begin.return_value = mock_begin_conn
         masked = mask_false_sources(detections)
 
     assert 2 in masked
@@ -68,6 +84,10 @@ def test_mask_false_sources_mixed_detections():
         {"id": 5, "lat": 42.2, "lon": 21.2},
     ]
 
+    # Mock count check result (table exists and has data)
+    mock_count_result = MagicMock()
+    mock_count_result.mappings.return_value.first.return_value = {"count": 5}
+
     # Mock database query to return only detection_id 3 and 5 as near industrial sources
     mock_result = MagicMock()
     mock_result.mappings.return_value.all.return_value = [
@@ -76,10 +96,14 @@ def test_mask_false_sources_mixed_detections():
     ]
 
     mock_conn = MagicMock()
-    mock_conn.__enter__.return_value.execute.return_value = mock_result
+    mock_conn.__enter__.return_value.execute.return_value = mock_count_result
+
+    mock_begin_conn = MagicMock()
+    mock_begin_conn.__enter__.return_value.execute.return_value = mock_result
 
     with patch("api.fires.scoring.get_engine") as mock_engine:
-        mock_engine.return_value.begin.return_value = mock_conn
+        mock_engine.return_value.connect.return_value = mock_conn
+        mock_engine.return_value.begin.return_value = mock_begin_conn
         masked = mask_false_sources(detections)
 
     assert masked[3] is True, "Detection 3 should be masked"
@@ -97,20 +121,67 @@ def test_mask_false_sources_custom_radius():
     """Test that custom radius is passed to query."""
     detections = [{"id": 6, "lat": 42.0, "lon": 21.0}]
 
+    # Mock count check result (table exists and has data)
+    mock_count_result = MagicMock()
+    mock_count_result.mappings.return_value.first.return_value = {"count": 5}
+
     mock_result = MagicMock()
     mock_result.mappings.return_value.all.return_value = []
 
     mock_conn = MagicMock()
-    mock_execute = mock_conn.__enter__.return_value.execute
+    mock_conn.__enter__.return_value.execute.return_value = mock_count_result
+
+    mock_begin_conn = MagicMock()
+    mock_execute = mock_begin_conn.__enter__.return_value.execute
     mock_execute.return_value = mock_result
 
     with patch("api.fires.scoring.get_engine") as mock_engine:
-        mock_engine.return_value.begin.return_value = mock_conn
+        mock_engine.return_value.connect.return_value = mock_conn
+        mock_engine.return_value.begin.return_value = mock_begin_conn
         mask_false_sources(detections, radius_m=1000.0)
 
     # Verify that the query was called with custom radius
     call_args = mock_execute.call_args
     assert call_args[0][1]["radius_m"] == 1000.0
+
+
+def test_mask_false_sources_empty_table():
+    """Test that all detections pass through unmasked when industrial_sources table is empty."""
+    detections = [
+        {"id": 7, "lat": 42.0, "lon": 21.0},
+        {"id": 8, "lat": 42.1, "lon": 21.1},
+    ]
+
+    # Mock count check result (table exists but is empty)
+    mock_count_result = MagicMock()
+    mock_count_result.mappings.return_value.first.return_value = {"count": 0}
+
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value.execute.return_value = mock_count_result
+
+    with patch("api.fires.scoring.get_engine") as mock_engine:
+        mock_engine.return_value.connect.return_value = mock_conn
+        masked = mask_false_sources(detections)
+
+    assert masked[7] is False, "Detection should be unmasked when table is empty"
+    assert masked[8] is False, "Detection should be unmasked when table is empty"
+
+
+def test_mask_false_sources_missing_table():
+    """Test that all detections pass through unmasked when industrial_sources table doesn't exist."""
+    detections = [
+        {"id": 9, "lat": 42.0, "lon": 21.0},
+    ]
+
+    # Mock connection that raises an exception (table doesn't exist)
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value.execute.side_effect = Exception("relation 'industrial_sources' does not exist")
+
+    with patch("api.fires.scoring.get_engine") as mock_engine:
+        mock_engine.return_value.connect.return_value = mock_conn
+        masked = mask_false_sources(detections)
+
+    assert masked[9] is False, "Detection should be unmasked when table is missing"
 
 
 @pytest.mark.integration
