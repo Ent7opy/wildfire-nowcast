@@ -18,6 +18,7 @@ Usage::
 
 import argparse
 import logging
+import time
 import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -124,13 +125,32 @@ def fetch_nifc_perimeters(
             year, offset, bbox,
         )
 
-        response = httpx.get(
-            NIFC_FEATURE_SERVER,
-            params=params,
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
+        max_retries = 3
+        data = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = httpx.get(
+                    NIFC_FEATURE_SERVER,
+                    params=params,
+                    timeout=timeout_seconds,
+                )
+                response.raise_for_status()
+                data = response.json()
+                break
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
+                if attempt < max_retries:
+                    wait = attempt * 10
+                    LOGGER.warning(
+                        "  Attempt %d/%d failed (%s). Retrying in %ds...",
+                        attempt, max_retries, type(exc).__name__, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    LOGGER.error("  All %d attempts failed. Raising.", max_retries)
+                    raise
+
+        if data is None:
+            break
 
         if "error" in data:
             LOGGER.error("NIFC API error: %s", data["error"])

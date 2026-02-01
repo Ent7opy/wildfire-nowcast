@@ -329,15 +329,19 @@ def _optional_float(value: str | None) -> float | None:
 
 
 def _parse_confidence(row: Dict[str, str]) -> float | None:
-    numeric = row.get("confidence")
-    if numeric:
+    mapping = {"h": 90.0, "high": 90.0, "n": 50.0, "nominal": 50.0, "l": 10.0, "low": 10.0}
+
+    raw = row.get("confidence")
+    if raw:
         try:
-            return float(numeric)
+            return float(raw)
         except ValueError:
-            pass
+            # VIIRS CSVs put categorical text (n/l/h) in the confidence column
+            mapped = mapping.get(raw.strip().lower())
+            if mapped is not None:
+                return mapped
 
     confidence_text = (row.get("confidence_text") or "").lower()
-    mapping = {"h": 90.0, "high": 90.0, "n": 50.0, "nominal": 50.0, "l": 10.0, "low": 10.0}
     return mapping.get(confidence_text) if confidence_text else None
 
 
