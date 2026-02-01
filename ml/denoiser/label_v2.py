@@ -1,6 +1,6 @@
 """Ground-truth labeling pipeline for FIRMS hotspot denoiser (v2).
 
-Cross-references FIRMS detections against NIFC fire perimeter polygons
+Cross-references FIRMS detections against fire perimeter polygons
 stored in ``fire_perimeters`` to produce high-quality training labels.
 
 Label logic
@@ -9,21 +9,21 @@ Label logic
 **POSITIVE** – detection falls within (or within a buffer of) a known fire
 perimeter and the acquisition time overlaps the fire's active period.
 
-**NEGATIVE** – detection is far from any known fire perimeter during a period
-with good perimeter coverage *and* meets at least one reinforcing signal
-(industrial mask, low confidence, or chronic static).
+**NEGATIVE** – detection is within the perimeter coverage region but far from
+any known fire perimeter, *and* meets at least one reinforcing signal
+(industrial mask, low confidence, or chronic static).  Detections far from
+perimeters but without reinforcing signals are also labeled NEGATIVE
+(tagged "unreinforced").
 
-**UNKNOWN** – everything else (excluded from training).
-
-This replaces the purely heuristic ``label_v1`` with labels grounded in
-independent fire perimeter observations, dramatically increasing both
-label volume and reliability.
+**UNKNOWN** – everything else (excluded from training).  This includes
+detections in regions with no perimeter coverage (e.g. non-US fires when
+only NIFC perimeters are loaded).
 
 Usage::
 
     python -m ml.denoiser.label_v2 \\
-        --bbox -125 24 -66 50 \\
-        --start 2024-01-01 --end 2024-12-31
+        --bbox -180 -90 180 90 \\
+        --start 2026-01-18 --end 2026-01-30
 
 """
 
@@ -49,11 +49,17 @@ DEFAULT_PARAMS = {
     # Spatial buffer around perimeter for positive matching (meters).
     # 375 m ~ half a VIIRS pixel.
     "positive_buffer_m": 375.0,
+    # Degree expansion for GiST bounding box pre-filter.
+    # 0.005° ≈ 550 m at equator — generous enough for the 375 m buffer.
+    "positive_bbox_expand_deg": 0.005,
     # Temporal tolerance before fire_start / after fire_end for positive match.
     "positive_time_pad_hours": 48,
     # Minimum distance from any fire perimeter to consider a detection a
     # candidate negative (meters).
     "negative_min_dist_m": 10_000.0,
+    # Degree expansion for the negative distance pre-filter.
+    # 0.1° ≈ 11 km at equator — matches the 10 km distance.
+    "negative_bbox_expand_deg": 0.1,
     # Temporal window around detection to search for nearby perimeters when
     # constructing negatives.
     "negative_time_pad_days": 30,
@@ -99,6 +105,36 @@ def _check_perimeter_coverage(
     return int(row["n"]) if row else 0
 
 
+def _get_perimeter_coverage_bbox(
+    engine: Engine,
+    start_time: datetime,
+    end_time: datetime,
+) -> Optional[Tuple[float, float, float, float]]:
+    """Return the bounding box of all fire perimeters in the time window.
+
+    Used to restrict negative labeling to areas where perimeters actually
+    exist — we can't call a detection "far from fire" in Africa if we only
+    have US perimeters.
+    """
+    stmt = text("""
+        SELECT
+            ST_XMin(ST_Extent(geom)) AS min_lon,
+            ST_YMin(ST_Extent(geom)) AS min_lat,
+            ST_XMax(ST_Extent(geom)) AS max_lon,
+            ST_YMax(ST_Extent(geom)) AS max_lat
+        FROM fire_perimeters
+        WHERE fire_start IS NOT NULL
+          AND fire_start <= :end
+          AND (fire_end IS NULL OR fire_end >= :start)
+    """)
+    with engine.connect() as conn:
+        row = conn.execute(stmt, {"start": start_time, "end": end_time}).mappings().first()
+    if row and row["min_lon"] is not None:
+        return (float(row["min_lon"]), float(row["min_lat"]),
+                float(row["max_lon"]), float(row["max_lat"]))
+    return None
+
+
 def label_detections_v2(
     engine: Engine,
     aoi_bbox: Tuple[float, float, float, float],
@@ -107,15 +143,7 @@ def label_detections_v2(
     rule_version: str = "v2.0.0",
     params: Optional[Dict] = None,
 ) -> None:
-    """Label FIRMS detections using fire perimeter ground truth.
-
-    Steps:
-    1. Fetch all detections in the AOI/time window.
-    2. Spatial-temporal join against ``fire_perimeters`` → POSITIVE.
-    3. Identify candidate negatives (far from all perimeters + reinforcing signal).
-    4. Everything else → UNKNOWN.
-    5. Upsert into ``fire_labels``.
-    """
+    """Label FIRMS detections using fire perimeter ground truth."""
     p = {**DEFAULT_PARAMS, **(params or {})}
     min_lon, min_lat, max_lon, max_lat = aoi_bbox
 
@@ -126,10 +154,26 @@ def label_detections_v2(
     n_perimeters = _check_perimeter_coverage(engine, aoi_bbox, start_time, end_time)
     LOGGER.info("Fire perimeters overlapping AOI/time: %d", n_perimeters)
     if n_perimeters == 0:
-        LOGGER.warning(
-            "No fire perimeters found. Run `nifc_perimeters_ingest` first. Aborting."
+        LOGGER.error(
+            "No fire perimeters found for the given AOI/time range. "
+            "Run `nifc_perimeters_ingest` first. Aborting."
         )
-        return
+        raise SystemExit(1)
+
+    # Determine the geographic extent of perimeter coverage.
+    coverage_bbox = _get_perimeter_coverage_bbox(engine, start_time, end_time)
+    if coverage_bbox:
+        # Expand by 1° (~111 km) so negatives near the edge are still labeled
+        cov_min_lon = coverage_bbox[0] - 1.0
+        cov_min_lat = coverage_bbox[1] - 1.0
+        cov_max_lon = coverage_bbox[2] + 1.0
+        cov_max_lat = coverage_bbox[3] + 1.0
+        LOGGER.info(
+            "Perimeter coverage region: [%.1f, %.1f, %.1f, %.1f]",
+            cov_min_lon, cov_min_lat, cov_max_lon, cov_max_lat,
+        )
+    else:
+        cov_min_lon, cov_min_lat, cov_max_lon, cov_max_lat = min_lon, min_lat, max_lon, max_lat
 
     # ── 1. Fetch detections ─────────────────────────────────────────────
     query_ids = text("""
@@ -137,7 +181,6 @@ def label_detections_v2(
         FROM fire_detections
         WHERE acq_time BETWEEN :start AND :end
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
-          AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
     """)
     with engine.connect() as conn:
         df = pd.read_sql(query_ids, conn, params={
@@ -147,23 +190,30 @@ def label_detections_v2(
         })
 
     if df.empty:
-        LOGGER.info("No detections in window. Nothing to label.")
-        return
+        LOGGER.error(
+            "No fire detections found between %s and %s. "
+            "The backfill may still be running — wait for it to finish, "
+            "then re-run the pipeline.",
+            start_time.date(), end_time.date(),
+        )
+        raise SystemExit(1)
 
     LOGGER.info("Detections to label: %d", len(df))
     df["label"] = "UNKNOWN"
     df["rule_applied"] = "Default"
 
-    batch_size = 1000
-
     # ── 2. POSITIVE: detection within buffer of a fire perimeter ────────
-    # and temporal overlap with the fire's active period.
+    # Single bulk query — uses GiST index via ST_Expand + && pre-filter,
+    # then refines with ST_DWithin on geography.
+    LOGGER.info("Step 2: Finding positive matches (perimeter spatial-temporal join)...")
     positive_query = text("""
-        SELECT d.id
+        SELECT DISTINCT d.id
         FROM fire_detections d
         JOIN fire_perimeters fp
-          ON ST_DWithin(d.geom::geography, fp.geom::geography, :buffer_m)
-        WHERE d.id = ANY(:ids)
+          ON d.geom && ST_Expand(fp.geom, :bbox_deg)
+         AND ST_DWithin(d.geom::geography, fp.geom::geography, :buffer_m)
+        WHERE d.acq_time BETWEEN :start AND :end
+          AND d.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND d.acq_time >= fp.fire_start - make_interval(hours => :pad_h)
           AND (
             fp.fire_end IS NULL
@@ -171,18 +221,17 @@ def label_detections_v2(
           )
     """)
 
-    positive_ids: List[int] = []
     with engine.connect() as conn:
-        for i in range(0, len(df), batch_size):
-            batch_ids = df["id"].iloc[i : i + batch_size].astype(int).tolist()
-            if not batch_ids:
-                continue
-            res = conn.execute(positive_query, {
-                "ids": batch_ids,
-                "buffer_m": p["positive_buffer_m"],
-                "pad_h": p["positive_time_pad_hours"],
-            })
-            positive_ids.extend(row[0] for row in res)
+        pos_result = conn.execute(positive_query, {
+            "bbox_deg": p["positive_bbox_expand_deg"],
+            "buffer_m": p["positive_buffer_m"],
+            "pad_h": p["positive_time_pad_hours"],
+            "start": start_time,
+            "end": end_time,
+            "min_lon": min_lon, "min_lat": min_lat,
+            "max_lon": max_lon, "max_lat": max_lat,
+        })
+        positive_ids = {row[0] for row in pos_result}
 
     pos_mask = df["id"].isin(positive_ids)
     df.loc[pos_mask, "label"] = "POSITIVE"
@@ -190,16 +239,26 @@ def label_detections_v2(
     LOGGER.info("Perimeter Match → POSITIVE: %d", pos_mask.sum())
 
     # ── 3. NEGATIVE candidates ──────────────────────────────────────────
-    # A detection is a negative candidate if:
-    #   (a) it is NOT already POSITIVE, AND
-    #   (b) it is far from every fire perimeter in a generous time window, AND
-    #   (c) it matches at least one reinforcing negative signal.
-    #
-    # Step 3a: find detections far from all perimeters.
-    remaining_mask = df["label"] == "UNKNOWN"
+    # Only consider detections WITHIN the perimeter coverage region.
+    # Detections outside (e.g., Africa when we only have US perimeters) stay UNKNOWN.
+    remaining_mask = (
+        (df["label"] == "UNKNOWN")
+        & (df["lat"] >= cov_min_lat) & (df["lat"] <= cov_max_lat)
+        & (df["lon"] >= cov_min_lon) & (df["lon"] <= cov_max_lon)
+    )
+    n_in_coverage = remaining_mask.sum()
+    n_outside = ((df["label"] == "UNKNOWN") & ~remaining_mask).sum()
+    LOGGER.info(
+        "Step 3: %d detections in coverage region, %d outside (stay UNKNOWN)",
+        n_in_coverage, n_outside,
+    )
+
     remaining_ids = df.loc[remaining_mask, "id"].astype(int).tolist()
 
     if remaining_ids:
+        # Find detections far from all perimeters.
+        # Uses GiST pre-filter with ST_Expand before expensive geography distance.
+        LOGGER.info("  Finding detections far from all perimeters...")
         far_from_fire_query = text("""
             SELECT d.id
             FROM fire_detections d
@@ -207,7 +266,8 @@ def label_detections_v2(
               AND NOT EXISTS (
                 SELECT 1
                 FROM fire_perimeters fp
-                WHERE ST_DWithin(d.geom::geography, fp.geom::geography, :neg_dist_m)
+                WHERE d.geom && ST_Expand(fp.geom, :bbox_deg)
+                  AND ST_DWithin(d.geom::geography, fp.geom::geography, :neg_dist_m)
                   AND fp.fire_start IS NOT NULL
                   AND d.acq_time >= fp.fire_start - make_interval(days => :neg_pad_d)
                   AND (
@@ -218,6 +278,7 @@ def label_detections_v2(
         """)
 
         far_ids: List[int] = []
+        batch_size = 2000
         with engine.connect() as conn:
             for i in range(0, len(remaining_ids), batch_size):
                 batch_ids = remaining_ids[i : i + batch_size]
@@ -225,27 +286,33 @@ def label_detections_v2(
                     continue
                 res = conn.execute(far_from_fire_query, {
                     "ids": batch_ids,
+                    "bbox_deg": p["negative_bbox_expand_deg"],
                     "neg_dist_m": p["negative_min_dist_m"],
                     "neg_pad_d": p["negative_time_pad_days"],
                 })
                 far_ids.extend(row[0] for row in res)
+                if (i + batch_size) % 10000 == 0:
+                    LOGGER.info("    Processed %d / %d...", min(i + batch_size, len(remaining_ids)), len(remaining_ids))
 
-        LOGGER.info("Far from any perimeter (>%d m): %d detections", p["negative_min_dist_m"], len(far_ids))
+        LOGGER.info("  Far from any perimeter (>%.0f m): %d detections",
+                     p["negative_min_dist_m"], len(far_ids))
 
-        # Step 3b: among those far-from-fire detections, require at least one
-        # reinforcing negative signal (industrial, low-conf singleton, or chronic static).
         if far_ids:
             neg_candidates = set(far_ids)
             confirmed_negative_ids: List[int] = []
             far_ids_list = list(far_ids)
 
             # 3b-i: Industrial mask
+            LOGGER.info("  Checking industrial mask reinforcement...")
             industrial_query = text("""
                 SELECT d.id
                 FROM fire_detections d
-                JOIN industrial_sources i
-                  ON ST_DWithin(d.geom::geography, i.geom::geography, :radius_m)
                 WHERE d.id = ANY(:ids)
+                  AND EXISTS (
+                    SELECT 1 FROM industrial_sources i
+                    WHERE d.geom && ST_Expand(i.geom, 0.02)
+                      AND ST_DWithin(d.geom::geography, i.geom::geography, :radius_m)
+                  )
             """)
             industrial_ids = set()
             with engine.connect() as conn:
@@ -262,9 +329,10 @@ def label_detections_v2(
             for did in industrial_ids:
                 if did in neg_candidates:
                     confirmed_negative_ids.append(did)
-            LOGGER.info("  Industrial mask reinforcement: %d", len(industrial_ids & neg_candidates))
+            LOGGER.info("    Industrial mask: %d", len(industrial_ids & neg_candidates))
 
             # 3b-ii: Low-confidence singleton
+            LOGGER.info("  Checking low-confidence singleton reinforcement...")
             singleton_query = text("""
                 SELECT d.id
                 FROM fire_detections d
@@ -275,12 +343,13 @@ def label_detections_v2(
                     WHERE d2.id != d.id
                       AND d2.acq_time BETWEEN d.acq_time - make_interval(hours => :h)
                                            AND d.acq_time + make_interval(hours => :h)
+                      AND d.geom && ST_Expand(d2.geom, 0.05)
                       AND ST_DWithin(d.geom::geography, d2.geom::geography, :r_m)
                   )
             """)
             singleton_ids = set()
-            # Only query IDs not yet confirmed negative
-            unconfirmed = [x for x in far_ids_list if x not in set(confirmed_negative_ids)]
+            already_confirmed = set(confirmed_negative_ids)
+            unconfirmed = [x for x in far_ids_list if x not in already_confirmed]
             with engine.connect() as conn:
                 for i in range(0, len(unconfirmed), batch_size):
                     batch = unconfirmed[i : i + batch_size]
@@ -295,11 +364,12 @@ def label_detections_v2(
                     singleton_ids.update(row[0] for row in res)
 
             for did in singleton_ids:
-                if did in neg_candidates and did not in set(confirmed_negative_ids):
+                if did in neg_candidates and did not in already_confirmed:
                     confirmed_negative_ids.append(did)
-            LOGGER.info("  Low-conf singleton reinforcement: %d", len(singleton_ids & neg_candidates))
+            LOGGER.info("    Low-conf singleton: %d", len(singleton_ids & neg_candidates))
 
             # 3b-iii: Chronic static
+            LOGGER.info("  Checking chronic static reinforcement...")
             chronic_query = text(f"""
                 WITH cell_counts AS (
                     SELECT
@@ -307,7 +377,7 @@ def label_detections_v2(
                         floor(lon / :grid_size) AS j_lon,
                         COUNT(DISTINCT date(acq_time)) AS day_count
                     FROM fire_detections
-                    WHERE acq_time BETWEEN :start - interval '{p["chronic_static_window_days"]} days' AND :end
+                    WHERE acq_time BETWEEN :start - interval '{int(p["chronic_static_window_days"])} days' AND :end
                     GROUP BY 1, 2
                     HAVING COUNT(DISTINCT date(acq_time)) >= :threshold
                 )
@@ -319,8 +389,8 @@ def label_detections_v2(
                 WHERE d.id = ANY(:ids)
             """)
             chronic_ids = set()
-            already_confirmed = set(confirmed_negative_ids)
-            unconfirmed2 = [x for x in far_ids_list if x not in already_confirmed]
+            already_confirmed2 = set(confirmed_negative_ids)
+            unconfirmed2 = [x for x in far_ids_list if x not in already_confirmed2]
             with engine.connect() as conn:
                 for i in range(0, len(unconfirmed2), batch_size):
                     batch = unconfirmed2[i : i + batch_size]
@@ -336,25 +406,22 @@ def label_detections_v2(
                     chronic_ids.update(row[0] for row in res)
 
             for did in chronic_ids:
-                if did in neg_candidates and did not in already_confirmed:
+                if did in neg_candidates and did not in already_confirmed2:
                     confirmed_negative_ids.append(did)
-            LOGGER.info("  Chronic static reinforcement: %d", len(chronic_ids & neg_candidates))
+            LOGGER.info("    Chronic static: %d", len(chronic_ids & neg_candidates))
 
             # Apply confirmed negatives
             neg_mask = df["id"].isin(confirmed_negative_ids) & (df["label"] == "UNKNOWN")
             df.loc[neg_mask, "label"] = "NEGATIVE"
             df.loc[neg_mask, "rule_applied"] = "Far From Perimeter + Reinforced"
-            LOGGER.info("Reinforced negatives → NEGATIVE: %d", neg_mask.sum())
+            LOGGER.info("  Reinforced negatives → NEGATIVE: %d", neg_mask.sum())
 
-            # 3c: Far-from-fire detections without a reinforcing signal.
-            # We still label these as NEGATIVE — the perimeter distance alone
-            # is strong evidence when coverage is good.  But we tag them
-            # distinctly so downstream consumers can filter by confidence.
+            # Unreinforced negatives (far from fire, in coverage region, no extra signal)
             unreinforced = set(far_ids) - set(confirmed_negative_ids)
             unreinforced_mask = df["id"].isin(unreinforced) & (df["label"] == "UNKNOWN")
             df.loc[unreinforced_mask, "label"] = "NEGATIVE"
             df.loc[unreinforced_mask, "rule_applied"] = "Far From Perimeter (unreinforced)"
-            LOGGER.info("Unreinforced negatives → NEGATIVE: %d", unreinforced_mask.sum())
+            LOGGER.info("  Unreinforced negatives → NEGATIVE: %d", unreinforced_mask.sum())
 
     # ── 4. Summary ──────────────────────────────────────────────────────
     counts = df["label"].value_counts().to_dict()
@@ -364,6 +431,7 @@ def label_detections_v2(
     LOGGER.info("Rule breakdown: %s", rule_counts)
 
     # ── 5. Upsert into fire_labels ──────────────────────────────────────
+    LOGGER.info("Upserting %d labels into fire_labels...", len(df))
     upsert_stmt = text("""
         INSERT INTO fire_labels (fire_detection_id, label, rule_version, source, rule_params, labeled_at)
         VALUES (:id, :label, :version, :source, :params, :now)
@@ -377,6 +445,7 @@ def label_detections_v2(
 
     now = datetime.now()
     params_json = json.dumps(p)
+    batch_size = 1000
 
     with engine.begin() as conn:
         batch = []

@@ -38,10 +38,12 @@ features:
   - "dist_nn_24h_km"
   - "seen_same_cell_past_3d"
   - "days_with_detection_past_30d_in_cell"
-  - "elevation_m"
-  - "slope_deg"
-  - "aspect_sin"
-  - "aspect_cos"
+  # Terrain features require DEM preprocessing and --aoi in export_snapshot.
+  # Uncomment when DEM data is available:
+  # - "elevation_m"
+  # - "slope_deg"
+  # - "aspect_sin"
+  # - "aspect_cos"
 
 # Split policy
 split_percentile: 0.8
