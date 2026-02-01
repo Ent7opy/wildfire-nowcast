@@ -202,13 +202,11 @@ ingest-all: ingest-viirs ingest-fwi ingest-weather ## Run all primary ingestion 
 db-cleanup: ## Run database cleanup (14-day retention)
 	$(UV) run --project api scripts/db_cleanup.py
 
-prepare: ## Prepare the database and initial context data (FIRMS + Weather)
+prepare: ## Prepare the database and initial context data (cleanup + FIRMS)
 	@echo "Cleaning up database..."
 	$(MAKE) db-cleanup
 	@echo "Ingesting FIRMS data..."
 	$(MAKE) ingest-firms
-	@echo "Ingesting weather data..."
-	$(MAKE) ingest-weather
 
 denoiser-label: ## Run heuristic labeling (pass ARGS="--bbox ... --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.label_v1 $(ARGS)
@@ -235,13 +233,16 @@ denoiser-train-v2: ## Train denoiser v2 (pass CONFIG="configs/denoiser_train_v2.
 
 # ── Denoiser v2 end-to-end pipeline ─────────────────────────────────────
 # Usage:
-#   make denoiser-pipeline-v2 BBOX="-125 24 -66 50" START=2024-01-01 END=2025-01-01 YEARS="--year 2024 --year 2025"
+#   make denoiser-pipeline-v2 BBOX="-180 -90 180 90" START=2026-01-18 END=2026-01-30 YEARS="--year 2024 --year 2025 --year 2026"
 #
+# BBOX is intentionally global: label_v2 auto-restricts negatives to the
+# perimeter coverage region, so non-US detections stay UNKNOWN (safe).
 # This runs: migrate → ingest perimeters → label → snapshot → train.
-BBOX ?= -125 24 -66 50
-START ?= 2024-01-01
-END ?= 2025-01-01
-YEARS ?= --year 2024 --year 2025
+# NOTE: START/END must match dates in fire_detections. Update when backfilling.
+BBOX ?= -180 -90 180 90
+START ?= 2026-01-18
+END ?= 2026-01-30
+YEARS ?= --year 2024 --year 2025 --year 2026
 DENOISER_V2_VERSION ?= v2.0.0
 
 denoiser-pipeline-v2: ## End-to-end denoiser v2: migrate → ingest perimeters → label → snapshot → train
@@ -260,7 +261,7 @@ denoiser-pipeline-v2: ## End-to-end denoiser v2: migrate → ingest perimeters �
 	@echo "=== Step 5/5: Training denoiser v2 (auto-detecting latest snapshot) ==="
 	$(UV) run --project ml -m ml.train_denoiser \
 		--config configs/denoiser_train_v2.yaml \
-		--snapshot-path "$$($(PYTHON) scripts/latest_snapshot.py)"
+		--snapshot-path latest
 
 hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG="configs/hindcast_smoke_grid_balkans_mvp.yaml")
 	$(UV) run --project ml -m ml.spread.hindcast_builder --config $(if $(CONFIG),$(CONFIG),configs/hindcast_smoke_grid_balkans_mvp.yaml) $(ARGS)
