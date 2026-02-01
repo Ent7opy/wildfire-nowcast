@@ -55,13 +55,12 @@ class FilterState:
     hours_start: int = 24
     hours_end: int = 0
     min_likelihood: float = 0.0
-    apply_denoiser: bool = True
 
 
 @dataclass
 class LayerState:
     show_fires: bool = True
-    show_forecast: bool = False
+    show_forecast: bool = True
     show_risk: bool = False
 
 
@@ -191,31 +190,28 @@ class AppState:
 
     def apply_preset(
         self, name: str, hours_start: int, hours_end: int,
-        likelihood: float, denoiser: bool,
+        likelihood: float,
     ) -> None:
         """Atomically apply a filter preset (filters + widget keys)."""
         self.filters.hours_start = hours_start
         self.filters.hours_end = hours_end
         self.filters.min_likelihood = likelihood
-        self.filters.apply_denoiser = denoiser
         self.active_preset = name
         self._preset_applied = True
 
         # Write widget keys so Streamlit picks up new values on rerun
         st.session_state.timeline_scrubber = (hours_end, hours_start)
         st.session_state.min_likelihood = likelihood
-        st.session_state.apply_denoiser = denoiser
 
         self._persist()
 
     def get_matching_preset(self) -> str | None:
         """Return the preset name that matches current filters, or *None*."""
         f = self.filters
-        for name, hs, he, lk, dn in FilterPresets.all_presets():
+        for name, hs, he, lk in FilterPresets.all_presets():
             if (hs == f.hours_start
                     and he == f.hours_end
-                    and abs(lk - f.min_likelihood) < 0.01
-                    and dn == f.apply_denoiser):
+                    and abs(lk - f.min_likelihood) < 0.01):
                 return name
         return None
 
@@ -228,9 +224,6 @@ class AppState:
             st.session_state.timeline_scrubber = (f.hours_end, f.hours_start)
         if "min_likelihood" not in st.session_state:
             st.session_state.min_likelihood = f.min_likelihood
-        if "apply_denoiser" not in st.session_state:
-            st.session_state.apply_denoiser = f.apply_denoiser
-
         lyr = self.layers
         if "fires_checkbox" not in st.session_state:
             st.session_state.fires_checkbox = lyr.show_fires
@@ -248,7 +241,7 @@ class AppState:
         separately in ``sidebar.py`` after they render.
         """
         f = self.filters
-        prev = (f.hours_start, f.hours_end, f.min_likelihood, f.apply_denoiser)
+        prev = (f.hours_start, f.hours_end, f.min_likelihood)
 
         # Timeline scrubber → hours
         scrubber = st.session_state.get("timeline_scrubber", (f.hours_end, f.hours_start))
@@ -258,12 +251,11 @@ class AppState:
         f.hours_start = start_hours
         f.hours_end = end_hours
 
-        # Likelihood & denoiser
+        # Likelihood
         f.min_likelihood = st.session_state.get("min_likelihood", f.min_likelihood)
-        f.apply_denoiser = st.session_state.get("apply_denoiser", f.apply_denoiser)
 
         # Detect manual filter changes → update active_preset
-        cur = (f.hours_start, f.hours_end, f.min_likelihood, f.apply_denoiser)
+        cur = (f.hours_start, f.hours_end, f.min_likelihood)
         if not self._preset_applied and cur != prev:
             match = self.get_matching_preset()
             self.active_preset = match if match else "Custom"
@@ -278,7 +270,6 @@ class AppState:
         st.query_params["start"] = str(f.hours_start)
         st.query_params["end"] = str(f.hours_end)
         st.query_params["likelihood"] = f"{f.min_likelihood:.2f}"
-        st.query_params["denoiser"] = str(f.apply_denoiser).lower()
 
         if self.active_preset:
             st.query_params["preset"] = self.active_preset
@@ -295,7 +286,6 @@ class AppState:
         s.time_range_hours_start = self.filters.hours_start
         s.time_range_hours_end = self.filters.hours_end
         s.fires_min_likelihood = self.filters.min_likelihood
-        s.fires_apply_denoiser = self.filters.apply_denoiser
 
         # Layers
         s.show_fires = self.layers.show_fires
@@ -325,11 +315,10 @@ class AppState:
             hours_start=s.get("time_range_hours_start", 24),
             hours_end=s.get("time_range_hours_end", 0),
             min_likelihood=s.get("fires_min_likelihood", 0.0),
-            apply_denoiser=s.get("fires_apply_denoiser", True),
         )
         self.layers = LayerState(
             show_fires=s.get("show_fires", True),
-            show_forecast=s.get("show_forecast", False),
+            show_forecast=s.get("show_forecast", True),
             show_risk=s.get("show_risk", False),
         )
         self.selection = SelectionState(
@@ -363,14 +352,11 @@ class AppState:
                 f.min_likelihood = float(params["likelihood"])
             except ValueError:
                 pass
-        if "denoiser" in params:
-            f.apply_denoiser = params["denoiser"].lower() == "true"
-
         # Determine active preset
         match = self.get_matching_preset()
         if match:
             self.active_preset = match
-        elif any(k in params for k in ("start", "end", "likelihood", "denoiser")):
+        elif any(k in params for k in ("start", "end", "likelihood")):
             self.active_preset = "Custom"
 
     @staticmethod

@@ -29,8 +29,8 @@ def render_sidebar() -> None:
                 if is_custom:
                     help_text = "Manually adjusted filters"
                 else:
-                    _, hours_start, hours_end, likelihood, denoiser = preset
-                    help_text = f"Time: {hours_start}h, Likelihood: {likelihood}, Denoiser: {'On' if denoiser else 'Off'}"
+                    _, hours_start, hours_end, likelihood = preset
+                    help_text = f"Time: {hours_start}h, Likelihood: {likelihood}"
 
                 if st.button(
                     name,
@@ -41,8 +41,8 @@ def render_sidebar() -> None:
                     help=help_text,
                 ):
                     if not is_custom:
-                        _, hours_start, hours_end, likelihood, denoiser = preset
-                        app_state.apply_preset(name, hours_start, hours_end, likelihood, denoiser)
+                        _, hours_start, hours_end, likelihood = preset
+                        app_state.apply_preset(name, hours_start, hours_end, likelihood)
                         st.rerun()
 
     # ── Widget sync: push canonical -> widget keys ────────────────────
@@ -84,12 +84,6 @@ def render_sidebar() -> None:
         else:
             st.caption("Threshold: **Low** \u2014 showing all detections")
 
-        st.toggle(
-            "Noise filter",
-            key="apply_denoiser",
-            help="Exclude false alarms",
-        )
-
     # ── Widget sync: pull widget keys -> canonical state ──────────────
     app_state.read_widgets_after_render()
 
@@ -119,7 +113,7 @@ def render_sidebar() -> None:
         )
 
         png_export_url = (
-            f"{api_public_base_url()}/exports/map.png?"
+            f"{api_public_base_url()}/map.png?"
             f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}&"
             f"start_time={isoformat(start_time)}&end_time={isoformat(end_time)}&"
             f"include_fires={'true' if app_state.layers.show_fires else 'false'}&"

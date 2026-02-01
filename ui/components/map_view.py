@@ -31,7 +31,6 @@ def render_map_view() -> Optional[Dict[str, float]]:
     # 1. Fires Layer (MVT)
     if app_state.layers.show_fires:
         start_time, end_time = app_state.time_range
-        include_noise = not app_state.filters.apply_denoiser
         min_likelihood = app_state.filters.min_likelihood
 
         # Build query params for the tile URL
@@ -39,7 +38,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
             "start_time": isoformat(start_time),
             "end_time": isoformat(end_time),
             "min_fire_likelihood": min_likelihood,
-            "include_noise": str(include_noise).lower(),
+            "include_noise": "false",
         }
         query_str = "&".join([f"{k}={v}" for k, v in params.items()])
 
@@ -67,7 +66,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
 
         # Include filter params in the layer ID so deck.gl fully recreates
         # the layer (and refetches tiles) when filters change.
-        fires_layer_id = f"fires-{min_likelihood}-{include_noise}-{isoformat(start_time)}"
+        fires_layer_id = f"fires-{min_likelihood}-{isoformat(start_time)}"
 
         layers.append(pdk.Layer(
             "MVTLayer",
@@ -151,7 +150,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
                 '<b>Sensor:</b> {sensor}<br/>'
                 '<b>FRP:</b> {frp} MW<br/>'
                 '<b>Likelihood:</b> {fire_likelihood}<br/>'
-                '<b>Confidence:</b> {confidence}'
+                '<b>Confidence:</b> {confidence_score}'
                 '</div></div>'
             ),
             "style": {

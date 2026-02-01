@@ -155,7 +155,7 @@ def _render_aggregate_stats() -> None:
         start_iso=isoformat(start_time),
         end_iso=isoformat(end_time),
         min_likelihood=app_state.filters.min_likelihood,
-        include_noise=str(not app_state.filters.apply_denoiser).lower(),
+        include_noise="false",
     )
 
     if not result.get("ok"):
@@ -255,7 +255,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
     acq_time = det.get("acq_time")
     st.write(f"**Timestamp:** {acq_time}")
     st.write(f"**Satellite:** {det.get('sensor')}")
-    st.write(f"**Confidence:** {det.get('confidence')}")
+    st.write(f"**Confidence:** {det.get('confidence_score')}")
     st.write(f"**Fire intensity (FRP):** {det.get('frp')}")
     st.write(f"**Source:** {det.get('source')}")
 

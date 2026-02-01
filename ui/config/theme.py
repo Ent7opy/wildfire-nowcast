@@ -186,20 +186,20 @@ class Typography:
 class FilterPresets:
     """Predefined filter combinations for quick access.
 
-    Each preset is a tuple of (name, hours_start, hours_end, min_likelihood, apply_denoiser).
+    Each preset is a tuple of (name, hours_start, hours_end, min_likelihood).
     - hours_start: How many hours ago the time range starts (e.g., 24 = 24 hours ago)
     - hours_end: How many hours ago the time range ends (0 = now)
     These provide quick one-click access to common filter configurations.
     """
 
-    # Preset format: (name, hours_start, hours_end, min_likelihood, apply_denoiser)
+    # Preset format: (name, hours_start, hours_end, min_likelihood)
     # NOTE: "High" presets align with FireThresholds.HIGH (0.6) so all passing
     # fires are guaranteed to render as red or deep red on the map.
-    LAST_HOUR_HIGH = ("Last Hour High", 1, 0, 0.6, True)        # Last 1h, high confidence
-    LAST_6H_MEDIUM = ("Last 6h Medium+", 6, 0, 0.33, True)      # Last 6h, medium+ confidence
-    LAST_24H_HIGH = ("Last 24h High", 24, 0, 0.6, True)         # Last 24h, high confidence
-    LAST_24H_ALL = ("Last 24h All", 24, 0, 0.0, False)          # Last 24h, all fires
-    CUSTOM = ("Custom", None, None, None, None)                  # User-defined filters
+    LAST_HOUR_HIGH = ("Last Hour High", 1, 0, 0.6)        # Last 1h, high confidence
+    LAST_6H_MEDIUM = ("Last 6h Medium+", 6, 0, 0.33)      # Last 6h, medium+ confidence
+    LAST_24H_HIGH = ("Last 24h High", 24, 0, 0.6)         # Last 24h, high confidence
+    LAST_24H_ALL = ("Last 24h All", 24, 0, 0.0)           # Last 24h, all fires
+    CUSTOM = ("Custom", None, None, None)                  # User-defined filters
 
     @classmethod
     def all_presets(cls):

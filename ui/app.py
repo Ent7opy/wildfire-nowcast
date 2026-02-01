@@ -227,11 +227,9 @@ def main() -> None:
     st.subheader("Map")
 
     # Active filters summary
-    filter_state = "on" if app_state.filters.apply_denoiser else "off"
     st.caption(
         f"**Fires filters:** {app_state.time_window}, "
-        f"likelihood at least {app_state.filters.min_likelihood:.2f}, "
-        f"noise filter {filter_state}"
+        f"likelihood at least {app_state.filters.min_likelihood:.2f}"
     )
 
     # Render map + details side-by-side
