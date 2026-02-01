@@ -257,13 +257,14 @@ def export_map_png(
             if dt_end.tzinfo is None:
                 dt_end = dt_end.replace(tzinfo=timezone.utc)
             
-            fires = fires_repo.list_fire_detections_bbox_time(
+            fires_result = fires_repo.list_fire_detections_bbox_time(
                 bbox=bbox,
                 start_time=dt_start,
                 end_time=dt_end,
                 limit=5000,
                 columns=["lat", "lon", "frp"]
             )
+            fires = fires_result.get("data", [])
         except Exception:
             # If fires fail, just skip them
             fires = None
