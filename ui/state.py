@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 import pydeck as pdk
 import streamlit as st
 
-from config.theme import FilterPresets, MapConfig
+from config.theme import FilterPresets
 
 # ---------------------------------------------------------------------------
 # Helpers

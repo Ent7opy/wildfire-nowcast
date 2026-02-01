@@ -10,7 +10,7 @@ from typing import AsyncGenerator
 from urllib.parse import quote_plus
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel

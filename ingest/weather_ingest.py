@@ -164,7 +164,6 @@ def _validate_grib_file(path: Path) -> None:
     
     # Try to open with cfgrib to verify it's a valid GRIB file
     try:
-        import cfgrib
         # Open with backend to validate without loading full dataset
         ds = xr.open_dataset(
             path,

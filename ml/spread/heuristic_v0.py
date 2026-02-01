@@ -9,7 +9,7 @@ See `docs/spread_model_design.md` for a higher-level description, assumptions, a
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 from datetime import timezone
 from typing import Sequence

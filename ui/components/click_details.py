@@ -195,9 +195,9 @@ def _render_aggregate_stats() -> None:
     # ── Confidence gauge ─────────────────────────────────────────
     if max_lh is not None and max_lh > 0:
         st.markdown(
-            f'<div style="font-size:12px;color:rgba(255,255,255,0.5);'
-            f'text-transform:uppercase;letter-spacing:0.5px;'
-            f'text-align:center;margin-top:8px;">Highest confidence</div>',
+            '<div style="font-size:12px;color:rgba(255,255,255,0.5);'
+            'text-transform:uppercase;letter-spacing:0.5px;'
+            'text-align:center;margin-top:8px;">Highest confidence</div>',
             unsafe_allow_html=True,
         )
         gauge_html = _render_confidence_gauge(max_lh)
