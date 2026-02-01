@@ -329,6 +329,15 @@ def train_baseline(config: Dict[str, Any]):
         train_path = os.path.join(snapshot_path, "train.parquet")
         eval_path = os.path.join(snapshot_path, "eval.parquet")
         LOGGER.info(f"Snapshot path is a directory. Loading {train_path} and {eval_path}")
+        if not os.path.exists(train_path) or not os.path.exists(eval_path):
+            LOGGER.error(
+                "Snapshot directory '%s' exists but is missing parquet files. "
+                "This usually means the export step found no labeled data for the "
+                "given date range / rule version. Check that labeling and export "
+                "date ranges match your fire_detections data.",
+                snapshot_path,
+            )
+            raise SystemExit(1)
         train_df = pd.read_parquet(train_path)
         eval_df = pd.read_parquet(eval_path)
         
@@ -482,6 +491,27 @@ def train_baseline(config: Dict[str, Any]):
         
     LOGGER.info("Training pipeline finished successfully.")
 
+def _resolve_snapshot_path(path: str) -> str:
+    """Resolve special snapshot path values.
+
+    ``"latest"`` is expanded to the most recently modified
+    ``data/denoiser/snapshots/run_*`` directory.
+    """
+    if path.lower() == "latest":
+        import glob
+        pattern = os.path.join("data", "denoiser", "snapshots", "run_*")
+        runs = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        if not runs:
+            raise FileNotFoundError(
+                "No snapshots found in data/denoiser/snapshots/. "
+                "Run the snapshot export step first."
+            )
+        resolved = runs[0]
+        LOGGER.info("Resolved snapshot path 'latest' → %s", resolved)
+        return resolved
+    return path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train denoiser baseline model.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
@@ -489,13 +519,13 @@ def main():
         "--snapshot-path",
         type=str,
         default=None,
-        help="Override snapshot_path from config (useful for pipeline automation).",
+        help="Override snapshot_path from config. Use 'latest' to auto-detect.",
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
     if args.snapshot_path:
-        config["snapshot_path"] = args.snapshot_path
+        config["snapshot_path"] = _resolve_snapshot_path(args.snapshot_path)
     train_baseline(config)
 
 if __name__ == "__main__":
