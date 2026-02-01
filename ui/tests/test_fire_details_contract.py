@@ -179,10 +179,31 @@ def test_map_view_property_key_consistency():
     assert lon_value is not None, "lon coordinate must be present"
 
 
+def test_aggregate_stats_handles_none_fire_likelihood():
+    """Test that aggregate stats handles fire_likelihood=None without TypeError.
+
+    Regression test: float(None) raises TypeError. The code must handle
+    detections where fire_likelihood key exists but its value is None.
+    """
+    detections = [
+        {"fire_likelihood": None, "acq_time": "2026-01-19T12:00:00Z"},
+        {"fire_likelihood": 0.8, "acq_time": "2026-01-19T13:00:00Z"},
+        {"fire_likelihood": "0.5", "acq_time": "2026-01-19T14:00:00Z"},
+        {"acq_time": "2026-01-19T15:00:00Z"},  # key missing entirely
+    ]
+
+    # Replicate the fixed expression from click_details.py _render_aggregate_stats
+    max_lh = max(
+        (float(d.get("fire_likelihood") or 0) for d in detections),
+        default=0,
+    )
+    assert max_lh == 0.8
+
+
 def test_tooltip_properties_in_contract():
     """Test that all properties used in map tooltip are in the contract."""
     # Properties referenced in map_view.py tooltip template
-    tooltip_properties = ["acq_time", "sensor", "frp", "fire_likelihood"]
+    tooltip_properties = ["acq_time", "sensor", "frp", "fire_likelihood", "confidence"]
 
     all_contract_props = (
         set(FIRE_MAP_FEATURE_CONTRACT["required"].keys())

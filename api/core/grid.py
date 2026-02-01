@@ -33,6 +33,10 @@ DEFAULT_CRS = "EPSG:4326"
 DEFAULT_CELL_SIZE_DEG = 0.01
 
 
+# Epsilon for floating-point precision handling in grid calculations
+_EPSILON = 1e-12
+
+
 @dataclass(frozen=True, slots=True)
 class GridSpec:
     """Grid definition for rasters on the analysis grid."""
@@ -43,6 +47,75 @@ class GridSpec:
     origin_lon: float = 0.0  # left (western) edge
     n_lat: int = 0
     n_lon: int = 0
+
+    @classmethod
+    def from_bbox_tuple(
+        cls,
+        bbox: tuple[float, float, float, float],
+        *,
+        cell_size_deg: float = DEFAULT_CELL_SIZE_DEG,
+        crs: str = DEFAULT_CRS,
+    ) -> "GridSpec":
+        """Construct a grid from a bbox tuple (min_lon, min_lat, max_lon, max_lat).
+
+        Args:
+            bbox: Bounding box as (min_lon, min_lat, max_lon, max_lat)
+            cell_size_deg: Grid cell size in degrees
+            crs: Coordinate reference system
+
+        Returns:
+            GridSpec instance
+        """
+        if len(bbox) != 4:
+            raise ValueError(f"bbox tuple must have 4 elements, got {len(bbox)}")
+        min_lon, min_lat, max_lon, max_lat = bbox
+        return cls.from_bounds(
+            lat_min=min_lat,
+            lat_max=max_lat,
+            lon_min=min_lon,
+            lon_max=max_lon,
+            cell_size_deg=cell_size_deg,
+            crs=crs,
+        )
+
+    @classmethod
+    def from_bounds(
+        cls,
+        *,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        cell_size_deg: float = DEFAULT_CELL_SIZE_DEG,
+        crs: str = DEFAULT_CRS,
+    ) -> "GridSpec":
+        """Construct a grid from individual bounds parameters.
+
+        Args:
+            lat_min: Minimum latitude (southern bound)
+            lat_max: Maximum latitude (northern bound)
+            lon_min: Minimum longitude (western bound)
+            lon_max: Maximum longitude (eastern bound)
+            cell_size_deg: Grid cell size in degrees
+            crs: Coordinate reference system
+
+        Returns:
+            GridSpec instance
+        """
+        cell = float(cell_size_deg)
+        # Add epsilon before floor to handle floating-point precision edge cases
+        origin_lat = math.floor((lat_min / cell) + _EPSILON) * cell
+        origin_lon = math.floor((lon_min / cell) + _EPSILON) * cell
+        n_lat = int(math.ceil((lat_max - origin_lat) / cell))
+        n_lon = int(math.ceil((lon_max - origin_lon) / cell))
+        return cls(
+            crs=crs,
+            cell_size_deg=cell,
+            origin_lat=origin_lat,
+            origin_lon=origin_lon,
+            n_lat=n_lat,
+            n_lon=n_lon,
+        )
 
     @classmethod
     def from_bbox(
@@ -57,6 +130,9 @@ class GridSpec:
     ) -> "GridSpec":
         """Construct a grid snapped down to the cell size from a bbox.
 
+        .. deprecated::
+            Use :meth:`from_bbox_tuple` or :meth:`from_bounds` for clearer semantics.
+
         Accepts either:
         - Four separate arguments: from_bbox(lat_min, lat_max, lon_min, lon_max)
         - A single bbox tuple: from_bbox((min_lon, min_lat, max_lon, max_lat))
@@ -64,28 +140,22 @@ class GridSpec:
         if isinstance(lat_min, (tuple, list)):
             if lat_max is not None or lon_min is not None or lon_max is not None:
                 raise ValueError("Cannot mix bbox tuple and individual arguments")
-            bbox = lat_min
-            if len(bbox) != 4:
-                raise ValueError(f"bbox tuple must have 4 elements, got {len(bbox)}")
-            min_lon, min_lat, max_lon, max_lat = bbox
-            lat_min, lat_max, lon_min, lon_max = min_lat, max_lat, min_lon, max_lon
+            return cls.from_bbox_tuple(
+                lat_min,
+                cell_size_deg=cell_size_deg,
+                crs=crs,
+            )
         else:
             if lat_max is None or lon_min is None or lon_max is None:
                 raise ValueError("Must provide all four bbox coordinates")
-
-        cell = float(cell_size_deg)
-        origin_lat = math.floor(lat_min / cell) * cell
-        origin_lon = math.floor(lon_min / cell) * cell
-        n_lat = int(math.ceil((lat_max - origin_lat) / cell))
-        n_lon = int(math.ceil((lon_max - origin_lon) / cell))
-        return cls(
-            crs=crs,
-            cell_size_deg=cell,
-            origin_lat=origin_lat,
-            origin_lon=origin_lon,
-            n_lat=n_lat,
-            n_lon=n_lon,
-        )
+            return cls.from_bounds(
+                lat_min=lat_min,
+                lat_max=lat_max,
+                lon_min=lon_min,
+                lon_max=lon_max,
+                cell_size_deg=cell_size_deg,
+                crs=crs,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,13 +239,19 @@ def bbox_to_window(
     - `i1`/`j1` use `ceil` (snap up) so a bbox that ends inside a cell includes it.
     - If `clip=True`, indices are clamped to the grid extent `[0, n_lat]` / `[0, n_lon]`.
       If the bbox lies completely outside, the result may be empty (e.g. `i0 == i1`).
+
+    Note:
+        Uses epsilon correction to handle floating-point precision edge cases where
+        coordinates at exact cell boundaries could be misassigned due to rounding errors.
     """
     cell = grid.cell_size_deg
 
-    i0 = int(math.floor((min_lat - grid.origin_lat) / cell))
-    i1 = int(math.ceil((max_lat - grid.origin_lat) / cell))
-    j0 = int(math.floor((min_lon - grid.origin_lon) / cell))
-    j1 = int(math.ceil((max_lon - grid.origin_lon) / cell))
+    # Add epsilon before floor/ceil to handle floating-point precision edge cases
+    # This prevents coordinates at exact cell boundaries from being misassigned
+    i0 = int(math.floor((min_lat - grid.origin_lat) / cell + _EPSILON))
+    i1 = int(math.ceil((max_lat - grid.origin_lat) / cell - _EPSILON))
+    j0 = int(math.floor((min_lon - grid.origin_lon) / cell + _EPSILON))
+    j1 = int(math.ceil((max_lon - grid.origin_lon) / cell - _EPSILON))
 
     if clip:
         i0 = max(0, min(grid.n_lat, i0))

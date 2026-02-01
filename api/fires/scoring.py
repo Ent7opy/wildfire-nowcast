@@ -41,6 +41,8 @@ def mask_false_sources(
     Notes:
         - Only returns True for masked detections; absent keys mean not masked
         - Relies on industrial_sources table populated via ingest pipeline
+        - If industrial_sources table is empty or missing, all detections pass through
+          unmasked and a warning is logged
     """
     detection_list = list(detections)
     if not detection_list:
@@ -49,6 +51,33 @@ def mask_false_sources(
     detection_ids = [d["id"] for d in detection_list]
     if not detection_ids:
         return {}
+
+    # Check if industrial_sources table exists and has data
+    try:
+        check_stmt = text("""
+            SELECT COUNT(*) as count
+            FROM industrial_sources
+        """)
+        with get_engine().connect() as conn:
+            result = conn.execute(check_stmt)
+            row = result.mappings().first()
+            source_count = row["count"] if row else 0
+
+        if source_count == 0:
+            LOGGER.warning(
+                "Industrial sources table is empty; all detections pass through unmasked. "
+                "Run ingest pipeline to populate industrial_sources table."
+            )
+            # Return all detections as unmasked
+            return {det_id: False for det_id in detection_ids}
+    except Exception as e:
+        # Table may not exist or other DB error
+        LOGGER.warning(
+            "Failed to query industrial_sources table; all detections pass through unmasked. "
+            "Error: %s",
+            e,
+        )
+        return {det_id: False for det_id in detection_ids}
 
     # Query detections within radius_m of any industrial source
     stmt = text("""
@@ -89,6 +118,7 @@ def compute_persistence_scores(
     *,
     spatial_radius_m: float = 750.0,
     time_window_hours: tuple[float, float] = (0.0, 72.0),
+    chunk_size: int = 5000,
 ) -> dict[int, float]:
     """Compute persistence scores for fire detections based on spatial-temporal clustering.
 
@@ -111,6 +141,8 @@ def compute_persistence_scores(
         time_window_hours: Time window for clustering as (min_hours, max_hours) tuple
             looking BACKWARD from target detection time. Default (0, 72) means
             all detections from the past 0-72 hours are considered
+        chunk_size: Process detections in chunks to avoid memory issues with large batches
+            (default 5000, max 10000). Each chunk uses a single database query.
 
     Returns:
         Dict mapping detection_id → persistence_score in range [0, 1]
@@ -120,7 +152,12 @@ def compute_persistence_scores(
         - Time filtering ensures detections are within reasonable temporal proximity
         - Scores are computed relative to all detections in the database within
           the time window, not just the input batch
+        - Large batches are processed in chunks to prevent memory exhaustion
+          and avoid overloading the database with massive IN clauses
     """
+    # Clamp chunk size to reasonable bounds
+    chunk_size = max(100, min(chunk_size, 10000))
+    
     detection_list = list(detections)
     if not detection_list:
         return {}
@@ -136,9 +173,12 @@ def compute_persistence_scores(
             "Must be (min_hours, max_hours) with 0 ≤ min_hours < max_hours."
         )
 
+    # Process detections in chunks for memory efficiency with large batches
+    scores: dict[int, float] = {}
+    total = len(detection_ids)
+    
     # Query clusters for each detection using ST_DWithin spatial clustering
-    # and time window filtering. For each detection, find all nearby detections
-    # within the spatial radius and time window.
+    # and time window filtering. Uses server-side cursor for memory efficiency.
     stmt = text("""
         WITH target_detections AS (
             SELECT id, geom, acq_time, sensor
@@ -159,44 +199,48 @@ def compute_persistence_scores(
         GROUP BY t.id
     """)
 
-    with get_engine().begin() as conn:
-        result = conn.execute(
-            stmt,
-            {
-                "detection_ids": detection_ids,
-                "radius_m": float(spatial_radius_m),
-                "min_hours": float(min_hours),
-                "max_hours": float(max_hours),
-            },
-        )
-        rows = result.mappings().all()
+    # Process in chunks to avoid overwhelming the database and memory
+    for chunk_start in range(0, total, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, total)
+        chunk_ids = detection_ids[chunk_start:chunk_end]
+        
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                stmt,
+                {
+                    "detection_ids": chunk_ids,
+                    "radius_m": float(spatial_radius_m),
+                    "min_hours": float(min_hours),
+                    "max_hours": float(max_hours),
+                },
+            )
+            rows = result.mappings().all()
 
-    scores: dict[int, float] = {}
-    for row in rows:
-        detection_id = int(row["detection_id"])
-        cluster_size = int(row["cluster_size"])
-        sensor_count = int(row["sensor_count"])
+        for row in rows:
+            detection_id = int(row["detection_id"])
+            cluster_size = int(row["cluster_size"])
+            sensor_count = int(row["sensor_count"])
 
-        # Base score from cluster size
-        if cluster_size == 1:
-            base_score = 0.2
-        elif cluster_size <= 3:
-            base_score = 0.3 + (cluster_size - 2) * 0.1
-        elif cluster_size <= 9:
-            base_score = 0.5 + (cluster_size - 4) * 0.033
-        else:
-            base_score = min(0.9, 0.7 + (cluster_size - 10) * 0.02)
+            # Base score from cluster size
+            if cluster_size == 1:
+                base_score = 0.2
+            elif cluster_size <= 3:
+                base_score = 0.3 + (cluster_size - 2) * 0.1
+            elif cluster_size <= 9:
+                base_score = 0.5 + (cluster_size - 4) * 0.033
+            else:
+                base_score = min(0.9, 0.7 + (cluster_size - 10) * 0.02)
 
-        # Multi-sensor bonus
-        multi_sensor_bonus = 0.1 if sensor_count >= 2 else 0.0
+            # Multi-sensor bonus
+            multi_sensor_bonus = 0.1 if sensor_count >= 2 else 0.0
 
-        final_score = min(1.0, base_score + multi_sensor_bonus)
-        scores[detection_id] = final_score
+            final_score = min(1.0, base_score + multi_sensor_bonus)
+            scores[detection_id] = final_score
 
-    # For detections not in clusters (no nearby detections), assign isolated score
-    for det_id in detection_ids:
-        if det_id not in scores:
-            scores[det_id] = 0.2
+        # For detections not in clusters (no nearby detections), assign isolated score
+        for det_id in chunk_ids:
+            if det_id not in scores:
+                scores[det_id] = 0.2
 
     return scores
 
@@ -383,6 +427,31 @@ def compute_weather_plausibility_scores(
     return scores
 
 
+def _to_numpy_datetime64(dt: datetime) -> np.datetime64:
+    """Convert a datetime to numpy datetime64 with proper UTC handling.
+
+    This helper centralizes timezone handling to avoid inconsistencies when
+    converting timezone-aware datetimes to numpy datetime64.
+
+    Args:
+        dt: A timezone-aware or naive datetime. If naive, assumed to be UTC.
+
+    Returns:
+        numpy.datetime64 in nanosecond precision UTC.
+    """
+    from datetime import timezone
+
+    # Ensure UTC timezone
+    if dt.tzinfo is None:
+        dt_utc = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt_utc = dt.astimezone(timezone.utc)
+
+    # Convert to numpy datetime64 with explicit UTC semantics
+    # Using 'ms' precision to avoid nanosecond overflow issues with some xarray versions
+    return np.datetime64(dt_utc.replace(tzinfo=None), "ms")
+
+
 def _get_weather_data_for_point(
     *,
     lat: float,
@@ -458,9 +527,8 @@ def _get_weather_data_for_point(
 
         # Select time closest to ref_time
         if "time" in ds_point.coords:
-            # Convert ref_time to numpy datetime64 (naive UTC)
-            ref_time_utc = ref_time.replace(tzinfo=None) if ref_time.tzinfo else ref_time
-            ref_time_64 = np.datetime64(ref_time_utc, "ns")
+            # Convert ref_time to numpy datetime64 with explicit UTC handling
+            ref_time_64 = _to_numpy_datetime64(ref_time)
             ds_point = ds_point.sel(time=ref_time_64, method="nearest")
 
         # Extract weather variables
@@ -487,8 +555,9 @@ def _get_weather_data_for_point(
             try:
                 # Select time range for precipitation lookback
                 precip_start = ref_time - timedelta(hours=precip_lookback_hours)
-                precip_start_64 = np.datetime64(precip_start.replace(tzinfo=None), "ns")
-                ref_time_64 = np.datetime64(ref_time.replace(tzinfo=None), "ns")
+                # Use centralized helper for consistent UTC handling
+                precip_start_64 = _to_numpy_datetime64(precip_start)
+                ref_time_64 = _to_numpy_datetime64(ref_time)
 
                 ds_precip = ds.sel(lat=lat, lon=lon, method="nearest")
                 ds_precip = ds_precip.sel(time=slice(precip_start_64, ref_time_64))

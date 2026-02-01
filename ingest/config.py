@@ -44,6 +44,15 @@ class FIRMSIngestSettings(BaseSettings):
     denoiser_threshold: float = Field(default=0.5, validation_alias="DENOISER_THRESHOLD")
     denoiser_batch_size: int = Field(default=500, validation_alias="DENOISER_BATCH_SIZE")
     denoiser_region: Optional[str] = Field(default=None, validation_alias="DENOISER_REGION")
+    denoiser_invoke_method: str = Field(
+        default="uv", validation_alias="DENOISER_INVOKE_METHOD"
+    )
+    """How to invoke the denoiser: 'uv' (default), 'python', or 'module'.
+    
+    - 'uv': Uses 'uv run --project ml -m ml.denoiser_inference' (requires uv in PATH)
+    - 'python': Uses 'python -m ml.denoiser_inference' (uses sys.executable)
+    - 'module': Directly imports and calls the module (no subprocess)
+    """
 
     @field_validator("sources", mode="before")
     @classmethod
@@ -113,10 +122,11 @@ class WeatherIngestSettings(BaseSettings):
         default=REPO_ROOT / "data" / "weather",
         validation_alias="WEATHER_BASE_DIR",
     )
-    bbox_min_lon: float = Field(default=5.0, validation_alias="WEATHER_BBOX_MIN_LON")
-    bbox_max_lon: float = Field(default=20.0, validation_alias="WEATHER_BBOX_MAX_LON")
-    bbox_min_lat: float = Field(default=35.0, validation_alias="WEATHER_BBOX_MIN_LAT")
-    bbox_max_lat: float = Field(default=47.0, validation_alias="WEATHER_BBOX_MAX_LAT")
+    # Default to global coverage for worldwide wildfire monitoring
+    bbox_min_lon: float = Field(default=-180.0, validation_alias="WEATHER_BBOX_MIN_LON")
+    bbox_max_lon: float = Field(default=180.0, validation_alias="WEATHER_BBOX_MAX_LON")
+    bbox_min_lat: float = Field(default=-90.0, validation_alias="WEATHER_BBOX_MIN_LAT")
+    bbox_max_lat: float = Field(default=90.0, validation_alias="WEATHER_BBOX_MAX_LAT")
     horizon_hours: int = Field(default=24, validation_alias="WEATHER_HORIZON_HOURS")
     step_hours: int = Field(default=6, validation_alias="WEATHER_STEP_HOURS")
     run_time: Optional[datetime] = Field(default=None, validation_alias="WEATHER_RUN_TIME")

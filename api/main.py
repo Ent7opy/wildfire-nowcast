@@ -1,3 +1,4 @@
+import logging
 import os
 from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -9,6 +10,8 @@ from redis.asyncio import Redis
 from api.config import settings
 from api.errors import ErrorResponse
 from api.routes import internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router
+
+LOGGER = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.app_name, version=settings.version)
 
@@ -28,8 +31,28 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
-    redis = Redis.from_url(f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}", encoding="utf-8", decode_responses=True)
-    await FastAPILimiter.init(redis)
+    try:
+        redis = Redis.from_url(
+            f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}",
+            encoding="utf-8",
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+        # Test connection with a simple ping
+        await redis.ping()
+        await FastAPILimiter.init(redis)
+        LOGGER.info("Redis connection established and rate limiter initialized")
+    except Exception as e:
+        LOGGER.warning(
+            "Redis connection failed; rate limiting disabled. Error: %s",
+            e,
+            extra={"redis_host": os.getenv("REDIS_HOST", "localhost"), "redis_port": os.getenv("REDIS_PORT", "6379")},
+        )
+        # Graceful degradation: rate limiting is disabled, but app continues
+        # Store None to indicate rate limiter is not available
+        app.state.redis = None
+        app.state.limiter_disabled = True
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -54,12 +77,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    # Only include internal details in development environment
+    # Use explicit check to prevent information leakage in production
+    include_details = settings.environment.lower() in ("dev", "development", "local", "debug")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=ErrorResponse(
             code="internal_error",
             message="Internal Server Error",
-            details=str(exc) if settings.environment == "dev" else None,
+            details=str(exc) if include_details else None,
         ).model_dump(),
     )
 

@@ -82,9 +82,36 @@ def build_features(
     df: pd.DataFrame, 
     engine: Engine, 
     feature_list: list[str],
-    region_name: Optional[str] = None
+    region_name: Optional[str] = None,
+    allow_missing_features: bool = True,
 ) -> pd.DataFrame:
-    """Build all required features for inference."""
+    """Build all required features for inference.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input detection data.
+    engine : Engine
+        SQLAlchemy database engine.
+    feature_list : list[str]
+        List of required feature columns.
+    region_name : Optional[str]
+        Region name for terrain features.
+    allow_missing_features : bool
+        If True (default for backwards compatibility), fills missing features with NaN and logs a warning.
+        If False, raises an error if any required features are missing.
+        Use allow_missing_features=False in production to ensure model integrity.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with features aligned to feature_list.
+        
+    Raises
+    ------
+    ValueError
+        If required features are missing and allow_missing_features is False.
+    """
     if df.empty:
         return pd.DataFrame(columns=feature_list)
 
@@ -97,10 +124,32 @@ def build_features(
         df = add_terrain_features(df, region_name)
 
     # 2. Align with training feature list
-    for col in feature_list:
-        if col not in df.columns:
-            LOGGER.warning(f"Feature column {col} missing during inference. Filling with NaN.")
-            df[col] = np.nan
+    missing_features = [col for col in feature_list if col not in df.columns]
+    
+    if missing_features:
+        if allow_missing_features:
+            for col in missing_features:
+                LOGGER.warning(f"Feature column {col} missing during inference. Filling with NaN.")
+                df[col] = np.nan
+        else:
+            error_msg = (
+                f"Missing {len(missing_features)} required feature(s) during inference: {missing_features}. "
+                "This may indicate that the feature pipeline is not producing expected outputs. "
+                "Set allow_missing_features=True to fill with NaN (if your model supports it)."
+            )
+            LOGGER.error(error_msg)
+            raise ValueError(error_msg)
+    
+    # Check for NaN values in required features (including newly filled ones)
+    features_with_nan = [
+        col for col in feature_list 
+        if col in df.columns and df[col].isna().any()
+    ]
+    if features_with_nan:
+        LOGGER.warning(
+            f"Features with NaN values detected: {features_with_nan}. "
+            "Model predictions may be affected."
+        )
 
     return df[feature_list]
 

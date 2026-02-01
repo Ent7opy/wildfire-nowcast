@@ -1,9 +1,33 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi_limiter.depends import RateLimiter
 
-from api.fires.repo import list_fire_detections_bbox_time
+from api.fires.repo import validate_bbox, list_fire_detections_bbox_time
+
+
+# Standard fire detection columns - defined centrally to stay in sync with schema
+FIRE_DETECTION_BASE_COLUMNS = [
+    "id",
+    "lat",
+    "lon",
+    "acq_time",
+    "confidence",
+    "brightness",
+    "bright_t31",
+    "frp",
+    "sensor",
+    "source",
+    "confidence_score",
+    "persistence_score",
+    "landcover_score",
+    "weather_score",
+    "false_source_masked",
+    "fire_likelihood",
+]
+
+FIRE_DETECTION_DENOISER_COLUMNS = ["denoised_score", "is_noise"]
 
 fires_router = APIRouter(prefix="/fires", tags=["fires"])
 
@@ -23,28 +47,17 @@ def _list_detections(
     include_denoiser_fields: bool,
     limit: Optional[int],
 ):
-    columns = [
-        "id",
-        "lat",
-        "lon",
-        "acq_time",
-        "confidence",
-        "brightness",
-        "bright_t31",
-        "frp",
-        "sensor",
-        "source",
-        "confidence_score",
-        "persistence_score",
-        "landcover_score",
-        "weather_score",
-        "false_source_masked",
-        "fire_likelihood",
-    ]
-    if include_denoiser_fields:
-        columns.extend(["denoised_score", "is_noise"])
+    # Validate bbox coordinates
+    try:
+        validate_bbox((min_lon, min_lat, max_lon, max_lat))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    detections = list_fire_detections_bbox_time(
+    columns = FIRE_DETECTION_BASE_COLUMNS.copy()
+    if include_denoiser_fields:
+        columns.extend(FIRE_DETECTION_DENOISER_COLUMNS)
+
+    result = list_fire_detections_bbox_time(
         bbox=(min_lon, min_lat, max_lon, max_lat),
         start_time=start_time,
         end_time=end_time,
@@ -55,11 +68,12 @@ def _list_detections(
         min_confidence=min_confidence,
         min_fire_likelihood=min_fire_likelihood,
     )
+    detections = result["data"]
 
     return {"count": len(detections), "detections": detections}
 
 
-@fires_router.get("")
+@fires_router.get("", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
 async def get_fires(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
     min_lat: float = Query(..., description="Minimum latitude (south boundary)"),
@@ -93,7 +107,7 @@ async def get_fires(
     )
 
 
-@fires_router.get("/detections")
+@fires_router.get("/detections", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
 async def get_detections(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
     min_lat: float = Query(..., description="Minimum latitude (south boundary)"),

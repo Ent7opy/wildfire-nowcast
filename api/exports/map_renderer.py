@@ -17,8 +17,22 @@ except ImportError:
 LOGGER = logging.getLogger(__name__)
 
 
+def _lon_to_mercator_x(lon: float) -> float:
+    """Convert longitude to Web Mercator X coordinate."""
+    return lon * 20037508.34 / 180.0
+
+
+def _lat_to_mercator_y(lat: float) -> float:
+    """Convert latitude to Web Mercator Y coordinate."""
+    # Clamp latitude to valid range to avoid math domain errors
+    lat = max(-85.05112878, min(85.05112878, lat))
+    lat_rad = math.radians(lat)
+    y = math.log(math.tan(math.pi / 4 + lat_rad / 2))
+    return y * 20037508.34 / math.pi
+
+
 def _lon_lat_to_pixel(lon: float, lat: float, bbox: tuple[float, float, float, float], width: int, height: int) -> tuple[int, int]:
-    """Convert lon/lat to pixel coordinates in Web Mercator projection.
+    """Convert lon/lat to pixel coordinates using Web Mercator projection.
     
     Args:
         lon: Longitude
@@ -32,10 +46,21 @@ def _lon_lat_to_pixel(lon: float, lat: float, bbox: tuple[float, float, float, f
     """
     min_lon, min_lat, max_lon, max_lat = bbox
     
-    # Simple linear mapping for MVP (good enough for small areas)
-    # For more accuracy, use proper Web Mercator math
-    x = int((lon - min_lon) / (max_lon - min_lon) * width)
-    y = int((max_lat - lat) / (max_lat - min_lat) * height)  # Flip Y
+    # Convert to Web Mercator coordinates
+    x_merc = _lon_to_mercator_x(lon)
+    y_merc = _lat_to_mercator_y(lat)
+    x_min = _lon_to_mercator_x(min_lon)
+    x_max = _lon_to_mercator_x(max_lon)
+    y_min = _lat_to_mercator_y(min_lat)
+    y_max = _lat_to_mercator_y(max_lat)
+    
+    # Map to pixel coordinates
+    x = int((x_merc - x_min) / (x_max - x_min) * width)
+    y = int((y_max - y_merc) / (y_max - y_min) * height)  # Flip Y
+    
+    # Clip to image bounds to prevent drawing artifacts
+    x = max(0, min(width - 1, x))
+    y = max(0, min(height - 1, y))
     
     return (x, y)
 
@@ -139,7 +164,7 @@ def render_map_png(
 
 
 def _draw_graticule(draw: ImageDraw.ImageDraw, bbox: tuple, width: int, height: int, font):
-    """Draw lat/lon grid lines."""
+    """Draw lat/lon grid lines using Web Mercator projection."""
     min_lon, min_lat, max_lon, max_lat = bbox
     
     # Determine grid spacing
@@ -150,10 +175,19 @@ def _draw_graticule(draw: ImageDraw.ImageDraw, bbox: tuple, width: int, height: 
     lon_step = max(0.1, round(lon_range / 5, 1))
     lat_step = max(0.1, round(lat_range / 5, 1))
     
+    # Pre-compute Mercator bounds for consistent scaling
+    x_min = _lon_to_mercator_x(min_lon)
+    x_max = _lon_to_mercator_x(max_lon)
+    y_min = _lat_to_mercator_y(min_lat)
+    y_max = _lat_to_mercator_y(max_lat)
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    
     # Draw vertical lines (longitude)
     lon = math.ceil(min_lon / lon_step) * lon_step
     while lon <= max_lon:
-        x = int((lon - min_lon) / lon_range * width)
+        x_merc = _lon_to_mercator_x(lon)
+        x = int((x_merc - x_min) / x_range * width)
         draw.line([(x, 0), (x, height)], fill=(200, 200, 200, 100), width=1)
         draw.text((x + 2, height - 15), f"{lon:.1f}°", fill=(120, 120, 120, 200), font=font)
         lon += lon_step
@@ -161,7 +195,8 @@ def _draw_graticule(draw: ImageDraw.ImageDraw, bbox: tuple, width: int, height: 
     # Draw horizontal lines (latitude)
     lat = math.ceil(min_lat / lat_step) * lat_step
     while lat <= max_lat:
-        y = int((max_lat - lat) / lat_range * height)
+        y_merc = _lat_to_mercator_y(lat)
+        y = int((y_max - y_merc) / y_range * height)
         draw.line([(0, y), (width, y)], fill=(200, 200, 200, 100), width=1)
         draw.text((5, y + 2), f"{lat:.1f}°", fill=(120, 120, 120, 200), font=font)
         lat += lat_step

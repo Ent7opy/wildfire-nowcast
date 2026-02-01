@@ -1,7 +1,8 @@
 """Main Streamlit application for Wildfire Nowcast & Forecast."""
 
 import streamlit as st
-from config.constants import TIME_WINDOW_OPTIONS
+
+from state import app_state
 
 # Import components
 from components.sidebar import render_sidebar
@@ -10,146 +11,197 @@ from components.click_details import render_click_details
 from components.forecast_status import render_forecast_status_polling
 
 
-def _get_matching_preset() -> str | None:
-    """Return the name of a preset that matches current filter state, or None."""
-    from config.theme import FilterPresets
-
-    current_start = st.session_state.get("time_range_hours_start", 24)
-    current_end = st.session_state.get("time_range_hours_end", 0)
-    current_likelihood = st.session_state.get("fires_min_likelihood", 0.0)
-    current_denoiser = st.session_state.get("fires_apply_denoiser", True)
-
-    for name, hours_start, hours_end, likelihood, denoiser in FilterPresets.all_presets():
-        if (hours_start == current_start and
-            hours_end == current_end and
-            abs(likelihood - current_likelihood) < 0.01 and
-            denoiser == current_denoiser):
-            return name
-    return None
-
-
-def _load_filters_from_url():
-    """Load filter state from URL query parameters on first load."""
-    params = st.query_params
-
-    # Load individual filter values from URL
-    if "start" in params:
-        try:
-            st.session_state.time_range_hours_start = int(params["start"])
-        except ValueError:
-            pass
-    if "end" in params:
-        try:
-            st.session_state.time_range_hours_end = int(params["end"])
-        except ValueError:
-            pass
-    if "likelihood" in params:
-        try:
-            st.session_state.fires_min_likelihood = float(params["likelihood"])
-        except ValueError:
-            pass
-    if "denoiser" in params:
-        st.session_state.fires_apply_denoiser = params["denoiser"].lower() == "true"
-
-    # Compute time_window string from loaded values
-    start_hours = st.session_state.get("time_range_hours_start", 24)
-    end_hours = st.session_state.get("time_range_hours_end", 0)
-    hours_window = start_hours - end_hours
-    if hours_window <= 6:
-        st.session_state.time_window = "Last 6 hours"
-    elif hours_window <= 12:
-        st.session_state.time_window = "Last 12 hours"
-    elif hours_window <= 24:
-        st.session_state.time_window = "Last 24 hours"
-    else:
-        st.session_state.time_window = "Last 48 hours"
-
-    # Determine active preset based on loaded filter values
-    # This ensures preset button highlights correctly when loading from URL
-    matching_preset = _get_matching_preset()
-    if matching_preset:
-        st.session_state.active_preset = matching_preset
-    elif any(key in params for key in ["start", "end", "likelihood", "denoiser"]):
-        # If URL has filter params but they don't match any preset, mark as Custom
-        st.session_state.active_preset = "Custom"
-
 def main() -> None:
     """Main application entry point."""
     # Page configuration - must be the first Streamlit command
     st.set_page_config(page_title="Wildfire Nowcast & Forecast", layout="wide")
 
-    # Minimal styling (Streamlit-supported CSS injection)
+    # Comprehensive dark theme + typography styling
     st.markdown(
         """
         <style>
-          /* CSS Custom Properties (for future theming capabilities) */
+          /* ── Design Tokens ──────────────────────────────────────────── */
           :root {
-            --fire-high: rgb(255, 0, 0);
-            --fire-medium: rgb(255, 165, 0);
-            --fire-low: rgb(255, 255, 0);
+            --bg-primary: #0a1628;
+            --bg-secondary: #1a1d29;
+            --bg-card: #252930;
+            --accent-ember: #ff6b35;
+            --accent-warning: #e63946;
+            --accent-amber: #fbbf24;
+            --text-primary: #e0e0e0;
+            --text-secondary: rgba(255,255,255,0.7);
+            --border-subtle: rgba(255,255,255,0.08);
+            --radius-card: 8px;
+            --radius-pill: 20px;
+            --font-stack: 'Inter', -apple-system, 'Segoe UI', 'Roboto', sans-serif;
+
+            /* Fire gradient */
+            --fire-very-high: rgb(220, 38, 38);
+            --fire-high: rgb(239, 68, 68);
+            --fire-medium: rgb(255, 107, 53);
+            --fire-low: rgb(251, 191, 36);
+            --fire-very-low: rgb(253, 224, 71);
+
+            /* Risk */
             --risk-low: rgb(34, 139, 34);
             --risk-medium: rgb(255, 215, 0);
             --risk-high: rgb(220, 20, 60);
-            --tooltip-bg: #333;
-            --tooltip-text: white;
           }
 
-          /* Floating Legend */
+          /* ── Typography ─────────────────────────────────────────────── */
+          html, body, [data-testid="stAppViewContainer"],
+          .stMarkdown, .stText, p, label {
+            font-family: var(--font-stack) !important;
+          }
+
+          /* Apply font to span/div but exclude Material icon elements */
+          span:not([class*="material"]):not([data-testid*="Icon"]),
+          div:not([class*="material"]) {
+            font-family: var(--font-stack);
+          }
+
+          h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+            font-family: var(--font-stack) !important;
+            font-weight: 600 !important;
+            font-size: 18px !important;
+            line-height: 1.3 !important;
+          }
+
+          h1 { font-size: 24px !important; }
+
+          p, .stMarkdown p, [data-testid="stText"] {
+            font-size: 14px !important;
+            line-height: 16px !important;
+          }
+
+          /* ── Layout spacing ─────────────────────────────────────────── */
+          .block-container {
+            padding-top: 1.25rem;
+            padding-bottom: 2rem;
+            transition: opacity 0.15s ease;
+          }
+
+          section[data-testid="stSidebar"] .block-container {
+            padding-top: 1.25rem;
+          }
+
+          div[data-testid="stCaptionContainer"] p {
+            margin-bottom: 0.35rem;
+          }
+
+          /* ── Sidebar card containers ────────────────────────────────── */
+          section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--bg-card) !important;
+            border-radius: var(--radius-card) !important;
+            border: 1px solid var(--border-subtle) !important;
+            padding: 12px !important;
+            margin-bottom: 8px !important;
+          }
+
+          /* ── Pill-shaped sidebar buttons ─────────────────────────────── */
+          section[data-testid="stSidebar"] .stButton > button {
+            border-radius: var(--radius-pill) !important;
+            font-size: 13px !important;
+            padding: 6px 16px !important;
+            transition: all 0.2s ease !important;
+          }
+
+          /* Active preset glow */
+          section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+            box-shadow: 0 0 12px rgba(255, 107, 53, 0.4) !important;
+            background-color: var(--accent-ember) !important;
+            border-color: var(--accent-ember) !important;
+          }
+
+          section[data-testid="stSidebar"] .stButton > button[kind="secondary"] {
+            background-color: var(--bg-card) !important;
+            border: 1px solid var(--border-subtle) !important;
+            color: var(--text-primary) !important;
+          }
+
+          section[data-testid="stSidebar"] .stButton > button[kind="secondary"]:hover {
+            background-color: rgba(255, 107, 53, 0.1) !important;
+            border-color: var(--accent-ember) !important;
+          }
+
+          /* ── Slider styling ─────────────────────────────────────────── */
+          [data-testid="stSlider"] [role="slider"] {
+            background-color: var(--accent-ember) !important;
+          }
+
+          [data-testid="stSlider"] [data-testid="stThumbValue"] {
+            color: var(--accent-ember) !important;
+          }
+
+          /* ── Export / link button styling ────────────────────────────── */
+          section[data-testid="stSidebar"] .stLinkButton a {
+            border-radius: var(--radius-card) !important;
+            transition: all 0.2s ease !important;
+            background: var(--bg-card) !important;
+            border: 1px solid var(--border-subtle) !important;
+            color: var(--text-primary) !important;
+          }
+
+          section[data-testid="stSidebar"] .stLinkButton a:hover {
+            background: rgba(255, 107, 53, 0.15) !important;
+            border-color: var(--accent-ember) !important;
+            box-shadow: 0 2px 8px rgba(255, 107, 53, 0.2) !important;
+          }
+
+          /* ── Prominent forecast button ──────────────────────────────── */
+          button[data-testid="stBaseButton-primary"] {
+            background: linear-gradient(135deg, #ff6b35, #e63946) !important;
+            border: none !important;
+            box-shadow: 0 4px 12px rgba(255, 107, 53, 0.3) !important;
+            font-size: 15px !important;
+            font-weight: 600 !important;
+            padding: 12px 24px !important;
+            transition: all 0.2s ease !important;
+          }
+
+          button[data-testid="stBaseButton-primary"]:hover {
+            box-shadow: 0 6px 16px rgba(255, 107, 53, 0.5) !important;
+            transform: translateY(-1px) !important;
+          }
+
+          /* ── Floating Legend (dark) ──────────────────────────────────── */
           #floating-legend {
             position: fixed;
             bottom: 20px;
             left: 20px;
-            background: rgba(255, 255, 255, 0.95);
-            border: 1px solid #ccc;
-            border-radius: 8px;
+            background: rgba(26, 29, 41, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: var(--radius-card);
             padding: 12px 16px;
             font-size: 13px;
             line-height: 1.5;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+            color: var(--text-primary);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
             z-index: 1000;
             max-width: 280px;
           }
 
-          /* Tighten overall top spacing a bit */
-          .block-container { padding-top: 1.25rem; padding-bottom: 2rem; }
+          /* ── Slide-in animation for details panel ───────────────────── */
+          @keyframes slideIn {
+            from { opacity: 0; transform: translateX(20px); }
+            to { opacity: 1; transform: translateX(0); }
+          }
 
-          /* Make sidebars feel less "boilerplate" */
-          section[data-testid="stSidebar"] .block-container { padding-top: 1.25rem; }
+          [data-testid="column"]:last-child {
+            animation: slideIn 0.3s ease-out;
+          }
 
-          /* Slightly tighten caption spacing */
-          div[data-testid="stCaptionContainer"] p { margin-bottom: 0.35rem; }
+          /* ── Toggle styling ─────────────────────────────────────────── */
+          [data-testid="stToggle"] label span {
+            color: var(--text-primary) !important;
+          }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Load filters from URL on first load (before setting defaults)
-    if "time_window" not in st.session_state:
-        _load_filters_from_url()
-
-    # Initialize session state with defaults for any missing values
-    if "time_window" not in st.session_state:
-        st.session_state.time_window = TIME_WINDOW_OPTIONS[0]
-    if "fires_min_likelihood" not in st.session_state:
-        st.session_state.fires_min_likelihood = 0.0
-    if "fires_apply_denoiser" not in st.session_state:
-        st.session_state.fires_apply_denoiser = True
-    if "time_range_hours_start" not in st.session_state:
-        st.session_state.time_range_hours_start = 24  # 24 hours ago
-    if "time_range_hours_end" not in st.session_state:
-        st.session_state.time_range_hours_end = 0  # Now
-    if "active_preset" not in st.session_state:
-        st.session_state.active_preset = None
-    if "show_fires" not in st.session_state:
-        st.session_state.show_fires = True
-    if "show_forecast" not in st.session_state:
-        st.session_state.show_forecast = False
-    if "show_risk" not in st.session_state:
-        st.session_state.show_risk = False
-    if "last_click" not in st.session_state:
-        st.session_state.last_click = None
-    if "selected_fire" not in st.session_state:
-        st.session_state.selected_fire = None
+    # Initialize centralized state (loads URL params on first run, restores on reruns)
+    app_state.initialize()
 
     # App identity
     st.title("Wildfire Nowcast & Forecast")
@@ -167,33 +219,25 @@ def main() -> None:
         render_sidebar()
 
     # Check for ongoing JIT forecast polling - display as status banner
-    if st.session_state.get("jit_job_id"):
+    if app_state.forecast_job.job_id:
         with st.container():
-            render_forecast_status_polling(st.session_state.jit_job_id)
+            render_forecast_status_polling(app_state.forecast_job.job_id)
 
     # Main content area - Map and details
     st.subheader("Map")
 
     # Active filters summary
-    filter_state = "on" if st.session_state.fires_apply_denoiser else "off"
     st.caption(
-        f"**Fires filters:** {st.session_state.time_window}, "
-        f"likelihood at least {st.session_state.fires_min_likelihood:.2f}, "
-        f"noise filter {filter_state}"
+        f"**Fires filters:** {app_state.time_window}, "
+        f"likelihood at least {app_state.filters.min_likelihood:.2f}"
     )
 
     # Render map + details side-by-side
     col_map, col_details = st.columns([3, 1], gap="large")
     with col_map:
         click_coords = render_map_view()
-        # Only update last_click if click actually happened
-        if click_coords is not None:
-            # Check if click is actually different to avoid unnecessary updates
-            current_click = st.session_state.get("last_click")
-            if (current_click is None or
-                current_click.get("lat") != click_coords.get("lat") or
-                current_click.get("lng") != click_coords.get("lng")):
-                st.session_state.last_click = click_coords
+        app_state.selection.update_click(click_coords)
+        app_state._persist()
 
         # Render floating legend overlay
         from components.legend import get_legend_html
@@ -202,8 +246,7 @@ def main() -> None:
             st.markdown(legend_html, unsafe_allow_html=True)
 
     with col_details:
-        st.subheader("Details")
-        render_click_details(st.session_state.last_click)
+        render_click_details(app_state.selection.last_click)
 
 if __name__ == "__main__":
     main()

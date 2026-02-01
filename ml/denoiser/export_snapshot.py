@@ -25,7 +25,8 @@ def export_training_snapshot(
     rule_version: str,
     out_dir: str,
     region_name: Optional[str] = None,
-    run_id: Optional[str] = None
+    run_id: Optional[str] = None,
+    max_neg_ratio: int = 20,
 ):
     """Export training and evaluation snapshots to Parquet."""
     if not run_id:
@@ -48,6 +49,7 @@ def export_training_snapshot(
         FROM fire_detections d
         JOIN fire_labels l ON d.id = l.fire_detection_id
         WHERE l.rule_version = :version
+          AND l.label IN ('POSITIVE', 'NEGATIVE')
           AND d.acq_time BETWEEN :start AND :end
           AND d.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
     """)
@@ -64,10 +66,30 @@ def export_training_snapshot(
         })
 
     if df.empty:
-        LOGGER.error("No labeled detections found for export.")
-        return
+        LOGGER.error("No labeled detections found for export. Check date range and rule_version.")
+        raise SystemExit(1)
 
-    LOGGER.info(f"Loaded {len(df)} labeled detections. Building features...")
+    LOGGER.info(f"Loaded {len(df)} labeled detections.")
+
+    # 1b. Downsample negatives to avoid hours-long feature computation.
+    # Keep all positives; randomly sample negatives up to max_neg_ratio × n_positives.
+    n_pos = (df["label"] == "POSITIVE").sum()
+    n_neg = (df["label"] == "NEGATIVE").sum()
+    max_neg = max(max_neg_ratio * max(n_pos, 1), 500)  # at least 500 negatives
+    if n_neg > max_neg:
+        LOGGER.info(
+            "Downsampling negatives: %d → %d (ratio %d:1 vs %d positives)",
+            n_neg, max_neg, max_neg_ratio, n_pos,
+        )
+        pos_df = df[df["label"] == "POSITIVE"]
+        neg_df = df[df["label"] == "NEGATIVE"].sample(n=max_neg, random_state=42)
+        df = pd.concat([pos_df, neg_df], ignore_index=True)
+    LOGGER.info(
+        "Samples for feature computation: %d (%d pos, %d neg)",
+        len(df), (df["label"] == "POSITIVE").sum(), (df["label"] == "NEGATIVE").sum(),
+    )
+
+    LOGGER.info("Building features...")
 
     # 2. Build features (X, y, meta)
     # Note: build_dataset handles add_firms_features, add_time_features, add_spatiotemporal_context, etc.
@@ -75,7 +97,7 @@ def export_training_snapshot(
 
     if X.empty:
         LOGGER.error("No valid training samples (POSITIVE/NEGATIVE) found after feature building.")
-        return
+        raise SystemExit(1)
 
     # Combine into a single dataframe for export
     full_df = pd.concat([X, meta], axis=1)
@@ -150,17 +172,22 @@ def main():
     parser.add_argument("--version", type=str, required=True, help="Rule version to export")
     parser.add_argument("--out", type=str, default="data/denoiser/snapshots", help="Output directory")
     parser.add_argument("--aoi", type=str, help="Region name for terrain features")
-    
+    parser.add_argument(
+        "--max-neg-ratio", type=int, default=20,
+        help="Max negatives = ratio × positives (default: 20). Prevents hours-long feature computation.",
+    )
+
     args = parser.parse_args()
-    
+
     start = datetime.strptime(args.start, "%Y-%m-%d")
     end = datetime.strptime(args.end, "%Y-%m-%d")
-    
+
     export_training_snapshot(
-        tuple(args.bbox), start, end, 
-        rule_version=args.version, 
-        out_dir=args.out, 
-        region_name=args.aoi
+        tuple(args.bbox), start, end,
+        rule_version=args.version,
+        out_dir=args.out,
+        region_name=args.aoi,
+        max_neg_ratio=args.max_neg_ratio,
     )
 
 if __name__ == "__main__":
