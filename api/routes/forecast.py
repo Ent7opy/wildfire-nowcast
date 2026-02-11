@@ -19,9 +19,10 @@ from pydantic import BaseModel, ConfigDict
 from api.config import settings
 from api.fires.repo import validate_bbox
 from api.forecast import repo
+from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
+from api.forecast.model_catalog import resolve_request_model_selection
 from api.forecast.worker import queue, run_jit_forecast_pipeline, handle_jit_pipeline_failure
 from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS_ENV
-from ml.spread.factory import normalize_model_selection
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
 DEFAULT_HORIZONS_HOURS = [24, 48, 72]
@@ -38,6 +39,7 @@ class GenerateForecastRequest(BaseModel):
     region_name: str | None = None
     forecast_reference_time: str | None = None  # ISO format string
     horizons_hours: list[int] | None = None
+    model_id: str | None = None
     model_name: str | None = None
     model_params: dict[str, Any] | None = None
     strict_inputs: bool | None = None
@@ -51,6 +53,7 @@ class JitForecastRequest(BaseModel):
     bbox: list[float]
     forecast_reference_time: str | None = None
     horizons_hours: list[int] | None = None
+    model_id: str | None = None
     model_name: str | None = None
     model_params: dict[str, Any] | None = None
     strict_inputs: bool | None = None
@@ -225,9 +228,10 @@ def create_jit_forecast(request: JitForecastRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        model_name, model_params = normalize_model_selection(
-            name=request.model_name,
-            params=request.model_params,
+        model_name, model_params, selected_model_id = resolve_request_model_selection(
+            model_id=request.model_id,
+            model_name=request.model_name,
+            model_params=request.model_params,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -249,6 +253,7 @@ def create_jit_forecast(request: JitForecastRequest):
     forecast_params = {
         "forecast_reference_time": forecast_reference_time.isoformat(),
         "horizons_hours": horizons_hours,
+        "model_id": selected_model_id,
         "model_name": model_name,
         "model_params": model_params,
         "strict_inputs": _resolve_strict_inputs(request.strict_inputs),
@@ -609,9 +614,10 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         raise HTTPException(status_code=422, detail=str(e))
 
     try:
-        model_name, model_params = normalize_model_selection(
-            name=request.model_name,
-            params=request.model_params,
+        model_name, model_params, selected_model_id = resolve_request_model_selection(
+            model_id=request.model_id,
+            model_name=request.model_name,
+            model_params=request.model_params,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -630,80 +636,83 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         thresholds=thresholds,
     )
 
-    if use_result_cache:
-        cached_run = repo.find_cached_forecast_run(
-            cache_key=cache_key,
-            freshness_minutes=settings.forecast_result_cache_ttl_minutes,
-        )
-    else:
-        cached_run = None
-
-    if cached_run:
-        run_id = int(cached_run["id"])
-        rasters = repo.list_rasters_for_run(run_id)
-        contours = repo.list_contours_for_run(run_id)
-
-        for r in rasters:
-            storage_path = str(r["storage_path"])
-            titiler_path = storage_path.replace(
-                settings.data_dir_local_prefix, settings.data_dir_titiler_mount
+    run_id: int | None = None
+    result_lock = acquire_forecast_result_lock(cache_key) if use_result_cache else None
+    try:
+        if use_result_cache:
+            cached_run = repo.find_cached_forecast_run(
+                cache_key=cache_key,
+                freshness_minutes=settings.forecast_result_cache_ttl_minutes,
             )
-            encoded_path = quote_plus(titiler_path)
-            r["tilejson_url"] = (
-                f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
-            )
+        else:
+            cached_run = None
 
-        return {
-            "run": {
-                "id": run_id,
-                "model_name": cached_run.get("model_name"),
-                "model_version": cached_run.get("model_version"),
-                "forecast_reference_time": (
-                    cached_run["forecast_reference_time"].isoformat()
-                    if cached_run.get("forecast_reference_time")
-                    else None
-                ),
-                "region_name": cached_run.get("region_name"),
-                "status": cached_run.get("status", "completed"),
-                "metadata": cached_run.get("metadata"),
+        if cached_run:
+            run_id = int(cached_run["id"])
+            rasters = repo.list_rasters_for_run(run_id)
+            contours = repo.list_contours_for_run(run_id)
+
+            for r in rasters:
+                storage_path = str(r["storage_path"])
+                titiler_path = storage_path.replace(
+                    settings.data_dir_local_prefix, settings.data_dir_titiler_mount
+                )
+                encoded_path = quote_plus(titiler_path)
+                r["tilejson_url"] = (
+                    f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
+                )
+
+            return {
+                "run": {
+                    "id": run_id,
+                    "model_name": cached_run.get("model_name"),
+                    "model_version": cached_run.get("model_version"),
+                    "forecast_reference_time": (
+                        cached_run["forecast_reference_time"].isoformat()
+                        if cached_run.get("forecast_reference_time")
+                        else None
+                    ),
+                    "region_name": cached_run.get("region_name"),
+                    "status": cached_run.get("status", "completed"),
+                    "metadata": cached_run.get("metadata"),
+                },
+                "rasters": rasters,
+                "contours": {"type": "FeatureCollection", "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": json.loads(c["geom_geojson"]),
+                        "properties": {
+                            "horizon_hours": c["horizon_hours"],
+                            "threshold": c["threshold"],
+                        },
+                    }
+                    for c in contours
+                ]},
+                "cache_hit": True,
+                "cache_source": "forecast_result",
+            }
+
+        model_version = get_model_version_hint(model_name)
+        try:
+            model = get_spread_model(model_name, model_params)
+        except (ValueError, FileNotFoundError) as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+        # Create run record
+        run_id = create_spread_forecast_run(
+            region_name=request.region_name,
+            model_name=model_name,
+            model_version=model_version,
+            forecast_reference_time=forecast_reference_time,
+            bbox=bbox,
+            metadata={
+                "model_id": selected_model_id,
+                "model_params": model_params,
+                "strict_inputs": strict_inputs,
+                "cache_key": cache_key,
             },
-            "rasters": rasters,
-            "contours": {"type": "FeatureCollection", "features": [
-                {
-                    "type": "Feature",
-                    "geometry": json.loads(c["geom_geojson"]),
-                    "properties": {
-                        "horizon_hours": c["horizon_hours"],
-                        "threshold": c["threshold"],
-                    },
-                }
-                for c in contours
-            ]},
-            "cache_hit": True,
-            "cache_source": "forecast_result",
-        }
+        )
 
-    model_version = get_model_version_hint(model_name)
-    try:
-        model = get_spread_model(model_name, model_params)
-    except (ValueError, FileNotFoundError) as e:
-        raise HTTPException(status_code=422, detail=str(e))
-
-    # Create run record
-    run_id = create_spread_forecast_run(
-        region_name=request.region_name,
-        model_name=model_name,
-        model_version=model_version,
-        forecast_reference_time=forecast_reference_time,
-        bbox=bbox,
-        metadata={
-            "model_params": model_params,
-            "strict_inputs": strict_inputs,
-            "cache_key": cache_key,
-        },
-    )
-
-    try:
         # Create request
         spread_request = SpreadForecastRequest(
             region_name=request.region_name,
@@ -800,8 +809,12 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         }
 
     except ForecastInputFallbackError as e:
-        finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(e)})
+        if run_id is not None:
+            finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(e)})
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(e)})
+        if run_id is not None:
+            finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(e)})
         raise
+    finally:
+        release_forecast_result_lock(result_lock)

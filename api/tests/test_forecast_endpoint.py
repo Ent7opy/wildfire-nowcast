@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -184,21 +185,31 @@ def test_create_jit_forecast_valid_bbox():
 
 
 def test_create_jit_forecast_accepts_new_optional_fields():
-    """Test POST /forecast/jit accepts explicit model and strict/cache flags."""
+    """Test POST /forecast/jit accepts model_id + strict/cache flags."""
     from uuid import uuid4
+    from api.forecast.model_catalog import get_spread_model_catalog
 
     mock_job_id = uuid4()
     mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
+    catalog_json = json.dumps(
+        {
+            "spread_v1_prod": {
+                "model_name": "LearnedSpreadModelV1",
+                "model_params": {"model_run_dir": "models/spread_v1/run_123"},
+            }
+        }
+    )
 
-    with patch("api.forecast.repo.create_jit_job", return_value=mock_job) as mock_create, \
+    get_spread_model_catalog.cache_clear()
+    with patch.dict(os.environ, {"SPREAD_MODEL_CATALOG_JSON": catalog_json}), \
+         patch("api.forecast.repo.create_jit_job", return_value=mock_job) as mock_create, \
          patch("api.forecast.worker.queue.enqueue"):
 
         response = client.post(
             "/forecast/jit",
             json={
                 "bbox": [20.0, 40.0, 21.0, 41.0],
-                "model_name": "LearnedSpreadModelV1",
-                "model_params": {"model_run_dir": "models/spread_v1/run_123"},
+                "model_id": "spread_v1_prod",
                 "strict_inputs": True,
                 "use_result_cache": False,
             },
@@ -207,10 +218,12 @@ def test_create_jit_forecast_accepts_new_optional_fields():
         assert response.status_code == 202
         create_args = mock_create.call_args.args
         persisted_request = create_args[1]
+        assert persisted_request["model_id"] == "spread_v1_prod"
         assert persisted_request["model_name"] == "LearnedSpreadModelV1"
         assert persisted_request["model_params"] == {"model_run_dir": "models/spread_v1/run_123"}
         assert persisted_request["strict_inputs"] is True
         assert persisted_request["use_result_cache"] is False
+    get_spread_model_catalog.cache_clear()
 
 
 def test_create_jit_forecast_defaults_new_flags():
@@ -294,19 +307,65 @@ def test_create_jit_forecast_invalid_model_selection():
     assert "Unsupported model" in response.json()["detail"]
 
 
-def test_create_jit_forecast_missing_required_model_params():
-    """Test POST /forecast/jit fails for v1 model without model_run_dir."""
+def test_create_jit_forecast_rejects_direct_artifact_paths():
+    """Test POST /forecast/jit rejects raw model artifact paths in request."""
     response = client.post(
         "/forecast/jit",
         json={
             "bbox": [20.0, 40.0, 21.0, 41.0],
-            "model_name": "LearnedSpreadModelV1",
-            "model_params": {},
+            "model_name": "HeuristicSpreadModelV0",
+            "model_params": {"model_run_dir": "/tmp/unsafe"},
         },
     )
 
     assert response.status_code == 422
-    assert "model_params.model_run_dir is required" in response.json()["detail"]
+    assert "Direct model artifact paths are not allowed" in response.json()["detail"]
+
+
+def test_create_jit_forecast_unknown_model_id():
+    """Test POST /forecast/jit rejects unknown model_id."""
+    response = client.post(
+        "/forecast/jit",
+        json={
+            "bbox": [20.0, 40.0, 21.0, 41.0],
+            "model_id": "unknown",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported model_id" in response.json()["detail"]
+
+
+def test_create_jit_forecast_rejects_tampered_catalog_signature():
+    """Test POST /forecast/jit fails when catalog signature verification fails."""
+    catalog_json = json.dumps(
+        {
+            "spread_v1_prod": {
+                "model_name": "LearnedSpreadModelV1",
+                "model_params": {"model_run_dir": "models/spread_v1/run_123"},
+            }
+        }
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "SPREAD_MODEL_CATALOG_JSON": catalog_json,
+            "SPREAD_MODEL_CATALOG_REQUIRE_SIGNATURE": "true",
+            "SPREAD_MODEL_CATALOG_SIGNING_KEY": "test-key",
+            "SPREAD_MODEL_CATALOG_SIGNATURE": "bad-signature",
+        },
+    ):
+        response = client.post(
+            "/forecast/jit",
+            json={
+                "bbox": [20.0, 40.0, 21.0, 41.0],
+                "model_id": "spread_v1_prod",
+            },
+        )
+
+    assert response.status_code == 422
+    assert "signature mismatch" in response.json()["detail"]
 
 
 def test_create_jit_forecast_invalid_bbox_length():
@@ -489,6 +548,8 @@ def test_generate_forecast_returns_cached_result_when_available():
     ]
 
     with patch("api.forecast.repo.build_forecast_result_cache_key", return_value="abc"), \
+         patch("api.routes.forecast.acquire_forecast_result_lock", return_value=object()) as mock_lock, \
+         patch("api.routes.forecast.release_forecast_result_lock") as mock_release, \
          patch("api.forecast.repo.find_cached_forecast_run", return_value=cached_run), \
          patch("api.forecast.repo.list_rasters_for_run", return_value=cached_rasters), \
          patch("api.forecast.repo.list_contours_for_run", return_value=cached_contours):
@@ -509,6 +570,8 @@ def test_generate_forecast_returns_cached_result_when_available():
     assert payload["cache_hit"] is True
     assert payload["cache_source"] == "forecast_result"
     assert payload["run"]["id"] == 123
+    mock_lock.assert_called_once_with("abc")
+    mock_release.assert_called_once()
 
 
 def test_get_jit_status_failed_with_error():

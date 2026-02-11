@@ -18,7 +18,9 @@ from rq import Queue
 
 from api.config import settings
 from api.forecast import repo
-from ml.spread.factory import get_model_version_hint, get_spread_model, normalize_model_selection
+from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
+from api.forecast.model_catalog import resolve_request_model_selection
+from ml.spread.factory import get_model_version_hint, get_spread_model
 from ml.spread.service import STRICT_FORECAST_INPUTS_ENV
 
 # Add ingest module to path for imports
@@ -136,6 +138,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
     
     run_dir: Optional[Path] = None
     run_id: Optional[int] = None
+    result_lock: Optional[RedisLock] = None
 
     try:
         # Parse request-level settings first (used by cache key and strict behavior).
@@ -153,9 +156,10 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             else _env_bool(STRICT_FORECAST_INPUTS_ENV, default=False)
         )
         use_result_cache = bool(forecast_params.get("use_result_cache", True))
-        model_name, model_params = normalize_model_selection(
-            name=forecast_params.get("model_name"),
-            params=forecast_params.get("model_params"),
+        model_name, model_params, selected_model_id = resolve_request_model_selection(
+            model_id=forecast_params.get("model_id"),
+            model_name=forecast_params.get("model_name"),
+            model_params=forecast_params.get("model_params"),
         )
 
         cache_key = repo.build_forecast_result_cache_key(
@@ -168,6 +172,9 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             strict_inputs=strict_inputs,
             thresholds=thresholds,
         )
+
+        if use_result_cache:
+            result_lock = acquire_forecast_result_lock(cache_key)
 
         # Exact-result cache can bypass the full pipeline.
         if use_result_cache:
@@ -337,6 +344,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             forecast_reference_time=forecast_time,
             bbox=bbox,
             metadata={
+                "model_id": selected_model_id,
                 "model_params": model_params,
                 "strict_inputs": strict_inputs,
                 "cache_key": cache_key,
@@ -464,3 +472,5 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
         # Clean up any artifacts if they were created
         if run_dir is not None:
             _cleanup_run_artifacts(run_dir)
+    finally:
+        release_forecast_result_lock(result_lock)
