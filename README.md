@@ -52,3 +52,18 @@ Run as a continuous scheduler:
 ```bash
 make ingest-orchestrator ARGS="--loop --poll-seconds 30"
 ```
+
+Reliability controls:
+
+```bash
+make ingest-orchestrator ARGS="--loop --max-retries 3 --retry-backoff-seconds 20 --enforce-freshness"
+```
+
+The orchestrator writes a JSON dashboard by default to:
+`data/ingest/orchestrator_dashboard.json`
+
+API/UI stale-data status endpoint:
+
+```bash
+curl http://localhost:8000/health/data-freshness
+```

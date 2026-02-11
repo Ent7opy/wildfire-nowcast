@@ -125,6 +125,54 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(["firms", "firms", "weather"], calls)
         self.assertTrue(clock.sleeps)
 
+    def test_run_once_retries_then_succeeds(self):
+        calls = {"count": 0}
+        sleeps: list[float] = []
+
+        def _flaky() -> int:
+            calls["count"] += 1
+            return 0 if calls["count"] == 2 else 1
+
+        jobs = [ScheduledJob(name="firms", interval_seconds=60.0, runner=_flaky)]
+
+        exit_code = run_once(
+            jobs,
+            stop_on_error=True,
+            max_retries=2,
+            retry_backoff_seconds=3.0,
+            sleep_fn=sleeps.append,
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(2, calls["count"])
+        self.assertEqual([3.0], sleeps)
+
+    def test_run_once_skips_fresh_job_when_enforced(self):
+        calls = {"count": 0}
+
+        def _runner() -> int:
+            calls["count"] += 1
+            return 0
+
+        jobs = [ScheduledJob(name="firms", interval_seconds=60.0, runner=_runner)]
+
+        def _snapshot():
+            return {
+                "sources": {
+                    "firms": {"state": "fresh"},
+                }
+            }
+
+        exit_code = run_once(
+            jobs,
+            stop_on_error=True,
+            enforce_freshness=True,
+            status_snapshot_fn=_snapshot,
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(0, calls["count"])
+
 
 if __name__ == "__main__":
     unittest.main()

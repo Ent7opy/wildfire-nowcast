@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
+from ingest.config import REPO_ROOT
 from ingest.dem_preprocess import DemIngestSettings, ingest_terrain_for_bbox
 from ingest.firms_ingest import run_firms_ingest
 from ingest.nifc_perimeters_ingest import fetch_nifc_perimeters, ingest_perimeters
@@ -28,6 +30,7 @@ JOB_WEATHER = "weather"
 JOB_TERRAIN = "terrain"
 JOB_PERIMETERS = "perimeters"
 JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_TERRAIN, JOB_PERIMETERS)
+DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 
 @dataclass
@@ -38,6 +41,19 @@ class ScheduledJob:
     interval_seconds: float
     runner: Callable[[], int]
     next_run_at: float = 0.0
+
+
+@dataclass
+class JobMetrics:
+    attempts: int = 0
+    successes: int = 0
+    failures: int = 0
+    retries: int = 0
+    skipped_fresh: int = 0
+    last_exit_code: int | None = None
+    last_outcome: str | None = None
+    last_started_at: str | None = None
+    last_finished_at: str | None = None
 
 
 class ShutdownFlag:
@@ -51,6 +67,10 @@ class ShutdownFlag:
 
     def is_set(self) -> bool:
         return self._stop
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -97,6 +117,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stop-on-error",
         action="store_true",
         help="Stop orchestration immediately if any job fails.",
+    )
+    parser.add_argument(
+        "--enforce-freshness",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip jobs whose source data is already fresh according to /health/data-freshness policy.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Maximum retries per failed job run.",
+    )
+    parser.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=15.0,
+        help="Linear backoff base in seconds between retries.",
+    )
+    parser.add_argument(
+        "--dashboard-path",
+        type=str,
+        default=str(DEFAULT_DASHBOARD_PATH),
+        help="Write orchestrator freshness/retry/idempotency dashboard JSON to this path.",
     )
 
     parser.add_argument(
@@ -233,6 +277,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _validate_args(args: argparse.Namespace) -> None:
     if args.poll_seconds <= 0:
         raise SystemExit("--poll-seconds must be > 0")
+    if args.max_retries < 0:
+        raise SystemExit("--max-retries must be >= 0")
+    if args.retry_backoff_seconds < 0:
+        raise SystemExit("--retry-backoff-seconds must be >= 0")
 
     selected = _parse_jobs(args.jobs)
     if not selected:
@@ -369,14 +417,155 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
     ]
 
 
-def run_once(jobs: Sequence[ScheduledJob], *, stop_on_error: bool) -> int:
-    failures = 0
-    for job in jobs:
+def _safe_data_status_snapshot() -> dict[str, Any] | None:
+    try:
+        from api.data_status import build_data_status_snapshot
+
+        return build_data_status_snapshot()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        LOGGER.warning("Unable to load data freshness snapshot: %s", exc)
+        return None
+
+
+def _init_metrics(jobs: Sequence[ScheduledJob]) -> dict[str, JobMetrics]:
+    return {job.name: JobMetrics() for job in jobs}
+
+
+def _write_dashboard(
+    *,
+    dashboard_path: Path | None,
+    metrics: dict[str, JobMetrics],
+    snapshot: dict[str, Any] | None,
+) -> None:
+    if dashboard_path is None:
+        return
+
+    payload = {
+        "generated_at": _utc_now().isoformat(),
+        "metrics": {name: asdict(value) for name, value in metrics.items()},
+        "data_freshness": snapshot,
+        "idempotency_dashboard": (snapshot or {}).get("idempotency_dashboard"),
+    }
+
+    dashboard_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dashboard_path.with_suffix(dashboard_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path.replace(dashboard_path)
+
+
+def _is_job_fresh(job_name: str, snapshot: dict[str, Any] | None) -> bool:
+    if not snapshot:
+        return False
+    source = snapshot.get("sources", {}).get(job_name, {})
+    return str(source.get("state", "")).lower() == "fresh"
+
+
+def _run_job_with_retries(
+    *,
+    job: ScheduledJob,
+    metric: JobMetrics,
+    max_retries: int,
+    retry_backoff_seconds: float,
+    sleep_fn: Callable[[float], None],
+) -> int:
+    attempts = 0
+    while True:
+        attempts += 1
+        metric.attempts += 1
+        metric.last_started_at = _utc_now().isoformat()
         code = _run_with_logging(job.name, job.runner)
+        metric.last_finished_at = _utc_now().isoformat()
+        metric.last_exit_code = code
+
+        if code == 0:
+            metric.successes += 1
+            metric.last_outcome = "success"
+            return 0
+
+        if attempts > max_retries:
+            metric.failures += 1
+            metric.last_outcome = "failed"
+            return 1
+
+        metric.retries += 1
+        sleep_seconds = retry_backoff_seconds * attempts
+        LOGGER.warning(
+            "Retrying job=%s attempt=%s/%s in %.1fs",
+            job.name,
+            attempts,
+            max_retries,
+            sleep_seconds,
+        )
+        if sleep_seconds > 0:
+            sleep_fn(sleep_seconds)
+
+
+def _execute_job(
+    *,
+    job: ScheduledJob,
+    metrics: dict[str, JobMetrics],
+    max_retries: int,
+    retry_backoff_seconds: float,
+    enforce_freshness: bool,
+    dashboard_path: Path | None,
+    sleep_fn: Callable[[float], None],
+    status_snapshot_fn: Callable[[], dict[str, Any] | None],
+) -> int:
+    metric = metrics[job.name]
+    should_capture_snapshot = enforce_freshness or dashboard_path is not None
+
+    snapshot = status_snapshot_fn() if enforce_freshness else None
+    if enforce_freshness and _is_job_fresh(job.name, snapshot):
+        metric.skipped_fresh += 1
+        metric.last_outcome = "skipped_fresh"
+        metric.last_finished_at = _utc_now().isoformat()
+        LOGGER.info("Skipping fresh job=%s", job.name)
+        _write_dashboard(dashboard_path=dashboard_path, metrics=metrics, snapshot=snapshot)
+        return 0
+
+    code = _run_job_with_retries(
+        job=job,
+        metric=metric,
+        max_retries=max_retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+        sleep_fn=sleep_fn,
+    )
+
+    fresh_snapshot = status_snapshot_fn() if should_capture_snapshot else None
+    _write_dashboard(dashboard_path=dashboard_path, metrics=metrics, snapshot=fresh_snapshot)
+    return code
+
+
+def run_once(
+    jobs: Sequence[ScheduledJob],
+    *,
+    stop_on_error: bool,
+    max_retries: int = 0,
+    retry_backoff_seconds: float = 0.0,
+    enforce_freshness: bool = False,
+    dashboard_path: Path | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    status_snapshot_fn: Callable[[], dict[str, Any] | None] = _safe_data_status_snapshot,
+) -> int:
+    failures = 0
+    metrics = _init_metrics(jobs)
+
+    for job in jobs:
+        code = _execute_job(
+            job=job,
+            metrics=metrics,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            enforce_freshness=enforce_freshness,
+            dashboard_path=dashboard_path,
+            sleep_fn=sleep_fn,
+            status_snapshot_fn=status_snapshot_fn,
+        )
         if code != 0:
             failures += 1
             if stop_on_error:
                 return 1
+
     return 1 if failures else 0
 
 
@@ -387,10 +576,17 @@ def run_scheduler(
     run_on_start: bool,
     stop_on_error: bool,
     stop_requested: Callable[[], bool],
+    max_retries: int = 0,
+    retry_backoff_seconds: float = 0.0,
+    enforce_freshness: bool = False,
+    dashboard_path: Path | None = None,
+    status_snapshot_fn: Callable[[], dict[str, Any] | None] = _safe_data_status_snapshot,
     now_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> int:
     failures = 0
+    metrics = _init_metrics(jobs)
+
     now = now_fn()
     for job in jobs:
         job.next_run_at = now if run_on_start else now + job.interval_seconds
@@ -401,7 +597,16 @@ def run_scheduler(
 
         if due:
             for job in due:
-                code = _run_with_logging(job.name, job.runner)
+                code = _execute_job(
+                    job=job,
+                    metrics=metrics,
+                    max_retries=max_retries,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                    enforce_freshness=enforce_freshness,
+                    dashboard_path=dashboard_path,
+                    sleep_fn=sleep_fn,
+                    status_snapshot_fn=status_snapshot_fn,
+                )
                 if code != 0:
                     failures += 1
                     if stop_on_error:
@@ -420,9 +625,17 @@ def run_scheduler(
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     jobs = build_jobs(args)
+    dashboard_path = Path(args.dashboard_path)
 
     if not args.loop:
-        exit_code = run_once(jobs, stop_on_error=args.stop_on_error)
+        exit_code = run_once(
+            jobs,
+            stop_on_error=args.stop_on_error,
+            max_retries=args.max_retries,
+            retry_backoff_seconds=args.retry_backoff_seconds,
+            enforce_freshness=args.enforce_freshness,
+            dashboard_path=dashboard_path,
+        )
         raise SystemExit(exit_code)
 
     shutdown = ShutdownFlag()
@@ -435,6 +648,10 @@ def main(argv: list[str] | None = None) -> None:
         run_on_start=args.run_on_start,
         stop_on_error=args.stop_on_error,
         stop_requested=shutdown.is_set,
+        max_retries=args.max_retries,
+        retry_backoff_seconds=args.retry_backoff_seconds,
+        enforce_freshness=args.enforce_freshness,
+        dashboard_path=dashboard_path,
     )
     raise SystemExit(exit_code)
 

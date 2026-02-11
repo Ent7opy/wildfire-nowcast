@@ -22,6 +22,7 @@ __all__ = [
     "generate_forecast",
     "create_jit_forecast",
     "get_jit_forecast_status",
+    "get_data_freshness_status",
 ]
 
 
@@ -76,6 +77,11 @@ def get_jit_forecast_status(job_id: str) -> JsonDict:
             url=str(resp.url),
             response_text=resp.text,
         ) from e
+
+
+def get_data_freshness_status() -> JsonDict:
+    """Get data freshness, stale behavior, and idempotency dashboard snapshot."""
+    return _get_json("/health/data-freshness", params={})
 
 
 @dataclass

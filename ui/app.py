@@ -9,6 +9,7 @@ from components.sidebar import render_sidebar
 from components.map_view import render_map_view
 from components.click_details import render_click_details
 from components.forecast_status import render_forecast_status_polling
+from components.data_freshness_banner import render_data_freshness_banner
 
 
 def main() -> None:
@@ -213,6 +214,7 @@ def main() -> None:
         "Use them as situational awareness, not as operational guidance.",
         icon="ℹ️",
     )
+    render_data_freshness_banner()
 
     # Sidebar controls
     with st.sidebar:

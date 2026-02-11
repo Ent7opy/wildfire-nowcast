@@ -274,7 +274,8 @@ def ingest_perimeters(features: List[Dict[str, Any]]) -> int:
             acres = EXCLUDED.acres,
             cause = EXCLUDED.cause,
             state = EXCLUDED.state,
-            meta = EXCLUDED.meta
+            meta = EXCLUDED.meta,
+            created_at = NOW()
     """).bindparams(bindparam("meta", type_=JSON))
 
     batch_size = 100

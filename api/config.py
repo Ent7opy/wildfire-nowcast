@@ -95,5 +95,31 @@ class AppSettings(BaseSettings):
         default=60, validation_alias="FORECAST_RESULT_CACHE_TTL_MINUTES"
     )
 
+    # Data freshness/staleness policy (minutes)
+    data_stale_firms_minutes: int = Field(
+        default=180, validation_alias="DATA_STALE_FIRMS_MINUTES"
+    )
+    data_stale_weather_minutes: int = Field(
+        default=360, validation_alias="DATA_STALE_WEATHER_MINUTES"
+    )
+    data_stale_terrain_minutes: int = Field(
+        default=10080, validation_alias="DATA_STALE_TERRAIN_MINUTES"
+    )
+    data_stale_perimeters_minutes: int = Field(
+        default=4320, validation_alias="DATA_STALE_PERIMETERS_MINUTES"
+    )
+    data_status_critical_sources: str = Field(
+        default="firms,weather",
+        validation_alias="DATA_STATUS_CRITICAL_SOURCES",
+    )
+
+    @property
+    def data_status_critical_sources_set(self) -> set[str]:
+        return {
+            source.strip().lower()
+            for source in self.data_status_critical_sources.split(",")
+            if source.strip()
+        }
+
 
 settings = AppSettings()
