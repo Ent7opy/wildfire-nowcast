@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-label-v2 denoiser-train-v2 denoiser-pipeline-v2 ingest-nifc-perimeters hindcast-build weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-label-v2 denoiser-train-v2 denoiser-pipeline-v2 ingest-nifc-perimeters hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -265,6 +265,9 @@ denoiser-pipeline-v2: ## End-to-end denoiser v2: migrate â†’ ingest perimeters â
 
 hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG="configs/hindcast_smoke_grid_balkans_mvp.yaml")
 	$(UV) run --project ml -m ml.spread.hindcast_builder --config $(if $(CONFIG),$(CONFIG),configs/hindcast_smoke_grid_balkans_mvp.yaml) $(ARGS)
+
+spread-champion-challenger: ## Evaluate spread champion vs challenger (pass CONFIG="configs/spread_champion_challenger.yaml")
+	$(UV) run --project ml -m ml.eval_spread_champion_challenger --config $(if $(CONFIG),$(CONFIG),configs/spread_champion_challenger.yaml) $(ARGS)
 
 weather-bias: ## Run weather bias analysis (pass ARGS="--forecast-nc ... --truth-nc ...")
 	$(UV) run --project ml -m ml.weather_bias_analysis $(ARGS)

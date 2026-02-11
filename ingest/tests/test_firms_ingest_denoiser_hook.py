@@ -10,6 +10,7 @@ class TestFirmsIngestDenoiserHook(unittest.TestCase):
         self.config.denoiser_threshold = 0.7
         self.config.denoiser_batch_size = 100
         self.config.denoiser_region = "balkans"
+        self.config.denoiser_strict_features = False
 
     @patch("subprocess.run")
     @patch("ingest.firms_ingest.log_event")
@@ -59,6 +60,18 @@ class TestFirmsIngestDenoiserHook(unittest.TestCase):
             _run_denoiser_inference(batch_id=1, config=self.config)
             mock_run.assert_not_called()
 
+    @patch("subprocess.run")
+    @patch("ingest.firms_ingest.log_event")
+    def test_run_denoiser_inference_passes_strict_features_flag(self, _mock_log, mock_run):
+        self.config.denoiser_strict_features = True
+        mock_result = MagicMock()
+        mock_result.stdout = '{"batch_id": 1, "noise_percent": 10.0}'
+        mock_result.returncode = 0
+        mock_run.return_value = mock_result
+
+        _run_denoiser_inference(batch_id=1, config=self.config)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--strict-features", cmd)
+
 if __name__ == "__main__":
     unittest.main()
-

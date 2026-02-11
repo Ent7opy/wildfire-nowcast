@@ -11,12 +11,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
 from ml.calibration import SpreadProbabilityCalibrator
 from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadForecast, SpreadModel
+from ml.spread.factory import get_model_version_hint
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0
 from ml.weather_bias_correction import resolve_weather_bias_corrector_path_full
 
@@ -31,10 +32,15 @@ SPREAD_CALIBRATOR_RUN_DIR_ENV = "SPREAD_CALIBRATOR_RUN_DIR"
 SPREAD_CALIBRATOR_ROOT_ENV = "SPREAD_CALIBRATOR_ROOT"
 WEATHER_BIAS_CORRECTOR_PATH_ENV = "WEATHER_BIAS_CORRECTOR_PATH"
 WEATHER_BIAS_CORRECTOR_ROOT_ENV = "WEATHER_BIAS_CORRECTOR_ROOT"
+STRICT_FORECAST_INPUTS_ENV = "STRICT_FORECAST_INPUTS"
 
 # Performance limit: avoid OOM/high latency for very large areas in synchronous calls.
 # 200x200 = 40,000 cells. At 0.01 degree, this is roughly 220km x 220km.
 MAX_AOI_CELLS = 40000
+
+
+class ForecastInputFallbackError(RuntimeError):
+    """Raised when strict mode forbids fallback input data."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +53,9 @@ class SpreadForecastRequest:
     horizons_hours: Sequence[int] = DEFAULT_HORIZONS_HOURS
     fire_lookback_hours: int = 24
     fire_cluster_id: str | None = None
-    # Model configuration overrides can be added here if needed.
+    strict_inputs: bool | None = None
+    model_name: str | None = None
+    model_params: dict[str, Any] | None = None
 
 
 def run_spread_forecast(
@@ -123,6 +131,13 @@ def run_spread_forecast(
         fire_lookback_hours=request.fire_lookback_hours,
         weather_bias_corrector_path=weather_bias_corrector_path,
     )
+
+    _enforce_no_fallback_if_strict(
+        request=request,
+        weather_fallback_used=inputs_package.weather_fallback_used,
+        weather_fallback_reason=getattr(inputs_package.weather_cube, "attrs", {}).get("weather_fallback_reason"),
+        terrain_fallback_used=inputs_package.terrain_fallback_used,
+    )
     
     # Check AOI size limit
     n_cells = inputs_package.window.lat.size * inputs_package.window.lon.size
@@ -150,14 +165,35 @@ def run_spread_forecast(
 
     # 2. Select and run model
     if model is None:
-        # Default to baseline heuristic
-        model = HeuristicSpreadModelV0()
+        # Default to baseline heuristic unless request includes explicit selection.
+        if request.model_name:
+            from ml.spread.factory import get_spread_model
+
+            model = get_spread_model(request.model_name, request.model_params)
+        else:
+            model = HeuristicSpreadModelV0()
     
     model_name = model.__class__.__name__
     LOGGER.info(f"Using spread model: {model_name}")
 
     # 3. Predict
     forecast = model.predict(inputs_package.to_model_input())
+    if forecast.model_name == "unknown" or not forecast.model_name:
+        forecast = SpreadForecast(
+            probabilities=forecast.probabilities,
+            forecast_reference_time=forecast.forecast_reference_time,
+            horizons_hours=forecast.horizons_hours,
+            model_name=model_name,
+            model_version=forecast.model_version,
+        )
+    if not forecast.model_version:
+        forecast = SpreadForecast(
+            probabilities=forecast.probabilities,
+            forecast_reference_time=forecast.forecast_reference_time,
+            horizons_hours=forecast.horizons_hours,
+            model_name=forecast.model_name,
+            model_version=get_model_version_hint(forecast.model_name),
+        )
 
     # 4. Validate output contract
     forecast.validate()
@@ -254,6 +290,42 @@ def run_spread_forecast(
     )
 
     return forecast
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_strict_inputs(strict_inputs: bool | None) -> bool:
+    if strict_inputs is not None:
+        return bool(strict_inputs)
+    return _env_bool(STRICT_FORECAST_INPUTS_ENV, default=False)
+
+
+def _enforce_no_fallback_if_strict(
+    *,
+    request: SpreadForecastRequest,
+    weather_fallback_used: bool,
+    weather_fallback_reason: str | None,
+    terrain_fallback_used: bool,
+) -> None:
+    if not _resolve_strict_inputs(request.strict_inputs):
+        return
+
+    reasons: list[str] = []
+    if weather_fallback_used:
+        reason = weather_fallback_reason or "unknown"
+        reasons.append(f"weather fallback used ({reason})")
+    # Location-based forecasts intentionally use terrain fallback when region_name=None.
+    if request.region_name is not None and terrain_fallback_used:
+        reasons.append("terrain fallback used")
+    if reasons:
+        raise ForecastInputFallbackError(
+            "Strict forecast inputs mode rejected this request: " + "; ".join(reasons)
+        )
 
 
 def _resolve_latest_run_dir(root: Path) -> Path | None:
@@ -473,4 +545,3 @@ def _apply_spread_calibration(
         has_uncalibrated_horizons=has_uncalibrated_horizons,
         uncalibrated_horizons=missing_h if has_uncalibrated_horizons else [],
     )
-

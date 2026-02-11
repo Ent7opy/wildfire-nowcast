@@ -1,0 +1,31 @@
+# Champion vs challenger spread evaluation config
+
+region_name: "smoke_grid"
+bbox: [22.0, 40.0, 24.0, 42.0]
+start_time: "2025-07-01T00:00:00+00:00"
+end_time: "2025-08-31T23:59:59+00:00"
+
+horizons_hours: [24, 48, 72]
+min_detections: 10
+interval_hours: 24
+label_window_hours: 3
+ece_bins: 10
+
+champion:
+  model_name: "HeuristicSpreadModelV0"
+  model_params: {}
+
+challenger:
+  model_name: "LearnedSpreadModelV1"
+  model_params:
+    model_run_dir: "models/spread_v1/<run_id>"
+
+# Conservative promotion gate
+# Challenger is recommended only when primary metrics improve on all horizons
+# and no major secondary regression exceeds these thresholds.
+gate:
+  max_pr_auc_drop: 0.01
+  max_iou_drop: 0.02
+
+plots:
+  enabled: true

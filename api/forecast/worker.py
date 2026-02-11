@@ -1,6 +1,8 @@
 """RQ worker tasks for JIT forecast pipeline."""
 import logging
+import json
 import os
+import re
 import shutil
 import sys
 import traceback
@@ -16,6 +18,8 @@ from rq import Queue
 
 from api.config import settings
 from api.forecast import repo
+from ml.spread.factory import get_model_version_hint, get_spread_model, normalize_model_selection
+from ml.spread.service import STRICT_FORECAST_INPUTS_ENV
 
 # Add ingest module to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +34,57 @@ queue = Queue(connection=redis_conn, default_timeout=120)
 
 # Lock timeout in seconds for cache operations
 CACHE_LOCK_TIMEOUT = 300  # 5 minutes
+DEFAULT_HORIZONS_HOURS = [24, 48, 72]
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_forecast_reference_time() -> datetime:
+    return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _parse_iso8601_datetime(value: str) -> datetime:
+    if not value or not value.strip():
+        raise ValueError("Empty datetime string")
+
+    value = value.strip()
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
+    tz_pattern = r"([+-])(\d{2})(\d{2})$"
+    match = re.search(tz_pattern, value)
+    if match and ":00" not in value[-6:]:
+        sign, hours, minutes = match.groups()
+        value = value[:match.start()] + f"{sign}{hours}:{minutes}"
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as e:
+        raise ValueError(f"Invalid ISO 8601 datetime format: {value}") from e
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed
+
+
+def _normalize_horizons(horizons_hours: list[int] | None) -> list[int]:
+    if horizons_hours is None:
+        return list(DEFAULT_HORIZONS_HOURS)
+    if len(horizons_hours) == 0:
+        raise ValueError("horizons_hours must not be empty.")
+    normalized = [int(h) for h in horizons_hours]
+    if any(h <= 0 for h in normalized):
+        raise ValueError("horizons_hours must contain only positive integers.")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("horizons_hours must not contain duplicates.")
+    return normalized
 
 
 def _acquire_cache_lock(lock_key: str, timeout: int = CACHE_LOCK_TIMEOUT) -> Optional[RedisLock]:
@@ -83,6 +138,96 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
     run_id: Optional[int] = None
 
     try:
+        # Parse request-level settings first (used by cache key and strict behavior).
+        if forecast_params.get("forecast_reference_time"):
+            forecast_time = _parse_iso8601_datetime(forecast_params["forecast_reference_time"])
+        else:
+            forecast_time = _default_forecast_reference_time()
+
+        horizons_hours = _normalize_horizons(forecast_params.get("horizons_hours"))
+        thresholds = [float(t) for t in forecast_params.get("thresholds", [0.3, 0.5, 0.7])]
+        region_name = forecast_params.get("region_name")
+        strict_inputs = bool(
+            forecast_params.get("strict_inputs")
+            if forecast_params.get("strict_inputs") is not None
+            else _env_bool(STRICT_FORECAST_INPUTS_ENV, default=False)
+        )
+        use_result_cache = bool(forecast_params.get("use_result_cache", True))
+        model_name, model_params = normalize_model_selection(
+            name=forecast_params.get("model_name"),
+            params=forecast_params.get("model_params"),
+        )
+
+        cache_key = repo.build_forecast_result_cache_key(
+            bbox=bbox,
+            forecast_reference_time=forecast_time,
+            horizons_hours=horizons_hours,
+            region_name=region_name,
+            model_name=model_name,
+            model_params=model_params,
+            strict_inputs=strict_inputs,
+            thresholds=thresholds,
+        )
+
+        # Exact-result cache can bypass the full pipeline.
+        if use_result_cache:
+            cached_run = repo.find_cached_forecast_run(
+                cache_key=cache_key,
+                freshness_minutes=settings.forecast_result_cache_ttl_minutes,
+            )
+        else:
+            cached_run = None
+
+        if cached_run:
+            cached_run_id = int(cached_run["id"])
+            rasters = repo.list_rasters_for_run(cached_run_id)
+            contours = repo.list_contours_for_run(cached_run_id)
+            tilejson_urls = []
+            for r in rasters:
+                storage_path = str(r["storage_path"])
+                titiler_path = storage_path.replace(
+                    settings.data_dir_local_prefix, settings.data_dir_titiler_mount
+                )
+                encoded_path = quote_plus(titiler_path)
+                tilejson_url = (
+                    f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
+                )
+                tilejson_urls.append(tilejson_url)
+
+            repo.update_jit_job_status(
+                job_id,
+                "completed",
+                result={
+                    "terrain_id": None,
+                    "weather_run_id": None,
+                    "forecast_run_id": cached_run_id,
+                    "run_id": cached_run_id,
+                    "tilejson_urls": tilejson_urls,
+                    "contours": {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "geometry": json.loads(c["geom_geojson"]),
+                                "properties": {
+                                    "horizon_hours": c["horizon_hours"],
+                                    "threshold": c["threshold"],
+                                },
+                            }
+                            for c in contours
+                        ],
+                    },
+                    "cache_hit": True,
+                    "cache_source": "forecast_result",
+                },
+            )
+            logger.info(
+                "JIT forecast pipeline cache hit: job_id=%s run_id=%s",
+                job_id,
+                cached_run_id,
+            )
+            return
+
         from ingest.dem_preprocess import ingest_terrain_for_bbox
         from ingest.weather_ingest import ingest_weather_for_bbox
 
@@ -122,18 +267,6 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                         logger.info(f"JIT job {job_id}: terrain ingestion completed, terrain_id={terrain_id}")
                 finally:
                     terrain_lock.release()
-
-        # Parse forecast_reference_time or use current time
-        if forecast_params.get("forecast_reference_time"):
-            forecast_time = datetime.fromisoformat(
-                forecast_params["forecast_reference_time"].replace("Z", "+00:00")
-            )
-            if forecast_time.tzinfo is None:
-                forecast_time = forecast_time.replace(tzinfo=timezone.utc)
-        else:
-            forecast_time = datetime.now(timezone.utc)
-
-        horizons_hours = forecast_params.get("horizons_hours", [24, 48, 72])
         max_horizon = max(horizons_hours)
 
         # Check for cached weather (within 6 hour freshness window) with distributed lock
@@ -193,25 +326,37 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
         )
         from api.core.grid import GridSpec, get_grid_window_for_bbox
 
+        model = get_spread_model(model_name, model_params)
+        model_version = get_model_version_hint(model_name)
+
         # Create forecast run record
         run_id = create_spread_forecast_run(
-            region_name=forecast_params.get("region_name", "location-based"),
-            model_name="HeuristicSpreadModelV0",
-            model_version="v0",
+            region_name=region_name or "location-based",
+            model_name=model_name,
+            model_version=model_version,
             forecast_reference_time=forecast_time,
             bbox=bbox,
+            metadata={
+                "model_params": model_params,
+                "strict_inputs": strict_inputs,
+                "cache_key": cache_key,
+                "use_result_cache": use_result_cache,
+            },
         )
         logger.info(f"JIT job {job_id}: created forecast run_id={run_id}")
 
         try:
             # Build and execute forecast request
             request = SpreadForecastRequest(
-                region_name=forecast_params.get("region_name"),
+                region_name=region_name,
                 bbox=bbox,
                 forecast_reference_time=forecast_time,
                 horizons_hours=horizons_hours,
+                strict_inputs=strict_inputs,
+                model_name=model_name,
+                model_params=model_params,
             )
-            forecast = run_spread_forecast(request)
+            forecast = run_spread_forecast(request, model=model)
             logger.info(f"JIT job {job_id}: forecast computation completed")
 
             # Capture operational metadata
@@ -225,6 +370,11 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                     "calibration_source",
                     "calibration_run_id",
                     "calibration_run_dir",
+                    "weather_fallback_used",
+                    "weather_fallback_reason",
+                    "terrain_fallback_used",
+                    "model_name",
+                    "model_version",
                 ):
                     if k in attrs:
                         extra_meta[k] = attrs.get(k)
@@ -232,22 +382,21 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 pass
 
             # Derive grid and window for persistence
-            if forecast_params.get("region_name"):
+            if region_name:
                 from api.fires.service import get_region_grid_spec
-                grid = get_region_grid_spec(forecast_params["region_name"])
+                grid = get_region_grid_spec(region_name)
             else:
                 grid = GridSpec.from_bbox(bbox)
             window = get_grid_window_for_bbox(grid, bbox, clip=True)
 
             # Save rasters
-            region_dir_name = forecast_params.get("region_name", "location-based")
+            region_dir_name = region_name or "location-based"
             run_dir = REPO_ROOT / "data" / "forecasts" / region_dir_name / f"run_{run_id}"
             raster_records = save_forecast_rasters(forecast, grid, window, run_dir, emit_cog=True)
             insert_spread_forecast_rasters(run_id, raster_records)
             logger.info(f"JIT job {job_id}: saved {len(raster_records)} rasters")
 
             # Generate and persist contours
-            thresholds = forecast_params.get("thresholds", [0.3, 0.5, 0.7])
             contour_records = build_contour_records(
                 forecast=forecast, grid=grid, window=window, thresholds=thresholds
             )
@@ -274,7 +423,24 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 "terrain_id": terrain_id,
                 "weather_run_id": weather_run_id,
                 "forecast_run_id": run_id,
+                "run_id": run_id,
                 "tilejson_urls": tilejson_urls,
+                "contours": {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "geometry": json.loads(c["geom_geojson"]),
+                            "properties": {
+                                "horizon_hours": c["horizon_hours"],
+                                "threshold": c["threshold"],
+                            },
+                        }
+                        for c in contour_records
+                    ],
+                },
+                "cache_hit": False,
+                "cache_source": None,
             }
 
             repo.update_jit_job_status(job_id, "completed", result=result)

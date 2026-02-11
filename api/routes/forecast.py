@@ -4,27 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime, timezone
 import re
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 from urllib.parse import quote_plus
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from fastapi_limiter.depends import RateLimiter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from api.config import settings
 from api.fires.repo import validate_bbox
 from api.forecast import repo
 from api.forecast.worker import queue, run_jit_forecast_pipeline, handle_jit_pipeline_failure
+from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS_ENV
+from ml.spread.factory import normalize_model_selection
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
+DEFAULT_HORIZONS_HOURS = [24, 48, 72]
 
 
 class GenerateForecastRequest(BaseModel):
     """Request body for generating a forecast on-the-fly."""
+    model_config = ConfigDict(protected_namespaces=())
+
     min_lon: float
     min_lat: float
     max_lon: float
@@ -32,19 +38,60 @@ class GenerateForecastRequest(BaseModel):
     region_name: str | None = None
     forecast_reference_time: str | None = None  # ISO format string
     horizons_hours: list[int] | None = None
+    model_name: str | None = None
+    model_params: dict[str, Any] | None = None
+    strict_inputs: bool | None = None
+    use_result_cache: bool | None = None
 
 
 class JitForecastRequest(BaseModel):
     """Request body for JIT forecast pipeline (bbox-only, no region_name required)."""
+    model_config = ConfigDict(protected_namespaces=())
+
     bbox: list[float]
     forecast_reference_time: str | None = None
     horizons_hours: list[int] | None = None
+    model_name: str | None = None
+    model_params: dict[str, Any] | None = None
+    strict_inputs: bool | None = None
+    use_result_cache: bool | None = None
 
 
 class JitForecastResponse(BaseModel):
     """Response body for JIT forecast pipeline initiation."""
     job_id: UUID
     status: str
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_strict_inputs(strict_inputs: bool | None) -> bool:
+    if strict_inputs is not None:
+        return bool(strict_inputs)
+    return _env_bool(STRICT_FORECAST_INPUTS_ENV, default=False)
+
+
+def _default_forecast_reference_time() -> datetime:
+    """Return a stable default reference time for cache-friendly requests."""
+    return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _normalize_horizons(horizons_hours: list[int] | None) -> list[int]:
+    if horizons_hours is None:
+        return list(DEFAULT_HORIZONS_HOURS)
+    if len(horizons_hours) == 0:
+        raise ValueError("horizons_hours must not be empty.")
+    normalized = [int(h) for h in horizons_hours]
+    if any(h <= 0 for h in normalized):
+        raise ValueError("horizons_hours must contain only positive integers.")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("horizons_hours must not contain duplicates.")
+    return normalized
 
 
 @forecast_router.get("", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
@@ -177,9 +224,35 @@ def create_jit_forecast(request: JitForecastRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    try:
+        model_name, model_params = normalize_model_selection(
+            name=request.model_name,
+            params=request.model_params,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        horizons_hours = _normalize_horizons(request.horizons_hours)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        forecast_reference_time = (
+            _parse_iso8601_datetime(request.forecast_reference_time)
+            if request.forecast_reference_time
+            else _default_forecast_reference_time()
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     forecast_params = {
-        "forecast_reference_time": request.forecast_reference_time,
-        "horizons_hours": request.horizons_hours or [24, 48, 72],
+        "forecast_reference_time": forecast_reference_time.isoformat(),
+        "horizons_hours": horizons_hours,
+        "model_name": model_name,
+        "model_params": model_params,
+        "strict_inputs": _resolve_strict_inputs(request.strict_inputs),
+        "use_result_cache": True if request.use_result_cache is None else bool(request.use_result_cache),
     }
 
     job = repo.create_jit_job(bbox, {"bbox": request.bbox, **forecast_params})
@@ -499,6 +572,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
     Requires region_name to determine the grid for persistence.
     """
     from ml.spread.service import SpreadForecastRequest, run_spread_forecast
+    from ml.spread.factory import get_model_version_hint, get_spread_model
     from api.fires.service import get_region_grid_spec
     from api.core.grid import get_grid_window_for_bbox
     from ingest.spread_forecast import save_forecast_rasters, build_contour_records
@@ -519,24 +593,114 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
     bbox = (request.min_lon, request.min_lat, request.max_lon, request.max_lat)
 
     # Parse horizons
-    if request.horizons_hours:
-        horizons = request.horizons_hours
-    else:
-        horizons = [24, 48, 72]
+    try:
+        horizons = _normalize_horizons(request.horizons_hours)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Parse forecast_reference_time with robust ISO 8601 handling
-    if request.forecast_reference_time:
-        forecast_reference_time = _parse_iso8601_datetime(request.forecast_reference_time)
+    try:
+        forecast_reference_time = (
+            _parse_iso8601_datetime(request.forecast_reference_time)
+            if request.forecast_reference_time
+            else _default_forecast_reference_time()
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        model_name, model_params = normalize_model_selection(
+            name=request.model_name,
+            params=request.model_params,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    strict_inputs = _resolve_strict_inputs(request.strict_inputs)
+    use_result_cache = True if request.use_result_cache is None else bool(request.use_result_cache)
+    thresholds = [0.3, 0.5, 0.7]
+    cache_key = repo.build_forecast_result_cache_key(
+        bbox=bbox,
+        forecast_reference_time=forecast_reference_time,
+        horizons_hours=[int(h) for h in horizons],
+        region_name=request.region_name,
+        model_name=model_name,
+        model_params=model_params,
+        strict_inputs=strict_inputs,
+        thresholds=thresholds,
+    )
+
+    if use_result_cache:
+        cached_run = repo.find_cached_forecast_run(
+            cache_key=cache_key,
+            freshness_minutes=settings.forecast_result_cache_ttl_minutes,
+        )
     else:
-        forecast_reference_time = datetime.now(timezone.utc)
+        cached_run = None
+
+    if cached_run:
+        run_id = int(cached_run["id"])
+        rasters = repo.list_rasters_for_run(run_id)
+        contours = repo.list_contours_for_run(run_id)
+
+        for r in rasters:
+            storage_path = str(r["storage_path"])
+            titiler_path = storage_path.replace(
+                settings.data_dir_local_prefix, settings.data_dir_titiler_mount
+            )
+            encoded_path = quote_plus(titiler_path)
+            r["tilejson_url"] = (
+                f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
+            )
+
+        return {
+            "run": {
+                "id": run_id,
+                "model_name": cached_run.get("model_name"),
+                "model_version": cached_run.get("model_version"),
+                "forecast_reference_time": (
+                    cached_run["forecast_reference_time"].isoformat()
+                    if cached_run.get("forecast_reference_time")
+                    else None
+                ),
+                "region_name": cached_run.get("region_name"),
+                "status": cached_run.get("status", "completed"),
+                "metadata": cached_run.get("metadata"),
+            },
+            "rasters": rasters,
+            "contours": {"type": "FeatureCollection", "features": [
+                {
+                    "type": "Feature",
+                    "geometry": json.loads(c["geom_geojson"]),
+                    "properties": {
+                        "horizon_hours": c["horizon_hours"],
+                        "threshold": c["threshold"],
+                    },
+                }
+                for c in contours
+            ]},
+            "cache_hit": True,
+            "cache_source": "forecast_result",
+        }
+
+    model_version = get_model_version_hint(model_name)
+    try:
+        model = get_spread_model(model_name, model_params)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     # Create run record
     run_id = create_spread_forecast_run(
         region_name=request.region_name,
-        model_name="HeuristicSpreadModelV0",
-        model_version="v0",
+        model_name=model_name,
+        model_version=model_version,
         forecast_reference_time=forecast_reference_time,
         bbox=bbox,
+        metadata={
+            "model_params": model_params,
+            "strict_inputs": strict_inputs,
+            "cache_key": cache_key,
+        },
     )
 
     try:
@@ -546,10 +710,13 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             bbox=bbox,
             forecast_reference_time=forecast_reference_time,
             horizons_hours=horizons,
+            strict_inputs=strict_inputs,
+            model_name=model_name,
+            model_params=model_params,
         )
 
         # Generate forecast
-        forecast = run_spread_forecast(spread_request)
+        forecast = run_spread_forecast(spread_request, model=model)
 
         # Get grid and window for persistence
         grid = get_region_grid_spec(request.region_name)
@@ -565,7 +732,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             forecast=forecast,
             grid=grid,
             window=window,
-            thresholds=[0.3, 0.5, 0.7],
+            thresholds=thresholds,
         )
         insert_spread_forecast_contours(run_id, contour_records)
 
@@ -578,9 +745,13 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                 "weather_bias_corrector_path",
                 "calibration_applied",
                 "calibration_source",
+                "calibration_run_id",
+                "calibration_run_dir",
                 "weather_fallback_used",
                 "weather_fallback_reason",
                 "terrain_fallback_used",
+                "model_name",
+                "model_version",
             ):
                 if k in attrs:
                     extra_meta[k] = attrs.get(k)
@@ -605,8 +776,8 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         return {
             "run": {
                 "id": run_id,
-                "model_name": "HeuristicSpreadModelV0",
-                "model_version": "v0",
+                "model_name": forecast.model_name,
+                "model_version": forecast.model_version or model_version,
                 "forecast_reference_time": forecast_reference_time.isoformat(),
                 "region_name": request.region_name,
                 "status": "completed",
@@ -624,9 +795,13 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                 }
                 for c in contour_records
             ]},
+            "cache_hit": False,
+            "cache_source": None,
         }
 
+    except ForecastInputFallbackError as e:
+        finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(e)})
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         finalize_spread_forecast_run(run_id, status="failed", extra_metadata={"error": str(e)})
         raise
-

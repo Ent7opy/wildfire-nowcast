@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
@@ -11,6 +14,44 @@ from sqlalchemy.dialects.postgresql import JSONB
 from api.db import get_engine
 
 BBox = tuple[float, float, float, float]
+
+
+def _normalize_bbox(bbox: BBox) -> list[float]:
+    return [round(float(v), 6) for v in bbox]
+
+
+def _normalize_reference_time(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(microsecond=0).isoformat()
+
+
+def build_forecast_result_cache_key(
+    *,
+    bbox: BBox,
+    forecast_reference_time: datetime,
+    horizons_hours: list[int],
+    region_name: str | None,
+    model_name: str,
+    model_params: dict[str, Any] | None,
+    strict_inputs: bool,
+    thresholds: list[float],
+) -> str:
+    """Build deterministic hash key for exact forecast-result cache reuse."""
+    payload = {
+        "bbox": _normalize_bbox(bbox),
+        "forecast_reference_time": _normalize_reference_time(forecast_reference_time),
+        "horizons_hours": [int(h) for h in horizons_hours],
+        "region_name": region_name,
+        "model_name": model_name,
+        "model_params": model_params or {},
+        "strict_inputs": bool(strict_inputs),
+        "thresholds": [round(float(t), 6) for t in thresholds],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def get_latest_forecast_run(
@@ -53,6 +94,47 @@ def get_latest_forecast_run(
             },
         ).mappings().first()
 
+    return dict(row) if row else None
+
+
+def find_cached_forecast_run(
+    cache_key: str,
+    *,
+    freshness_minutes: int = 60,
+) -> dict[str, Any] | None:
+    """Find a completed run by exact request cache key with recent freshness."""
+    stmt = text(
+        """
+        SELECT
+            r.id,
+            r.model_name,
+            r.model_version,
+            r.forecast_reference_time,
+            r.region_name,
+            r.status,
+            r.metadata,
+            ST_AsGeoJSON(r.bbox) AS bbox_geojson
+        FROM spread_forecast_runs r
+        WHERE r.status = 'completed'
+          AND r.created_at > now() - make_interval(mins => :freshness_minutes)
+          AND r.metadata->>'cache_key' = :cache_key
+          AND EXISTS (
+            SELECT 1
+            FROM spread_forecast_rasters rr
+            WHERE rr.run_id = r.id
+          )
+        ORDER BY r.created_at DESC
+        LIMIT 1
+        """
+    )
+    with get_engine().begin() as conn:
+        row = conn.execute(
+            stmt,
+            {
+                "cache_key": cache_key,
+                "freshness_minutes": int(freshness_minutes),
+            },
+        ).mappings().first()
     return dict(row) if row else None
 
 
@@ -233,4 +315,3 @@ def find_cached_weather(bbox: BBox, freshness_hours: int = 6, required_horizon_h
         }).mappings().first()
 
     return dict(row) if row else None
-
