@@ -26,6 +26,48 @@ MODEL_REGISTRY: dict[str, tuple[Type[SpreadModel], Type[Any]]] = {
     "LearnedSpreadModelV1": (LearnedSpreadModelV1, LearnedSpreadV1Config),
 }
 
+MODEL_DEFAULT_NAME = "HeuristicSpreadModelV0"
+MODEL_VERSION_HINTS: dict[str, str] = {
+    "HeuristicSpreadModelV0": "v0",
+    "LearnedSpreadModelV1": "v1",
+}
+
+
+def normalize_model_selection(
+    name: str | None,
+    params: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Validate and normalize model selection from external inputs.
+
+    Returns a concrete `(model_name, model_params)` pair suitable for
+    `get_spread_model`.
+    """
+    selected_name = name or MODEL_DEFAULT_NAME
+    if selected_name not in MODEL_REGISTRY:
+        raise ValueError(
+            f"Unsupported model: {selected_name}. Available: {list(MODEL_REGISTRY.keys())}"
+        )
+
+    if params is None:
+        normalized_params: dict[str, Any] = {}
+    elif isinstance(params, dict):
+        normalized_params = dict(params)
+    else:
+        raise ValueError("model_params must be an object/dict when provided.")
+
+    # Learned model requires an explicit artifacts directory.
+    if selected_name == "LearnedSpreadModelV1" and not normalized_params.get("model_run_dir"):
+        raise ValueError(
+            "model_params.model_run_dir is required for LearnedSpreadModelV1."
+        )
+
+    return selected_name, normalized_params
+
+
+def get_model_version_hint(model_name: str) -> str:
+    """Return a stable version hint for persistence metadata."""
+    return MODEL_VERSION_HINTS.get(model_name, "")
+
 
 def get_spread_model(name: str, params: dict[str, Any] | None = None) -> SpreadModel:
     """Instantiate a spread model by name with optional parameters.
@@ -48,11 +90,7 @@ def get_spread_model(name: str, params: dict[str, Any] | None = None) -> SpreadM
     ValueError
         If the model name is not found in the registry.
     """
-    if name not in MODEL_REGISTRY:
-        raise ValueError(f"Unsupported model: {name}. Available: {list(MODEL_REGISTRY.keys())}")
-
-    if params is None:
-        params = {}
+    name, params = normalize_model_selection(name=name, params=params)
 
     model_cls, config_cls = MODEL_REGISTRY[name]
 
@@ -79,4 +117,3 @@ def get_spread_model(name: str, params: dict[str, Any] | None = None) -> SpreadM
 
     # Default: assume model_cls(config=model_config)
     return model_cls(config=model_config)  # type: ignore
-

@@ -1,4 +1,6 @@
 import json
+import os
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -182,6 +184,190 @@ def test_create_jit_forecast_valid_bbox():
         mock_enqueue.assert_called_once()
 
 
+def test_create_jit_forecast_accepts_new_optional_fields():
+    """Test POST /forecast/jit accepts model_id + strict/cache flags."""
+    from uuid import uuid4
+    from api.forecast.model_catalog import get_spread_model_catalog
+
+    mock_job_id = uuid4()
+    mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
+    catalog_json = json.dumps(
+        {
+            "spread_v1_prod": {
+                "model_name": "LearnedSpreadModelV1",
+                "model_params": {"model_run_dir": "models/spread_v1/run_123"},
+            }
+        }
+    )
+
+    get_spread_model_catalog.cache_clear()
+    with patch.dict(os.environ, {"SPREAD_MODEL_CATALOG_JSON": catalog_json}), \
+         patch("api.forecast.repo.create_jit_job", return_value=mock_job) as mock_create, \
+         patch("api.forecast.worker.queue.enqueue"):
+
+        response = client.post(
+            "/forecast/jit",
+            json={
+                "bbox": [20.0, 40.0, 21.0, 41.0],
+                "model_id": "spread_v1_prod",
+                "strict_inputs": True,
+                "use_result_cache": False,
+            },
+        )
+
+        assert response.status_code == 202
+        create_args = mock_create.call_args.args
+        persisted_request = create_args[1]
+        assert persisted_request["model_id"] == "spread_v1_prod"
+        assert persisted_request["model_name"] == "LearnedSpreadModelV1"
+        assert persisted_request["model_params"] == {"model_run_dir": "models/spread_v1/run_123"}
+        assert persisted_request["strict_inputs"] is True
+        assert persisted_request["use_result_cache"] is False
+    get_spread_model_catalog.cache_clear()
+
+
+def test_create_jit_forecast_defaults_new_flags():
+    """Test POST /forecast/jit defaults strict=false and result-cache=true."""
+    from uuid import uuid4
+
+    mock_job_id = uuid4()
+    mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
+
+    with patch("api.forecast.repo.create_jit_job", return_value=mock_job) as mock_create, \
+         patch("api.forecast.worker.queue.enqueue"):
+        response = client.post(
+            "/forecast/jit",
+            json={"bbox": [20.0, 40.0, 21.0, 41.0]},
+        )
+
+        assert response.status_code == 202
+        persisted_request = mock_create.call_args.args[1]
+        assert persisted_request["strict_inputs"] is False
+        assert persisted_request["use_result_cache"] is True
+
+
+def test_create_jit_forecast_invalid_horizons_rejected():
+    """Test POST /forecast/jit rejects duplicate/invalid horizons."""
+    response = client.post(
+        "/forecast/jit",
+        json={
+            "bbox": [20.0, 40.0, 21.0, 41.0],
+            "horizons_hours": [24, 24],
+        },
+    )
+    assert response.status_code == 422
+    assert "horizons_hours must not contain duplicates" in response.json()["detail"]
+
+
+def test_create_jit_forecast_invalid_reference_time_rejected():
+    """Test POST /forecast/jit rejects invalid ISO reference time."""
+    response = client.post(
+        "/forecast/jit",
+        json={
+            "bbox": [20.0, 40.0, 21.0, 41.0],
+            "forecast_reference_time": "2026-13-99T25:00:00Z",
+        },
+    )
+    assert response.status_code == 422
+    assert "Invalid ISO 8601 datetime format" in response.json()["detail"]
+
+
+def test_create_jit_forecast_default_reference_time_is_canonical():
+    """Test POST /forecast/jit stores canonical default forecast_reference_time."""
+    from uuid import uuid4
+
+    mock_job_id = uuid4()
+    mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
+    canonical_time = datetime(2026, 2, 11, 14, 0, 0, tzinfo=timezone.utc)
+
+    with patch("api.routes.forecast._default_forecast_reference_time", return_value=canonical_time), \
+         patch("api.forecast.repo.create_jit_job", return_value=mock_job) as mock_create, \
+         patch("api.forecast.worker.queue.enqueue"):
+        response = client.post(
+            "/forecast/jit",
+            json={"bbox": [20.0, 40.0, 21.0, 41.0]},
+        )
+
+    assert response.status_code == 202
+    persisted_request = mock_create.call_args.args[1]
+    assert persisted_request["forecast_reference_time"] == canonical_time.isoformat()
+
+
+def test_create_jit_forecast_invalid_model_selection():
+    """Test POST /forecast/jit fails fast for unknown model."""
+    response = client.post(
+        "/forecast/jit",
+        json={
+            "bbox": [20.0, 40.0, 21.0, 41.0],
+            "model_name": "NoSuchModel",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported model" in response.json()["detail"]
+
+
+def test_create_jit_forecast_rejects_direct_artifact_paths():
+    """Test POST /forecast/jit rejects raw model artifact paths in request."""
+    response = client.post(
+        "/forecast/jit",
+        json={
+            "bbox": [20.0, 40.0, 21.0, 41.0],
+            "model_name": "HeuristicSpreadModelV0",
+            "model_params": {"model_run_dir": "/tmp/unsafe"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Direct model artifact paths are not allowed" in response.json()["detail"]
+
+
+def test_create_jit_forecast_unknown_model_id():
+    """Test POST /forecast/jit rejects unknown model_id."""
+    response = client.post(
+        "/forecast/jit",
+        json={
+            "bbox": [20.0, 40.0, 21.0, 41.0],
+            "model_id": "unknown",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported model_id" in response.json()["detail"]
+
+
+def test_create_jit_forecast_rejects_tampered_catalog_signature():
+    """Test POST /forecast/jit fails when catalog signature verification fails."""
+    catalog_json = json.dumps(
+        {
+            "spread_v1_prod": {
+                "model_name": "LearnedSpreadModelV1",
+                "model_params": {"model_run_dir": "models/spread_v1/run_123"},
+            }
+        }
+    )
+
+    with patch.dict(
+        os.environ,
+        {
+            "SPREAD_MODEL_CATALOG_JSON": catalog_json,
+            "SPREAD_MODEL_CATALOG_REQUIRE_SIGNATURE": "true",
+            "SPREAD_MODEL_CATALOG_SIGNING_KEY": "test-key",
+            "SPREAD_MODEL_CATALOG_SIGNATURE": "bad-signature",
+        },
+    ):
+        response = client.post(
+            "/forecast/jit",
+            json={
+                "bbox": [20.0, 40.0, 21.0, 41.0],
+                "model_id": "spread_v1_prod",
+            },
+        )
+
+    assert response.status_code == 422
+    assert "signature mismatch" in response.json()["detail"]
+
+
 def test_create_jit_forecast_invalid_bbox_length():
     """Test POST /forecast/jit with invalid bbox (wrong length) returns 400 error."""
     response = client.post(
@@ -257,8 +443,11 @@ def test_get_jit_status_completed_with_result():
     
     mock_job_id = uuid4()
     mock_result = {
+        "forecast_run_id": 42,
         "run_id": 42,
-        "forecast_url": "http://example.com/forecast/42"
+        "cache_hit": False,
+        "cache_source": None,
+        "forecast_url": "http://example.com/forecast/42",
     }
     mock_job = {
         "id": mock_job_id,
@@ -277,6 +466,112 @@ def test_get_jit_status_completed_with_result():
         assert data["status"] == "completed"
         assert data["progress_message"] == "Forecast complete!"
         assert data["result"] == mock_result
+
+
+def test_generate_forecast_invalid_model_selection_returns_422():
+    """Test POST /forecast/generate fails fast for unknown model selection."""
+    response = client.post(
+        "/forecast/generate",
+        json={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 21.0,
+            "max_lat": 41.0,
+            "region_name": "balkans",
+            "model_name": "NoSuchModel",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported model" in response.json()["detail"]
+
+
+def test_generate_forecast_invalid_reference_time_returns_422():
+    """Test POST /forecast/generate rejects invalid ISO reference time."""
+    response = client.post(
+        "/forecast/generate",
+        json={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 21.0,
+            "max_lat": 41.0,
+            "region_name": "balkans",
+            "forecast_reference_time": "invalid-datetime",
+        },
+    )
+    assert response.status_code == 422
+    assert "Invalid ISO 8601 datetime format" in response.json()["detail"]
+
+
+def test_generate_forecast_invalid_horizons_returns_422():
+    """Test POST /forecast/generate rejects invalid horizons."""
+    response = client.post(
+        "/forecast/generate",
+        json={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 21.0,
+            "max_lat": 41.0,
+            "region_name": "balkans",
+            "horizons_hours": [0, 24],
+        },
+    )
+    assert response.status_code == 422
+    assert "horizons_hours must contain only positive integers" in response.json()["detail"]
+
+
+def test_generate_forecast_returns_cached_result_when_available():
+    """Test POST /forecast/generate serves cached run when request key matches."""
+    cached_run = {
+        "id": 123,
+        "model_name": "HeuristicSpreadModelV0",
+        "model_version": "v0",
+        "forecast_reference_time": datetime(2026, 1, 19, 0, 0, tzinfo=timezone.utc),
+        "region_name": "balkans",
+        "status": "completed",
+        "metadata": {"cache_key": "abc"},
+        "bbox_geojson": json.dumps({"type": "Polygon", "coordinates": [[[20, 40], [21, 40], [21, 41], [20, 41], [20, 40]]]}),
+    }
+    cached_rasters = [
+        {
+            "horizon_hours": 24,
+            "file_format": "COG",
+            "storage_path": "data/forecasts/balkans/run_123/spread_h024_cog.tif",
+        }
+    ]
+    cached_contours = [
+        {
+            "horizon_hours": 24,
+            "threshold": 0.5,
+            "geom_geojson": json.dumps({"type": "MultiPolygon", "coordinates": []}),
+        }
+    ]
+
+    with patch("api.forecast.repo.build_forecast_result_cache_key", return_value="abc"), \
+         patch("api.routes.forecast.acquire_forecast_result_lock", return_value=object()) as mock_lock, \
+         patch("api.routes.forecast.release_forecast_result_lock") as mock_release, \
+         patch("api.forecast.repo.find_cached_forecast_run", return_value=cached_run), \
+         patch("api.forecast.repo.list_rasters_for_run", return_value=cached_rasters), \
+         patch("api.forecast.repo.list_contours_for_run", return_value=cached_contours):
+        response = client.post(
+            "/forecast/generate",
+            json={
+                "min_lon": 20.0,
+                "min_lat": 40.0,
+                "max_lon": 21.0,
+                "max_lat": 41.0,
+                "region_name": "balkans",
+                "use_result_cache": True,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cache_hit"] is True
+    assert payload["cache_source"] == "forecast_result"
+    assert payload["run"]["id"] == 123
+    mock_lock.assert_called_once_with("abc")
+    mock_release.assert_called_once()
 
 
 def test_get_jit_status_failed_with_error():
@@ -333,4 +628,3 @@ def test_get_jit_status_all_intermediate_statuses():
             data = response.json()
             assert data["status"] == status
             assert data["progress_message"] == expected_message
-

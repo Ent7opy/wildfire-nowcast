@@ -10,11 +10,16 @@ WORKDIR $APP_HOME
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        build-essential \
         curl \
         libgdal36 \
+        libgdal-dev \
         gdal-bin \
         libeccodes0 \
     && rm -rf /var/lib/apt/lists/*
+
+ENV GDAL_CONFIG=/usr/bin/gdal-config \
+    GDAL_MEM_ENABLE_OPEN=YES
 
 COPY pyproject.toml uv.lock ./
 
@@ -29,4 +34,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
-

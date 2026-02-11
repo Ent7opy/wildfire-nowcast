@@ -39,6 +39,24 @@ class TestDenoiserInference(unittest.TestCase):
         self.assertTrue(np.isnan(X["missing_feat"].iloc[0]))
         self.assertEqual(X.columns.tolist(), feature_list)
 
+    @patch("ml.denoiser_inference.add_firms_features")
+    @patch("ml.denoiser_inference.add_time_features")
+    @patch("ml.denoiser_inference.add_spatiotemporal_context_batch")
+    def test_build_features_strict_raises_on_missing_features(self, mock_context, mock_time, mock_firms):
+        mock_firms.side_effect = lambda df: df.assign(feat1=1.0)
+        mock_time.side_effect = lambda df: df
+        mock_context.side_effect = lambda df, engine: df
+
+        df = pd.DataFrame({"id": [1], "lat": [42.0], "lon": [20.0], "acq_time": [pd.Timestamp("2025-01-01")]})
+        engine = MagicMock()
+        with self.assertRaises(ValueError, msg="strict feature mode should fail on missing cols"):
+            build_features(
+                df,
+                engine,
+                feature_list=["feat1", "required_missing"],
+                allow_missing_features=False,
+            )
+
     @patch("ml.denoiser_inference.get_engine")
     @patch("ml.denoiser_inference.load_model_artifacts")
     @patch("ml.denoiser_inference.get_pending_detections")
@@ -78,4 +96,3 @@ class TestDenoiserInference(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

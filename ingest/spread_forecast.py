@@ -338,12 +338,30 @@ def main():
     )
     parser.add_argument("--thresholds", type=float, nargs="+", default=[0.3, 0.5, 0.7])
     parser.add_argument("--no-cog", action="store_true", help="Disable COG conversion.")
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="HeuristicSpreadModelV0",
+        help="Model name from ml.spread.factory MODEL_REGISTRY.",
+    )
+    parser.add_argument(
+        "--model-params-json",
+        type=str,
+        default=None,
+        help="JSON object with model params (e.g. '{\"model_run_dir\":\"models/spread_v1/<run_id>\"}').",
+    )
+    parser.add_argument(
+        "--strict-inputs",
+        action="store_true",
+        help="Fail if weather/terrain fallback is used.",
+    )
 
     args = parser.parse_args()
 
     # Import the model runner lazily so importing this module for utility functions
     # (e.g. contour generation / raster persistence) doesn't require optional ML deps.
     from ml.spread.service import SpreadForecastRequest, run_spread_forecast
+    from ml.spread.factory import get_model_version_hint, get_spread_model, normalize_model_selection
 
     # Import persistence layer lazily to avoid requiring DB deps in unit tests
     # that only exercise contours/rasters.
@@ -360,15 +378,22 @@ def main():
         ref_time = ref_time.replace(tzinfo=timezone.utc)
 
     bbox = tuple(args.bbox)
+    model_params = json.loads(args.model_params_json) if args.model_params_json else {}
+    model_name, model_params = normalize_model_selection(args.model_name, model_params)
+    model = get_spread_model(model_name, model_params)
+    model_version = get_model_version_hint(model_name)
 
     # 1. Create run record
-    # For now we assume HeuristicSpreadModelV0 as it's the only one implemented
     run_id = create_spread_forecast_run(
         region_name=args.region or "location-based",
-        model_name="HeuristicSpreadModelV0",
-        model_version="v0",
+        model_name=model_name,
+        model_version=model_version,
         forecast_reference_time=ref_time,
         bbox=bbox,
+        metadata={
+            "model_params": model_params,
+            "strict_inputs": bool(args.strict_inputs),
+        },
     )
 
     try:
@@ -378,9 +403,12 @@ def main():
             bbox=bbox,
             forecast_reference_time=ref_time,
             horizons_hours=args.horizons,
+            strict_inputs=bool(args.strict_inputs),
+            model_name=model_name,
+            model_params=model_params,
         )
         LOGGER.info(f"Running forecast for run_id={run_id}...")
-        forecast = run_spread_forecast(request)
+        forecast = run_spread_forecast(request, model=model)
 
         # Capture operational metadata from the forecast output (set by the service).
         extra_meta: dict[str, object] = {}
@@ -412,7 +440,8 @@ def main():
             )
         window = get_grid_window_for_bbox(grid, bbox, clip=True)
 
-        run_dir = REPO_ROOT / "data" / "forecasts" / args.region / f"run_{run_id}"
+        region_dir_name = args.region or "location-based"
+        run_dir = REPO_ROOT / "data" / "forecasts" / region_dir_name / f"run_{run_id}"
         raster_records = save_forecast_rasters(
             forecast, grid, window, run_dir, emit_cog=not args.no_cog
         )
@@ -443,4 +472,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

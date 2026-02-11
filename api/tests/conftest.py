@@ -19,6 +19,27 @@ if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
 
+@pytest.fixture(autouse=True)
+def disable_rate_limiter(monkeypatch):
+    """Bypass FastAPI rate limiting in tests to avoid Redis dependency."""
+    from fastapi_limiter.depends import RateLimiter
+
+    async def _allow(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(RateLimiter, "__call__", _allow)
+
+
+@pytest.fixture(autouse=True)
+def clear_spread_model_catalog_cache():
+    """Ensure model catalog env changes are reflected per test."""
+    from api.forecast.model_catalog import get_spread_model_catalog
+
+    get_spread_model_catalog.cache_clear()
+    yield
+    get_spread_model_catalog.cache_clear()
+
+
 def pytest_configure(config):
     """Register custom pytest marks."""
     config.addinivalue_line(

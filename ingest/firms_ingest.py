@@ -243,6 +243,8 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
 
     if config.denoiser_region:
         cmd.extend(["--region", config.denoiser_region])
+    if getattr(config, "denoiser_strict_features", False) is True:
+        cmd.append("--strict-features")
 
     try:
         # We capture output to get the JSON summary
@@ -297,6 +299,8 @@ def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") ->
         ]
         if config.denoiser_region:
             argv.extend(["--region", config.denoiser_region])
+        if getattr(config, "denoiser_strict_features", False) is True:
+            argv.append("--strict-features")
         
         # Capture the result - the module should return stats or print JSON
         # We need to capture stdout to get the JSON output
@@ -387,5 +391,3 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-
-

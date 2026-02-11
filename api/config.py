@@ -91,6 +91,9 @@ class AppSettings(BaseSettings):
         validation_alias="EXPORTS_DIR",
     )
 
+    forecast_result_cache_ttl_minutes: int = Field(
+        default=60, validation_alias="FORECAST_RESULT_CACHE_TTL_MINUTES"
+    )
+
 
 settings = AppSettings()
-

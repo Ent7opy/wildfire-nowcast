@@ -27,6 +27,8 @@ class LearnedSpreadModelV1(SpreadModel):
         self.models: Dict[int, Any] = {}
         self.feature_list: List[str] = []
         self.calibrator: SpreadProbabilityCalibrator | None = None
+        self.model_name = "LearnedSpreadModelV1"
+        self.model_version = "v1"
         self._load_artifacts()
 
     def _load_artifacts(self):
@@ -160,7 +162,8 @@ class LearnedSpreadModelV1(SpreadModel):
             probabilities=da,
             forecast_reference_time=inputs.forecast_reference_time,
             horizons_hours=horizons,
+            model_name=self.model_name,
+            model_version=self.model_version,
         )
         forecast.validate()
         return forecast
-

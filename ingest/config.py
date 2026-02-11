@@ -44,6 +44,10 @@ class FIRMSIngestSettings(BaseSettings):
     denoiser_threshold: float = Field(default=0.5, validation_alias="DENOISER_THRESHOLD")
     denoiser_batch_size: int = Field(default=500, validation_alias="DENOISER_BATCH_SIZE")
     denoiser_region: Optional[str] = Field(default=None, validation_alias="DENOISER_REGION")
+    denoiser_strict_features: bool = Field(
+        default=False,
+        validation_alias="DENOISER_STRICT_FEATURES",
+    )
     denoiser_invoke_method: str = Field(
         default="uv", validation_alias="DENOISER_INVOKE_METHOD"
     )
@@ -150,5 +154,4 @@ class WeatherIngestSettings(BaseSettings):
 
 
 weather_settings = WeatherIngestSettings()
-
 

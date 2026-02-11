@@ -12,6 +12,7 @@ services:
       - /app/api/.venv
     environment:
       APP_ENV: dev
+      GDAL_MEM_ENABLE_OPEN: "YES"
       WATCHFILES_FORCE_POLLING: "true"
       UVICORN_RELOAD_DIRS: /app/api
       # When running in Compose, other containers (e.g. UI) must reach TiTiler via service DNS,
@@ -46,7 +47,7 @@ services:
       - api
 
   db:
-    image: postgis/postgis:16-3.4
+    image: imresamu/postgis:16-3.5
     shm_size: 256mb
     restart: unless-stopped
     ports:
@@ -105,6 +106,7 @@ services:
       - /app/api/.venv
     environment:
       APP_ENV: dev
+      GDAL_MEM_ENABLE_OPEN: "YES"
       POSTGRES_HOST: db
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-wildfire}

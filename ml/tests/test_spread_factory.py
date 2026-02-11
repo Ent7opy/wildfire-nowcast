@@ -5,7 +5,7 @@ import logging
 import pytest
 
 from unittest.mock import patch, MagicMock
-from ml.spread.factory import get_spread_model
+from ml.spread.factory import get_spread_model, normalize_model_selection
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0
 from ml.spread.learned_v1 import LearnedSpreadModelV1
 
@@ -48,6 +48,11 @@ def test_get_spread_model_unknown_model():
         get_spread_model("UnknownModel")
 
 
+def test_normalize_model_selection_requires_learned_run_dir():
+    with pytest.raises(ValueError, match="model_params.model_run_dir is required"):
+        normalize_model_selection("LearnedSpreadModelV1", {})
+
+
 def test_get_spread_model_filters_unknown_params(caplog):
     """Verify that unknown parameters are filtered and warned about."""
     params = {"base_spread_km_h": 0.1, "this_does_not_exist": 123}
@@ -62,4 +67,3 @@ def test_get_spread_model_filters_unknown_params(caplog):
     # Warning should be logged
     assert "Ignoring unknown model_params for HeuristicSpreadModelV0" in caplog.text
     assert "this_does_not_exist" in caplog.text
-

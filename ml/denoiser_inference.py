@@ -185,6 +185,7 @@ def run_inference(
     threshold: float,
     batch_size: int = 500,
     region_name: Optional[str] = None,
+    strict_features: bool = False,
 ):
     """Run denoiser inference on a batch of detections (or all pending)."""
     engine = get_engine()
@@ -215,7 +216,13 @@ def run_inference(
             len(chunk),
         )
         
-        X = build_features(chunk, engine, feature_list, region_name=region_name)
+        X = build_features(
+            chunk,
+            engine,
+            feature_list,
+            region_name=region_name,
+            allow_missing_features=not strict_features,
+        )
         
         # Predict
         if hasattr(model, "predict_proba"):
@@ -276,6 +283,19 @@ def main():
         default=ingest_settings.denoiser_region,
         help="Region name for terrain features"
     )
+    parser.add_argument(
+        "--strict-features",
+        dest="strict_features",
+        action="store_true",
+        help="Fail if any required feature is missing during inference.",
+    )
+    parser.add_argument(
+        "--allow-missing-features",
+        dest="strict_features",
+        action="store_false",
+        help="Allow missing required features and fill with NaN.",
+    )
+    parser.set_defaults(strict_features=ingest_settings.denoiser_strict_features)
     
     args = parser.parse_args()
     
@@ -290,6 +310,7 @@ def main():
             threshold=args.threshold,
             batch_size=args.batch_size,
             region_name=args.region,
+            strict_features=args.strict_features,
         )
     except Exception:
         LOGGER.exception(f"Inference failed for batch {args.batch_id}")
@@ -297,4 +318,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

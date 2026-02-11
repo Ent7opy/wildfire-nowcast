@@ -182,6 +182,10 @@ def test_jit_pipeline_end_to_end():
         
         assert "forecast_run_id" in result
         assert result["forecast_run_id"] == mock_run_id
+        assert "run_id" in result
+        assert result["run_id"] == mock_run_id
+        assert result["cache_hit"] is False
+        assert result["cache_source"] is None
         
         assert "tilejson_urls" in result
         assert isinstance(result["tilejson_urls"], list)

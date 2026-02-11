@@ -4,7 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
 
-from ml.spread.service import run_spread_forecast, SpreadForecastRequest, MAX_AOI_CELLS
+from ml.spread.service import (
+    ForecastInputFallbackError,
+    MAX_AOI_CELLS,
+    SpreadForecastRequest,
+    run_spread_forecast,
+)
 from ml.spread.contract import SpreadForecast, SpreadModelInput
 from api.core.grid import GridSpec, GridWindow
 
@@ -34,6 +39,10 @@ def mock_spread_inputs(mock_grid, mock_window):
     # Use a real numeric array to avoid `float(MagicMock)` TypeError.
     mock.active_fires = MagicMock()
     mock.active_fires.heatmap = np.zeros((1, 1), dtype=float)
+    mock.weather_fallback_used = False
+    mock.terrain_fallback_used = False
+    mock.weather_cube = MagicMock()
+    mock.weather_cube.attrs = {}
     mock.to_model_input.return_value = MagicMock(spec=SpreadModelInput)
     return mock
 
@@ -238,3 +247,58 @@ def test_run_spread_forecast_bbox_only_no_region_name(monkeypatch, mock_spread_i
     # Weather bias corrector should be None for location-based forecasts
     assert kwargs["weather_bias_corrector_path"] is None
 
+
+def test_run_spread_forecast_strict_raises_on_weather_fallback(mock_spread_inputs):
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        strict_inputs=True,
+    )
+
+    mock_spread_inputs.weather_fallback_used = True
+    mock_spread_inputs.weather_cube.attrs = {"weather_fallback_reason": "no_weather_run_found"}
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        with pytest.raises(ForecastInputFallbackError, match="weather fallback used"):
+            run_spread_forecast(request)
+
+
+def test_run_spread_forecast_strict_raises_on_region_terrain_fallback(mock_spread_inputs):
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        strict_inputs=True,
+    )
+
+    mock_spread_inputs.terrain_fallback_used = True
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        with pytest.raises(ForecastInputFallbackError, match="terrain fallback used"):
+            run_spread_forecast(request)
+
+
+def test_run_spread_forecast_strict_allows_location_based_terrain_fallback(mock_spread_inputs):
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name=None,
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        strict_inputs=True,
+    )
+
+    mock_spread_inputs.terrain_fallback_used = True
+    mock_forecast = MagicMock(spec=SpreadForecast)
+    mock_forecast.probabilities = MagicMock()
+    mock_forecast.probabilities.min.return_value = 0.0
+    mock_forecast.probabilities.max.return_value = 0.0
+    mock_model = MagicMock()
+    mock_model.predict.return_value = mock_forecast
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        out = run_spread_forecast(request, model=mock_model)
+
+    assert out == mock_forecast
