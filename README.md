@@ -38,3 +38,17 @@ make dev-ui
 ```
 
 For project documentation, start at [`docs/README.md`](docs/README.md).
+
+## Ingestion Orchestrator
+
+Run FIRMS + weather + terrain + perimeters in one command:
+
+```bash
+make ingest-orchestrator
+```
+
+Run as a continuous scheduler:
+
+```bash
+make ingest-orchestrator ARGS="--loop --poll-seconds 30"
+```
