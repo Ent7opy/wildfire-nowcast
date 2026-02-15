@@ -230,6 +230,12 @@ def export_map_png(
     max_lat: float = Query(..., description="Maximum latitude"),
     start_time: str = Query(None, description="Start time for fires (ISO 8601)"),
     end_time: str = Query(None, description="End time for fires (ISO 8601)"),
+    min_fire_likelihood: float = Query(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Minimum fire likelihood threshold for exported fire points",
+    ),
     run_id: int = Query(None, description="Forecast run ID"),
     include_fires: bool = Query(True, description="Include fire detections"),
     include_risk: bool = Query(True, description="Include risk heatmap"),
@@ -262,7 +268,15 @@ def export_map_png(
                 start_time=dt_start,
                 end_time=dt_end,
                 limit=5000,
-                columns=["lat", "lon", "frp"]
+                min_fire_likelihood=min_fire_likelihood,
+                columns=[
+                    "lat",
+                    "lon",
+                    "frp",
+                    "fire_likelihood",
+                    "confidence_score",
+                    "confidence",
+                ],
             )
             fires = fires_result.get("data", [])
         except Exception:

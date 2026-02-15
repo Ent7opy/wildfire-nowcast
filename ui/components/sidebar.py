@@ -116,6 +116,7 @@ def render_sidebar() -> None:
             f"{api_public_base_url()}/map.png?"
             f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}&"
             f"start_time={isoformat(start_time)}&end_time={isoformat(end_time)}&"
+            f"min_fire_likelihood={app_state.filters.min_likelihood:.2f}&"
             f"include_fires={'true' if app_state.layers.show_fires else 'false'}&"
             f"include_risk={'true' if app_state.layers.show_risk else 'false'}&"
             f"include_forecast={'true' if app_state.layers.show_forecast else 'false'}"
