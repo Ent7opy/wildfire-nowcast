@@ -40,6 +40,22 @@ def clear_spread_model_catalog_cache():
     get_spread_model_catalog.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def default_forecast_gate_open(monkeypatch):
+    """Keep forecast gate open by default in tests unless explicitly overridden."""
+    monkeypatch.setattr(
+        "api.routes.forecast._build_forecast_gate_failure_payload",
+        lambda: {
+            "code": "forecast_inputs_stale_or_missing",
+            "message": "ok",
+            "missing_or_stale_sources": [],
+            "reasons": [],
+            "as_of": "2026-02-11T00:00:00+00:00",
+            "retry_hint": None,
+        },
+    )
+
+
 def pytest_configure(config):
     """Register custom pytest marks."""
     config.addinivalue_line(

@@ -70,3 +70,24 @@ def test_signed_catalog_required_without_signature_fails():
 
         with pytest.raises(ValueError, match="SPREAD_MODEL_CATALOG_SIGNING_KEY is required"):
             get_spread_model_catalog()
+
+
+def test_default_model_selection_prefers_promoted_model(monkeypatch):
+    monkeypatch.setattr(
+        "api.forecast.model_catalog._resolve_promoted_spread_catalog_entry",
+        lambda: (
+            "spread_prod_20260215",
+            ("LearnedSpreadModelV1", {"model_run_dir": "models/spread_v1/run_prod"}),
+        ),
+    )
+    get_spread_model_catalog.cache_clear()
+
+    model_name, model_params, model_id = resolve_request_model_selection(
+        model_id=None,
+        model_name=None,
+        model_params=None,
+    )
+
+    assert model_name == "LearnedSpreadModelV1"
+    assert model_params == {"model_run_dir": "models/spread_v1/run_prod"}
+    assert model_id == "spread_prod_20260215"

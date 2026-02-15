@@ -340,8 +340,15 @@ def create_jit_forecast(
         raise ApiUnavailableError(message=str(e), url=url) from e
 
     if resp.status_code != 202:
+        message = "Non-202 response from JIT forecast API"
+        try:
+            payload = resp.json()
+            if isinstance(payload, dict) and payload.get("message"):
+                message = str(payload["message"])
+        except ValueError:
+            payload = None
         raise ApiError(
-            message="Non-202 response from JIT forecast API",
+            message=message,
             status_code=resp.status_code,
             url=str(resp.url),
             response_text=resp.text,

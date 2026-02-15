@@ -35,9 +35,14 @@ class FIRMSIngestSettings(BaseSettings):
         default=30.0,
         validation_alias="FIRMS_REQUEST_TIMEOUT_SECONDS",
     )
+    firms_watermark_grace_minutes: int = Field(
+        default=90,
+        validation_alias="FIRMS_WATERMARK_GRACE_MINUTES",
+    )
 
     # Denoiser settings
     denoiser_enabled: bool = Field(default=False, validation_alias="DENOISER_ENABLED")
+    denoiser_required: bool = Field(default=True, validation_alias="DENOISER_REQUIRED")
     denoiser_model_run_dir: Optional[str] = Field(
         default=None, validation_alias="DENOISER_MODEL_RUN_DIR"
     )
@@ -154,4 +159,3 @@ class WeatherIngestSettings(BaseSettings):
 
 
 weather_settings = WeatherIngestSettings()
-

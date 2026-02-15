@@ -18,6 +18,7 @@ make help
 make install
 make db-up
 make migrate
+make prepare
 make dev-api
 make dev-ui
 ```
@@ -28,3 +29,9 @@ If your environment differs, preserve the same high-level behavior:
 - UI service available
 - Data store reachable
 - Background processing enabled
+
+For continuous ingestion runtime, use:
+
+```bash
+make ops-start
+```

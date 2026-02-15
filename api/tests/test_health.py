@@ -20,6 +20,15 @@ def test_data_freshness_endpoint_returns_snapshot(monkeypatch) -> None:
         "stale_sources": [],
         "critical_stale_sources": [],
         "forecast_inputs_ready": True,
+        "forecast_gate": {
+            "can_run": True,
+            "would_block_if_fail_closed": False,
+            "policy": "fail_closed",
+            "reasons": [],
+            "missing_or_stale_sources": [],
+            "as_of": "2026-02-11T00:00:00+00:00",
+            "retry_hint": None,
+        },
         "stale_behavior": {
             "mode": "normal",
             "policy": "serve_last_known_data_with_warning",
@@ -39,3 +48,19 @@ def test_data_freshness_endpoint_returns_snapshot(monkeypatch) -> None:
     response = client.get("/health/data-freshness")
     assert response.status_code == 200
     assert response.json() == expected
+
+
+def test_active_models_endpoint_returns_registry_payload(monkeypatch) -> None:
+    expected = {
+        "denoiser": {
+            "model_id": "denoiser-prod-1",
+            "artifact_uri": "models/denoiser_v1/run_prod",
+        }
+    }
+    monkeypatch.setattr("api.routes.internal.list_active_models", lambda: expected)
+
+    response = client.get("/internal/models/active")
+    assert response.status_code == 200
+    body = response.json()
+    assert "as_of" in body
+    assert body["models"] == expected

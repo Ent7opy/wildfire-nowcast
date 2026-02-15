@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from api_client import (
     ApiError,
     ApiUnavailableError,
     create_jit_forecast,
+    get_data_freshness_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,22 @@ def _fetch_aggregate_stats(
     except Exception as exc:
         logger.warning("Failed to fetch aggregate stats: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _fetch_forecast_gate_status() -> Dict[str, Any]:
+    """Fetch forecast gate state from data freshness endpoint."""
+    try:
+        snapshot = get_data_freshness_status()
+        gate = snapshot.get("forecast_gate", {}) or {}
+        return {
+            "ok": True,
+            "can_run": bool(gate.get("can_run", True)),
+            "reasons": gate.get("reasons", []) or [],
+            "retry_hint": gate.get("retry_hint"),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "can_run": True, "reasons": []}
 
 
 def _render_aggregate_stats() -> None:
@@ -361,11 +379,19 @@ def _render_forecast_section(
     )
 
     is_forecast_running = app_state.forecast_job.job_id is not None
+    gate = _fetch_forecast_gate_status()
+    forecast_blocked = bool(gate.get("ok", False) and not gate.get("can_run", True))
+
+    if forecast_blocked:
+        reason_text = ", ".join(gate.get("reasons", [])) or "stale or missing forecast inputs"
+        st.warning(f"Forecast temporarily blocked: {reason_text}")
+        if gate.get("retry_hint"):
+            st.caption(f"Action: {gate['retry_hint']}")
 
     if st.button(
         "Generate Spread Forecast",
         key="generate_forecast_btn",
-        disabled=is_forecast_running,
+        disabled=is_forecast_running or forecast_blocked,
         type="primary",
         use_container_width=True,
     ):
@@ -399,6 +425,18 @@ def _render_forecast_section(
         except ApiUnavailableError:
             st.error("Data service is unavailable right now. Please try again in a moment.")
         except ApiError as e:
+            if e.status_code == 503 and e.response_text:
+                try:
+                    payload = json.loads(e.response_text)
+                    retry_hint = payload.get("retry_hint")
+                    reasons = payload.get("reasons") or payload.get("missing_or_stale_sources") or []
+                    reason_text = ", ".join(str(r) for r in reasons) if reasons else "required inputs are stale or missing"
+                    st.error(f"Forecast blocked: {reason_text}")
+                    if retry_hint:
+                        st.caption(f"Action: {retry_hint}")
+                    return
+                except Exception:
+                    pass
             logger.error(
                 "Forecast generation failed: status=%s, response=%s, bbox=%s",
                 e.status_code, e.response_text, forecast_bbox

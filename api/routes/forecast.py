@@ -12,11 +12,12 @@ from urllib.parse import quote_plus
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, ConfigDict
 
 from api.config import settings
+from api.data_status import build_data_status_snapshot, resolve_forecast_gate
 from api.fires.repo import validate_bbox
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
@@ -82,6 +83,29 @@ def _resolve_strict_inputs(strict_inputs: bool | None) -> bool:
 def _default_forecast_reference_time() -> datetime:
     """Return a stable default reference time for cache-friendly requests."""
     return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _build_forecast_gate_failure_payload() -> dict[str, Any]:
+    try:
+        snapshot = build_data_status_snapshot()
+        gate = resolve_forecast_gate(snapshot)
+    except Exception as exc:
+        return {
+            "code": "forecast_gate_status_unavailable",
+            "message": "Forecast gate status is unavailable; rejecting request in fail-closed mode.",
+            "missing_or_stale_sources": ["weather", "terrain"],
+            "reasons": ["freshness_snapshot_unavailable", str(exc)],
+            "as_of": None,
+            "retry_hint": "retry after data freshness endpoint recovers",
+        }
+    return {
+        "code": "forecast_inputs_stale_or_missing",
+        "message": "Forecast cannot run because required input data is stale or missing.",
+        "missing_or_stale_sources": gate.get("missing_or_stale_sources", []),
+        "reasons": gate.get("reasons", []),
+        "as_of": gate.get("as_of") or snapshot.get("as_of"),
+        "retry_hint": gate.get("retry_hint") or "retry after weather and terrain refresh",
+    }
 
 
 def _normalize_horizons(horizons_hours: list[int] | None) -> list[int]:
@@ -226,6 +250,13 @@ def create_jit_forecast(request: JitForecastRequest):
         validate_bbox(bbox)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    gate_failure = _build_forecast_gate_failure_payload()
+    if bool(settings.forecast_fail_closed_on_stale) and gate_failure["missing_or_stale_sources"]:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=gate_failure,
+        )
 
     try:
         model_name, model_params, selected_model_id = resolve_request_model_selection(

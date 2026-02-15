@@ -7,3 +7,4 @@ This project keeps documentation intentionally small.
 1. [`WILDFIRE_NOWCAST_101.md`](WILDFIRE_NOWCAST_101.md) - product charter
 2. [`architecture.md`](architecture.md) - system blueprint
 3. [`SETUP.md`](SETUP.md) - local environment contract
+4. [`OPS_RUNBOOK.md`](OPS_RUNBOOK.md) - bootstrap, runtime, model promotion, and incident flow

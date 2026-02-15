@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Sequence
 
 from sqlalchemy import JSON, bindparam, create_engine, text
@@ -11,6 +12,14 @@ from api.config import settings as api_settings
 from ingest.models import DetectionRecord
 
 _engine: Engine | None = None
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def get_engine() -> Engine:
@@ -105,6 +114,86 @@ def finalize_ingest_batch(
         )
 
 
+def get_ingest_watermark(source: str, area_key: str) -> dict | None:
+    """Fetch the current ingestion watermark for a source and area."""
+    stmt = text(
+        """
+        SELECT
+            source,
+            area_key,
+            last_acq_time_utc,
+            last_batch_id,
+            updated_at
+        FROM ingest_watermarks
+        WHERE source = :source
+          AND area_key = :area_key
+        """
+    )
+    with get_engine().begin() as conn:
+        row = conn.execute(
+            stmt,
+            {
+                "source": source,
+                "area_key": area_key,
+            },
+        ).mappings().first()
+
+    if row is None:
+        return None
+
+    payload = dict(row)
+    payload["last_acq_time_utc"] = _as_utc(payload.get("last_acq_time_utc"))
+    payload["updated_at"] = _as_utc(payload.get("updated_at"))
+    return payload
+
+
+def advance_ingest_watermark(
+    *,
+    source: str,
+    area_key: str,
+    last_acq_time_utc: datetime,
+    last_batch_id: int,
+) -> None:
+    """Advance the source+area ingestion watermark after successful batch completion."""
+    stmt = text(
+        """
+        INSERT INTO ingest_watermarks (
+            source,
+            area_key,
+            last_acq_time_utc,
+            last_batch_id,
+            updated_at
+        )
+        VALUES (
+            :source,
+            :area_key,
+            :last_acq_time_utc,
+            :last_batch_id,
+            NOW()
+        )
+        ON CONFLICT (source, area_key)
+        DO UPDATE SET
+            last_acq_time_utc = GREATEST(
+                COALESCE(ingest_watermarks.last_acq_time_utc, EXCLUDED.last_acq_time_utc),
+                EXCLUDED.last_acq_time_utc
+            ),
+            last_batch_id = EXCLUDED.last_batch_id,
+            updated_at = NOW()
+        """
+    )
+
+    with get_engine().begin() as conn:
+        conn.execute(
+            stmt,
+            {
+                "source": source,
+                "area_key": area_key,
+                "last_acq_time_utc": _as_utc(last_acq_time_utc),
+                "last_batch_id": int(last_batch_id),
+            },
+        )
+
+
 def insert_detections(detections: Sequence[DetectionRecord]) -> int:
     """Bulk insert detections and return the number of inserted rows."""
     if not detections:
@@ -158,5 +247,3 @@ def insert_detections(detections: Sequence[DetectionRecord]) -> int:
         inserted = result.rowcount or 0
 
     return inserted
-
-

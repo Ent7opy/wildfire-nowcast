@@ -94,6 +94,9 @@ class AppSettings(BaseSettings):
     forecast_result_cache_ttl_minutes: int = Field(
         default=60, validation_alias="FORECAST_RESULT_CACHE_TTL_MINUTES"
     )
+    forecast_fail_closed_on_stale: bool = Field(
+        default=True, validation_alias="FORECAST_FAIL_CLOSED_ON_STALE"
+    )
 
     # Data freshness/staleness policy (minutes)
     data_stale_firms_minutes: int = Field(

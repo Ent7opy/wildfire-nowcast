@@ -9,6 +9,7 @@ import os
 from functools import lru_cache
 from typing import Any
 
+from api.model_registry import resolve_active_model
 from ml.spread.factory import normalize_model_selection
 
 SPREAD_MODEL_CATALOG_JSON_ENV = "SPREAD_MODEL_CATALOG_JSON"
@@ -23,6 +24,27 @@ DEFAULT_MODEL_CATALOG: dict[str, dict[str, Any]] = {
         "model_params": {},
     }
 }
+
+
+def _resolve_promoted_spread_catalog_entry() -> tuple[str, tuple[str, dict[str, Any]]] | None:
+    """Resolve promoted spread model as a catalog entry.
+
+    Returns a `(model_id, (model_name, model_params))` tuple or None if unavailable.
+    """
+    active = resolve_active_model("spread")
+    if not active:
+        return None
+
+    model_id = active.get("model_id")
+    artifact_uri = active.get("artifact_uri")
+    if not model_id or not artifact_uri:
+        return None
+
+    model_name, model_params = normalize_model_selection(
+        "LearnedSpreadModelV1",
+        {"model_run_dir": str(artifact_uri)},
+    )
+    return str(model_id), (model_name, model_params)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -102,6 +124,11 @@ def get_spread_model_catalog() -> dict[str, tuple[str, dict[str, Any]]]:
         if not isinstance(entry, dict):
             raise ValueError(f"Invalid catalog entry for {model_id!r}: expected object.")
         catalog[model_id] = _normalize_catalog_entry(entry, model_id)
+
+    promoted = _resolve_promoted_spread_catalog_entry()
+    if promoted is not None:
+        promoted_model_id, promoted_entry = promoted
+        catalog.setdefault(promoted_model_id, promoted_entry)
     return catalog
 
 
@@ -124,6 +151,12 @@ def resolve_request_model_selection(
         if model_params is not None and model_params != resolved[1]:
             raise ValueError("model_params conflicts with selected model_id.")
         return resolved[0], dict(resolved[1]), model_id
+
+    if model_name is None and model_params is None:
+        promoted = _resolve_promoted_spread_catalog_entry()
+        if promoted is not None:
+            promoted_model_id, promoted_entry = promoted
+            return promoted_entry[0], dict(promoted_entry[1]), promoted_model_id
 
     normalized_params = dict(model_params or {})
     # Block raw artifact paths from request surface; require catalog model_id instead.

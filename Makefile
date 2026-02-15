@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-label-v2 denoiser-train-v2 denoiser-pipeline-v2 ingest-nifc-perimeters ingest-orchestrator hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-label-v2 denoiser-train-v2 denoiser-pipeline-v2 ingest-nifc-perimeters ingest-orchestrator model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -202,11 +202,44 @@ ingest-all: ingest-viirs ingest-fwi ingest-weather ## Run all primary ingestion 
 db-cleanup: ## Run database cleanup (14-day retention)
 	$(UV) run --project api scripts/db_cleanup.py
 
-prepare: ## Prepare the database and initial context data (cleanup + FIRMS)
-	@echo "Cleaning up database..."
+# Default local bootstrap window (Balkans smoke-grid compatible).
+# Override these on demand:
+#   make prepare PREPARE_BBOX="-125 24 -66 50" PREPARE_FIRMS_AREA="-125,24,-66,50" PREPARE_REGION="conus"
+PREPARE_BBOX ?= 22 40 24 42
+PREPARE_FIRMS_AREA ?= 22,40,24,42
+PREPARE_REGION ?= smoke_grid
+PREPARE_JOBS ?= firms,weather,terrain,perimeters
+PREPARE_MAX_RETRIES ?= 3
+PREPARE_RETRY_BACKOFF_SECONDS ?= 20
+PREPARE_FIRMS_DAY_RANGE ?= 1
+PREPARE_PERIMETER_YEARS ?=
+PREPARE_WEATHER_PATCH_MODE ?= --weather-patch-mode
+PREPARE_EXTRA_ARGS ?=
+
+prepare: ## Prepare DB + core context data (migrate, cleanup, orchestrated FIRMS/weather/terrain/perimeters)
+	@echo "=== Step 1/3: Running migrations ==="
+	$(MAKE) migrate
+	@echo ""
+	@echo "=== Step 2/3: Cleaning old operational records ==="
 	$(MAKE) db-cleanup
-	@echo "Ingesting FIRMS data..."
-	$(MAKE) ingest-firms
+	@echo ""
+	@echo "=== Step 3/3: Running orchestrated ingestion ==="
+	$(MAKE) ingest-orchestrator ARGS="--once --jobs $(PREPARE_JOBS) --enforce-freshness --max-retries $(PREPARE_MAX_RETRIES) --retry-backoff-seconds $(PREPARE_RETRY_BACKOFF_SECONDS) --firms-day-range $(PREPARE_FIRMS_DAY_RANGE) --firms-area $(PREPARE_FIRMS_AREA) --weather-bbox $(PREPARE_BBOX) $(PREPARE_WEATHER_PATCH_MODE) --terrain-bbox $(PREPARE_BBOX) --terrain-region-name $(PREPARE_REGION) --perimeters-bbox $(PREPARE_BBOX) $(PREPARE_PERIMETER_YEARS) $(PREPARE_EXTRA_ARGS)"
+	@echo ""
+	@echo "Prepare complete."
+	@echo "Check freshness/status: curl http://localhost:8000/health/data-freshness"
+
+OPS_JOBS ?= firms,weather,perimeters
+OPS_FIRMS_INTERVAL_MINUTES ?= 30
+OPS_WEATHER_INTERVAL_MINUTES ?= 180
+OPS_TERRAIN_INTERVAL_MINUTES ?= 1440
+OPS_PERIMETERS_INTERVAL_MINUTES ?= 1440
+OPS_MAX_RETRIES ?= 3
+OPS_RETRY_BACKOFF_SECONDS ?= 20
+OPS_DASHBOARD_PATH ?= data/ingest/orchestrator_dashboard.json
+
+ops-start: ## Start continuous runtime scheduler profile (FIRMS 30m, weather/perimeters periodic)
+	$(MAKE) ingest-orchestrator ARGS="--loop --jobs $(OPS_JOBS) --poll-seconds 30 --enforce-freshness --max-retries $(OPS_MAX_RETRIES) --retry-backoff-seconds $(OPS_RETRY_BACKOFF_SECONDS) --firms-interval-minutes $(OPS_FIRMS_INTERVAL_MINUTES) --weather-interval-minutes $(OPS_WEATHER_INTERVAL_MINUTES) --terrain-interval-minutes $(OPS_TERRAIN_INTERVAL_MINUTES) --perimeters-interval-minutes $(OPS_PERIMETERS_INTERVAL_MINUTES) --dashboard-path $(OPS_DASHBOARD_PATH)"
 
 denoiser-label: ## Run heuristic labeling (pass ARGS="--bbox ... --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.label_v1 $(ARGS)
@@ -227,6 +260,52 @@ ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 -
 
 ingest-orchestrator: ## Run unified FIRMS/weather/terrain/perimeters orchestrator (pass ARGS="--loop --poll-seconds 30")
 	$(UV) run --project ingest -m ingest.orchestrator $(ARGS)
+
+model-register: ## Register model artifact (usage: make model-register FAMILY=denoiser ARTIFACT=... METRICS=@path/or-json)
+	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
+	$(if $(ARTIFACT),,$(error Please provide ARTIFACT=<artifact path or URI>))
+	$(UV) run --project api scripts/model_registry.py register --family "$(FAMILY)" --artifact "$(ARTIFACT)" $(if $(METRICS),--metrics '$(METRICS)',)
+
+model-promote: ## Promote model champion (usage: make model-promote FAMILY=denoiser MODEL_ID=...)
+	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
+	$(if $(MODEL_ID),,$(error Please provide MODEL_ID=<registered model id>))
+	$(UV) run --project api scripts/model_registry.py promote --family "$(FAMILY)" --model-id "$(MODEL_ID)" $(if $(PROMOTED_BY),--by "$(PROMOTED_BY)",) $(if $(NOTES),--notes "$(NOTES)",)
+
+model-rollback: ## Rollback champion to previous promoted model (usage: make model-rollback FAMILY=denoiser)
+	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
+	$(UV) run --project api scripts/model_registry.py rollback --family "$(FAMILY)" $(if $(PROMOTED_BY),--by "$(PROMOTED_BY)",) $(if $(NOTES),--notes "$(NOTES)",)
+
+TRAIN_DENOISER_CONFIG ?= configs/denoiser_train_v2.yaml
+TRAIN_DENOISER_FAMILY ?= denoiser
+TRAIN_DENOISER_ROOT ?= models/denoiser_v1
+TRAIN_DENOISER_METRICS_FILE ?= metrics.json
+
+train-denoiser: ## Train/eval/register/promote denoiser champion from latest run
+	@echo "=== Training denoiser ==="
+	$(UV) run --project ml -m ml.train_denoiser --config $(TRAIN_DENOISER_CONFIG)
+	@latest_run=$$(ls -td $(TRAIN_DENOISER_ROOT)/* 2>/dev/null | head -n 1); \
+	if [ -z "$$latest_run" ]; then echo "No denoiser run found under $(TRAIN_DENOISER_ROOT)"; exit 1; fi; \
+	if [ ! -f "$$latest_run/$(TRAIN_DENOISER_METRICS_FILE)" ]; then echo "Missing metrics file: $$latest_run/$(TRAIN_DENOISER_METRICS_FILE)"; exit 1; fi; \
+	echo "Registering $$latest_run"; \
+	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_DENOISER_FAMILY) --artifact "$$latest_run" --metrics "@$$latest_run/$(TRAIN_DENOISER_METRICS_FILE)"); \
+	echo "Promoting $$model_id"; \
+	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_DENOISER_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-denoiser"
+
+TRAIN_SPREAD_CONFIG ?= configs/spread_train_v1.yaml
+TRAIN_SPREAD_FAMILY ?= spread
+TRAIN_SPREAD_ROOT ?= models/spread_v1
+TRAIN_SPREAD_METRICS_FILE ?= metrics.json
+
+train-spread: ## Train/eval/register/promote spread champion from latest run
+	@echo "=== Training spread model ==="
+	$(UV) run --project ml -m ml.train_spread_v1 --config $(TRAIN_SPREAD_CONFIG)
+	@latest_run=$$(ls -td $(TRAIN_SPREAD_ROOT)/* 2>/dev/null | head -n 1); \
+	if [ -z "$$latest_run" ]; then echo "No spread run found under $(TRAIN_SPREAD_ROOT)"; exit 1; fi; \
+	if [ ! -f "$$latest_run/$(TRAIN_SPREAD_METRICS_FILE)" ]; then echo "Missing metrics file: $$latest_run/$(TRAIN_SPREAD_METRICS_FILE)"; exit 1; fi; \
+	echo "Registering $$latest_run"; \
+	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_SPREAD_FAMILY) --artifact "$$latest_run" --metrics "@$$latest_run/$(TRAIN_SPREAD_METRICS_FILE)"); \
+	echo "Promoting $$model_id"; \
+	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_SPREAD_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-spread"
 
 denoiser-label-v2: ## Run ground-truth labeling v2 (pass ARGS="--bbox ... --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)

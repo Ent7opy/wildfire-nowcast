@@ -49,6 +49,59 @@ def _source_status(*, name: str, last_seen_at: datetime | None, threshold_minute
     }
 
 
+def _build_forecast_gate(
+    *,
+    sources: dict[str, Any],
+    as_of: str | None,
+) -> dict[str, Any]:
+    """Build the forecast fail-closed gate decision from freshness source states."""
+    reasons: list[str] = []
+    missing_or_stale_sources: list[str] = []
+
+    weather_state = str((sources.get("weather") or {}).get("state", "missing")).lower()
+    terrain_state = str((sources.get("terrain") or {}).get("state", "missing")).lower()
+
+    if weather_state != "fresh":
+        reasons.append("weather_stale_or_missing")
+        missing_or_stale_sources.append("weather")
+
+    # Terrain is quasi-static: require presence, not strict freshness.
+    if terrain_state == "missing":
+        reasons.append("terrain_missing")
+        missing_or_stale_sources.append("terrain")
+
+    can_run_without_policy_override = len(reasons) == 0
+    fail_closed = bool(settings.forecast_fail_closed_on_stale)
+    can_run = can_run_without_policy_override if fail_closed else True
+
+    retry_hints: list[str] = []
+    if "weather" in missing_or_stale_sources:
+        retry_hints.append("wait for weather refresh or trigger weather prewarm")
+    if "terrain" in missing_or_stale_sources:
+        retry_hints.append("trigger terrain prewarm for the selected coordinates")
+
+    return {
+        "can_run": can_run,
+        "would_block_if_fail_closed": not can_run_without_policy_override,
+        "policy": "fail_closed" if fail_closed else "best_effort",
+        "reasons": reasons,
+        "missing_or_stale_sources": missing_or_stale_sources,
+        "as_of": as_of,
+        "retry_hint": "; ".join(retry_hints) if retry_hints else None,
+    }
+
+
+def resolve_forecast_gate(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Resolve forecast gate payload from snapshot, rebuilding when absent."""
+    gate = snapshot.get("forecast_gate")
+    if isinstance(gate, dict):
+        return gate
+    return _build_forecast_gate(
+        sources=snapshot.get("sources", {}),
+        as_of=snapshot.get("as_of"),
+    )
+
+
 def _fetch_latest_firms_status(conn) -> dict[str, Any]:
     row = conn.execute(
         text(
@@ -279,10 +332,8 @@ def build_data_status_snapshot(*, now: datetime | None = None, engine: Engine | 
     else:
         overall_state = "healthy"
 
-    forecast_inputs_ready = (
-        sources["weather"]["state"] != "missing"
-        and sources["terrain"]["state"] != "missing"
-    )
+    forecast_gate = _build_forecast_gate(sources=sources, as_of=now_utc.isoformat())
+    forecast_inputs_ready = bool(forecast_gate["can_run"])
 
     stale_behavior = {
         "mode": "normal" if overall_state == "healthy" else "degraded",
@@ -290,11 +341,12 @@ def build_data_status_snapshot(*, now: datetime | None = None, engine: Engine | 
         "fires_api": "returns cached/latest detections and includes freshness status endpoint",
         "forecast_api": (
             "allow_forecast_generation"
-            if forecast_inputs_ready
-            else "deny_new_forecasts_until_weather_and_terrain_exist"
+            if forecast_gate["can_run"]
+            else "deny_new_forecasts_until_weather_fresh_and_terrain_present"
         ),
         "ui": "show_stale_data_banner_when_state_not_healthy",
         "critical_sources": sorted(critical_sources),
+        "forecast_retry_hint": forecast_gate.get("retry_hint"),
     }
 
     return {
@@ -303,6 +355,7 @@ def build_data_status_snapshot(*, now: datetime | None = None, engine: Engine | 
         "stale_sources": all_issues,
         "critical_stale_sources": critical_issues,
         "forecast_inputs_ready": forecast_inputs_ready,
+        "forecast_gate": forecast_gate,
         "stale_behavior": stale_behavior,
         "sources": sources,
         "idempotency_dashboard": {

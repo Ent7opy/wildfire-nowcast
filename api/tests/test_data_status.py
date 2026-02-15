@@ -52,3 +52,5 @@ def test_build_data_status_snapshot_marks_stale_and_critical(monkeypatch):
     assert snapshot["overall_state"] == "critical"
     assert "weather" in snapshot["critical_stale_sources"]
     assert snapshot["stale_behavior"]["mode"] == "degraded"
+    assert snapshot["forecast_gate"]["can_run"] is False
+    assert "weather_stale_or_missing" in snapshot["forecast_gate"]["reasons"]

@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from ingest import repository
@@ -33,6 +34,56 @@ MAX_FIRMS_DAY_RANGE = 10
 NRT_RETENTION_DAYS_HINT = 7
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _area_key_from_bbox(bbox: str) -> str:
+    """Build deterministic area key from normalized FIRMS bbox string."""
+    parts = [float(part.strip()) for part in bbox.split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"Invalid FIRMS bbox: {bbox!r}. Expected 'w,s,e,n'.")
+    return ",".join(f"{value:.6f}" for value in parts)
+
+
+def _filter_detections_by_watermark(
+    detections: list,
+    *,
+    watermark_time_utc: datetime | None,
+    grace_minutes: int,
+) -> tuple[list, datetime | None]:
+    """Filter detections to incremental window with late-arrival grace."""
+    if not detections:
+        return [], None
+
+    max_acq_time = max((_as_utc(d.acq_time) for d in detections), default=None)
+    if watermark_time_utc is None:
+        return detections, max_acq_time
+
+    threshold = _as_utc(watermark_time_utc) - timedelta(minutes=max(0, int(grace_minutes)))
+    filtered = [d for d in detections if (_as_utc(d.acq_time) or datetime.min.replace(tzinfo=timezone.utc)) > threshold]
+    max_filtered = max((_as_utc(d.acq_time) for d in filtered), default=None)
+    return filtered, max_filtered
+
+
+def _resolve_denoiser_model_run_dir(config: "FIRMSIngestSettings") -> str | None:
+    """Resolve denoiser model path from promoted registry model with env fallback."""
+    try:
+        from api.model_registry import resolve_active_model
+
+        active = resolve_active_model("denoiser")
+        if active and active.get("artifact_uri"):
+            return str(active["artifact_uri"])
+    except Exception:
+        LOGGER.warning("Failed to resolve active promoted denoiser model; using env fallback if provided.")
+
+    return config.denoiser_model_run_dir
+
+
 def run_firms_ingest(
     day_range: Optional[int],
     area: Optional[str],
@@ -51,6 +102,7 @@ def run_firms_ingest(
         )
         return 2
     bbox = _resolve_area(area) if area else config.resolved_area
+    area_key = _area_key_from_bbox(bbox)
     effective_day_range = day_range if day_range is not None else config.day_range
     source_list = _resolve_sources(sources) or config.sources
 
@@ -84,18 +136,29 @@ def run_firms_ingest(
     )
 
     for source in source_list:
+        watermark = repository.get_ingest_watermark(source, area_key)
+        watermark_time_utc = _as_utc((watermark or {}).get("last_acq_time_utc"))
+        grace_minutes = int(config.firms_watermark_grace_minutes)
+
         source_uri = build_firms_url(config.map_key, source, bbox, effective_day_range)
         batch_id = repository.create_ingest_batch(
             source,
             redact_firms_url(source_uri, config.map_key),
             bbox,
             effective_day_range,
+            metadata_extra={
+                "area_key": area_key,
+                "watermark_before": watermark_time_utc.isoformat() if watermark_time_utc else None,
+                "watermark_grace_minutes": grace_minutes,
+            },
         )
         LOGGER.info("Created ingest batch %s for %s", batch_id, source)
 
         fetched_count = 0
         inserted = 0
         skipped_duplicates = 0
+        rows_after_watermark_filter = 0
+        watermark_advanced_to: datetime | None = None
         try:
             csv_rows = fetch_csv_rows(
                 map_key=config.map_key,
@@ -107,15 +170,31 @@ def run_firms_ingest(
             fetched_count = len(csv_rows)
             detections, validation = parse_detection_rows(csv_rows, source, batch_id)
             parsed_count = len(detections)
+            filtered_detections, watermark_advanced_to = _filter_detections_by_watermark(
+                detections,
+                watermark_time_utc=watermark_time_utc,
+                grace_minutes=grace_minutes,
+            )
+            rows_after_watermark_filter = len(filtered_detections)
             _log_firms_validation(source, batch_id, validation)
-            inserted = repository.insert_detections(detections)
-            skipped_duplicates = parsed_count - inserted
+            inserted = repository.insert_detections(filtered_detections)
+            skipped_duplicates = rows_after_watermark_filter - inserted
 
             if inserted > 0:
                 _update_all_scoring_atomic(batch_id)
 
-            if config.denoiser_enabled and inserted > 0:
-                _run_denoiser_inference(batch_id, config)
+            should_run_denoiser = inserted > 0 and (config.denoiser_enabled or config.denoiser_required)
+            if should_run_denoiser:
+                denoiser_model_run_dir = _resolve_denoiser_model_run_dir(config)
+                if not denoiser_model_run_dir:
+                    if config.denoiser_required:
+                        raise RuntimeError(
+                            "Denoiser is required but no promoted denoiser model or "
+                            "DENOISER_MODEL_RUN_DIR fallback is configured."
+                        )
+                    LOGGER.warning("Denoiser is enabled but no model run directory is configured; skipping inference.")
+                else:
+                    _run_denoiser_inference(batch_id, config, model_run_dir=denoiser_model_run_dir)
 
             repository.finalize_ingest_batch(
                 batch_id,
@@ -124,12 +203,31 @@ def run_firms_ingest(
                 inserted=inserted,
                 skipped=max(skipped_duplicates, 0),
             )
+            if watermark_advanced_to is not None:
+                repository.advance_ingest_watermark(
+                    source=source,
+                    area_key=area_key,
+                    last_acq_time_utc=watermark_advanced_to,
+                    last_batch_id=batch_id,
+                )
+            log_event(
+                LOGGER,
+                "firms.watermark",
+                "Applied FIRMS incremental watermark filter",
+                source=source,
+                batch_id=batch_id,
+                area_key=area_key,
+                watermark_before=watermark_time_utc.isoformat() if watermark_time_utc else None,
+                rows_after_watermark_filter=rows_after_watermark_filter,
+                watermark_advanced_to=watermark_advanced_to.isoformat() if watermark_advanced_to else None,
+            )
             LOGGER.info(
-                "Ingested source=%s batch=%s fetched=%s parsed=%s inserted=%s duplicates=%s",
+                "Ingested source=%s batch=%s fetched=%s parsed=%s post_watermark=%s inserted=%s duplicates=%s",
                 source,
                 batch_id,
                 fetched_count,
                 parsed_count,
+                rows_after_watermark_filter,
                 inserted,
                 skipped_duplicates,
             )
@@ -192,9 +290,15 @@ def _update_all_scoring_atomic(batch_id: int) -> None:
         raise  # Re-raise to ensure batch failure is recorded
 
 
-def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> None:
+def _run_denoiser_inference(
+    batch_id: int,
+    config: "FIRMSIngestSettings",
+    *,
+    model_run_dir: str | None = None,
+) -> None:
     """Trigger denoiser inference via subprocess or direct module call."""
-    if not config.denoiser_model_run_dir:
+    model_run_dir = model_run_dir or config.denoiser_model_run_dir
+    if not model_run_dir:
         LOGGER.warning(
             "Denoiser is enabled but DENOISER_MODEL_RUN_DIR is not set. Skipping inference."
         )
@@ -208,7 +312,7 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
 
     # Use direct module import if configured
     if config.denoiser_invoke_method == "module":
-        _run_denoiser_module_direct(batch_id, config)
+        _run_denoiser_module_direct(batch_id, config, model_run_dir=model_run_dir)
         return
 
     # Build command based on invocation method
@@ -234,7 +338,7 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
         "--batch-id",
         str(batch_id),
         "--model-run",
-        config.denoiser_model_run_dir,
+        model_run_dir,
         "--threshold",
         str(config.denoiser_threshold),
         "--batch-size",
@@ -280,7 +384,12 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
         raise RuntimeError(f"Denoiser inference failed for batch {batch_id}") from e
 
 
-def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") -> None:
+def _run_denoiser_module_direct(
+    batch_id: int,
+    config: "FIRMSIngestSettings",
+    *,
+    model_run_dir: str,
+) -> None:
     """Run denoiser inference by directly importing the module (no subprocess).
     
     This avoids subprocess overhead and works in environments where uv/python
@@ -293,7 +402,7 @@ def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") ->
         # Build arguments as if they came from command line
         argv = [
             "--batch-id", str(batch_id),
-            "--model-run", config.denoiser_model_run_dir,
+            "--model-run", model_run_dir,
             "--threshold", str(config.denoiser_threshold),
             "--batch-size", str(config.denoiser_batch_size),
         ]

@@ -127,13 +127,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=2,
+        default=3,
         help="Maximum retries per failed job run.",
     )
     parser.add_argument(
         "--retry-backoff-seconds",
         type=float,
-        default=15.0,
+        default=20.0,
         help="Linear backoff base in seconds between retries.",
     )
     parser.add_argument(

@@ -17,6 +17,7 @@ from redis.lock import Lock as RedisLock
 from rq import Queue
 
 from api.config import settings
+from api.data_status import build_data_status_snapshot, resolve_forecast_gate
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
 from api.forecast.model_catalog import resolve_request_model_selection
@@ -37,6 +38,14 @@ queue = Queue(connection=redis_conn, default_timeout=120)
 # Lock timeout in seconds for cache operations
 CACHE_LOCK_TIMEOUT = 300  # 5 minutes
 DEFAULT_HORIZONS_HOURS = [24, 48, 72]
+
+
+class ForecastGateBlockedError(RuntimeError):
+    """Raised when forecast preflight gate blocks execution."""
+
+    def __init__(self, payload: dict) -> None:
+        super().__init__(payload.get("message", "Forecast gate blocked"))
+        self.payload = payload
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -141,6 +150,21 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
     result_lock: Optional[RedisLock] = None
 
     try:
+        if bool(settings.forecast_fail_closed_on_stale):
+            snapshot = build_data_status_snapshot()
+            gate = resolve_forecast_gate(snapshot)
+            if not bool(gate.get("can_run", True)):
+                raise ForecastGateBlockedError(
+                    {
+                        "code": "forecast_inputs_stale_or_missing",
+                        "message": "Forecast blocked by stale/missing critical inputs at worker preflight.",
+                        "missing_or_stale_sources": gate.get("missing_or_stale_sources", []),
+                        "reasons": gate.get("reasons", []),
+                        "as_of": gate.get("as_of") or snapshot.get("as_of"),
+                        "retry_hint": gate.get("retry_hint"),
+                    }
+                )
+
         # Parse request-level settings first (used by cache key and strict behavior).
         if forecast_params.get("forecast_reference_time"):
             forecast_time = _parse_iso8601_datetime(forecast_params["forecast_reference_time"])
@@ -464,7 +488,10 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             raise
 
     except Exception as e:
-        error_msg = f"{type(e).__name__}: {str(e)}"
+        if isinstance(e, ForecastGateBlockedError):
+            error_msg = json.dumps(e.payload, sort_keys=True)
+        else:
+            error_msg = f"{type(e).__name__}: {str(e)}"
         logger.error(
             f"JIT forecast pipeline failed: job_id={job_id}, error={error_msg}\n{traceback.format_exc()}"
         )

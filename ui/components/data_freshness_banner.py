@@ -49,9 +49,13 @@ def render_data_freshness_banner() -> None:
     sources = snapshot.get("sources", {})
     stale_sources = snapshot.get("stale_sources", [])
     stale_behavior = snapshot.get("stale_behavior", {})
+    forecast_gate = snapshot.get("forecast_gate", {})
     idempotency_dashboard = snapshot.get("idempotency_dashboard", {})
+    forecast_can_run = bool(forecast_gate.get("can_run", True))
+    forecast_reasons = forecast_gate.get("reasons", []) or []
+    forecast_retry_hint = forecast_gate.get("retry_hint")
 
-    if overall == "healthy":
+    if overall == "healthy" and forecast_can_run:
         st.caption("Data freshness: healthy")
         if idempotency_dashboard:
             with st.expander("Ingestion idempotency dashboard", expanded=False):
@@ -75,7 +79,18 @@ def render_data_freshness_banner() -> None:
         f"Forecast behavior: `{forecast_api_mode}`"
     )
 
-    if overall == "critical":
+    gate_lines = ""
+    if not forecast_can_run:
+        reason_text = ", ".join(forecast_reasons) if forecast_reasons else "forecast inputs unavailable"
+        gate_lines = f"\n\nForecast gate: `BLOCKED` ({reason_text})"
+        if forecast_retry_hint:
+            gate_lines += f"\nRetry hint: {forecast_retry_hint}"
+    else:
+        gate_lines = "\n\nForecast gate: `READY`"
+
+    body += gate_lines
+
+    if overall == "critical" or not forecast_can_run:
         st.error(f"Data freshness is critical.\n\n{body}")
     else:
         st.warning(f"Data freshness is degraded.\n\n{body}")
