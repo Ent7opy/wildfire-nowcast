@@ -7,6 +7,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
+import pydeck as pdk
 import requests
 import streamlit as st
 
@@ -198,18 +199,45 @@ def _render_major_fires(detections: list[Dict[str, Any]], *, now_utc: datetime, 
             location = "Unknown location"
         frp_str = f"{frp:.1f} MW" if frp is not None else "N/A"
         acq_str = acq.astimezone(timezone.utc).strftime("%H:%M UTC") if acq is not None else "Unknown"
-
-        st.markdown(
-            f'<div style="padding:8px 0;border-top:1px solid rgba(255,255,255,0.06);">'
-            f'<div style="display:flex;justify-content:space-between;gap:8px;">'
-            f'<span style="font-size:13px;font-weight:600;color:#e0e0e0;">#{idx} {location}</span>'
-            f'<span style="font-size:12px;color:#ff6b35;font-weight:600;">{score:.2f}</span>'
-            f'</div>'
-            f'<div style="font-size:11px;color:rgba(255,255,255,0.58);margin-top:2px;">'
-            f'FRP {frp_str} | {acq_str}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
+        button_label = f"#{idx} {location} | FRP {frp_str} | score {score:.2f}"
+        button_key = (
+            f"major_fire_select_{det.get('id', idx)}_"
+            f"{int((lat or 0.0) * 100)}_{int((lon or 0.0) * 100)}"
         )
+
+        if st.button(button_label, key=button_key, use_container_width=True):
+            _select_fire_from_overview(det, lat=lat, lon=lon)
+            st.rerun()
+
+        st.caption(f"Observed {acq_str}")
+
+
+def _select_fire_from_overview(det: Dict[str, Any], *, lat: Optional[float], lon: Optional[float]) -> None:
+    """Select a detection from the overview list and re-center the map."""
+    if lat is None or lon is None:
+        return
+
+    selected = dict(det)
+    selected["lat"] = lat
+    selected["lon"] = lon
+
+    app_state.selection.selected_fire = selected
+    app_state.selection.last_click = {"lat": lat, "lng": lon}
+
+    current_view = st.session_state.get("map_view_state")
+    current_zoom = float(getattr(current_view, "zoom", 2.0)) if current_view is not None else 2.0
+    pitch = float(getattr(current_view, "pitch", 0.0)) if current_view is not None else 0.0
+    bearing = float(getattr(current_view, "bearing", 0.0)) if current_view is not None else 0.0
+    target_zoom = max(current_zoom, 5.5)
+
+    st.session_state.map_view_state = pdk.ViewState(
+        latitude=lat,
+        longitude=lon,
+        zoom=target_zoom,
+        pitch=pitch,
+        bearing=bearing,
+    )
+    app_state._persist()
 
 
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
@@ -224,10 +252,12 @@ def _lookup_country_for_coordinates(lat: float, lon: float) -> Optional[str]:
                 "lon": f"{lon:.4f}",
                 "zoom": 3,
                 "addressdetails": 1,
+                "accept-language": "en",
             },
             headers={
                 "User-Agent": "wildfire-nowcast-ui/1.0",
                 "Accept": "application/json",
+                "Accept-Language": "en",
             },
             timeout=(1.5, 3.0),
         )

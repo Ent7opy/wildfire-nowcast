@@ -152,13 +152,11 @@ class AppState:
     def time_window(self) -> str:
         """Human-readable label derived from the current time range."""
         hours = self.filters.hours_start - self.filters.hours_end
-        if hours <= 6:
-            return "Last 6 hours"
-        if hours <= 12:
-            return "Last 12 hours"
-        if hours <= 24:
-            return "Last 24 hours"
-        return "Last 48 hours"
+        if self.filters.hours_end == 0:
+            if hours == 1:
+                return "Last 1 hour"
+            return f"Last {hours} hours"
+        return f"{hours}h window ({self.filters.hours_start}h ago to {self.filters.hours_end}h ago)"
 
     @property
     def time_range(self) -> tuple[datetime, datetime]:
