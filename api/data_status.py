@@ -275,7 +275,12 @@ def _fetch_latest_perimeters_status(conn) -> dict[str, Any]:
     }
 
 
-def build_data_status_snapshot(*, now: datetime | None = None, engine: Engine | None = None) -> dict[str, Any]:
+def build_data_status_snapshot(
+    *,
+    now: datetime | None = None,
+    engine: Engine | None = None,
+    include_internal: bool = False,
+) -> dict[str, Any]:
     """Build a snapshot of data freshness and idempotency metrics."""
     now_utc = _as_utc(now) or _utc_now()
     db_engine = engine or get_engine()
@@ -325,43 +330,75 @@ def build_data_status_snapshot(*, now: datetime | None = None, engine: Engine | 
         if details["state"] in {"stale", "missing"}
     ]
 
-    if critical_issues:
-        overall_state = "critical"
-    elif all_issues:
-        overall_state = "degraded"
+    if include_internal:
+        if critical_issues:
+            overall_state = "critical"
+        elif all_issues:
+            overall_state = "degraded"
+        else:
+            overall_state = "healthy"
+
+        forecast_gate = _build_forecast_gate(sources=sources, as_of=now_utc.isoformat())
+        forecast_inputs_ready = bool(forecast_gate["can_run"])
+        stale_behavior = {
+            "mode": "normal" if overall_state == "healthy" else "degraded",
+            "policy": "serve_last_known_data_with_warning",
+            "fires_api": "returns cached/latest detections and includes freshness status endpoint",
+            "forecast_api": (
+                "allow_forecast_generation"
+                if forecast_gate["can_run"]
+                else "deny_new_forecasts_until_weather_fresh_and_terrain_present"
+            ),
+            "ui": "show_stale_data_banner_when_state_not_healthy",
+            "critical_sources": sorted(critical_sources),
+            "forecast_retry_hint": forecast_gate.get("retry_hint"),
+        }
     else:
-        overall_state = "healthy"
+        # Public/user-facing contract: informational only (last-fetched status), no stale signaling.
+        missing_sources = [
+            name
+            for name, details in sources.items()
+            if details["state"] == "missing"
+        ]
+        overall_state = "degraded" if missing_sources else "healthy"
+        forecast_inputs_ready = True
+        forecast_gate = {
+            "can_run": True,
+            "would_block_if_fail_closed": False,
+            "policy": "on_demand",
+            "reasons": [],
+            "missing_or_stale_sources": [],
+            "as_of": now_utc.isoformat(),
+            "retry_hint": None,
+        }
+        stale_behavior = {
+            "mode": "informational",
+            "policy": "show_last_fetched_only",
+            "fires_api": "returns latest detections with source timestamps",
+            "forecast_api": "ingests missing weather/terrain on forecast request",
+            "ui": "show_last_fetched_timestamps",
+            "critical_sources": sorted(critical_sources),
+            "forecast_retry_hint": None,
+        }
 
-    forecast_gate = _build_forecast_gate(sources=sources, as_of=now_utc.isoformat())
-    forecast_inputs_ready = bool(forecast_gate["can_run"])
+    public_stale_sources = all_issues if include_internal else []
+    public_critical_stale_sources = critical_issues if include_internal else []
 
-    stale_behavior = {
-        "mode": "normal" if overall_state == "healthy" else "degraded",
-        "policy": "serve_last_known_data_with_warning",
-        "fires_api": "returns cached/latest detections and includes freshness status endpoint",
-        "forecast_api": (
-            "allow_forecast_generation"
-            if forecast_gate["can_run"]
-            else "deny_new_forecasts_until_weather_fresh_and_terrain_present"
-        ),
-        "ui": "show_stale_data_banner_when_state_not_healthy",
-        "critical_sources": sorted(critical_sources),
-        "forecast_retry_hint": forecast_gate.get("retry_hint"),
-    }
-
-    return {
+    snapshot = {
         "as_of": now_utc.isoformat(),
         "overall_state": overall_state,
-        "stale_sources": all_issues,
-        "critical_stale_sources": critical_issues,
+        "stale_sources": public_stale_sources,
+        "critical_stale_sources": public_critical_stale_sources,
         "forecast_inputs_ready": forecast_inputs_ready,
         "forecast_gate": forecast_gate,
         "stale_behavior": stale_behavior,
         "sources": sources,
-        "idempotency_dashboard": {
+    }
+    if include_internal:
+        snapshot["idempotency_dashboard"] = {
             "firms": firms["idempotency"],
             "weather": weather["idempotency"],
             "terrain": terrain["idempotency"],
             "perimeters": perimeters["idempotency"],
-        },
-    }
+        }
+    return snapshot

@@ -17,6 +17,8 @@ import time
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
+from sqlalchemy.engine import Connection
+
 from ingest import repository
 from ingest.config import settings as ingest_settings
 from ingest.firms_client import build_firms_url, fetch_csv_rows, parse_detection_rows, redact_firms_url
@@ -50,16 +52,25 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     return [segment.strip() for segment in value.split(",") if segment.strip()]
 
 
-def _update_false_source_masking(batch_id: int) -> None:
-    """Update false_source_masked column for detections in the batch."""
+def _update_all_scoring(batch_id: int, *, conn: Connection | None = None) -> None:
+    """Update all scoring columns, including fire_likelihood, for a backfill batch."""
     try:
-        from api.fires.repo import update_false_source_masking
+        from api.fires.repo import update_all_scoring_for_batch
 
-        LOGGER.info("Updating false-source masking for batch %s", batch_id)
-        masked_count = update_false_source_masking(batch_id)
-        LOGGER.info("Marked %s detections as false sources in batch %s", masked_count, batch_id)
+        LOGGER.info("Updating full scoring for backfill batch %s", batch_id)
+        counts = update_all_scoring_for_batch(batch_id, conn=conn)
+        LOGGER.info(
+            "Backfill batch %s scoring complete: masked=%s persistence=%s landcover=%s weather=%s likelihood=%s",
+            batch_id,
+            counts["masked_count"],
+            counts["persistence_count"],
+            counts["landcover_count"],
+            counts["weather_count"],
+            counts["likelihood_count"],
+        )
     except Exception:
-        LOGGER.exception("Failed to update false-source masking for batch %s", batch_id)
+        LOGGER.exception("Failed to update full scoring for backfill batch %s", batch_id)
+        raise
 
 
 def run_backfill(
@@ -121,6 +132,7 @@ def run_backfill(
             fetched_count = 0
             inserted = 0
             skipped_duplicates = 0
+            parsed_count = 0
 
             try:
                 csv_rows = fetch_csv_rows(
@@ -134,11 +146,23 @@ def run_backfill(
                 fetched_count = len(csv_rows)
                 detections, _validation = parse_detection_rows(csv_rows, source, batch_id)
                 parsed_count = len(detections)
-                inserted = repository.insert_detections(detections)
-                skipped_duplicates = parsed_count - inserted
-
-                if inserted > 0:
-                    _update_false_source_masking(batch_id)
+                if detections:
+                    with repository.get_engine().begin() as conn:
+                        inserted = repository.insert_detections(detections, conn=conn)
+                        skipped_duplicates = parsed_count - inserted
+                        if inserted > 0:
+                            _update_all_scoring(batch_id, conn=conn)
+                            remaining_unscored = repository.count_unscored_likelihood_for_batch(
+                                batch_id,
+                                conn=conn,
+                            )
+                            if remaining_unscored > 0:
+                                raise RuntimeError(
+                                    f"Backfill batch {batch_id} still has {remaining_unscored} rows with NULL fire_likelihood"
+                                )
+                else:
+                    inserted = 0
+                    skipped_duplicates = 0
 
                 repository.finalize_ingest_batch(
                     batch_id,
@@ -159,12 +183,25 @@ def run_backfill(
                 )
             except Exception:
                 LOGGER.exception("Backfill failed for source=%s as_of=%s", source, date_str)
+                persisted_after_cleanup = 0
+                try:
+                    persisted_before_cleanup = repository.count_detections_for_batch(batch_id)
+                    if persisted_before_cleanup > 0:
+                        deleted = repository.delete_detections_for_batch(batch_id)
+                        LOGGER.warning(
+                            "Removed %s persisted detections for failed backfill batch %s",
+                            deleted,
+                            batch_id,
+                        )
+                    persisted_after_cleanup = repository.count_detections_for_batch(batch_id)
+                except Exception:
+                    LOGGER.exception("Failed to cleanup detections for failed backfill batch %s", batch_id)
                 repository.finalize_ingest_batch(
                     batch_id,
                     status="failed",
                     fetched=fetched_count,
-                    inserted=inserted,
-                    skipped=max(skipped_duplicates, 0),
+                    inserted=persisted_after_cleanup,
+                    skipped=max(parsed_count - persisted_after_cleanup, 0),
                 )
                 return 1
 
@@ -236,5 +273,3 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-
-

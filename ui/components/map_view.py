@@ -44,23 +44,29 @@ def render_map_view() -> Optional[Dict[str, float]]:
 
         tile_url = f"{api_public_base_url()}/tiles/fires/{{z}}/{{x}}/{{y}}.pbf?{query_str}"
 
-        # 5-tier graduated color: deep red → red → ember orange → amber → yellow
-        # The final `>= 0` guard separates real low-likelihood fires (yellow) from
-        # NULL/unscored fires (gray) — JS treats `null >= 0.2` as false but also
-        # `null >= 0` as false, so NULLs fall through to UNSCORED_FILL.
+        # 5-tier graduated color: deep red -> red -> ember orange -> amber -> yellow.
+        # When fire_likelihood is NULL (unscored), fall back to confidence_score,
+        # then raw confidence, then FRP-derived intensity so points still render
+        # with meaningful color instead of neutral/washed styling.
+        severity_expr = (
+            "(properties.fire_likelihood != null ? properties.fire_likelihood : "
+            "properties.confidence_score != null ? properties.confidence_score : "
+            "properties.confidence != null ? properties.confidence / 100.0 : "
+            "properties.frp != null ? (properties.frp >= 80 ? 0.8 : properties.frp >= 40 ? 0.6 : properties.frp >= 20 ? 0.4 : properties.frp >= 5 ? 0.2 : 0.1) : -1)"
+        )
+
         fill_color_expr = (
-            f"properties.fire_likelihood >= {FireThresholds.VERY_HIGH} ? {FireColors.VERY_HIGH_FILL} : "
-            f"properties.fire_likelihood >= {FireThresholds.HIGH} ? {FireColors.HIGH_FILL} : "
-            f"properties.fire_likelihood >= {FireThresholds.MEDIUM} ? {FireColors.MEDIUM_FILL} : "
-            f"properties.fire_likelihood >= {FireThresholds.LOW} ? {FireColors.LOW_FILL} : "
-            f"properties.fire_likelihood >= 0 ? {FireColors.VERY_LOW_FILL} : "
+            f"({severity_expr}) >= {FireThresholds.VERY_HIGH} ? {FireColors.VERY_HIGH_FILL} : "
+            f"({severity_expr}) >= {FireThresholds.HIGH} ? {FireColors.HIGH_FILL} : "
+            f"({severity_expr}) >= {FireThresholds.MEDIUM} ? {FireColors.MEDIUM_FILL} : "
+            f"({severity_expr}) >= {FireThresholds.LOW} ? {FireColors.LOW_FILL} : "
+            f"({severity_expr}) >= 0 ? {FireColors.VERY_LOW_FILL} : "
             f"{FireColors.UNSCORED_FILL}"
         )
 
-        # Conditional outline: ember orange glow for high-confidence, subtle white otherwise
-        # Same NULL guard: unscored fires get the default outline.
+        # Conditional outline: ember glow for high-severity points, subtle white otherwise.
         line_color_expr = (
-            f"properties.fire_likelihood >= {FireThresholds.HIGH} ? "
+            f"({severity_expr}) >= {FireThresholds.HIGH} ? "
             f"{FireColors.OUTLINE_HIGH} : {FireColors.OUTLINE_DEFAULT}"
         )
 
@@ -74,6 +80,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
             id=fires_layer_id,
             pickable=True,
             auto_highlight=True,
+            filled=True,
             get_fill_color=fill_color_expr,
             get_point_radius=f"properties.frp > {PointSizing.LARGE_FRP} ? {PointSizing.LARGE_SIZE} : properties.frp > {PointSizing.MEDIUM_FRP} ? {PointSizing.MEDIUM_SIZE} : properties.frp > {PointSizing.SMALL_FRP} ? {PointSizing.SMALL_SIZE} : {PointSizing.MIN_SIZE}",
             point_radius_min_pixels=PointSizing.MIN_PIXELS,

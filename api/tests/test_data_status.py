@@ -44,7 +44,7 @@ def test_build_data_status_snapshot_marks_stale_and_critical(monkeypatch):
         },
     )
 
-    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine())
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine(), include_internal=True)
 
     assert snapshot["sources"]["firms"]["state"] == "fresh"
     assert snapshot["sources"]["weather"]["state"] == "stale"

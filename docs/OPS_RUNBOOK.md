@@ -14,6 +14,7 @@ Validate:
 ```bash
 curl http://localhost:8000/health/data-freshness
 curl http://localhost:8000/internal/models/active
+curl http://localhost:8000/internal/health/data-freshness
 ```
 
 ## 2) Continuous runtime operations
@@ -32,7 +33,6 @@ docker compose up ingest_scheduler -d
 
 Expected runtime profile:
 - FIRMS poll every 30 minutes.
-- Weather refresh every 3 hours.
 - Perimeters refresh daily.
 - Freshness checks enabled.
 - Retries enabled (`max_retries=3`, `backoff=20s`).
@@ -66,23 +66,24 @@ make train-spread
 
 These targets train, register the latest run, and promote it as champion.
 
-## 5) Incident playbook: stale-critical forecast failures
+## 5) Incident playbook: data recency / empty-map issues
 
 Symptoms:
-- `POST /forecast/jit` returns `503` with code `forecast_inputs_stale_or_missing`.
-- UI forecast action is blocked with stale/missing source reasons.
+- Map shows no fires for recent windows.
+- Forecast generation is slow due repeated on-demand weather/terrain ingestion.
 
 Immediate checks:
 
 ```bash
 curl http://localhost:8000/health/data-freshness
+curl http://localhost:8000/internal/health/data-freshness
 ```
 
 Actions:
-- If `weather` is stale/missing: run/repair weather ingestion and retry.
-- If `terrain` is missing for target area: trigger terrain ingest/prewarm and retry.
+- If FIRMS latest run has zero fetched rows, run a manual FIRMS ingest for the intended area/day window.
+- If weather/terrain is missing for frequent forecast AOIs, prewarm those inputs (optional) to reduce click-to-forecast latency.
 - If FIRMS ingest fails due denoiser policy, ensure promoted denoiser exists or set `DENOISER_REQUIRED=false` only for controlled local/dev fallback.
 
 Recovery verification:
-- `forecast_gate.can_run == true`
+- `/health/data-freshness` reports recent `sources.*.last_seen_at` values.
 - Scheduler dashboard updates at `data/ingest/orchestrator_dashboard.json`

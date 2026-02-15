@@ -27,23 +27,3 @@ def test_run_jit_pipeline_releases_result_lock_on_cache_hit():
     mock_release.assert_called_once_with(lock)
     mock_update.assert_called_once()
     assert mock_update.call_args.args[1] == "completed"
-
-
-def test_run_jit_pipeline_fails_fast_when_forecast_gate_blocks():
-    job_id = uuid4()
-    bbox = (20.0, 40.0, 21.0, 41.0)
-
-    with patch("api.forecast.worker.build_data_status_snapshot", return_value={"as_of": "2026-02-11T00:00:00+00:00"}), \
-         patch("api.forecast.worker.resolve_forecast_gate", return_value={
-             "can_run": False,
-             "reasons": ["weather_stale_or_missing"],
-             "missing_or_stale_sources": ["weather"],
-             "as_of": "2026-02-11T00:00:00+00:00",
-             "retry_hint": "wait for weather refresh",
-         }), \
-         patch("api.forecast.worker.repo.update_jit_job_status") as mock_update:
-        run_jit_forecast_pipeline(job_id, bbox, forecast_params={})
-
-    mock_update.assert_called_once()
-    assert mock_update.call_args.args[1] == "failed"
-    assert "forecast_inputs_stale_or_missing" in (mock_update.call_args.kwargs.get("error") or "")

@@ -184,30 +184,6 @@ def test_create_jit_forecast_valid_bbox():
         mock_enqueue.assert_called_once()
 
 
-def test_create_jit_forecast_returns_503_when_forecast_gate_blocks(monkeypatch):
-    monkeypatch.setattr(
-        "api.routes.forecast._build_forecast_gate_failure_payload",
-        lambda: {
-            "code": "forecast_inputs_stale_or_missing",
-            "message": "Forecast cannot run because required input data is stale or missing.",
-            "missing_or_stale_sources": ["weather"],
-            "reasons": ["weather_stale_or_missing"],
-            "as_of": "2026-02-11T00:00:00+00:00",
-            "retry_hint": "wait for weather refresh or trigger weather prewarm",
-        },
-    )
-
-    response = client.post(
-        "/forecast/jit",
-        json={"bbox": [20.0, 40.0, 21.0, 41.0]},
-    )
-
-    assert response.status_code == 503
-    payload = response.json()
-    assert payload["code"] == "forecast_inputs_stale_or_missing"
-    assert payload["missing_or_stale_sources"] == ["weather"]
-
-
 def test_create_jit_forecast_accepts_new_optional_fields():
     """Test POST /forecast/jit accepts model_id + strict/cache flags."""
     from uuid import uuid4

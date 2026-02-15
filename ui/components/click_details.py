@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
+import requests
 import streamlit as st
 
 from state import app_state, isoformat
@@ -15,7 +15,6 @@ from api_client import (
     ApiError,
     ApiUnavailableError,
     create_jit_forecast,
-    get_data_freshness_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +110,139 @@ def _parse_time(value: Any) -> Optional[datetime]:
     return None
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    """Convert a value to float, returning None on invalid inputs."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clamp_01(value: float) -> float:
+    return max(0.0, min(value, 1.0))
+
+
+def _compute_detection_severity(det: Dict[str, Any]) -> float:
+    """Compute a 0-1 severity score with robust fallbacks when likelihood is missing."""
+    fire_likelihood = _safe_float(det.get("fire_likelihood"))
+    if fire_likelihood is not None:
+        return _clamp_01(fire_likelihood)
+
+    confidence_score = _safe_float(det.get("confidence_score"))
+    if confidence_score is not None:
+        return _clamp_01(confidence_score)
+
+    confidence = _safe_float(det.get("confidence"))
+    if confidence is not None:
+        return _clamp_01(confidence / 100.0)
+
+    frp = _safe_float(det.get("frp"))
+    if frp is not None:
+        # Log-normalized FRP fallback so very large outliers don't dominate.
+        return _clamp_01(math.log1p(max(frp, 0.0)) / math.log1p(100.0))
+
+    return 0.0
+
+
+def _compute_significance(det: Dict[str, Any], *, now_utc: datetime) -> float:
+    """Composite ranking for 'major fires' cards in the overview panel."""
+    severity = _compute_detection_severity(det)
+
+    frp = _safe_float(det.get("frp"))
+    frp_component = 0.0
+    if frp is not None:
+        frp_component = _clamp_01(math.log1p(max(frp, 0.0)) / math.log1p(200.0))
+
+    recency_component = 0.0
+    acq_time = _parse_time(det.get("acq_time"))
+    if acq_time is not None:
+        if acq_time.tzinfo is None:
+            acq_time = acq_time.replace(tzinfo=timezone.utc)
+        age_hours = max((now_utc - acq_time).total_seconds() / 3600.0, 0.0)
+        recency_component = _clamp_01(1.0 - min(age_hours, 24.0) / 24.0)
+
+    return 0.65 * severity + 0.25 * frp_component + 0.10 * recency_component
+
+
+def _render_major_fires(detections: list[Dict[str, Any]], *, now_utc: datetime, limit: int = 5) -> None:
+    """Render top significant fires from currently loaded detections."""
+    ranked: list[tuple[float, Dict[str, Any]]] = []
+    for det in detections:
+        ranked.append((_compute_significance(det, now_utc=now_utc), det))
+
+    top = sorted(ranked, key=lambda item: item[0], reverse=True)[: max(0, limit)]
+    if not top:
+        return
+
+    st.markdown(
+        '<div style="margin-top:14px;font-size:12px;color:rgba(255,255,255,0.5);'
+        'text-transform:uppercase;letter-spacing:0.5px;">Major fires in view</div>',
+        unsafe_allow_html=True,
+    )
+
+    for idx, (score, det) in enumerate(top, start=1):
+        lat = _safe_float(det.get("lat"))
+        lon = _safe_float(det.get("lon"))
+        frp = _safe_float(det.get("frp"))
+        acq = _parse_time(det.get("acq_time"))
+
+        country = None
+        if lat is not None and lon is not None:
+            country = _lookup_country_for_coordinates(lat, lon)
+        if lat is not None and lon is not None:
+            coords = f"{lat:.2f}, {lon:.2f}"
+            location = f"{country} ({coords})" if country else coords
+        else:
+            location = "Unknown location"
+        frp_str = f"{frp:.1f} MW" if frp is not None else "N/A"
+        acq_str = acq.astimezone(timezone.utc).strftime("%H:%M UTC") if acq is not None else "Unknown"
+
+        st.markdown(
+            f'<div style="padding:8px 0;border-top:1px solid rgba(255,255,255,0.06);">'
+            f'<div style="display:flex;justify-content:space-between;gap:8px;">'
+            f'<span style="font-size:13px;font-weight:600;color:#e0e0e0;">#{idx} {location}</span>'
+            f'<span style="font-size:12px;color:#ff6b35;font-weight:600;">{score:.2f}</span>'
+            f'</div>'
+            f'<div style="font-size:11px;color:rgba(255,255,255,0.58);margin-top:2px;">'
+            f'FRP {frp_str} | {acq_str}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+
+@st.cache_data(ttl=12 * 3600, show_spinner=False)
+def _lookup_country_for_coordinates(lat: float, lon: float) -> Optional[str]:
+    """Best-effort reverse geocode to country name for display purposes."""
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "format": "jsonv2",
+                "lat": f"{lat:.4f}",
+                "lon": f"{lon:.4f}",
+                "zoom": 3,
+                "addressdetails": 1,
+            },
+            headers={
+                "User-Agent": "wildfire-nowcast-ui/1.0",
+                "Accept": "application/json",
+            },
+            timeout=(1.5, 3.0),
+        )
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+        address = payload.get("address", {}) if isinstance(payload, dict) else {}
+        country = address.get("country")
+        if isinstance(country, str) and country.strip():
+            return country.strip()
+        return None
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _fetch_aggregate_stats(
     bbox: Tuple[float, float, float, float],
@@ -145,22 +277,6 @@ def _fetch_aggregate_stats(
         return {"ok": False, "error": str(exc)}
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def _fetch_forecast_gate_status() -> Dict[str, Any]:
-    """Fetch forecast gate state from data freshness endpoint."""
-    try:
-        snapshot = get_data_freshness_status()
-        gate = snapshot.get("forecast_gate", {}) or {}
-        return {
-            "ok": True,
-            "can_run": bool(gate.get("can_run", True)),
-            "reasons": gate.get("reasons", []) or [],
-            "retry_hint": gate.get("retry_hint"),
-        }
-    except Exception as exc:
-        return {"ok": False, "error": str(exc), "can_run": True, "reasons": []}
-
-
 def _render_aggregate_stats() -> None:
     """Render aggregate statistics when no fire is selected."""
     from config.theme import DarkTheme
@@ -191,7 +307,7 @@ def _render_aggregate_stats() -> None:
     most_recent_str = "N/A"
     if detections:
         max_lh = max(
-            (float(d.get("fire_likelihood") or 0) for d in detections),
+            (_compute_detection_severity(d) for d in detections),
             default=0,
         )
         times = [_parse_time(d.get("acq_time")) for d in detections]
@@ -215,17 +331,18 @@ def _render_aggregate_stats() -> None:
         st.markdown(
             '<div style="font-size:12px;color:rgba(255,255,255,0.5);'
             'text-transform:uppercase;letter-spacing:0.5px;'
-            'text-align:center;margin-top:8px;">Highest confidence</div>',
+            'text-align:center;margin-top:8px;">Highest severity</div>',
             unsafe_allow_html=True,
         )
         gauge_html = _render_confidence_gauge(max_lh)
         st.markdown(gauge_html, unsafe_allow_html=True)
     else:
-        _render_stat_row("Highest confidence", "N/A")
+        _render_stat_row("Highest severity", "N/A")
 
     # ── Stat rows ────────────────────────────────────────────────
     _render_stat_row("Most recent", most_recent_str)
     _render_stat_row("Time window", app_state.time_window)
+    _render_major_fires(detections, now_utc=end_time, limit=5)
 
 
 def _render_stat_row(label: str, value: str) -> None:
@@ -379,19 +496,10 @@ def _render_forecast_section(
     )
 
     is_forecast_running = app_state.forecast_job.job_id is not None
-    gate = _fetch_forecast_gate_status()
-    forecast_blocked = bool(gate.get("ok", False) and not gate.get("can_run", True))
-
-    if forecast_blocked:
-        reason_text = ", ".join(gate.get("reasons", [])) or "stale or missing forecast inputs"
-        st.warning(f"Forecast temporarily blocked: {reason_text}")
-        if gate.get("retry_hint"):
-            st.caption(f"Action: {gate['retry_hint']}")
-
     if st.button(
         "Generate Spread Forecast",
         key="generate_forecast_btn",
-        disabled=is_forecast_running or forecast_blocked,
+        disabled=is_forecast_running,
         type="primary",
         use_container_width=True,
     ):
@@ -425,18 +533,6 @@ def _render_forecast_section(
         except ApiUnavailableError:
             st.error("Data service is unavailable right now. Please try again in a moment.")
         except ApiError as e:
-            if e.status_code == 503 and e.response_text:
-                try:
-                    payload = json.loads(e.response_text)
-                    retry_hint = payload.get("retry_hint")
-                    reasons = payload.get("reasons") or payload.get("missing_or_stale_sources") or []
-                    reason_text = ", ".join(str(r) for r in reasons) if reasons else "required inputs are stale or missing"
-                    st.error(f"Forecast blocked: {reason_text}")
-                    if retry_hint:
-                        st.caption(f"Action: {retry_hint}")
-                    return
-                except Exception:
-                    pass
             logger.error(
                 "Forecast generation failed: status=%s, response=%s, bbox=%s",
                 e.status_code, e.response_text, forecast_bbox

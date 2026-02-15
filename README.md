@@ -98,6 +98,12 @@ API/UI stale-data status endpoint:
 curl http://localhost:8000/health/data-freshness
 ```
 
+Internal ops freshness + idempotency diagnostics:
+
+```bash
+curl http://localhost:8000/internal/health/data-freshness
+```
+
 Active promoted models endpoint:
 
 ```bash

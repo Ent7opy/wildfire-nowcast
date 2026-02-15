@@ -39,6 +39,14 @@ class FIRMSIngestSettings(BaseSettings):
         default=90,
         validation_alias="FIRMS_WATERMARK_GRACE_MINUTES",
     )
+    firms_reconcile_unscored_batches: bool = Field(
+        default=True,
+        validation_alias="FIRMS_RECONCILE_UNSCORED_BATCHES",
+    )
+    firms_reconcile_max_batches: int = Field(
+        default=5,
+        validation_alias="FIRMS_RECONCILE_MAX_BATCHES",
+    )
 
     # Denoiser settings
     denoiser_enabled: bool = Field(default=False, validation_alias="DENOISER_ENABLED")

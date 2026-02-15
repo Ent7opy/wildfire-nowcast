@@ -17,9 +17,43 @@ async def healthcheck() -> dict:
 
 @internal_router.get("/health/data-freshness")
 async def data_freshness_healthcheck() -> dict:
-    """Return source freshness, stale-data policy, and idempotency dashboard metrics."""
+    """Return user-facing source freshness and stale-data policy."""
     try:
         return build_data_status_snapshot()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {
+            "as_of": None,
+            "overall_state": "degraded",
+            "stale_sources": [],
+            "critical_stale_sources": [],
+            "forecast_inputs_ready": True,
+            "forecast_gate": {
+                "can_run": True,
+                "would_block_if_fail_closed": False,
+                "policy": "on_demand",
+                "reasons": [],
+                "missing_or_stale_sources": [],
+                "as_of": None,
+                "retry_hint": None,
+            },
+            "stale_behavior": {
+                "mode": "informational",
+                "policy": "show_last_fetched_only",
+                "fires_api": "returns latest detections with source timestamps",
+                "forecast_api": "ingests missing weather/terrain on forecast request",
+                "ui": "show_last_fetched_timestamps",
+                "critical_sources": ["firms", "weather"],
+            },
+            "sources": {},
+            "error": str(exc),
+        }
+
+
+@internal_router.get("/internal/health/data-freshness")
+async def data_freshness_healthcheck_internal() -> dict:
+    """Return internal freshness snapshot including idempotency diagnostics."""
+    try:
+        return build_data_status_snapshot(include_internal=True)
     except Exception as exc:  # pragma: no cover - defensive fallback
         return {
             "as_of": None,

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 
 from sqlalchemy import JSON, bindparam, create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from api.config import settings as api_settings
 from ingest.models import DetectionRecord
@@ -194,7 +194,11 @@ def advance_ingest_watermark(
         )
 
 
-def insert_detections(detections: Sequence[DetectionRecord]) -> int:
+def insert_detections(
+    detections: Sequence[DetectionRecord],
+    *,
+    conn: Connection | None = None,
+) -> int:
     """Bulk insert detections and return the number of inserted rows."""
     if not detections:
         return 0
@@ -242,8 +246,105 @@ def insert_detections(detections: Sequence[DetectionRecord]) -> int:
     ).bindparams(bindparam("raw_properties", type_=JSON))
     parameters = [record.to_parameters() for record in detections]
 
-    with get_engine().begin() as conn:
-        result = conn.execute(insert_stmt, parameters)
-        inserted = result.rowcount or 0
+    def _execute(active_conn: Connection) -> int:
+        result = active_conn.execute(insert_stmt, parameters)
+        return result.rowcount or 0
 
-    return inserted
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)
+
+
+def count_unscored_likelihood_for_batch(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> int:
+    """Count detections in a batch that still have NULL fire_likelihood."""
+    stmt = text(
+        """
+        SELECT COUNT(*) AS n
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+          AND fire_likelihood IS NULL
+        """
+    )
+
+    def _execute(active_conn: Connection) -> int:
+        value = active_conn.execute(stmt, {"batch_id": int(batch_id)}).scalar_one()
+        return int(value or 0)
+
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)
+
+
+def count_detections_for_batch(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> int:
+    """Count detections tied to a specific ingest batch."""
+    stmt = text(
+        """
+        SELECT COUNT(*) AS n
+        FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+        """
+    )
+
+    def _execute(active_conn: Connection) -> int:
+        value = active_conn.execute(stmt, {"batch_id": int(batch_id)}).scalar_one()
+        return int(value or 0)
+
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)
+
+
+def list_batches_with_unscored_likelihood(limit: int = 5) -> list[int]:
+    """Return recent ingest batch IDs containing rows with NULL fire_likelihood."""
+    stmt = text(
+        """
+        SELECT ingest_batch_id
+        FROM fire_detections
+        WHERE ingest_batch_id IS NOT NULL
+          AND fire_likelihood IS NULL
+        GROUP BY ingest_batch_id
+        ORDER BY ingest_batch_id DESC
+        LIMIT :limit
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, {"limit": max(1, int(limit))}).scalars().all()
+    return [int(row) for row in rows if row is not None]
+
+
+def delete_detections_for_batch(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> int:
+    """Delete all detections tied to a specific ingest batch."""
+    stmt = text(
+        """
+        DELETE FROM fire_detections
+        WHERE ingest_batch_id = :batch_id
+        """
+    )
+
+    def _execute(active_conn: Connection) -> int:
+        result = active_conn.execute(stmt, {"batch_id": int(batch_id)})
+        return int(result.rowcount or 0)
+
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)

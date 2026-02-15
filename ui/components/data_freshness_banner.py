@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any
 
 import streamlit as st
 
 from api_client import ApiError, ApiUnavailableError, get_data_freshness_status
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+SHOW_OPS_DIAGNOSTICS = _env_bool("UI_SHOW_OPS_DIAGNOSTICS", default=False)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -35,7 +46,7 @@ def _fmt_ts(value: Any) -> str:
 
 
 def render_data_freshness_banner() -> None:
-    """Render stale-data status banner sourced from API /health/data-freshness."""
+    """Render user-facing data recency banner sourced from API /health/data-freshness."""
     try:
         snapshot = _load_data_freshness()
     except ApiUnavailableError:
@@ -45,56 +56,23 @@ def render_data_freshness_banner() -> None:
         st.warning(f"Data freshness status error: {exc.message}")
         return
 
-    overall = snapshot.get("overall_state", "unknown")
     sources = snapshot.get("sources", {})
-    stale_sources = snapshot.get("stale_sources", [])
-    stale_behavior = snapshot.get("stale_behavior", {})
-    forecast_gate = snapshot.get("forecast_gate", {})
     idempotency_dashboard = snapshot.get("idempotency_dashboard", {})
-    forecast_can_run = bool(forecast_gate.get("can_run", True))
-    forecast_reasons = forecast_gate.get("reasons", []) or []
-    forecast_retry_hint = forecast_gate.get("retry_hint")
-
-    if overall == "healthy" and forecast_can_run:
-        st.caption("Data freshness: healthy")
-        if idempotency_dashboard:
-            with st.expander("Ingestion idempotency dashboard", expanded=False):
-                st.json(idempotency_dashboard)
-        return
-
-    lines: list[str] = []
-    for source_name in stale_sources:
-        details = sources.get(source_name, {})
-        state = details.get("state", "unknown")
-        lines.append(
-            f"- `{source_name}` is **{state}** (last seen {_fmt_ts(details.get('last_seen_at'))}, age {_fmt_age(details.get('age_minutes'))})"
+    ordered_sources = ["firms", "weather", "terrain", "perimeters"]
+    parts: list[str] = []
+    for source_name in ordered_sources:
+        details = sources.get(source_name)
+        if not details:
+            continue
+        parts.append(
+            f"`{source_name}`: last fetched {_fmt_ts(details.get('last_seen_at'))} (age {_fmt_age(details.get('age_minutes'))})"
         )
 
-    policy = stale_behavior.get("policy", "serve_last_known_data_with_warning")
-    forecast_api_mode = stale_behavior.get("forecast_api", "allow_forecast_generation")
-
-    body = "\n".join(lines) if lines else "- Source freshness details unavailable"
-    body += (
-        f"\n\nPolicy: `{policy}`\n"
-        f"Forecast behavior: `{forecast_api_mode}`"
-    )
-
-    gate_lines = ""
-    if not forecast_can_run:
-        reason_text = ", ".join(forecast_reasons) if forecast_reasons else "forecast inputs unavailable"
-        gate_lines = f"\n\nForecast gate: `BLOCKED` ({reason_text})"
-        if forecast_retry_hint:
-            gate_lines += f"\nRetry hint: {forecast_retry_hint}"
+    if parts:
+        st.caption("Data updates: " + " | ".join(parts))
     else:
-        gate_lines = "\n\nForecast gate: `READY`"
+        st.caption("Data updates: unavailable")
 
-    body += gate_lines
-
-    if overall == "critical" or not forecast_can_run:
-        st.error(f"Data freshness is critical.\n\n{body}")
-    else:
-        st.warning(f"Data freshness is degraded.\n\n{body}")
-
-    if idempotency_dashboard:
-        with st.expander("Ingestion idempotency dashboard", expanded=False):
+    if SHOW_OPS_DIAGNOSTICS and idempotency_dashboard:
+        with st.expander("Operational diagnostics", expanded=False):
             st.json(idempotency_dashboard)

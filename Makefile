@@ -229,7 +229,7 @@ prepare: ## Prepare DB + core context data (migrate, cleanup, orchestrated FIRMS
 	@echo "Prepare complete."
 	@echo "Check freshness/status: curl http://localhost:8000/health/data-freshness"
 
-OPS_JOBS ?= firms,weather,perimeters
+OPS_JOBS ?= firms,perimeters
 OPS_FIRMS_INTERVAL_MINUTES ?= 30
 OPS_WEATHER_INTERVAL_MINUTES ?= 180
 OPS_TERRAIN_INTERVAL_MINUTES ?= 1440

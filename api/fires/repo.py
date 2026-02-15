@@ -519,7 +519,10 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
 
 
 
-def update_all_scoring_for_batch(batch_id: int) -> dict[str, int]:
+def update_all_scoring_for_batch(
+    batch_id: int,
+    conn: Connection | None = None,
+) -> dict[str, int]:
     """Update all scoring columns for a batch within a single transaction.
     
     This function wraps all scoring updates (false source masking, persistence,
@@ -543,17 +546,23 @@ def update_all_scoring_for_batch(batch_id: int) -> dict[str, int]:
     Raises:
         Exception: If any scoring update fails, the entire transaction is rolled back
     """
-    with get_engine().begin() as conn:
-        masked_count = update_false_source_masking(batch_id, conn=conn)
-        persistence_count = update_persistence_scores(batch_id, conn=conn)
-        landcover_count = update_landcover_scores(batch_id, conn=conn)
-        weather_count = update_weather_scores(batch_id, conn=conn)
-        likelihood_count = update_fire_likelihood(batch_id, conn=conn)
-    
-    return {
-        "masked_count": masked_count,
-        "persistence_count": persistence_count,
-        "landcover_count": landcover_count,
-        "weather_count": weather_count,
-        "likelihood_count": likelihood_count,
-    }
+    def _execute(active_conn: Connection) -> dict[str, int]:
+        masked_count = update_false_source_masking(batch_id, conn=active_conn)
+        persistence_count = update_persistence_scores(batch_id, conn=active_conn)
+        landcover_count = update_landcover_scores(batch_id, conn=active_conn)
+        weather_count = update_weather_scores(batch_id, conn=active_conn)
+        likelihood_count = update_fire_likelihood(batch_id, conn=active_conn)
+
+        return {
+            "masked_count": masked_count,
+            "persistence_count": persistence_count,
+            "landcover_count": landcover_count,
+            "weather_count": weather_count,
+            "likelihood_count": likelihood_count,
+        }
+
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)

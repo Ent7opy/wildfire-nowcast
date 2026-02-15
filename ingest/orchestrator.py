@@ -421,7 +421,7 @@ def _safe_data_status_snapshot() -> dict[str, Any] | None:
     try:
         from api.data_status import build_data_status_snapshot
 
-        return build_data_status_snapshot()
+        return build_data_status_snapshot(include_internal=True)
     except Exception as exc:  # pragma: no cover - defensive logging
         LOGGER.warning("Unable to load data freshness snapshot: %s", exc)
         return None
@@ -586,6 +586,7 @@ def run_scheduler(
 ) -> int:
     failures = 0
     metrics = _init_metrics(jobs)
+    last_heartbeat_at = now_fn()
 
     now = now_fn()
     for job in jobs:
@@ -615,6 +616,23 @@ def run_scheduler(
             continue
 
         next_run_at = min(job.next_run_at for job in jobs)
+        if now - last_heartbeat_at >= 60.0:
+            next_due_name = min(jobs, key=lambda j: j.next_run_at).name
+            eta_seconds = max(0.0, next_run_at - now)
+            LOGGER.info(
+                "Scheduler heartbeat: next_due_job=%s in %.1fs",
+                next_due_name,
+                eta_seconds,
+            )
+            if dashboard_path is not None:
+                snapshot = status_snapshot_fn()
+                _write_dashboard(
+                    dashboard_path=dashboard_path,
+                    metrics=metrics,
+                    snapshot=snapshot,
+                )
+            last_heartbeat_at = now
+
         sleep_seconds = max(0.0, min(poll_seconds, next_run_at - now))
         sleep_fn(sleep_seconds)
 

@@ -10,6 +10,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+from sqlalchemy.engine import Connection
+
 from ingest import repository
 from ingest.config import FIRMSIngestSettings, settings as ingest_settings
 from ingest.firms_client import (
@@ -177,11 +179,26 @@ def run_firms_ingest(
             )
             rows_after_watermark_filter = len(filtered_detections)
             _log_firms_validation(source, batch_id, validation)
-            inserted = repository.insert_detections(filtered_detections)
-            skipped_duplicates = rows_after_watermark_filter - inserted
+            if filtered_detections:
+                # Keep insert+scoring in one DB transaction so partially scored rows
+                # cannot be committed if the process is interrupted mid-run.
+                with repository.get_engine().begin() as conn:
+                    inserted = repository.insert_detections(filtered_detections, conn=conn)
+                    skipped_duplicates = rows_after_watermark_filter - inserted
 
-            if inserted > 0:
-                _update_all_scoring_atomic(batch_id)
+                    if inserted > 0:
+                        _update_all_scoring_atomic(batch_id, conn=conn)
+                        remaining_unscored = repository.count_unscored_likelihood_for_batch(
+                            batch_id,
+                            conn=conn,
+                        )
+                        if remaining_unscored > 0:
+                            raise RuntimeError(
+                                f"Batch {batch_id} still has {remaining_unscored} rows with NULL fire_likelihood"
+                            )
+            else:
+                inserted = 0
+                skipped_duplicates = 0
 
             should_run_denoiser = inserted > 0 and (config.denoiser_enabled or config.denoiser_required)
             if should_run_denoiser:
@@ -233,14 +250,30 @@ def run_firms_ingest(
             )
         except Exception:  # pragma: no cover - defensive logging
             LOGGER.exception("Ingest failed for source=%s batch=%s", source, batch_id)
+            persisted_after_cleanup = 0
+            try:
+                persisted_before_cleanup = repository.count_detections_for_batch(batch_id)
+                if persisted_before_cleanup > 0:
+                    deleted = repository.delete_detections_for_batch(batch_id)
+                    LOGGER.warning(
+                        "Removed %s persisted detections for failed batch %s",
+                        deleted,
+                        batch_id,
+                    )
+                persisted_after_cleanup = repository.count_detections_for_batch(batch_id)
+            except Exception:
+                LOGGER.exception("Failed to cleanup detections for failed batch %s", batch_id)
             repository.finalize_ingest_batch(
                 batch_id,
                 status="failed",
                 fetched=fetched_count,
-                inserted=inserted,
-                skipped=max(skipped_duplicates, 0),
+                inserted=persisted_after_cleanup,
+                skipped=max(rows_after_watermark_filter - persisted_after_cleanup, 0),
             )
             return 1
+
+    if config.firms_reconcile_unscored_batches:
+        _reconcile_unscored_batches(max_batches=int(config.firms_reconcile_max_batches))
 
     return 0
 
@@ -258,7 +291,11 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     return [segment.strip() for segment in value.split(",") if segment.strip()]
 
 
-def _update_all_scoring_atomic(batch_id: int) -> None:
+def _update_all_scoring_atomic(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> None:
     """Update all scoring columns for detections in the batch atomically.
     
     This function wraps all scoring updates (false source masking, persistence,
@@ -275,7 +312,7 @@ def _update_all_scoring_atomic(batch_id: int) -> None:
         from api.fires.repo import update_all_scoring_for_batch
 
         LOGGER.info("Updating all scoring for batch %s (atomic transaction)", batch_id)
-        counts = update_all_scoring_for_batch(batch_id)
+        counts = update_all_scoring_for_batch(batch_id, conn=conn)
         LOGGER.info(
             "Batch %s scoring complete: masked=%s, persistence=%s, landcover=%s, weather=%s, likelihood=%s",
             batch_id,
@@ -288,6 +325,24 @@ def _update_all_scoring_atomic(batch_id: int) -> None:
     except Exception:
         LOGGER.exception("Failed to update scoring for batch %s", batch_id)
         raise  # Re-raise to ensure batch failure is recorded
+
+
+def _reconcile_unscored_batches(max_batches: int = 5) -> None:
+    """Best-effort repair for historical rows that still have NULL fire_likelihood."""
+    candidate_batch_ids = repository.list_batches_with_unscored_likelihood(limit=max(1, max_batches))
+    if not candidate_batch_ids:
+        return
+
+    LOGGER.info(
+        "Reconciling %s batch(es) with NULL fire_likelihood: %s",
+        len(candidate_batch_ids),
+        candidate_batch_ids,
+    )
+    for batch_id in candidate_batch_ids:
+        try:
+            _update_all_scoring_atomic(batch_id)
+        except Exception:
+            LOGGER.exception("Failed to reconcile unscored batch %s", batch_id)
 
 
 def _run_denoiser_inference(
