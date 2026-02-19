@@ -134,6 +134,24 @@ def test_mvt_fires_properties_documented():
         assert prop in migration_content, f"Required property '{prop}' from contract should be in MVT function"
 
 
+def test_mvt_fires_low_zoom_gate_is_not_present():
+    """Guard against hidden zoom floors that make world-view tiles empty."""
+    import pathlib
+
+    migration_path = (
+        pathlib.Path(__file__).parent.parent
+        / "migrations"
+        / "versions"
+        / "20260216_fix_mvt_fires_zoom_floor.py"
+    )
+
+    assert migration_path.exists(), "Low-zoom visibility migration should exist"
+
+    migration_content = migration_path.read_text()
+    assert "z >= 6" not in migration_content
+    assert "acq_time BETWEEN start_time AND end_time" in migration_content
+
+
 def test_ui_property_access_matches_mvt_schema():
     """Test that UI component property access matches MVT schema."""
     # Simulate MVT properties as they would appear in session_state

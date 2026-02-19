@@ -121,6 +121,72 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in kilometers."""
+    r = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(d_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return r * c
+
+
+@st.cache_data(ttl=15 * 60, show_spinner=False)
+def _fetch_open_wildfire_events() -> list[dict[str, Any]]:
+    """Fetch open wildfire events from NASA EONET (external context)."""
+    try:
+        response = requests.get(
+            "https://eonet.gsfc.nasa.gov/api/v3/events",
+            params={
+                "status": "open",
+                "category": "wildfires",
+                "limit": 200,
+            },
+            headers={"Accept": "application/json"},
+            timeout=(2.0, 5.0),
+        )
+        if response.status_code != 200:
+            return []
+        payload = response.json()
+        events = payload.get("events", []) if isinstance(payload, dict) else []
+        return events if isinstance(events, list) else []
+    except Exception:
+        return []
+
+
+def _nearest_open_wildfire_event(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    """Return nearest open EONET wildfire event to a point."""
+    events = _fetch_open_wildfire_events()
+    best: Optional[Dict[str, Any]] = None
+    for event in events:
+        geometries = event.get("geometry", [])
+        if not isinstance(geometries, list):
+            continue
+        for g in geometries:
+            coords = g.get("coordinates") if isinstance(g, dict) else None
+            if not (isinstance(coords, list) and len(coords) >= 2):
+                continue
+            ev_lon = _safe_float(coords[0])
+            ev_lat = _safe_float(coords[1])
+            if ev_lon is None or ev_lat is None:
+                continue
+            dist_km = _haversine_km(lat, lon, ev_lat, ev_lon)
+            if best is None or dist_km < float(best["distance_km"]):
+                best = {
+                    "title": event.get("title", "Unnamed wildfire event"),
+                    "id": event.get("id"),
+                    "date": g.get("date"),
+                    "distance_km": dist_km,
+                    "source": "NASA EONET",
+                }
+    return best
+
+
 def _clamp_01(value: float) -> float:
     return max(0.0, min(value, 1.0))
 
@@ -390,6 +456,52 @@ def _render_stat_row(label: str, value: str) -> None:
     )
 
 
+def _render_fire_summary(det: Dict[str, Any]) -> None:
+    """Render compact analyst-oriented summary with optional external context."""
+    lat = _safe_float(det.get("lat"))
+    lon = _safe_float(det.get("lon"))
+    severity = _compute_detection_severity(det)
+    frp = _safe_float(det.get("frp"))
+    persistence = _safe_float(det.get("persistence_score"))
+    confidence = _safe_float(det.get("confidence_score"))
+
+    signals: list[str] = []
+    if severity >= 0.6:
+        signals.append("high modeled likelihood")
+    if frp is not None and frp >= 20:
+        signals.append("elevated FRP")
+    if persistence is not None and persistence >= 0.6:
+        signals.append("persistent hotspot pattern")
+    if confidence is not None and confidence >= 0.8:
+        signals.append("high satellite confidence")
+
+    if not signals:
+        summary = "Low-signal detection profile; treat as unverified without corroboration."
+    else:
+        summary = f"Likely active fire signal based on {', '.join(signals)}."
+    st.info(summary)
+
+    if lat is None or lon is None:
+        return
+
+    nearest = _nearest_open_wildfire_event(lat, lon)
+    if nearest is None:
+        st.caption("External context: no open wildfire events returned from NASA EONET.")
+        return
+
+    dist_km = float(nearest["distance_km"])
+    if dist_km <= 250.0:
+        st.success(
+            f"External context ({nearest['source']}): "
+            f"possible match '{nearest['title']}' ({dist_km:.0f} km away)."
+        )
+    else:
+        st.caption(
+            f"External context ({nearest['source']}): nearest open event is "
+            f"'{nearest['title']}' at {dist_km:.0f} km."
+        )
+
+
 def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
     """Render details for the selected fire based on PyDeck selection."""
     # Use the selected fire from state manager (set by map_view)
@@ -423,6 +535,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
     st.write(f"**Confidence:** {det.get('confidence_score')}")
     st.write(f"**Fire intensity (FRP):** {det.get('frp')}")
     st.write(f"**Source:** {det.get('source')}")
+    _render_fire_summary(det)
 
     # Display fire likelihood with visual gauge and component scores
     fire_likelihood = det.get("fire_likelihood")

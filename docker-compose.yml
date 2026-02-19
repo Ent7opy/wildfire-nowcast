@@ -144,6 +144,7 @@ services:
     environment:
       APP_ENV: dev
       DENOISER_REQUIRED: "true"
+      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY}
       POSTGRES_HOST: db
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-wildfire}
@@ -159,12 +160,14 @@ services:
 
   tiles:
     image: pramsey/pg_tileserv:latest
+    restart: unless-stopped
     ports:
       - "7800:7800"
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER:-wildfire}:${POSTGRES_PASSWORD:-wildfire}@db:5432/${POSTGRES_DB:-wildfire}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
 volumes:
   db_data:

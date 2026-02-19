@@ -90,7 +90,7 @@ def test_active_models_endpoint_returns_registry_payload(monkeypatch) -> None:
     expected = {
         "denoiser": {
             "model_id": "denoiser-prod-1",
-            "artifact_uri": "models/denoiser_v1/run_prod",
+            "artifact_uri": "models/denoiser_v2/run_prod",
         }
     }
     monkeypatch.setattr("api.routes.internal.list_active_models", lambda: expected)

@@ -317,7 +317,7 @@ def train_baseline(config: Dict[str, Any]):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     git_sha = _maybe_git_sha() or "unknown"
     run_name = f"{timestamp}_{git_sha}"
-    model_dir = os.path.join(config.get("model_output_root", "models/denoiser_v1"), run_name)
+    model_dir = os.path.join(config.get("model_output_root", "models/denoiser_v2"), run_name)
     os.makedirs(model_dir, exist_ok=True)
     
     # 2. Load data

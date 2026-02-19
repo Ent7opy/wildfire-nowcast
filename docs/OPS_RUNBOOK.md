@@ -42,7 +42,7 @@ Expected runtime profile:
 Register artifact:
 
 ```bash
-make model-register FAMILY=denoiser ARTIFACT=models/denoiser_v1/<run_id> METRICS=@models/denoiser_v1/<run_id>/metrics.json
+make model-register FAMILY=denoiser ARTIFACT=models/denoiser_v2/<run_id> METRICS=@models/denoiser_v2/<run_id>/metrics.json
 ```
 
 Promote champion:

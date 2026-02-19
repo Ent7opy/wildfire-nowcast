@@ -1,4 +1,4 @@
-"""Immutable training snapshot exporter for denoiser v1."""
+"""Immutable training snapshot exporter for denoiser labels."""
 
 import argparse
 import json
@@ -192,4 +192,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

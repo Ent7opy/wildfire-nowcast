@@ -113,7 +113,7 @@ curl http://localhost:8000/internal/models/active
 Model lifecycle commands:
 
 ```bash
-make model-register FAMILY=denoiser ARTIFACT=models/denoiser_v1/<run_id> METRICS=@models/denoiser_v1/<run_id>/metrics.json
+make model-register FAMILY=denoiser ARTIFACT=models/denoiser_v2/<run_id> METRICS=@models/denoiser_v2/<run_id>/metrics.json
 make model-promote FAMILY=denoiser MODEL_ID=<model_id>
 make model-rollback FAMILY=denoiser
 ```

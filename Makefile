@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-label-v2 denoiser-train-v2 denoiser-pipeline-v2 ingest-nifc-perimeters ingest-orchestrator model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-pipeline-v2 ingest-nifc-perimeters ingest-orchestrator model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -202,11 +202,12 @@ ingest-all: ingest-viirs ingest-fwi ingest-weather ## Run all primary ingestion 
 db-cleanup: ## Run database cleanup (14-day retention)
 	$(UV) run --project api scripts/db_cleanup.py
 
-# Default local bootstrap window (Balkans smoke-grid compatible).
+# Default local bootstrap window for weather/terrain/perimeters.
+# FIRMS defaults to `world` so the map has recent detections out of the box.
 # Override these on demand:
 #   make prepare PREPARE_BBOX="-125 24 -66 50" PREPARE_FIRMS_AREA="-125,24,-66,50" PREPARE_REGION="conus"
 PREPARE_BBOX ?= 22 40 24 42
-PREPARE_FIRMS_AREA ?= 22,40,24,42
+PREPARE_FIRMS_AREA ?= world
 PREPARE_REGION ?= smoke_grid
 PREPARE_JOBS ?= firms,weather,terrain,perimeters
 PREPARE_MAX_RETRIES ?= 3
@@ -241,17 +242,17 @@ OPS_DASHBOARD_PATH ?= data/ingest/orchestrator_dashboard.json
 ops-start: ## Start continuous runtime scheduler profile (FIRMS 30m, weather/perimeters periodic)
 	$(MAKE) ingest-orchestrator ARGS="--loop --jobs $(OPS_JOBS) --poll-seconds 30 --enforce-freshness --max-retries $(OPS_MAX_RETRIES) --retry-backoff-seconds $(OPS_RETRY_BACKOFF_SECONDS) --firms-interval-minutes $(OPS_FIRMS_INTERVAL_MINUTES) --weather-interval-minutes $(OPS_WEATHER_INTERVAL_MINUTES) --terrain-interval-minutes $(OPS_TERRAIN_INTERVAL_MINUTES) --perimeters-interval-minutes $(OPS_PERIMETERS_INTERVAL_MINUTES) --dashboard-path $(OPS_DASHBOARD_PATH)"
 
-denoiser-label: ## Run heuristic labeling (pass ARGS="--bbox ... --start ... --end ...")
-	$(UV) run --project ml -m ml.denoiser.label_v1 $(ARGS)
+denoiser-label: ## Run ground-truth labeling v2 (pass ARGS="--bbox ... --start ... --end ...")
+	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)
 
 denoiser-snapshot: ## Export training snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
 	$(UV) run --project ml -m ml.denoiser.export_snapshot $(ARGS)
 
-denoiser-train: ## Train denoiser baseline (pass CONFIG="configs/denoiser_train_v1.yaml")
-	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v1.yaml)
+denoiser-train: ## Train denoiser v2 (pass CONFIG="configs/denoiser_train_v2.yaml")
+	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v2.yaml)
 
-denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="models/denoiser_v1/<run_id>" SNAPSHOT="data/denoiser/snapshots/<run>" OUT="reports/denoiser_v1/<run_id>" ARGS="--target_precision 0.95 ...")
-	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v1/<run_id>"))
+denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="models/denoiser_v2/<run_id>" SNAPSHOT="data/denoiser/snapshots/<run>" OUT="reports/denoiser_v2/<run_id>" ARGS="--target_precision 0.95 ...")
+	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v2/<run_id>"))
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT="data/denoiser/snapshots/<run>" or a labeled parquet))
 	$(UV) run --project ml -m ml.eval_denoiser --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) $(if $(OUT),--out $(OUT),) $(ARGS)
 
@@ -277,7 +278,7 @@ model-rollback: ## Rollback champion to previous promoted model (usage: make mod
 
 TRAIN_DENOISER_CONFIG ?= configs/denoiser_train_v2.yaml
 TRAIN_DENOISER_FAMILY ?= denoiser
-TRAIN_DENOISER_ROOT ?= models/denoiser_v1
+TRAIN_DENOISER_ROOT ?= models/denoiser_v2
 TRAIN_DENOISER_METRICS_FILE ?= metrics.json
 
 train-denoiser: ## Train/eval/register/promote denoiser champion from latest run
@@ -307,12 +308,6 @@ train-spread: ## Train/eval/register/promote spread champion from latest run
 	echo "Promoting $$model_id"; \
 	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_SPREAD_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-spread"
 
-denoiser-label-v2: ## Run ground-truth labeling v2 (pass ARGS="--bbox ... --start ... --end ...")
-	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)
-
-denoiser-train-v2: ## Train denoiser v2 (pass CONFIG="configs/denoiser_train_v2.yaml")
-	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v2.yaml)
-
 # ── Denoiser v2 end-to-end pipeline ─────────────────────────────────────
 # Usage:
 #   make denoiser-pipeline-v2 BBOX="-180 -90 180 90" START=2026-01-18 END=2026-01-30 YEARS="--year 2024 --year 2025 --year 2026"
@@ -335,7 +330,7 @@ denoiser-pipeline-v2: ## End-to-end denoiser v2: migrate → ingest perimeters �
 	$(MAKE) ingest-nifc-perimeters ARGS="$(YEARS) --bbox $(BBOX)"
 	@echo ""
 	@echo "=== Step 3/5: Labeling detections with ground truth (v2) ==="
-	$(MAKE) denoiser-label-v2 ARGS="--bbox $(BBOX) --start $(START) --end $(END)"
+	$(MAKE) denoiser-label ARGS="--bbox $(BBOX) --start $(START) --end $(END)"
 	@echo ""
 	@echo "=== Step 4/5: Exporting training snapshot ==="
 	$(MAKE) denoiser-snapshot ARGS="--bbox $(BBOX) --start $(START) --end $(END) --version $(DENOISER_V2_VERSION)"

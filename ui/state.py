@@ -55,6 +55,8 @@ class FilterState:
     hours_start: int = 24
     hours_end: int = 0
     min_likelihood: float = 0.0
+    active_only: bool = True
+    cluster_points: bool = True
 
 
 @dataclass
@@ -222,11 +224,11 @@ class AppState:
             st.session_state.timeline_scrubber = (f.hours_end, f.hours_start)
         if "min_likelihood" not in st.session_state:
             st.session_state.min_likelihood = f.min_likelihood
+        if "active_only" not in st.session_state:
+            st.session_state.active_only = f.active_only
+        if "cluster_points" not in st.session_state:
+            st.session_state.cluster_points = f.cluster_points
         lyr = self.layers
-        if "fires_checkbox" not in st.session_state:
-            st.session_state.fires_checkbox = lyr.show_fires
-        if "forecast_checkbox" not in st.session_state:
-            st.session_state.forecast_checkbox = lyr.show_forecast
         if "risk_checkbox" not in st.session_state:
             st.session_state.risk_checkbox = lyr.show_risk
 
@@ -235,11 +237,10 @@ class AppState:
 
         Also handles change-detection for active preset.
 
-        Note: layer checkboxes render later in the sidebar and are read
-        separately in ``sidebar.py`` after they render.
+        Layer controls are handled in ``sidebar.py`` after rendering.
         """
         f = self.filters
-        prev = (f.hours_start, f.hours_end, f.min_likelihood)
+        prev = (f.hours_start, f.hours_end, f.min_likelihood, f.active_only, f.cluster_points)
 
         # Timeline scrubber → hours
         scrubber = st.session_state.get("timeline_scrubber", (f.hours_end, f.hours_start))
@@ -251,9 +252,11 @@ class AppState:
 
         # Likelihood
         f.min_likelihood = st.session_state.get("min_likelihood", f.min_likelihood)
+        f.active_only = bool(st.session_state.get("active_only", f.active_only))
+        f.cluster_points = bool(st.session_state.get("cluster_points", f.cluster_points))
 
         # Detect manual filter changes → update active_preset
-        cur = (f.hours_start, f.hours_end, f.min_likelihood)
+        cur = (f.hours_start, f.hours_end, f.min_likelihood, f.active_only, f.cluster_points)
         if not self._preset_applied and cur != prev:
             match = self.get_matching_preset()
             self.active_preset = match if match else "Custom"
@@ -268,6 +271,8 @@ class AppState:
         st.query_params["start"] = str(f.hours_start)
         st.query_params["end"] = str(f.hours_end)
         st.query_params["likelihood"] = f"{f.min_likelihood:.2f}"
+        st.query_params["active_only"] = "true" if f.active_only else "false"
+        st.query_params["cluster"] = "true" if f.cluster_points else "false"
 
         if self.active_preset:
             st.query_params["preset"] = self.active_preset
@@ -284,10 +289,12 @@ class AppState:
         s.time_range_hours_start = self.filters.hours_start
         s.time_range_hours_end = self.filters.hours_end
         s.fires_min_likelihood = self.filters.min_likelihood
+        s.fires_active_only = self.filters.active_only
+        s.fires_cluster_points = self.filters.cluster_points
 
         # Layers
-        s.show_fires = self.layers.show_fires
-        s.show_forecast = self.layers.show_forecast
+        s.show_fires = True
+        s.show_forecast = True
         s.show_risk = self.layers.show_risk
 
         # Selection
@@ -313,10 +320,12 @@ class AppState:
             hours_start=s.get("time_range_hours_start", 24),
             hours_end=s.get("time_range_hours_end", 0),
             min_likelihood=s.get("fires_min_likelihood", 0.0),
+            active_only=s.get("fires_active_only", True),
+            cluster_points=s.get("fires_cluster_points", True),
         )
         self.layers = LayerState(
-            show_fires=s.get("show_fires", True),
-            show_forecast=s.get("show_forecast", True),
+            show_fires=True,
+            show_forecast=True,
             show_risk=s.get("show_risk", False),
         )
         self.selection = SelectionState(
@@ -350,6 +359,10 @@ class AppState:
                 f.min_likelihood = float(params["likelihood"])
             except ValueError:
                 pass
+        if "active_only" in params:
+            f.active_only = str(params["active_only"]).strip().lower() in ("1", "true", "yes", "on")
+        if "cluster" in params:
+            f.cluster_points = str(params["cluster"]).strip().lower() in ("1", "true", "yes", "on")
         # Determine active preset
         match = self.get_matching_preset()
         if match:

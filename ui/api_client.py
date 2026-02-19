@@ -195,7 +195,13 @@ def get_fires(
         "end_time": _isoformat(end_time),
     }
     if filters:
-        params.update(dict(filters))
+        normalized_filters: Dict[str, Any] = {}
+        for key, value in dict(filters).items():
+            if isinstance(value, bool):
+                normalized_filters[key] = "true" if value else "false"
+            else:
+                normalized_filters[key] = value
+        params.update(normalized_filters)
 
     data = _get_json("/fires", params=params)
     if not isinstance(data, dict):
