@@ -5,7 +5,7 @@ Why this exists:
 - NRT feeds often retain only ~7 days.
 - For training, we want months of detections in `fire_detections`.
 
-This backfill tool walks a date range backwards in <=10-day chunks by using the optional
+This backfill tool walks a date range backwards in <=5-day chunks by using the optional
 `/YYYY-MM-DD` suffix supported by the area CSV endpoint.
 """
 
@@ -32,7 +32,8 @@ LOGGER = logging.getLogger("firms_backfill")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-MAX_FIRMS_DAY_RANGE = 10
+# FIRMS historical date-suffix endpoint returns empty payloads for day_range > 5.
+MAX_FIRMS_DAY_RANGE = 5
 
 
 def _parse_ymd(value: str) -> date:
@@ -71,6 +72,20 @@ def _update_all_scoring(batch_id: int, *, conn: Connection | None = None) -> Non
     except Exception:
         LOGGER.exception("Failed to update full scoring for backfill batch %s", batch_id)
         raise
+
+
+def _assert_batch_scoring_complete(batch_id: int, *, conn: Connection | None = None) -> None:
+    """Fail the batch if any required scoring column is still NULL."""
+    remaining_incomplete = repository.count_rows_with_null_columns_for_batch(
+        batch_id,
+        columns=repository.REQUIRED_SCORING_COLUMNS,
+        exclude_source_like="mvt_%",
+        conn=conn,
+    )
+    if remaining_incomplete > 0:
+        raise RuntimeError(
+            f"Backfill batch {batch_id} still has {remaining_incomplete} production rows with NULL scoring fields"
+        )
 
 
 def run_backfill(
@@ -152,14 +167,7 @@ def run_backfill(
                         skipped_duplicates = parsed_count - inserted
                         if inserted > 0:
                             _update_all_scoring(batch_id, conn=conn)
-                            remaining_unscored = repository.count_unscored_likelihood_for_batch(
-                                batch_id,
-                                conn=conn,
-                            )
-                            if remaining_unscored > 0:
-                                raise RuntimeError(
-                                    f"Backfill batch {batch_id} still has {remaining_unscored} rows with NULL fire_likelihood"
-                                )
+                            _assert_batch_scoring_complete(batch_id, conn=conn)
                 else:
                     inserted = 0
                     skipped_duplicates = 0
@@ -222,8 +230,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--chunk-days",
         type=int,
-        default=10,
-        help="Days per request window (1-10). Higher is fewer requests.",
+        default=5,
+        help="Days per request window (1-5). Higher is fewer requests.",
     )
     parser.add_argument(
         "--area",

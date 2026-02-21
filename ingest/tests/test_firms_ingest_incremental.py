@@ -30,7 +30,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
     @patch("ingest.firms_ingest._update_all_scoring_atomic")
     @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
     @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
-    @patch("ingest.firms_ingest.repository.count_unscored_likelihood_for_batch", return_value=0)
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", return_value=0)
     @patch("ingest.firms_ingest.repository.insert_detections")
     @patch("ingest.firms_ingest.repository.get_engine")
     @patch("ingest.firms_ingest.parse_detection_rows")
@@ -47,7 +47,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_parse_rows,
         mock_get_engine,
         mock_insert,
-        _mock_unscored,
+        _mock_incomplete,
         mock_finalize,
         mock_advance,
         _mock_scoring,
@@ -145,7 +145,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
     @patch("ingest.firms_ingest._update_all_scoring_atomic")
     @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
     @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
-    @patch("ingest.firms_ingest.repository.count_unscored_likelihood_for_batch", return_value=0)
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", return_value=0)
     @patch("ingest.firms_ingest.repository.insert_detections")
     @patch("ingest.firms_ingest.repository.get_engine")
     @patch("ingest.firms_ingest.repository.count_detections_for_batch", side_effect=[1, 0, 0])
@@ -166,7 +166,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         _mock_count,
         mock_get_engine,
         mock_insert,
-        _mock_unscored,
+        _mock_incomplete,
         mock_finalize,
         mock_advance,
         _mock_update_scoring,
@@ -195,6 +195,122 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         code = run_firms_ingest(day_range=None, area=None, sources=None)
 
         self.assertEqual(1, code)
+        mock_finalize.assert_called_once()
+        self.assertEqual("failed", mock_finalize.call_args.kwargs["status"])
+        mock_advance.assert_not_called()
+
+    @patch("ingest.firms_ingest._update_all_scoring_atomic")
+    @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
+    @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", return_value=2)
+    @patch("ingest.firms_ingest.repository.insert_detections")
+    @patch("ingest.firms_ingest.repository.get_engine")
+    @patch("ingest.firms_ingest.repository.count_detections_for_batch", side_effect=[1, 0])
+    @patch("ingest.firms_ingest.repository.delete_detections_for_batch", return_value=1)
+    @patch("ingest.firms_ingest.parse_detection_rows")
+    @patch("ingest.firms_ingest.fetch_csv_rows")
+    @patch("ingest.firms_ingest.repository.create_ingest_batch")
+    @patch("ingest.firms_ingest.repository.get_ingest_watermark")
+    @patch("ingest.firms_ingest.ingest_settings")
+    def test_scoring_completeness_gate_fails_batch(
+        self,
+        mock_settings,
+        _mock_get_watermark,
+        mock_create_batch,
+        mock_fetch_rows,
+        mock_parse_rows,
+        _mock_delete,
+        _mock_count,
+        mock_get_engine,
+        mock_insert,
+        _mock_incomplete,
+        mock_finalize,
+        mock_advance,
+        _mock_update_scoring,
+    ):
+        mock_settings.map_key = "test-key"
+        mock_settings.resolved_area = "20,40,21,41"
+        mock_settings.day_range = 1
+        mock_settings.sources = ["VIIRS_SNPP_NRT"]
+        mock_settings.request_timeout_seconds = 30.0
+        mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.denoiser_enabled = False
+        mock_settings.denoiser_required = False
+        mock_settings.firms_reconcile_unscored_batches = False
+        mock_settings.firms_reconcile_max_batches = 5
+
+        txn_conn = object()
+        mock_get_engine.return_value.begin.return_value = nullcontext(txn_conn)
+        mock_create_batch.return_value = 888
+        mock_fetch_rows.return_value = [{"id": "x"}]
+        detection = SimpleNamespace(acq_time=datetime(2026, 2, 15, 12, 0, tzinfo=timezone.utc))
+        mock_parse_rows.return_value = ([detection], FirmsValidationSummary(total_rows=1, parsed_rows=1))
+        mock_insert.return_value = 1
+
+        code = run_firms_ingest(day_range=None, area=None, sources=None)
+
+        self.assertEqual(1, code)
+        mock_finalize.assert_called_once()
+        self.assertEqual("failed", mock_finalize.call_args.kwargs["status"])
+        mock_advance.assert_not_called()
+
+    @patch("ingest.firms_ingest._run_denoiser_inference")
+    @patch("ingest.firms_ingest._resolve_denoiser_model_run_dir", return_value="/models/denoiser/run")
+    @patch("ingest.firms_ingest._update_all_scoring_atomic")
+    @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
+    @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", side_effect=[0, 1])
+    @patch("ingest.firms_ingest.repository.insert_detections")
+    @patch("ingest.firms_ingest.repository.get_engine")
+    @patch("ingest.firms_ingest.repository.count_detections_for_batch", side_effect=[1, 0])
+    @patch("ingest.firms_ingest.repository.delete_detections_for_batch", return_value=1)
+    @patch("ingest.firms_ingest.parse_detection_rows")
+    @patch("ingest.firms_ingest.fetch_csv_rows")
+    @patch("ingest.firms_ingest.repository.create_ingest_batch")
+    @patch("ingest.firms_ingest.repository.get_ingest_watermark")
+    @patch("ingest.firms_ingest.ingest_settings")
+    def test_required_denoiser_completeness_gate_fails_batch(
+        self,
+        mock_settings,
+        _mock_get_watermark,
+        mock_create_batch,
+        mock_fetch_rows,
+        mock_parse_rows,
+        _mock_delete,
+        _mock_count,
+        mock_get_engine,
+        mock_insert,
+        _mock_incomplete,
+        mock_finalize,
+        mock_advance,
+        _mock_update_scoring,
+        _mock_resolve_model,
+        mock_run_denoiser,
+    ):
+        mock_settings.map_key = "test-key"
+        mock_settings.resolved_area = "20,40,21,41"
+        mock_settings.day_range = 1
+        mock_settings.sources = ["VIIRS_SNPP_NRT"]
+        mock_settings.request_timeout_seconds = 30.0
+        mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.denoiser_enabled = False
+        mock_settings.denoiser_required = True
+        mock_settings.firms_reconcile_unscored_batches = False
+        mock_settings.firms_reconcile_max_batches = 5
+
+        _mock_get_watermark.return_value = None
+        txn_conn = object()
+        mock_get_engine.return_value.begin.return_value = nullcontext(txn_conn)
+        mock_create_batch.return_value = 889
+        mock_fetch_rows.return_value = [{"id": "x"}]
+        detection = SimpleNamespace(acq_time=datetime(2026, 2, 15, 12, 0, tzinfo=timezone.utc))
+        mock_parse_rows.return_value = ([detection], FirmsValidationSummary(total_rows=1, parsed_rows=1))
+        mock_insert.return_value = 1
+
+        code = run_firms_ingest(day_range=None, area=None, sources=None)
+
+        self.assertEqual(1, code)
+        mock_run_denoiser.assert_called_once()
         mock_finalize.assert_called_once()
         self.assertEqual("failed", mock_finalize.call_args.kwargs["status"])
         mock_advance.assert_not_called()

@@ -30,10 +30,16 @@ def test_get_fires_serializes_bool_filters_as_lowercase_strings(monkeypatch) -> 
     api_client.get_fires(
         bbox=(-180.0, -85.0, 180.0, 85.0),
         time_range=(start, now),
-        filters={"include_noise": False, "min_fire_likelihood": 0.0, "limit": 10000},
+        filters={
+            "include_noise": False,
+            "include_denoiser_fields": True,
+            "min_fire_likelihood": 0.0,
+            "limit": 10000,
+        },
     )
 
     assert captured["url"] == "http://example.test/fires"
     assert captured["params"]["include_noise"] == "false"
+    assert captured["params"]["include_denoiser_fields"] == "true"
     assert captured["params"]["min_fire_likelihood"] == 0.0
     assert captured["params"]["limit"] == 10000

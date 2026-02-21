@@ -142,8 +142,9 @@ services:
       - ./ml:/app/ml:delegated
       - /app/api/.venv
     environment:
-      APP_ENV: dev
+      APP_ENV: ${APP_ENV:-prod}
       DENOISER_REQUIRED: "true"
+      DENOISER_BATCH_SIZE: ${DENOISER_BATCH_SIZE:-5000}
       FIRMS_MAP_KEY: ${FIRMS_MAP_KEY}
       POSTGRES_HOST: db
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}

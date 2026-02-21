@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import subprocess
@@ -34,6 +35,13 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 MAX_FIRMS_DAY_RANGE = 10
 NRT_RETENTION_DAYS_HINT = 7
+_DENOISER_V2_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "front_id",
+    "event_id",
+    "event_score",
+    "denoiser_decision",
+    "review_required",
+)
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -84,6 +92,16 @@ def _resolve_denoiser_model_run_dir(config: "FIRMSIngestSettings") -> str | None
         LOGGER.warning("Failed to resolve active promoted denoiser model; using env fallback if provided.")
 
     return config.denoiser_model_run_dir
+
+
+def _resolve_denoiser_pipeline_version(config: "FIRMSIngestSettings") -> str:
+    return str(getattr(config, "denoiser_pipeline_version", "v1") or "v1").strip().lower()
+
+
+def _resolve_denoiser_module_name(config: "FIRMSIngestSettings") -> str:
+    if _resolve_denoiser_pipeline_version(config) == "v2":
+        return "ml.denoiser_inference_v2"
+    return "ml.denoiser_inference"
 
 
 def run_firms_ingest(
@@ -188,19 +206,13 @@ def run_firms_ingest(
 
                     if inserted > 0:
                         _update_all_scoring_atomic(batch_id, conn=conn)
-                        remaining_unscored = repository.count_unscored_likelihood_for_batch(
-                            batch_id,
-                            conn=conn,
-                        )
-                        if remaining_unscored > 0:
-                            raise RuntimeError(
-                                f"Batch {batch_id} still has {remaining_unscored} rows with NULL fire_likelihood"
-                            )
+                        _assert_batch_scoring_complete(batch_id, conn=conn)
             else:
                 inserted = 0
                 skipped_duplicates = 0
 
             should_run_denoiser = inserted > 0 and (config.denoiser_enabled or config.denoiser_required)
+            denoiser_ran = False
             if should_run_denoiser:
                 denoiser_model_run_dir = _resolve_denoiser_model_run_dir(config)
                 if not denoiser_model_run_dir:
@@ -212,6 +224,9 @@ def run_firms_ingest(
                     LOGGER.warning("Denoiser is enabled but no model run directory is configured; skipping inference.")
                 else:
                     _run_denoiser_inference(batch_id, config, model_run_dir=denoiser_model_run_dir)
+                    denoiser_ran = True
+            if denoiser_ran or config.denoiser_required:
+                _assert_batch_denoiser_complete(batch_id, config=config)
 
             repository.finalize_ingest_batch(
                 batch_id,
@@ -327,6 +342,51 @@ def _update_all_scoring_atomic(
         raise  # Re-raise to ensure batch failure is recorded
 
 
+def _assert_batch_scoring_complete(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> None:
+    """Fail the batch if any required scoring column is still NULL."""
+    remaining_incomplete = repository.count_rows_with_null_columns_for_batch(
+        batch_id,
+        columns=repository.REQUIRED_SCORING_COLUMNS,
+        exclude_source_like="mvt_%",
+        conn=conn,
+    )
+    if remaining_incomplete > 0:
+        raise RuntimeError(
+            f"Batch {batch_id} still has {remaining_incomplete} production rows with NULL scoring fields"
+        )
+
+
+def _assert_batch_denoiser_complete(
+    batch_id: int,
+    *,
+    config: "FIRMSIngestSettings",
+) -> None:
+    """Fail the batch if denoiser inference left production rows unscored."""
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    shadow_mode = bool(getattr(config, "denoiser_shadow_mode", False))
+    if pipeline_version == "v2":
+        required_columns = _DENOISER_V2_REQUIRED_COLUMNS
+        # In shadow mode, keep legacy fields untouched while ensuring v2 writes are complete.
+        if not shadow_mode:
+            required_columns = required_columns + repository.REQUIRED_DENOISER_COLUMNS
+    else:
+        required_columns = repository.REQUIRED_DENOISER_COLUMNS
+
+    remaining_incomplete = repository.count_rows_with_null_columns_for_batch(
+        batch_id,
+        columns=required_columns,
+        exclude_source_like="mvt_%",
+    )
+    if remaining_incomplete > 0:
+        raise RuntimeError(
+            f"Batch {batch_id} still has {remaining_incomplete} production rows with NULL denoiser fields"
+        )
+
+
 def _reconcile_unscored_batches(max_batches: int = 5) -> None:
     """Best-effort repair for historical rows that still have NULL fire_likelihood."""
     candidate_batch_ids = repository.list_batches_with_unscored_likelihood(limit=max(1, max_batches))
@@ -350,7 +410,7 @@ def _run_denoiser_inference(
     config: "FIRMSIngestSettings",
     *,
     model_run_dir: str | None = None,
-) -> None:
+    ) -> None:
     """Trigger denoiser inference via subprocess or direct module call."""
     model_run_dir = model_run_dir or config.denoiser_model_run_dir
     if not model_run_dir:
@@ -359,24 +419,29 @@ def _run_denoiser_inference(
         )
         return
 
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    invoke_method = str(getattr(config, "denoiser_invoke_method", "uv") or "uv").strip().lower()
+    module_name = _resolve_denoiser_module_name(config)
+
     LOGGER.info(
-        "Starting denoiser inference for batch %s (method=%s)",
+        "Starting denoiser inference for batch %s (pipeline=%s, method=%s)",
         batch_id,
-        config.denoiser_invoke_method,
+        pipeline_version,
+        invoke_method,
     )
 
     # Use direct module import if configured
-    if config.denoiser_invoke_method == "module":
+    if invoke_method == "module":
         _run_denoiser_module_direct(batch_id, config, model_run_dir=model_run_dir)
         return
 
     # Build command based on invocation method
-    if config.denoiser_invoke_method == "python":
+    if invoke_method == "python":
         # Use Python directly - works in containerized environments without uv
         cmd = [
             sys.executable,
             "-m",
-            "ml.denoiser_inference",
+            module_name,
         ]
     else:
         # Default: uv run (original behavior)
@@ -386,24 +451,10 @@ def _run_denoiser_inference(
             "--project",
             "ml",
             "-m",
-            "ml.denoiser_inference",
+            module_name,
         ]
 
-    cmd.extend([
-        "--batch-id",
-        str(batch_id),
-        "--model-run",
-        model_run_dir,
-        "--threshold",
-        str(config.denoiser_threshold),
-        "--batch-size",
-        str(config.denoiser_batch_size),
-    ])
-
-    if config.denoiser_region:
-        cmd.extend(["--region", config.denoiser_region])
-    if getattr(config, "denoiser_strict_features", False) is True:
-        cmd.append("--strict-features")
+    cmd.extend(_build_denoiser_argv(batch_id=batch_id, model_run_dir=model_run_dir, config=config))
 
     try:
         # We capture output to get the JSON summary
@@ -451,21 +502,14 @@ def _run_denoiser_module_direct(
     command-line invocation is problematic.
     """
     try:
-        # Import the denoiser inference module
-        from ml.denoiser_inference import main as denoiser_main
-        
-        # Build arguments as if they came from command line
-        argv = [
-            "--batch-id", str(batch_id),
-            "--model-run", model_run_dir,
-            "--threshold", str(config.denoiser_threshold),
-            "--batch-size", str(config.denoiser_batch_size),
-        ]
-        if config.denoiser_region:
-            argv.extend(["--region", config.denoiser_region])
-        if getattr(config, "denoiser_strict_features", False) is True:
-            argv.append("--strict-features")
-        
+        # Import the denoiser inference module dynamically for v1/v2.
+        module_name = _resolve_denoiser_module_name(config)
+        module = importlib.import_module(module_name)
+        denoiser_main = getattr(module, "main")
+
+        # Build arguments as if they came from command line.
+        argv = _build_denoiser_argv(batch_id=batch_id, model_run_dir=model_run_dir, config=config)
+
         # Capture the result - the module should return stats or print JSON
         # We need to capture stdout to get the JSON output
         import io
@@ -487,10 +531,10 @@ def _run_denoiser_module_direct(
             )
         else:
             LOGGER.warning("Denoiser inference finished but no JSON summary found in output.")
-            
+
     except ImportError as e:
         LOGGER.error(
-            "Failed to import ml.denoiser_inference for direct module invocation: %s",
+            "Failed to import denoiser inference module for direct invocation: %s",
             e
         )
         raise RuntimeError(
@@ -499,6 +543,51 @@ def _run_denoiser_module_direct(
     except Exception as e:
         LOGGER.error("Denoiser inference failed for batch %s: %s", batch_id, e)
         raise RuntimeError(f"Denoiser inference failed for batch {batch_id}") from e
+
+
+def _build_denoiser_argv(
+    *,
+    batch_id: int,
+    model_run_dir: str,
+    config: "FIRMSIngestSettings",
+) -> list[str]:
+    argv = [
+        "--batch-id",
+        str(batch_id),
+        "--model-run",
+        model_run_dir,
+    ]
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    if pipeline_version == "v2":
+        argv.extend(
+            [
+                "--strong-filter-threshold",
+                str(getattr(config, "denoiser_strong_filter_threshold", 0.5)),
+                "--downweight-threshold",
+                str(getattr(config, "denoiser_downweight_threshold", 0.7)),
+                "--uncertainty-band-low",
+                str(getattr(config, "denoiser_uncertainty_band_low", 0.45)),
+                "--uncertainty-band-high",
+                str(getattr(config, "denoiser_uncertainty_band_high", 0.55)),
+            ]
+        )
+        if bool(getattr(config, "denoiser_shadow_mode", False)):
+            argv.append("--shadow-mode")
+        return argv
+
+    argv.extend(
+        [
+            "--threshold",
+            str(config.denoiser_threshold),
+            "--batch-size",
+            str(config.denoiser_batch_size),
+        ]
+    )
+    if config.denoiser_region:
+        argv.extend(["--region", config.denoiser_region])
+    if bool(getattr(config, "denoiser_strict_features", False)):
+        argv.append("--strict-features")
+    return argv
 
 
 def _log_firms_validation(

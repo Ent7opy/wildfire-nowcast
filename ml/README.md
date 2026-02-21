@@ -16,21 +16,21 @@ To train the baseline denoiser model, use the `train_denoiser.py` script.
 #### Prerequisites
 
 1.  **Data Snapshot**: You need a Parquet snapshot produced by the labeling/feature pipeline. Snapshots are typically stored in `data/denoiser/snapshots/run_<timestamp>/`.
-2.  **Configuration**: Create or modify a configuration file (e.g., `configs/denoiser_train_v2.yaml`).
+2.  **Configuration**: Create or modify a configuration file (e.g., `configs/denoiser_train.yaml`).
 
 #### Usage
 
 ```bash
 # Using make (from repo root)
-make denoiser-train CONFIG=configs/denoiser_train_v2.yaml
+make denoiser-train CONFIG=configs/denoiser_train.yaml
 
 # Or using uv directly
-python -m ml.train_denoiser --config configs/denoiser_train_v2.yaml
+python -m ml.train_denoiser --config configs/denoiser_train.yaml
 ```
 
 #### Artifacts
 
-Each training run produces versioned artifacts in the output directory specified in the config (default: `models/denoiser_v2/`).
+Each training run produces versioned artifacts in the output directory specified in the config (default: `models/denoiser/`).
 
 Artifacts saved:
 - `model.pkl`: The trained model (using `joblib`).

@@ -57,6 +57,30 @@ class FIRMSIngestSettings(BaseSettings):
     denoiser_threshold: float = Field(default=0.5, validation_alias="DENOISER_THRESHOLD")
     denoiser_batch_size: int = Field(default=500, validation_alias="DENOISER_BATCH_SIZE")
     denoiser_region: Optional[str] = Field(default=None, validation_alias="DENOISER_REGION")
+    denoiser_pipeline_version: str = Field(
+        default="v1",
+        validation_alias="DENOISER_PIPELINE_VERSION",
+    )
+    denoiser_shadow_mode: bool = Field(
+        default=False,
+        validation_alias="DENOISER_SHADOW_MODE",
+    )
+    denoiser_strong_filter_threshold: float = Field(
+        default=0.5,
+        validation_alias="DENOISER_STRONG_FILTER_THRESHOLD",
+    )
+    denoiser_downweight_threshold: float = Field(
+        default=0.7,
+        validation_alias="DENOISER_DOWNWEIGHT_THRESHOLD",
+    )
+    denoiser_uncertainty_band_low: float = Field(
+        default=0.45,
+        validation_alias="DENOISER_UNCERTAINTY_BAND_LOW",
+    )
+    denoiser_uncertainty_band_high: float = Field(
+        default=0.55,
+        validation_alias="DENOISER_UNCERTAINTY_BAND_HIGH",
+    )
     denoiser_strict_features: bool = Field(
         default=False,
         validation_alias="DENOISER_STRICT_FEATURES",
@@ -105,6 +129,39 @@ class FIRMSIngestSettings(BaseSettings):
         if not 1 <= val <= 10:
             raise ValueError("FIRMS_DAY_RANGE must be between 1 and 10")
         return val
+
+    @field_validator("denoiser_pipeline_version")
+    @classmethod
+    def _validate_denoiser_pipeline_version(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"v1", "v2"}:
+            raise ValueError("DENOISER_PIPELINE_VERSION must be one of: v1, v2")
+        return normalized
+
+    @field_validator(
+        "denoiser_strong_filter_threshold",
+        "denoiser_downweight_threshold",
+        "denoiser_uncertainty_band_low",
+        "denoiser_uncertainty_band_high",
+        mode="after",
+    )
+    @classmethod
+    def _validate_probability_threshold(cls, value: float) -> float:
+        numeric = float(value)
+        if not 0.0 <= numeric <= 1.0:
+            raise ValueError("Denoiser thresholds must be between 0.0 and 1.0")
+        return numeric
+
+    @field_validator("denoiser_uncertainty_band_high", mode="after")
+    @classmethod
+    def _validate_uncertainty_band_order(cls, value: float, info) -> float:
+        low = info.data.get("denoiser_uncertainty_band_low")
+        if low is not None and float(value) < float(low):
+            raise ValueError(
+                "DENOISER_UNCERTAINTY_BAND_HIGH must be greater than or equal to "
+                "DENOISER_UNCERTAINTY_BAND_LOW"
+            )
+        return float(value)
 
     @property
     def resolved_area(self) -> str:

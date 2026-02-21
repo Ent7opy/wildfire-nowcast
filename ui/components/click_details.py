@@ -364,6 +364,7 @@ def _fetch_aggregate_stats(
             filters={
                 "min_fire_likelihood": min_likelihood,
                 "include_noise": include_noise,
+                "include_denoiser_fields": True,
                 "limit": 1000,
             },
         )

@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-pipeline-v2 ingest-nifc-perimeters ingest-orchestrator model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-drift-monitor denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -173,6 +173,12 @@ ingest-firms: ## Run NASA FIRMS ingestion (pass ARGS="--day-range 3")
 ingest-firms-backfill: ## Backfill historical FIRMS detections (pass ARGS="--start YYYY-MM-DD --end YYYY-MM-DD --area w,s,e,n --sources ...")
 	$(UV) run --project ingest -m ingest.firms_backfill $(ARGS)
 
+repair-fire-detections: ## Repair synthetic rows, thermal fields, stale running batches, and batch metadata
+	$(UV) run --project api scripts/repair_fire_detections.py $(ARGS)
+
+recompute-fire-scores: ## Recompute scoring fields for batches with incomplete derived columns
+	$(UV) run --project api scripts/recompute_fire_scores.py $(ARGS)
+
 ingest-weather: ## Run NOAA GFS weather ingestion (pass ARGS="--run-time 2025-12-06T00:00Z")
 	$(UV) run --project ingest -m ingest.weather_ingest $(ARGS)
 
@@ -242,19 +248,40 @@ OPS_DASHBOARD_PATH ?= data/ingest/orchestrator_dashboard.json
 ops-start: ## Start continuous runtime scheduler profile (FIRMS 30m, weather/perimeters periodic)
 	$(MAKE) ingest-orchestrator ARGS="--loop --jobs $(OPS_JOBS) --poll-seconds 30 --enforce-freshness --max-retries $(OPS_MAX_RETRIES) --retry-backoff-seconds $(OPS_RETRY_BACKOFF_SECONDS) --firms-interval-minutes $(OPS_FIRMS_INTERVAL_MINUTES) --weather-interval-minutes $(OPS_WEATHER_INTERVAL_MINUTES) --terrain-interval-minutes $(OPS_TERRAIN_INTERVAL_MINUTES) --perimeters-interval-minutes $(OPS_PERIMETERS_INTERVAL_MINUTES) --dashboard-path $(OPS_DASHBOARD_PATH)"
 
-denoiser-label: ## Run ground-truth labeling v2 (pass ARGS="--bbox ... --start ... --end ...")
-	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)
+denoiser-label: ## Run ground-truth labeling (pass ARGS="--bbox ... --start ... --end ...")
+	$(UV) run --project ml -m ml.denoiser.label $(ARGS)
 
 denoiser-snapshot: ## Export training snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
 	$(UV) run --project ml -m ml.denoiser.export_snapshot $(ARGS)
 
-denoiser-train: ## Train denoiser v2 (pass CONFIG="configs/denoiser_train_v2.yaml")
-	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v2.yaml)
+denoiser-train: ## Train denoiser (pass CONFIG="configs/denoiser_train.yaml")
+	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train.yaml)
 
-denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="models/denoiser_v2/<run_id>" SNAPSHOT="data/denoiser/snapshots/<run>" OUT="reports/denoiser_v2/<run_id>" ARGS="--target_precision 0.95 ...")
-	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v2/<run_id>"))
+denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="models/denoiser/<run_id>" SNAPSHOT="data/denoiser/snapshots/<run>" OUT="reports/denoiser/<run_id>" ARGS="--target_precision 0.95 ...")
+	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser/<run_id>"))
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT="data/denoiser/snapshots/<run>" or a labeled parquet))
 	$(UV) run --project ml -m ml.eval_denoiser --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) $(if $(OUT),--out $(OUT),) $(ARGS)
+
+denoiser-eventize: ## Build front/event clusters for v2 (pass ARGS="--batch-id ... | --start ... --end ...")
+	$(UV) run --project ml -m ml.denoiser.eventize $(ARGS)
+
+denoiser-label-v2: ## Run v2 labeling (pass ARGS="--bbox ... --start ... --end ... --version ...")
+	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)
+
+denoiser-snapshot-v2: ## Export v2 event snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
+	$(UV) run --project ml -m ml.denoiser.export_snapshot_v2 $(ARGS)
+
+denoiser-train-v2: ## Train v2 denoiser (pass CONFIG="configs/denoiser_train_v2.yaml")
+	$(UV) run --project ml -m ml.train_denoiser_v2 --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v2.yaml)
+
+denoiser-eval-v2: ## Evaluate v2 denoiser (pass MODEL_RUN="models/denoiser_v2/<run_id>" SNAPSHOT=".../run_<id>" OUT="reports/denoiser_v2/<run_id>")
+	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v2/<run_id>"))
+	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT=<snapshot dir/parquet>))
+	$(if $(OUT),,$(error Please provide OUT="reports/denoiser_v2/<run_id>"))
+	$(UV) run --project ml -m ml.eval_denoiser_v2 --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) --out $(OUT) $(ARGS)
+
+denoiser-drift-monitor: ## Run denoiser drift monitor (+ optional rollback) (pass ARGS="--dry-run")
+	$(UV) run --project ingest -m ingest.denoiser_drift_monitor $(ARGS)
 
 ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 --year 2025")
 	$(UV) run --project ingest -m ingest.nifc_perimeters_ingest $(ARGS)
@@ -276,21 +303,43 @@ model-rollback: ## Rollback champion to previous promoted model (usage: make mod
 	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
 	$(UV) run --project api scripts/model_registry.py rollback --family "$(FAMILY)" $(if $(PROMOTED_BY),--by "$(PROMOTED_BY)",) $(if $(NOTES),--notes "$(NOTES)",)
 
-TRAIN_DENOISER_CONFIG ?= configs/denoiser_train_v2.yaml
+TRAIN_DENOISER_PIPELINE ?= v1
+TRAIN_DENOISER_CONFIG_V1 ?= configs/denoiser_train.yaml
+TRAIN_DENOISER_CONFIG_V2 ?= configs/denoiser_train_v2.yaml
+TRAIN_DENOISER_CONFIG ?= $(if $(filter v2,$(TRAIN_DENOISER_PIPELINE)),$(TRAIN_DENOISER_CONFIG_V2),$(TRAIN_DENOISER_CONFIG_V1))
 TRAIN_DENOISER_FAMILY ?= denoiser
-TRAIN_DENOISER_ROOT ?= models/denoiser_v2
+TRAIN_DENOISER_ROOT ?= $(if $(filter v2,$(TRAIN_DENOISER_PIPELINE)),models/denoiser_v2,models/denoiser)
 TRAIN_DENOISER_METRICS_FILE ?= metrics.json
+TRAIN_DENOISER_GATE_REPORT_FILE ?= gate_report.json
+TRAIN_DENOISER_REQUIRE_GATE ?= false
 
 train-denoiser: ## Train/eval/register/promote denoiser champion from latest run
-	@echo "=== Training denoiser ==="
-	$(UV) run --project ml -m ml.train_denoiser --config $(TRAIN_DENOISER_CONFIG)
+	@echo "=== Training denoiser ($(TRAIN_DENOISER_PIPELINE)) ==="
+	@if [ ! -f "$(TRAIN_DENOISER_CONFIG)" ]; then echo "Missing config: $(TRAIN_DENOISER_CONFIG)"; exit 1; fi
+	@if [ "$(TRAIN_DENOISER_PIPELINE)" = "v2" ]; then \
+		$(UV) run --project ml -m ml.train_denoiser_v2 --config $(TRAIN_DENOISER_CONFIG); \
+	else \
+		$(UV) run --project ml -m ml.train_denoiser --config $(TRAIN_DENOISER_CONFIG); \
+	fi
 	@latest_run=$$(ls -td $(TRAIN_DENOISER_ROOT)/* 2>/dev/null | head -n 1); \
 	if [ -z "$$latest_run" ]; then echo "No denoiser run found under $(TRAIN_DENOISER_ROOT)"; exit 1; fi; \
-	if [ ! -f "$$latest_run/$(TRAIN_DENOISER_METRICS_FILE)" ]; then echo "Missing metrics file: $$latest_run/$(TRAIN_DENOISER_METRICS_FILE)"; exit 1; fi; \
+	metrics_file="$$latest_run/$(TRAIN_DENOISER_METRICS_FILE)"; \
+	gate_file="$$latest_run/$(TRAIN_DENOISER_GATE_REPORT_FILE)"; \
+	if [ ! -f "$$metrics_file" ]; then echo "Missing metrics file: $$metrics_file"; exit 1; fi; \
+	if [ "$(TRAIN_DENOISER_REQUIRE_GATE)" = "true" ] && [ ! -f "$$gate_file" ]; then echo "Missing required gate report: $$gate_file"; exit 1; fi; \
+	gate_pass="true"; \
+	if [ -f "$$gate_file" ]; then \
+		gate_pass=$$($(PYTHON) -c 'import json,sys; payload=json.load(open(sys.argv[1], "r", encoding="utf-8")); print("true" if bool(payload.get("pass", False)) else "false")' "$$gate_file"); \
+		if [ "$$gate_pass" != "true" ]; then echo "Promotion blocked: gate report failed ($$gate_file)"; exit 1; fi; \
+	fi; \
+	registry_metrics="$$latest_run/registry_metrics.json"; \
+	$(PYTHON) -c 'import json, os, sys; metrics_path, gate_path, out_path, gate_pass = sys.argv[1:5]; metrics=json.load(open(metrics_path, "r", encoding="utf-8")); out=dict(metrics) if isinstance(metrics, dict) else {"metrics": metrics}; out["gate_pass"]=(gate_pass=="true"); \
+if gate_path and os.path.exists(gate_path): out["gate_report"]=json.load(open(gate_path, "r", encoding="utf-8")); \
+json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file" "$$gate_file" "$$registry_metrics" "$$gate_pass"; \
 	echo "Registering $$latest_run"; \
-	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_DENOISER_FAMILY) --artifact "$$latest_run" --metrics "@$$latest_run/$(TRAIN_DENOISER_METRICS_FILE)"); \
+	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_DENOISER_FAMILY) --artifact "$$latest_run" --metrics "@$$registry_metrics"); \
 	echo "Promoting $$model_id"; \
-	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_DENOISER_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-denoiser"
+	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_DENOISER_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-denoiser pipeline=$(TRAIN_DENOISER_PIPELINE)"
 
 TRAIN_SPREAD_CONFIG ?= configs/spread_train_v1.yaml
 TRAIN_SPREAD_FAMILY ?= spread
@@ -308,11 +357,11 @@ train-spread: ## Train/eval/register/promote spread champion from latest run
 	echo "Promoting $$model_id"; \
 	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_SPREAD_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-spread"
 
-# ── Denoiser v2 end-to-end pipeline ─────────────────────────────────────
+# ── Denoiser end-to-end pipeline ─────────────────────────────────────
 # Usage:
-#   make denoiser-pipeline-v2 BBOX="-180 -90 180 90" START=2026-01-18 END=2026-01-30 YEARS="--year 2024 --year 2025 --year 2026"
+#   make denoiser-pipeline BBOX="-180 -90 180 90" START=2026-01-18 END=2026-01-30 YEARS="--year 2024 --year 2025 --year 2026"
 #
-# BBOX is intentionally global: label_v2 auto-restricts negatives to the
+# BBOX is intentionally global: labeling auto-restricts negatives to the
 # perimeter coverage region, so non-US detections stay UNKNOWN (safe).
 # This runs: migrate → ingest perimeters → label → snapshot → train.
 # NOTE: START/END must match dates in fire_detections. Update when backfilling.
@@ -320,24 +369,24 @@ BBOX ?= -180 -90 180 90
 START ?= 2026-01-18
 END ?= 2026-01-30
 YEARS ?= --year 2024 --year 2025 --year 2026
-DENOISER_V2_VERSION ?= v2.0.0
+DENOISER_LABEL_VERSION ?= default
 
-denoiser-pipeline-v2: ## End-to-end denoiser v2: migrate → ingest perimeters → label → snapshot → train
+denoiser-pipeline: ## End-to-end denoiser: migrate → ingest perimeters → label → snapshot → train
 	@echo "=== Step 1/5: Running migrations ==="
 	$(MAKE) migrate
 	@echo ""
 	@echo "=== Step 2/5: Ingesting NIFC fire perimeters ==="
 	$(MAKE) ingest-nifc-perimeters ARGS="$(YEARS) --bbox $(BBOX)"
 	@echo ""
-	@echo "=== Step 3/5: Labeling detections with ground truth (v2) ==="
+	@echo "=== Step 3/5: Labeling detections with ground truth ==="
 	$(MAKE) denoiser-label ARGS="--bbox $(BBOX) --start $(START) --end $(END)"
 	@echo ""
 	@echo "=== Step 4/5: Exporting training snapshot ==="
-	$(MAKE) denoiser-snapshot ARGS="--bbox $(BBOX) --start $(START) --end $(END) --version $(DENOISER_V2_VERSION)"
+	$(MAKE) denoiser-snapshot ARGS="--bbox $(BBOX) --start $(START) --end $(END) --version $(DENOISER_LABEL_VERSION)"
 	@echo ""
-	@echo "=== Step 5/5: Training denoiser v2 (auto-detecting latest snapshot) ==="
+	@echo "=== Step 5/5: Training denoiser (auto-detecting latest snapshot) ==="
 	$(UV) run --project ml -m ml.train_denoiser \
-		--config configs/denoiser_train_v2.yaml \
+		--config configs/denoiser_train.yaml \
 		--snapshot-path latest
 
 hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG="configs/hindcast_smoke_grid_balkans_mvp.yaml")

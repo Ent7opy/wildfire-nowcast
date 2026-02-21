@@ -90,7 +90,7 @@ def test_active_models_endpoint_returns_registry_payload(monkeypatch) -> None:
     expected = {
         "denoiser": {
             "model_id": "denoiser-prod-1",
-            "artifact_uri": "models/denoiser_v2/run_prod",
+            "artifact_uri": "models/denoiser/run_prod",
         }
     }
     monkeypatch.setattr("api.routes.internal.list_active_models", lambda: expected)
@@ -100,3 +100,44 @@ def test_active_models_endpoint_returns_registry_payload(monkeypatch) -> None:
     body = response.json()
     assert "as_of" in body
     assert body["models"] == expected
+
+
+def test_denoiser_latest_gate_endpoint(monkeypatch) -> None:
+    expected_gate = {"run_id": "run_1", "gate_report_json": {"pass": True}}
+    monkeypatch.setattr("api.routes.internal.get_latest_denoiser_gate_report", lambda: expected_gate)
+
+    response = client.get("/internal/denoiser/gates/latest")
+    assert response.status_code == 200
+    body = response.json()
+    assert "as_of" in body
+    assert body["gate"] == expected_gate
+
+
+def test_denoiser_drift_endpoint(monkeypatch) -> None:
+    rows = [{"metric_name": "psi_score", "metric_value": 0.03}]
+    monkeypatch.setattr("api.routes.internal.list_recent_denoiser_drift", lambda limit=50: rows)
+
+    response = client.get("/internal/denoiser/drift")
+    assert response.status_code == 200
+    body = response.json()
+    assert "as_of" in body
+    assert body["rows"] == rows
+
+
+def test_denoiser_review_queue_endpoints(monkeypatch) -> None:
+    rows = [{"id": 1, "event_id": "evt_1", "status": "open"}]
+    monkeypatch.setattr("api.routes.internal.list_denoiser_review_queue", lambda limit=200, status="open": rows)
+    monkeypatch.setattr("api.routes.internal.resolve_denoiser_review_event", lambda **_: 2)
+
+    list_resp = client.get("/internal/denoiser/review-queue")
+    assert list_resp.status_code == 200
+    assert list_resp.json()["rows"] == rows
+
+    resolve_resp = client.post(
+        "/internal/denoiser/review-queue/evt_1/resolve",
+        json={"resolved_by": "qa", "resolved_notes": "validated"},
+    )
+    assert resolve_resp.status_code == 200
+    payload = resolve_resp.json()
+    assert payload["event_id"] == "evt_1"
+    assert payload["updated"] == 2

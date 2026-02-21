@@ -1,12 +1,24 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from api.config import settings
 from api.data_status import build_data_status_snapshot
 from api.model_registry import list_active_models
+from api.fires.repo import (
+    get_latest_denoiser_gate_report,
+    list_recent_denoiser_drift,
+    list_denoiser_review_queue,
+    resolve_denoiser_review_event,
+)
 
 internal_router = APIRouter(tags=["internal"])
+
+
+class DenoiserReviewResolveRequest(BaseModel):
+    resolved_by: str = "system"
+    resolved_notes: str | None = None
 
 
 @internal_router.get("/health")
@@ -105,3 +117,51 @@ async def active_models() -> dict:
         return {"as_of": as_of, "models": {}, "error": str(exc)}
 
     return {"as_of": as_of, "models": models}
+
+
+@internal_router.get("/internal/denoiser/gates/latest")
+async def denoiser_latest_gate_report() -> dict:
+    """Return latest stored denoiser gate report."""
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        gate = get_latest_denoiser_gate_report()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "gate": None, "error": str(exc)}
+    return {"as_of": as_of, "gate": gate}
+
+
+@internal_router.get("/internal/denoiser/drift")
+async def denoiser_drift(limit: int = 50) -> dict:
+    """Return recent denoiser drift metrics."""
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        rows = list_recent_denoiser_drift(limit=limit)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "rows": [], "error": str(exc)}
+    return {"as_of": as_of, "rows": rows}
+
+
+@internal_router.get("/internal/denoiser/review-queue")
+async def denoiser_review_queue(limit: int = 200, status: str = "open") -> dict:
+    """Return denoiser review queue items."""
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        rows = list_denoiser_review_queue(limit=limit, status=status)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "rows": [], "error": str(exc)}
+    return {"as_of": as_of, "rows": rows}
+
+
+@internal_router.post("/internal/denoiser/review-queue/{event_id}/resolve")
+async def denoiser_review_queue_resolve(event_id: str, request: DenoiserReviewResolveRequest) -> dict:
+    """Resolve all open review rows for an event id."""
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        updated = resolve_denoiser_review_event(
+            event_id=event_id,
+            resolved_by=request.resolved_by,
+            resolved_notes=request.resolved_notes,
+        )
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "event_id": event_id, "updated": 0, "error": str(exc)}
+    return {"as_of": as_of, "event_id": event_id, "updated": updated}

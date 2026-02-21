@@ -184,6 +184,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
             filters={
                 "min_fire_likelihood": min_likelihood,
                 "include_noise": False,
+                "include_denoiser_fields": True,
                 "limit": 10000,
             },
         ).get("detections", [])

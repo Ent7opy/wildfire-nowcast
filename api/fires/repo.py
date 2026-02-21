@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Iterable, Literal, TYPE_CHECKING
 
@@ -19,6 +20,11 @@ from api.fires.scoring import (
 )
 
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
+LOGGER = logging.getLogger(__name__)
+_LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD = 5000
+_NEUTRAL_WEATHER_SCORE = 0.5
+_LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD = 20000
+_NEUTRAL_PERSISTENCE_SCORE = 0.3
 
 
 def validate_bbox(bbox: BBox) -> None:
@@ -58,6 +64,13 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "denoised_score": "denoised_score",
     "false_source_masked": "false_source_masked",
     "fire_likelihood": "fire_likelihood",
+    "event_id": "event_id",
+    "front_id": "front_id",
+    "event_score": "event_score",
+    "denoiser_decision": "denoiser_decision",
+    "review_required": "review_required",
+    "denoiser_model_id": "denoiser_model_id",
+    "denoiser_scored_at": "denoiser_scored_at",
 }
 
 
@@ -308,6 +321,29 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
         if not detections:
             return 0
 
+        # Large global repairs/backfills can make geospatial clustering too slow.
+        # Assign neutral persistence for throughput and keep strict completeness gates.
+        if len(detections) >= _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD:
+            LOGGER.warning(
+                "Batch %s has %s detections; assigning neutral persistence_score=%s for bulk throughput.",
+                batch_id,
+                len(detections),
+                _NEUTRAL_PERSISTENCE_SCORE,
+            )
+            update_stmt = text("""
+                UPDATE fire_detections
+                SET persistence_score = :score
+                WHERE ingest_batch_id = :batch_id
+            """)
+            conn.execute(
+                update_stmt,
+                {
+                    "batch_id": batch_id,
+                    "score": _NEUTRAL_PERSISTENCE_SCORE,
+                },
+            )
+            return len(detections)
+
         # Compute persistence scores
         persistence_scores = compute_persistence_scores(detections)
 
@@ -424,6 +460,30 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
         detections = [dict(r) for r in rows]
         if not detections:
             return 0
+
+        # Large global repairs/backfills can make per-detection weather lookup
+        # prohibitively slow. Use neutral weather score to keep ingestion fail-closed
+        # gates enforceable while preserving throughput.
+        if len(detections) >= _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD:
+            LOGGER.warning(
+                "Batch %s has %s detections; assigning neutral weather_score=%s for bulk throughput.",
+                batch_id,
+                len(detections),
+                _NEUTRAL_WEATHER_SCORE,
+            )
+            update_stmt = text("""
+                UPDATE fire_detections
+                SET weather_score = :score
+                WHERE ingest_batch_id = :batch_id
+            """)
+            conn.execute(
+                update_stmt,
+                {
+                    "batch_id": batch_id,
+                    "score": _NEUTRAL_WEATHER_SCORE,
+                },
+            )
+            return len(detections)
 
         # Compute weather plausibility scores
         weather_scores = compute_weather_plausibility_scores(detections)
@@ -566,3 +626,180 @@ def update_all_scoring_for_batch(
 
     with get_engine().begin() as new_conn:
         return _execute(new_conn)
+
+
+def list_fire_events_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    min_event_score: float | None = None,
+    include_review_required: bool = True,
+    limit: int = 1000,
+) -> list[dict]:
+    """List denoiser events in a bbox/time window."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    if limit <= 0 or limit > 10000:
+        raise ValueError("limit must be between 1 and 10000.")
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    else:
+        start_time = start_time.astimezone(timezone.utc)
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    else:
+        end_time = end_time.astimezone(timezone.utc)
+
+    review_predicate = ""
+    if not include_review_required:
+        review_predicate = "AND review_required IS NOT TRUE"
+
+    score_predicate = ""
+    params: dict[str, object] = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "min_lon": float(min_lon),
+        "min_lat": float(min_lat),
+        "max_lon": float(max_lon),
+        "max_lat": float(max_lat),
+        "limit": int(limit),
+    }
+    if min_event_score is not None:
+        score_predicate = "AND (event_score IS NULL OR event_score >= :min_event_score)"
+        params["min_event_score"] = float(min_event_score)
+
+    stmt = text(
+        f"""
+        SELECT
+            event_id,
+            source,
+            sensor,
+            start_time,
+            end_time,
+            detection_count,
+            front_count,
+            event_score,
+            denoiser_decision,
+            review_required,
+            ST_X(ST_Centroid(geom)) AS lon,
+            ST_Y(ST_Centroid(geom)) AS lat
+        FROM fire_events
+        WHERE start_time <= :end_time
+          AND end_time >= :start_time
+          AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+          AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
+          {review_predicate}
+          {score_predicate}
+        ORDER BY COALESCE(start_time, end_time) DESC, event_id DESC
+        LIMIT :limit
+        """
+    )
+
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, params).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_latest_denoiser_gate_report() -> dict | None:
+    """Return latest gate report written by v2 evaluation."""
+    stmt = text(
+        """
+        SELECT run_id, model_id, status, gate_report_json, evaluated_at
+        FROM denoiser_eval_runs
+        WHERE gate_report_json IS NOT NULL
+        ORDER BY evaluated_at DESC
+        LIMIT 1
+        """
+    )
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt).mappings().first()
+    return dict(row) if row else None
+
+
+def list_recent_denoiser_drift(limit: int = 50) -> list[dict]:
+    """Return recent drift metric rows."""
+    stmt = text(
+        """
+        SELECT
+            id,
+            model_id,
+            metric_name,
+            metric_value,
+            threshold_value,
+            window_start,
+            window_end,
+            triggered_rollback,
+            payload_json,
+            created_at
+        FROM denoiser_drift_metrics
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, {"limit": max(1, int(limit))}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def list_denoiser_review_queue(limit: int = 200, status: str = "open") -> list[dict]:
+    """List denoiser review queue rows."""
+    stmt = text(
+        """
+        SELECT
+            id,
+            event_id,
+            fire_detection_id,
+            reason,
+            severity,
+            status,
+            payload_json,
+            resolved_by,
+            resolved_notes,
+            resolved_at,
+            created_at,
+            updated_at
+        FROM denoiser_review_queue
+        WHERE status = :status
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            stmt,
+            {"status": str(status), "limit": max(1, int(limit))},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def resolve_denoiser_review_event(
+    event_id: str,
+    *,
+    resolved_by: str,
+    resolved_notes: str | None = None,
+) -> int:
+    """Resolve all open review items for an event."""
+    stmt = text(
+        """
+        UPDATE denoiser_review_queue
+        SET
+            status = 'resolved',
+            resolved_by = :resolved_by,
+            resolved_notes = :resolved_notes,
+            resolved_at = NOW(),
+            updated_at = NOW()
+        WHERE event_id = :event_id
+          AND status = 'open'
+        """
+    )
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            stmt,
+            {
+                "event_id": event_id,
+                "resolved_by": resolved_by,
+                "resolved_notes": resolved_notes,
+            },
+        )
+    return int(result.rowcount or 0)
