@@ -67,35 +67,34 @@ def render_sidebar() -> None:
         st.caption(f"Selected: {start_hours}h ago to {end_str} ({start_hours - end_hours}h window)")
 
         st.slider(
-            "Minimum fire likelihood",
+            "Minimum event score",
             min_value=0.0,
             max_value=1.0,
             step=0.05,
             key="min_likelihood",
-            help="Composite score combining FIRMS confidence (20%), persistence (30%), land-cover plausibility (25%), and weather conditions (25%). Values <0.3 indicate low confidence, 0.3-0.6 uncertain, >0.6 likely real fire.",
+            help="Event-level denoiser score. Values <0.3 are low-signal events, 0.3-0.6 uncertain, >0.6 likely real fire events.",
         )
 
         # Dynamic likelihood intensity label (best-effort for fire icon feedback)
         likelihood_val = st.session_state.get("min_likelihood", 0.0)
         if likelihood_val >= 0.6:
-            st.caption("Threshold: **High** \u2014 likely real fires only")
+            st.caption("Threshold: **High** \u2014 likely real events only")
         elif likelihood_val >= 0.3:
-            st.caption("Threshold: **Medium** \u2014 filtering uncertain detections")
+            st.caption("Threshold: **Medium** \u2014 filtering uncertain events")
         else:
-            st.caption("Threshold: **Low** \u2014 showing all detections")
+            st.caption("Threshold: **Low** \u2014 showing all events")
 
         st.toggle(
             "Active incidents only",
             key="active_only",
             help=(
-                "Hide lower-signal detections using a stricter wildfire activity profile "
-                "(likelihood/confidence/FRP/persistence heuristics)."
+                "Hide lower-signal events using event-level decisioning and score thresholds."
             ),
         )
         st.toggle(
             "Cluster nearby points",
             key="cluster_points",
-            help="Aggregate nearby detections into incident bubbles to reduce visual clutter.",
+            help="Aggregate nearby events into incident bubbles to reduce visual clutter.",
         )
         cluster_enabled = bool(st.session_state.get("cluster_points", True))
         st.toggle(

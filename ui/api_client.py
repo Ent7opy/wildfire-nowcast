@@ -18,6 +18,7 @@ __all__ = [
     "ApiError",
     "ApiUnavailableError",
     "get_fires",
+    "get_fire_events",
     "get_forecast",
     "generate_forecast",
     "create_jit_forecast",
@@ -210,6 +211,72 @@ def get_fires(
     if detections is None or not isinstance(detections, list):
         raise ApiError(
             message="API returned invalid fires payload (missing 'detections')",
+            status_code=None,
+            url=None,
+            response_text=str(data)[:500],
+        )
+    return data
+
+
+def get_fire_events(
+    bbox: BBox,
+    time_range: TimeRange,
+    filters: Optional[Mapping[str, Any]] = None,
+) -> JsonDict:
+    """Fetch fire events from the backend.
+
+    Backend contract: GET /fires/events
+      - min_lon, min_lat, max_lon, max_lat (float)
+      - start_time, end_time (datetime)
+      - min_event_score (float, optional)
+      - include_review_required (bool, optional)
+      - limit (int, optional)
+
+    Response shape:
+      { "count": int, "events": [ { "event_id": str, "lat": float, "lon": float, ... }, ... ] }
+    """
+    if not bbox or len(bbox) != 4:
+        raise ApiError(
+            message="Invalid bbox: must be a 4-tuple (min_lon, min_lat, max_lon, max_lat)",
+            url=None,
+        )
+    min_lon, min_lat, max_lon, max_lat = bbox
+    if not all(isinstance(x, (int, float)) for x in bbox):
+        raise ApiError(
+            message="Invalid bbox: all values must be numbers",
+            url=None,
+        )
+    if min_lon >= max_lon or min_lat >= max_lat:
+        raise ApiError(
+            message="Invalid bbox: min values must be less than max values",
+            url=None,
+        )
+
+    start_time, end_time = time_range
+    params: Dict[str, Any] = {
+        "min_lon": min_lon,
+        "min_lat": min_lat,
+        "max_lon": max_lon,
+        "max_lat": max_lat,
+        "start_time": _isoformat(start_time),
+        "end_time": _isoformat(end_time),
+    }
+    if filters:
+        normalized_filters: Dict[str, Any] = {}
+        for key, value in dict(filters).items():
+            if isinstance(value, bool):
+                normalized_filters[key] = "true" if value else "false"
+            else:
+                normalized_filters[key] = value
+        params.update(normalized_filters)
+
+    data = _get_json("/fires/events", params=params)
+    if not isinstance(data, dict):
+        raise ApiError(message="API returned invalid events payload (not a JSON object)", url=None)
+    events = data.get("events")
+    if events is None or not isinstance(events, list):
+        raise ApiError(
+            message="API returned invalid events payload (missing 'events')",
             status_code=None,
             url=None,
             response_text=str(data)[:500],

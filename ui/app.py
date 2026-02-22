@@ -265,7 +265,7 @@ def main() -> None:
     # App identity
     st.title("Wildfire Nowcast & Forecast")
     st.caption(
-        "Live satellite fire detections with spread overlays."
+        "Live satellite fire events with spread overlays."
     )
     st.info(
         "Forecast overlays are **experimental** and **probabilistic** (not deterministic). "
@@ -288,8 +288,8 @@ def main() -> None:
 
     # Active filters summary
     st.caption(
-        f"**Fires filters:** {app_state.time_window}, "
-        f"likelihood at least {app_state.filters.min_likelihood:.2f}, "
+        f"**Events filters:** {app_state.time_window}, "
+        f"event score at least {app_state.filters.min_likelihood:.2f}, "
         f"active-only={'on' if app_state.filters.active_only else 'off'}, "
         f"cluster={'on' if app_state.filters.cluster_points else 'off'}, "
         f"risk={'on' if app_state.layers.show_risk else 'off'}"
