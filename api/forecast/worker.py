@@ -21,7 +21,10 @@ from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
 from api.forecast.model_catalog import resolve_request_model_selection
 from ml.spread.factory import get_model_version_hint, get_spread_model
-from ml.spread.service import STRICT_FORECAST_INPUTS_ENV
+from ml.spread.service import (
+    SPREAD_SHADOW_ENABLED_ENV,
+    STRICT_FORECAST_INPUTS_ENV,
+)
 
 # Add ingest module to path for imports
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -161,6 +164,21 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             model_name=forecast_params.get("model_name"),
             model_params=forecast_params.get("model_params"),
         )
+        shadow_enabled = _env_bool(SPREAD_SHADOW_ENABLED_ENV, default=False)
+        shadow_model_name = None
+        shadow_model_params = None
+        shadow_model_id = os.getenv("SPREAD_SHADOW_MODEL_ID")
+        if shadow_enabled and shadow_model_id:
+            try:
+                shadow_model_name, shadow_model_params, _ = resolve_request_model_selection(
+                    model_id=shadow_model_id,
+                    model_name=None,
+                    model_params=None,
+                )
+            except Exception:
+                logger.exception("Failed to resolve shadow model_id=%s. Continuing without shadow.", shadow_model_id)
+                shadow_model_name = None
+                shadow_model_params = None
 
         cache_key = repo.build_forecast_result_cache_key(
             bbox=bbox,
@@ -349,6 +367,8 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 "strict_inputs": strict_inputs,
                 "cache_key": cache_key,
                 "use_result_cache": use_result_cache,
+                "shadow_enabled": bool(shadow_model_name),
+                "shadow_model_id": shadow_model_id if shadow_model_name else None,
             },
         )
         logger.info(f"JIT job {job_id}: created forecast run_id={run_id}")
@@ -363,6 +383,8 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 strict_inputs=strict_inputs,
                 model_name=model_name,
                 model_params=model_params,
+                shadow_model_name=shadow_model_name,
+                shadow_model_params=shadow_model_params,
             )
             forecast = run_spread_forecast(request, model=model)
             logger.info(f"JIT job {job_id}: forecast computation completed")
@@ -381,6 +403,11 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                     "weather_fallback_used",
                     "weather_fallback_reason",
                     "terrain_fallback_used",
+                    "confidence_level",
+                    "staleness_hours",
+                    "fallback_used",
+                    "shadow_evaluated",
+                    "shadow_metrics_summary",
                     "model_name",
                     "model_version",
                 ):
@@ -449,6 +476,10 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 },
                 "cache_hit": False,
                 "cache_source": None,
+                "confidence_level": extra_meta.get("confidence_level"),
+                "staleness_hours": extra_meta.get("staleness_hours"),
+                "shadow_evaluated": bool(extra_meta.get("shadow_evaluated", False)),
+                "shadow_metrics_summary": extra_meta.get("shadow_metrics_summary"),
             }
 
             repo.update_jit_job_status(job_id, "completed", result=result)

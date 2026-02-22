@@ -91,3 +91,28 @@ def test_default_model_selection_prefers_promoted_model(monkeypatch):
     assert model_name == "LearnedSpreadModelV1"
     assert model_params == {"model_run_dir": "models/spread_v1/run_prod"}
     assert model_id == "spread_prod_20260215"
+
+
+def test_default_model_selection_infers_v2_from_promoted_metadata(monkeypatch, tmp_path):
+    run_dir = tmp_path / "spread_v2_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        json.dumps({"model_name": "LearnedSpreadModelV2"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "api.forecast.model_catalog.resolve_active_model",
+        lambda _family: {"model_id": "spread_v2_prod", "artifact_uri": str(run_dir)},
+    )
+    get_spread_model_catalog.cache_clear()
+
+    model_name, model_params, model_id = resolve_request_model_selection(
+        model_id=None,
+        model_name=None,
+        model_params=None,
+    )
+
+    assert model_name == "LearnedSpreadModelV2"
+    assert model_params == {"model_run_dir": str(run_dir)}
+    assert model_id == "spread_v2_prod"

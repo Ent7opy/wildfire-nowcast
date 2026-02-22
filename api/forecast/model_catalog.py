@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from api.model_registry import resolve_active_model
@@ -40,8 +41,22 @@ def _resolve_promoted_spread_catalog_entry() -> tuple[str, tuple[str, dict[str, 
     if not model_id or not artifact_uri:
         return None
 
+    artifact_path = Path(str(artifact_uri))
+    inferred_model_name = "LearnedSpreadModelV1"
+    try:
+        meta_path = artifact_path / "metadata.json"
+        if meta_path.exists():
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            name = payload.get("model_name")
+            if name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2"}:
+                inferred_model_name = str(name)
+        elif (artifact_path / "model.int8.onnx").exists() or (artifact_path / "model.onnx").exists():
+            inferred_model_name = "LearnedSpreadModelV2"
+    except Exception:
+        inferred_model_name = "LearnedSpreadModelV1"
+
     model_name, model_params = normalize_model_selection(
-        "LearnedSpreadModelV1",
+        inferred_model_name,
         {"model_run_dir": str(artifact_uri)},
     )
     return str(model_id), (model_name, model_params)
@@ -160,13 +175,17 @@ def resolve_request_model_selection(
 
     normalized_params = dict(model_params or {})
     # Block raw artifact paths from request surface; require catalog model_id instead.
-    if "model_run_dir" in normalized_params or "calibrator_run_dir" in normalized_params:
+    if (
+        "model_run_dir" in normalized_params
+        or "calibrator_run_dir" in normalized_params
+        or "onnx_filename" in normalized_params
+    ):
         raise ValueError(
             "Direct model artifact paths are not allowed in requests. Use model_id from the approved catalog."
         )
-    if model_name == "LearnedSpreadModelV1":
+    if model_name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2"}:
         raise ValueError(
-            "LearnedSpreadModelV1 must be selected via model_id from the approved catalog."
+            f"{model_name} must be selected via model_id from the approved catalog."
         )
     name, params = normalize_model_selection(model_name, normalized_params)
     return name, params, None

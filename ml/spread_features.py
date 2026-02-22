@@ -231,6 +231,13 @@ def _load_weather_cube(
         )
         # Mark as not using fallback when successfully loaded
         ds_final.attrs["weather_fallback_used"] = False
+        ds_final.attrs["weather_run_id"] = run.get("id")
+        run_time = run.get("run_time")
+        if run_time is not None:
+            try:
+                ds_final.attrs["weather_run_time"] = run_time.isoformat()
+            except Exception:
+                ds_final.attrs["weather_run_time"] = str(run_time)
         return ds_final
     except Exception:
         LOGGER.exception("Failed to load/align weather dataset from %s; using fallback.", path)
@@ -485,4 +492,3 @@ def build_spread_inputs(
         weather_fallback_used=weather_fallback_used,
         terrain_fallback_used=terrain_fallback_used,
     )
-

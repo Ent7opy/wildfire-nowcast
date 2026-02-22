@@ -1,12 +1,15 @@
 """Hindcast dataset builder for learned spread models."""
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import sqlalchemy as sa
+from scipy.ndimage import binary_dilation
 from sqlalchemy.engine import Engine
 
 from api.db import get_engine
@@ -14,6 +17,28 @@ from api.fires.service import get_fire_cells_heatmap
 from ml.spread_features import build_spread_inputs
 
 LOGGER = logging.getLogger(__name__)
+
+# Fixed channel order for v2 tensor training/inference.
+V2_TENSOR_CHANNELS: tuple[str, ...] = (
+    "fire_t0",
+    "fire_t-6h",
+    "fire_t-12h",
+    "u10",
+    "v10",
+    "t2m",
+    "rh2m",
+    "precip_24h",
+    "slope_deg",
+    "aspect_sin",
+    "aspect_cos",
+    "elevation_m",
+    "ruggedness",
+    "tpi",
+    "ndvi",
+    "lfmc",
+    "dfmc",
+    "region_id_embedding_input",
+)
 
 
 def sample_fire_reference_times(
@@ -24,19 +49,12 @@ def sample_fire_reference_times(
     min_detections: int = 5,
     interval_hours: int = 24,
 ) -> List[datetime]:
-    """Sample reference times that have active fires in the bbox.
-
-    This ensures we build the dataset around actual fire events.
-    We group detections by `interval_hours` time buckets and pick the start of those buckets
-    if they have enough detections.
-    """
+    """Sample reference times that have active fires in the bbox."""
     min_lon, min_lat, max_lon, max_lat = bbox
 
-    # Note: we use date_trunc to group by time buckets.
-    # We want to find candidate reference times (start of a prediction window).
     stmt = sa.text(
         """
-        SELECT 
+        SELECT
             date_trunc('hour', acq_time) - (CAST(extract(hour FROM acq_time) AS INTEGER) % :interval_h) * interval '1 hour' as ref_time,
             count(*) as detection_count
         FROM fire_detections
@@ -64,8 +82,48 @@ def sample_fire_reference_times(
             },
         ).mappings().all()
 
-    # Convert to UTC-aware datetimes
     return [r["ref_time"].replace(tzinfo=timezone.utc) for r in result]
+
+
+def _load_fire_history(
+    region_name: str,
+    bbox: Tuple[float, float, float, float],
+    ref_time: datetime,
+    lookback_hours: int,
+) -> np.ndarray:
+    start_time = ref_time - timedelta(hours=int(lookback_hours))
+    return get_fire_cells_heatmap(
+        region_name=region_name,
+        bbox=bbox,
+        start_time=start_time,
+        end_time=ref_time,
+        mode="presence",
+        clip=True,
+    ).heatmap.astype(np.float32, copy=False)
+
+
+def _derive_ruggedness_and_tpi(
+    elevation: np.ndarray | None,
+    slope: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    if elevation is None:
+        zeros = np.zeros_like(slope, dtype=np.float32)
+        return zeros, zeros
+
+    # Simple local roughness proxy: gradient magnitude of elevation.
+    grad_y, grad_x = np.gradient(elevation.astype(np.float32, copy=False))
+    ruggedness = np.sqrt(grad_x**2 + grad_y**2).astype(np.float32, copy=False)
+
+    # Approximate topographic position index using global mean fallback.
+    tpi = (elevation.astype(np.float32, copy=False) - np.float32(np.nanmean(elevation))).astype(np.float32, copy=False)
+    return ruggedness, tpi
+
+
+def _coerce_weather_var(weather_h: Any, var_name: str, shape: tuple[int, int]) -> np.ndarray:
+    data = weather_h.get(var_name)
+    if data is None:
+        return np.zeros(shape, dtype=np.float32)
+    return np.asarray(data.values, dtype=np.float32)
 
 
 def _flatten_features(
@@ -74,51 +132,50 @@ def _flatten_features(
     ref_time: datetime,
     horizons_hours: List[int],
 ) -> List[pd.DataFrame]:
-    """Extract features for a single reference time across all horizons.
-    
-    Returns a list of DataFrames, one per horizon.
-    """
-    # 1. Gather all inputs (weather, terrain, current fires)
+    """Extract tabular features for a single reference time across all horizons."""
     inputs = build_spread_inputs(
         region_name=region_name,
         bbox=bbox,
         forecast_reference_time=ref_time,
         horizons_hours=horizons_hours,
     )
-    
-    # 2. Extract static terrain features
-    # (lat, lon) arrays from TerrainWindow
-    slope = inputs.terrain.slope
-    aspect = inputs.terrain.aspect
-    elevation = inputs.terrain.elevation
-    
-    # Pre-calculate aspect components to avoid circularity issues
+
+    slope = inputs.terrain.slope.astype(np.float32, copy=False)
+    aspect = inputs.terrain.aspect.astype(np.float32, copy=False)
+    elevation = (
+        None if inputs.terrain.elevation is None else inputs.terrain.elevation.astype(np.float32, copy=False)
+    )
+
     aspect_rad = np.radians(aspect)
-    aspect_sin = np.sin(aspect_rad)
-    aspect_cos = np.cos(aspect_rad)
-    
-    # 3. Extract current fire state (T=0)
-    fire_t0 = inputs.active_fires.heatmap
-    
-    # 4. Loop horizons to build per-horizon tabular data
-    horizon_dfs = []
+    aspect_sin = np.sin(aspect_rad).astype(np.float32, copy=False)
+    aspect_cos = np.cos(aspect_rad).astype(np.float32, copy=False)
+
+    fire_t0 = inputs.active_fires.heatmap.astype(np.float32, copy=False)
+    fire_t_minus_6 = _load_fire_history(region_name, bbox, ref_time, lookback_hours=6)
+    fire_t_minus_12 = _load_fire_history(region_name, bbox, ref_time, lookback_hours=12)
+    ruggedness, tpi = _derive_ruggedness_and_tpi(elevation=elevation, slope=slope)
+
+    ny, nx = fire_t0.shape
+    lat_grid, lon_grid = np.meshgrid(inputs.window.lat, inputs.window.lon, indexing="ij")
+    region_bucket = int(abs(hash(region_name)) % 10)
+
+    horizon_dfs: list[pd.DataFrame] = []
     for h_idx, horizon_h in enumerate(horizons_hours):
-        # 4a. Weather at this horizon
-        # weather_cube has (time, lat, lon)
         weather_h = inputs.weather_cube.isel(time=h_idx)
-        u10 = weather_h["u10"].values
-        v10 = weather_h["v10"].values
-        t2m = weather_h.get("t2m")
-        rh2m = weather_h.get("rh2m")
-        
-        # 4b. Load target label (future fire presence)
-        # We look ahead from ref_time + horizon_h
+        u10 = np.asarray(weather_h["u10"].values, dtype=np.float32)
+        v10 = np.asarray(weather_h["v10"].values, dtype=np.float32)
+        t2m = _coerce_weather_var(weather_h, "t2m", (ny, nx))
+        rh2m = _coerce_weather_var(weather_h, "rh2m", (ny, nx))
+
+        precip_24h = _coerce_weather_var(weather_h, "precip_24h", (ny, nx))
+        ndvi = _coerce_weather_var(weather_h, "ndvi", (ny, nx))
+        lfmc = _coerce_weather_var(weather_h, "lfmc", (ny, nx))
+        dfmc = _coerce_weather_var(weather_h, "dfmc", (ny, nx))
+
         target_time = ref_time + timedelta(hours=horizon_h)
-        # Look in a small window around the target time (e.g. +/- 3h) to capture detections
-        # that might be slightly offset but represent fire at that time.
         target_start = target_time - timedelta(hours=3)
         target_end = target_time + timedelta(hours=3)
-        
+
         target_heatmap = get_fire_cells_heatmap(
             region_name=region_name,
             bbox=bbox,
@@ -126,48 +183,183 @@ def _flatten_features(
             end_time=target_end,
             mode="presence",
             clip=True,
-        ).heatmap
+        ).heatmap.astype(np.int8, copy=False)
         if target_heatmap.shape != fire_t0.shape:
             raise ValueError(
                 "Target heatmap shape mismatch. "
                 f"target={target_heatmap.shape} fire_t0={fire_t0.shape} "
                 f"region={region_name!r} bbox={bbox!r} ref_time={ref_time!r} horizon_h={horizon_h}"
             )
-        
-        # 5. Flatten everything into a DataFrame for this (ref_time, horizon)
-        ny, nx = fire_t0.shape
-        # Create coordinate grids
-        lat_grid, lon_grid = np.meshgrid(inputs.window.lat, inputs.window.lon, indexing="ij")
-        
+
         data: Dict[str, Any] = {
             "ref_time": [ref_time] * (ny * nx),
             "horizon_h": [horizon_h] * (ny * nx),
             "lat": lat_grid.ravel(),
             "lon": lon_grid.ravel(),
             "fire_t0": fire_t0.ravel(),
+            "fire_t-6h": fire_t_minus_6.ravel(),
+            "fire_t-12h": fire_t_minus_12.ravel(),
             "slope_deg": slope.ravel(),
             "aspect_sin": aspect_sin.ravel(),
             "aspect_cos": aspect_cos.ravel(),
             "u10": u10.ravel(),
             "v10": v10.ravel(),
-            "label": target_heatmap.ravel().astype(int),
+            "t2m": t2m.ravel(),
+            "rh2m": rh2m.ravel(),
+            "precip_24h": precip_24h.ravel(),
+            "ruggedness": ruggedness.ravel(),
+            "tpi": tpi.ravel(),
+            "ndvi": ndvi.ravel(),
+            "lfmc": lfmc.ravel(),
+            "dfmc": dfmc.ravel(),
+            "region_id_embedding_input": np.full(ny * nx, region_bucket, dtype=np.int32),
+            "label": target_heatmap.ravel().astype(np.int8, copy=False),
         }
-        
+
         if elevation is not None:
             data["elevation_m"] = elevation.ravel()
-        if t2m is not None:
-            data["t2m"] = t2m.values.ravel()
-        if rh2m is not None:
-            data["rh2m"] = rh2m.values.ravel()
-            
+        else:
+            data["elevation_m"] = np.zeros(ny * nx, dtype=np.float32)
+
         df = pd.DataFrame(data)
-        
-        # Add basic derived features
-        df["wind_speed"] = np.sqrt(df["u10"]**2 + df["v10"]**2)
-        
+        df["wind_speed"] = np.sqrt(df["u10"] ** 2 + df["v10"] ** 2)
+        df["region_name"] = region_name
+        df["region_bucket"] = region_bucket
+        df["ref_year"] = pd.to_datetime(df["ref_time"], utc=True).dt.year.astype(int)
+
         horizon_dfs.append(df)
-        
+
     return horizon_dfs
+
+
+def _near_periphery_negative_mask(
+    df: pd.DataFrame,
+    *,
+    radius_cells: int = 2,
+) -> pd.Series:
+    """Return a mask for negatives near the positive fire boundary."""
+    ny = int(df["lat"].nunique())
+    nx = int(df["lon"].nunique())
+    if ny * nx != len(df):
+        return pd.Series(False, index=df.index)
+
+    labels = np.asarray(df["label"], dtype=np.int8).reshape(ny, nx)
+    positives = labels > 0
+    if not positives.any():
+        return pd.Series(False, index=df.index)
+
+    boundary = binary_dilation(positives, iterations=int(radius_cells)) & (~positives)
+    return pd.Series(boundary.ravel(), index=df.index)
+
+
+def _sample_negatives_with_periphery_priority(
+    df: pd.DataFrame,
+    *,
+    pos_mask: pd.Series,
+    neg_mask: pd.Series,
+    must_keep_neg: pd.Series,
+    n_other_target: int,
+    random_state: int,
+) -> pd.DataFrame:
+    if n_other_target <= 0:
+        return df[pos_mask | must_keep_neg]
+
+    other_neg = neg_mask & (~must_keep_neg)
+    if n_other_target >= int(other_neg.sum()):
+        return df[pos_mask | neg_mask]
+
+    near_boundary = _near_periphery_negative_mask(df)
+    boundary_pool = other_neg & near_boundary
+    background_pool = other_neg & (~near_boundary)
+
+    boundary_target = int(round(n_other_target * 0.70))
+    boundary_target = min(boundary_target, int(boundary_pool.sum()))
+    background_target = n_other_target - boundary_target
+
+    if background_target > int(background_pool.sum()):
+        spill = background_target - int(background_pool.sum())
+        background_target = int(background_pool.sum())
+        boundary_target = min(boundary_target + spill, int(boundary_pool.sum()))
+
+    sampled_parts = []
+    if boundary_target > 0:
+        sampled_parts.append(
+            df[boundary_pool].sample(n=boundary_target, random_state=random_state)
+        )
+    if background_target > 0:
+        sampled_parts.append(
+            df[background_pool].sample(n=background_target, random_state=random_state + 17)
+        )
+
+    keep_mask = pos_mask | must_keep_neg
+    if sampled_parts:
+        return pd.concat([df[keep_mask], *sampled_parts], axis=0)
+    return df[keep_mask]
+
+
+def split_hindcast_dataset(
+    df: pd.DataFrame,
+    *,
+    split_year: int | None = None,
+    validation_region_buckets: set[int] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Leakage-safe train/eval split using year and region-bucket holdout."""
+    if df.empty:
+        return df.copy(), df.copy()
+
+    out = df.copy()
+    out["ref_time"] = pd.to_datetime(out["ref_time"], utc=True)
+    if "ref_year" not in out.columns:
+        out["ref_year"] = out["ref_time"].dt.year.astype(int)
+    if "region_bucket" not in out.columns:
+        out["region_bucket"] = (
+            ((out["lat"].round(2) * 10).astype(int) + (out["lon"].round(2) * 10).astype(int)).abs() % 10
+        )
+
+    holdout_year = int(split_year if split_year is not None else out["ref_year"].max())
+    holdout_buckets = validation_region_buckets or {0}
+
+    eval_mask = (out["ref_year"] >= holdout_year) & (out["region_bucket"].isin(holdout_buckets))
+    train_df = out[~eval_mask].copy()
+    eval_df = out[eval_mask].copy()
+
+    if train_df.empty or eval_df.empty:
+        split_dt = out["ref_time"].quantile(0.8)
+        train_df = out[out["ref_time"] < split_dt].copy()
+        eval_df = out[out["ref_time"] >= split_dt].copy()
+
+    return train_df, eval_df
+
+
+def _to_tensor_case(
+    df: pd.DataFrame,
+    *,
+    channel_names: tuple[str, ...],
+) -> dict[str, Any]:
+    ny = int(df["lat"].nunique())
+    nx = int(df["lon"].nunique())
+    if ny * nx != len(df):
+        raise ValueError("Tensor conversion requires full (lat, lon) grid rows.")
+
+    tensor = np.stack(
+        [np.asarray(df[ch], dtype=np.float32).reshape(ny, nx) for ch in channel_names],
+        axis=0,
+    )
+    label = np.asarray(df["label"], dtype=np.float32).reshape(ny, nx)
+    lat = np.asarray(sorted(df["lat"].unique()), dtype=np.float32)
+    lon = np.asarray(sorted(df["lon"].unique()), dtype=np.float32)
+
+    return {
+        "ref_time": pd.to_datetime(df["ref_time"].iloc[0], utc=True),
+        "horizon_h": int(df["horizon_h"].iloc[0]),
+        "region_name": str(df["region_name"].iloc[0]),
+        "region_bucket": int(df["region_bucket"].iloc[0]),
+        "x_tensor": tensor,
+        "y_tensor": label,
+        "lat": lat,
+        "lon": lon,
+        "channel_names": list(channel_names),
+    }
 
 
 def build_hindcast_dataset(
@@ -181,68 +373,84 @@ def build_hindcast_dataset(
     negative_ratio: Optional[float] = 5.0,
     min_negative_samples: int = 500,
     seed: int = 42,
-) -> pd.DataFrame:
-    """Build a consolidated hindcast dataset for spread training."""
+    output_mode: Literal["tabular", "tensor"] = "tabular",
+    tensor_channels: tuple[str, ...] = V2_TENSOR_CHANNELS,
+) -> pd.DataFrame | list[dict[str, Any]]:
+    """Build hindcast data in tabular (v1) or tensor (v2) mode."""
     engine = get_engine()
-    
-    # 1. Sample reference times
     candidate_times = sample_fire_reference_times(
         engine, bbox, start_time, end_time, min_detections, interval_hours
     )
-    LOGGER.info(f"Found {len(candidate_times)} candidate reference times for hindcast.")
-    
-    all_dfs = []
+    LOGGER.info("Found %s candidate reference times for hindcast.", len(candidate_times))
+
+    all_dfs: list[pd.DataFrame] = []
     for ref_time in candidate_times:
         try:
-            LOGGER.info(f"Processing ref_time={ref_time}...")
+            LOGGER.info("Processing ref_time=%s ...", ref_time)
             horizon_dfs = _flatten_features(region_name, bbox, ref_time, horizons_hours)
-            
             for df in horizon_dfs:
-                # 2. Negative sampling (if requested)
-                # Spread is very sparse; most cells are 0.
-                if negative_ratio is not None:
-                    pos_mask = df["label"] == 1
-                    neg_mask = df["label"] == 0
-                    
-                    n_pos = int(pos_mask.sum())
-                    # Always include cells that had fire at T=0 (even if there are no future positives).
-                    must_keep_neg = neg_mask & (df["fire_t0"] > 0)
-                    n_must_keep = int(must_keep_neg.sum())
-
-                    # Target number of negatives:
-                    # - If we have positives, use the requested negative_ratio.
-                    # - If we have zero positives, still include a small background sample so the
-                    #   dataset isn't biased toward "only horizons with spread".
-                    if n_pos > 0:
-                        n_neg_target = int(n_pos * float(negative_ratio))
-                    else:
-                        n_neg_target = int(max(min_negative_samples, n_must_keep))
-                    
-                    other_neg = neg_mask & (~must_keep_neg)
-                    n_other_target = max(0, n_neg_target - n_must_keep)
-                    
-                    if n_other_target < other_neg.sum():
-                        # Make sampling stable but vary per (ref_time, horizon) so we don't select
-                        # the exact same background negatives for every time bucket.
-                        horizon_val = int(df["horizon_h"].iloc[0]) if "horizon_h" in df.columns and len(df) else 0
-                        rs = int(seed + int(ref_time.timestamp()) + horizon_val * 1000) & 0x7FFFFFFF
-                        sampled_other_neg_idx = df[other_neg].sample(
-                            n=n_other_target, random_state=rs
-                        ).index
-                        keep_mask = pos_mask | must_keep_neg
-                        final_df = pd.concat([df[keep_mask], df.loc[sampled_other_neg_idx]])
-                    else:
-                        final_df = df[pos_mask | neg_mask]
-                    
-                    all_dfs.append(final_df)
-                else:
+                if negative_ratio is None:
                     all_dfs.append(df)
-                    
-        except Exception:
-            LOGGER.exception(f"Failed to process ref_time={ref_time}; skipping.")
-            
-    if not all_dfs:
-        return pd.DataFrame()
-        
-    return pd.concat(all_dfs, ignore_index=True)
+                    continue
 
+                pos_mask = df["label"] == 1
+                neg_mask = df["label"] == 0
+                n_pos = int(pos_mask.sum())
+
+                must_keep_neg = neg_mask & (df["fire_t0"] > 0)
+                n_must_keep = int(must_keep_neg.sum())
+
+                if n_pos > 0:
+                    n_neg_target = int(n_pos * float(negative_ratio))
+                else:
+                    n_neg_target = int(max(min_negative_samples, n_must_keep))
+
+                n_other_target = max(0, n_neg_target - n_must_keep)
+                horizon_val = int(df["horizon_h"].iloc[0]) if "horizon_h" in df.columns and len(df) else 0
+                rs = int(seed + int(ref_time.timestamp()) + horizon_val * 1000) & 0x7FFFFFFF
+                sampled = _sample_negatives_with_periphery_priority(
+                    df,
+                    pos_mask=pos_mask,
+                    neg_mask=neg_mask,
+                    must_keep_neg=must_keep_neg,
+                    n_other_target=n_other_target,
+                    random_state=rs,
+                )
+                all_dfs.append(sampled)
+
+        except Exception:
+            LOGGER.exception("Failed to process ref_time=%s; skipping.", ref_time)
+
+    if not all_dfs:
+        return [] if output_mode == "tensor" else pd.DataFrame()
+
+    merged = pd.concat(all_dfs, ignore_index=True)
+    if output_mode == "tabular":
+        return merged
+
+    tensor_cases = []
+    for (_, h), chunk in merged.groupby(["ref_time", "horizon_h"], sort=True):
+        _ = h
+        tensor_cases.append(_to_tensor_case(chunk, channel_names=tensor_channels))
+    return tensor_cases
+
+
+def build_hindcast_tensor_dataset(
+    region_name: str,
+    bbox: Tuple[float, float, float, float],
+    start_time: datetime,
+    end_time: datetime,
+    horizons_hours: List[int],
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Convenience wrapper for v2 spatial tensor training data."""
+    out = build_hindcast_dataset(
+        region_name=region_name,
+        bbox=bbox,
+        start_time=start_time,
+        end_time=end_time,
+        horizons_hours=horizons_hours,
+        output_mode="tensor",
+        **kwargs,
+    )
+    return list(out)

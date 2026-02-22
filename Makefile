@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-drift-monitor denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-drift-monitor denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -289,6 +289,9 @@ ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 -
 ingest-orchestrator: ## Run unified FIRMS/weather/terrain/perimeters orchestrator (pass ARGS="--loop --poll-seconds 30")
 	$(UV) run --project ingest -m ingest.orchestrator $(ARGS)
 
+download-fuels: ## Build/cache fuel-moisture feature cube (pass ARGS="--bbox ... --run-time ...")
+	$(UV) run --project ingest -m ingest.fuels_ingest $(ARGS)
+
 model-register: ## Register model artifact (usage: make model-register FAMILY=denoiser ARTIFACT=... METRICS=@path/or-json)
 	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
 	$(if $(ARTIFACT),,$(error Please provide ARTIFACT=<artifact path or URI>))
@@ -341,21 +344,53 @@ json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file
 	echo "Promoting $$model_id"; \
 	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_DENOISER_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-denoiser pipeline=$(TRAIN_DENOISER_PIPELINE)"
 
-TRAIN_SPREAD_CONFIG ?= configs/spread_train_v1.yaml
+TRAIN_SPREAD_PIPELINE ?= v1
+TRAIN_SPREAD_CONFIG_V1 ?= configs/spread_train_v1.yaml
+TRAIN_SPREAD_CONFIG_V2 ?= configs/spread_train_v2.yaml
+TRAIN_SPREAD_CONFIG ?= $(if $(filter v2,$(TRAIN_SPREAD_PIPELINE)),$(TRAIN_SPREAD_CONFIG_V2),$(TRAIN_SPREAD_CONFIG_V1))
 TRAIN_SPREAD_FAMILY ?= spread
-TRAIN_SPREAD_ROOT ?= models/spread_v1
+TRAIN_SPREAD_ROOT ?= $(if $(filter v2,$(TRAIN_SPREAD_PIPELINE)),models/spread_v2,models/spread_v1)
 TRAIN_SPREAD_METRICS_FILE ?= metrics.json
+TRAIN_SPREAD_GATE_REPORT_FILE ?= gate_report.json
+TRAIN_SPREAD_GATE_CONFIG_V2 ?= configs/spread_champion_challenger.yaml
+TRAIN_SPREAD_GATE_CONFIG ?= $(if $(filter v2,$(TRAIN_SPREAD_PIPELINE)),$(TRAIN_SPREAD_GATE_CONFIG_V2),)
+TRAIN_SPREAD_REQUIRE_GATE ?= $(if $(filter v2,$(TRAIN_SPREAD_PIPELINE)),true,false)
 
 train-spread: ## Train/eval/register/promote spread champion from latest run
-	@echo "=== Training spread model ==="
-	$(UV) run --project ml -m ml.train_spread_v1 --config $(TRAIN_SPREAD_CONFIG)
+	@echo "=== Training spread model ($(TRAIN_SPREAD_PIPELINE)) ==="
+	@if [ ! -f "$(TRAIN_SPREAD_CONFIG)" ]; then echo "Missing config: $(TRAIN_SPREAD_CONFIG)"; exit 1; fi
+	@if [ "$(TRAIN_SPREAD_PIPELINE)" = "v2" ]; then \
+		$(UV) run --project ml -m ml.train_spread_v2 --config $(TRAIN_SPREAD_CONFIG); \
+	else \
+		$(UV) run --project ml -m ml.train_spread_v1 --config $(TRAIN_SPREAD_CONFIG); \
+	fi
 	@latest_run=$$(ls -td $(TRAIN_SPREAD_ROOT)/* 2>/dev/null | head -n 1); \
 	if [ -z "$$latest_run" ]; then echo "No spread run found under $(TRAIN_SPREAD_ROOT)"; exit 1; fi; \
-	if [ ! -f "$$latest_run/$(TRAIN_SPREAD_METRICS_FILE)" ]; then echo "Missing metrics file: $$latest_run/$(TRAIN_SPREAD_METRICS_FILE)"; exit 1; fi; \
+	metrics_file="$$latest_run/$(TRAIN_SPREAD_METRICS_FILE)"; \
+	gate_file="$$latest_run/$(TRAIN_SPREAD_GATE_REPORT_FILE)"; \
+	if [ ! -f "$$metrics_file" ]; then echo "Missing metrics file: $$metrics_file"; exit 1; fi; \
+	if [ -n "$(TRAIN_SPREAD_GATE_CONFIG)" ]; then \
+		gate_out="$$latest_run/gate_eval"; \
+		$(UV) run --project ml -m ml.eval_spread_champion_challenger --config $(TRAIN_SPREAD_GATE_CONFIG) --out-dir "$$gate_out"; \
+		latest_gate=$$(ls -td "$$gate_out"/* 2>/dev/null | head -n 1); \
+		if [ -n "$$latest_gate" ] && [ -f "$$latest_gate/summary.json" ]; then \
+			$(PYTHON) -c 'import json,sys; data=json.load(open(sys.argv[1], "r", encoding="utf-8")); decision=data.get("decision", {}); payload={"pass": bool(decision.get("recommend_challenger", False)), "decision": decision}; json.dump(payload, open(sys.argv[2], "w", encoding="utf-8"), indent=2)' "$$latest_gate/summary.json" "$$gate_file"; \
+		fi; \
+	fi; \
+	if [ "$(TRAIN_SPREAD_REQUIRE_GATE)" = "true" ] && [ ! -f "$$gate_file" ]; then echo "Missing required gate report: $$gate_file"; exit 1; fi; \
+	gate_pass="true"; \
+	if [ -f "$$gate_file" ]; then \
+		gate_pass=$$($(PYTHON) -c 'import json,sys; payload=json.load(open(sys.argv[1], "r", encoding="utf-8")); print("true" if bool(payload.get("pass", False)) else "false")' "$$gate_file"); \
+		if [ "$$gate_pass" != "true" ]; then echo "Promotion blocked: gate report failed ($$gate_file)"; exit 1; fi; \
+	fi; \
+	registry_metrics="$$latest_run/registry_metrics.json"; \
+	$(PYTHON) -c 'import json, os, sys; metrics_path, gate_path, out_path, gate_pass = sys.argv[1:5]; metrics=json.load(open(metrics_path, "r", encoding="utf-8")); out=dict(metrics) if isinstance(metrics, dict) else {"metrics": metrics}; out["gate_pass"]=(gate_pass=="true"); \
+if gate_path and os.path.exists(gate_path): out["gate_report"]=json.load(open(gate_path, "r", encoding="utf-8")); \
+json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file" "$$gate_file" "$$registry_metrics" "$$gate_pass"; \
 	echo "Registering $$latest_run"; \
-	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_SPREAD_FAMILY) --artifact "$$latest_run" --metrics "@$$latest_run/$(TRAIN_SPREAD_METRICS_FILE)"); \
+	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_SPREAD_FAMILY) --artifact "$$latest_run" --metrics "@$$registry_metrics"); \
 	echo "Promoting $$model_id"; \
-	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_SPREAD_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-spread"
+	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_SPREAD_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-spread pipeline=$(TRAIN_SPREAD_PIPELINE)"
 
 # ── Denoiser end-to-end pipeline ─────────────────────────────────────
 # Usage:

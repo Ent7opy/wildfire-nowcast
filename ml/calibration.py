@@ -161,6 +161,7 @@ def fit_from_hindcast_run(
     p_min: float = 1e-4,
     split_percentile: float = 0.8,
     out_root: str = "models/spread_calibration",
+    min_positive_for_isotonic: int = 5000,
 ) -> SpreadProbabilityCalibrator:
     """Train a calibrator from a hindcast run directory.
 
@@ -265,17 +266,27 @@ def fit_from_hindcast_run(
         y_train = np.concatenate(train_cases["y_obs"].values)
         
         # 2a. Fit
-        # Check if we have both classes
+        # Isotonic remains the default. For sparse positives, fallback to Platt for stability.
         effective_method = method
+        pos_count = int(np.sum(y_train > 0.5))
+        if method == "isotonic" and pos_count < int(min_positive_for_isotonic):
+            effective_method = "platt"
+            LOGGER.info(
+                "Positive support is sparse for T+%sh (pos=%s < %s). "
+                "Falling back to Platt scaling.",
+                h,
+                pos_count,
+                min_positive_for_isotonic,
+            )
+
         if len(np.unique(y_train)) < 2:
-            if method == "platt":
+            if effective_method == "platt":
                 LOGGER.warning(
                     f"Only one class in training data for T+{h}h; "
                     "falling back to Isotonic (constant) predictor as Platt scaling requires 2 classes."
                 )
-                effective_method = "isotonic"
-            else:
-                LOGGER.info(f"Only one class in training data for T+{h}h; Isotonic will predict constant value.")
+            effective_method = "isotonic"
+            LOGGER.info(f"Only one class in training data for T+{h}h; Isotonic will predict constant value.")
 
         LOGGER.info(f"Fitting {effective_method} calibrator for T+{h}h on {len(X_train)} samples...")
         
@@ -311,6 +322,10 @@ def fit_from_hindcast_run(
             prob_true_cal, prob_pred_cal = calibration_curve(y_eval, y_cal, n_bins=10)
             
             metrics[h] = {
+                "method": effective_method,
+                "n_train": int(X_train.size),
+                "n_eval": int(X_eval.size),
+                "n_train_positive": int(np.sum(y_train > 0.5)),
                 "brier_raw": float(brier_raw),
                 "brier_cal": float(brier_cal),
                 "improvement": float(brier_raw - brier_cal),
@@ -337,6 +352,7 @@ def fit_from_hindcast_run(
         "p_min": p_min,
         "hindcast_run_dir": str(hindcast_run_dir),
         "split_percentile": split_percentile,
+        "min_positive_for_isotonic": int(min_positive_for_isotonic),
         "horizons": list(per_horizon_models.keys()),
         "package_versions": {
             "sklearn": sys.modules["sklearn"].__version__,
@@ -373,6 +389,12 @@ def main():
     parser.add_argument("--method", type=str, choices=["isotonic", "platt"], default="isotonic", help="Calibration method.")
     parser.add_argument("--p_min", type=float, default=1e-4, help="Min probability for candidate mask.")
     parser.add_argument("--split", type=float, default=0.8, help="Train/eval split percentile.")
+    parser.add_argument(
+        "--min_positive_for_isotonic",
+        type=int,
+        default=5000,
+        help="Fallback to Platt when positives are below this threshold.",
+    )
     parser.add_argument("--out_root", type=str, default="models/spread_calibration", help="Root for artifacts.")
     
     args = parser.parse_args()
@@ -384,6 +406,7 @@ def main():
             p_min=args.p_min,
             split_percentile=args.split,
             out_root=args.out_root,
+            min_positive_for_isotonic=args.min_positive_for_isotonic,
         )
     except Exception as e:
         LOGGER.exception(f"Calibration training failed: {e}")
@@ -392,4 +415,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

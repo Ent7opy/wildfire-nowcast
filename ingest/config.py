@@ -224,3 +224,45 @@ class WeatherIngestSettings(BaseSettings):
 
 
 weather_settings = WeatherIngestSettings()
+
+
+class FuelIngestSettings(BaseSettings):
+    """Environment-driven configuration for fuel/moisture feature ingestion."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    provider_url: str = Field(
+        default="https://forest-fire.emergency.copernicus.eu/apps/effis_current_situation/",
+        validation_alias="FUEL_PROVIDER_URL",
+    )
+    cache_root: Path = Field(
+        default=REPO_ROOT / "data" / "fuels",
+        validation_alias="FUEL_CACHE_ROOT",
+    )
+    freshness_ttl_hours: int = Field(
+        default=24,
+        validation_alias="FUEL_FRESHNESS_TTL_HOURS",
+    )
+    request_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias="FUEL_REQUEST_TIMEOUT_SECONDS",
+    )
+    max_retries: int = Field(
+        default=3,
+        validation_alias="FUEL_MAX_RETRIES",
+    )
+    retry_backoff_seconds: float = Field(
+        default=5.0,
+        validation_alias="FUEL_RETRY_BACKOFF_SECONDS",
+    )
+    enable_network_fetch: bool = Field(
+        default=False,
+        validation_alias="FUEL_ENABLE_NETWORK_FETCH",
+    )
+
+
+fuel_settings = FuelIngestSettings()
