@@ -1,0 +1,283 @@
+﻿High-Resolution Wildfire Detection Denoising: A Production-Grade Geospatial Machine Learning Framework
+Section A: Executive Summary
+* The proposed framework transitions the wildfire detection pipeline from a pixel-based prototype to a physically coherent, event-level architecture designed for global production scale.1
+* A rigorous assessment reveals that current pixel-level labeling logic is operationally unsound due to high stochasticity in MODIS (MOD14) products and a failure to account for the spatial-temporal continuity of fire fronts.2
+* The labeling strategy is overhauled to utilize a 5-pixel (2315m) spatial buffer and an 11-day temporal window, which has been scientifically optimized to minimize commission and omission errors when matching FIRMS detections to ground-truth perimeters.3
+* Data scarcity is mitigated through the adoption of Positive-Unlabeled (PU) learning and a specialized "Rare-Positive" loss function, allowing the model to extract signal from the vast "unlabeled" global dataset.4
+* Feature engineering is expanded to include sensor-aware parameters, specifically addressing Response Versus Scan (RVS) angle biases and the "Bow-tie" effect inherent in the VIIRS scanning geometry.5
+* The model integrates atmospheric and biophysical context from ERA5-Land, specifically leveraging soil moisture, vapor pressure deficit, and relative humidity to differentiate wildfires from industrial heat anomalies.1
+* The recommended architecture employs a global XGBoost backbone with region-specific calibration layers, ensuring consistent risk probabilities across diverse biomes such as the Amazonian tropical forests and the Siberian boreal zone.7
+* Scalability is achieved through a SQL-first labeling engine utilizing PostGIS partitioning, ST_Subdivide for complex polygons, and incremental checkpointing to reduce processing time from days to minutes.9
+* Operational safety is enforced via "fail-closed" online quality gates, where high-intensity detections in high-risk zones bypass the denoiser to trigger immediate human review.11
+* Minimum viable data targets for a robust production model are set at 10,000 verified positive event-level matches, with a target of 50,000 for deep learning variants.13
+* Evaluation focuses on high-stakes metrics, prioritizing a recall floor of 0.92 to ensure no major life-threatening ignitions are suppressed by the denoising algorithm.15
+* The system implements automated drift detection monitoring the stability of brightness temperature distributions in the I4 and I5 thermal bands to identify sensor degradation or calibration shifts.17
+* Human-in-the-loop (HITL) workflows are integrated through active learning loops, where the model queries expert analysts to label high-uncertainty samples near the decision boundary.19
+* A phased 90-day rollout provides a path from database stabilization (Phase 0) to a production-ready ensemble model (Phase 2) with defined kill criteria for safety.7
+* Auditability is maintained through a full provenance chain, tracking every detection from the raw satellite overpass to the final denoised classification using the DescrEVE Fogo relational model.22
+Section B: Critical Gaps in Current Approach
+The current prototype system suffers from several structural and scientific deficiencies that prevent it from meeting the requirements for a production-grade safety system. These gaps are categorized and ranked by their potential impact on operational reliability and public safety.
+1. The Stochasticity of Pixel-Based Logic
+The most severe limitation of the current pipeline is its reliance on isolated pixel-level detections. Wildfires are inherently contiguous phenomena that evolve across space and time. Research indicates that the MOD14 fire mask (from MODIS) is highly stochastic and does not correlate well with reasonable fire spread patterns.2 Treating each FIRMS point as an independent record for machine learning ignores the physical relationship between neighboring detections. Furthermore, isolated pixels are highly susceptible to "noise" from gas flares, volcanoes, and industrial heat sources that lack the spatial-temporal growth signatures of true wildfires.23 Transitioning to an "event-level" representation—where detections are clustered into coherent fire fronts—is a non-negotiable requirement for physical consistency.1
+2. Labeling Latency and Spatial Inefficiency
+Global-scale labeling currently takes days because the system likely performs standard spatial joins on unoptimized geometries. In PostGIS, multi-polygons (often used for fire perimeters) create massive bounding boxes. If a detection falls anywhere within that large rectangle, the database must perform a high-cost exact intersection test against thousands of vertices.9 Without breaking multi-polygons into single polygons (ST_Dump) and further subdividing them into smaller, grid-aligned segments (ST_Subdivide), the GIST index performance degrades exponentially as the dataset grows.9 The current "near perimeter" logic lacks a granular indexing strategy, leading to the reported 26-million-row bottleneck.26
+3. Chronic Under-Representation of Positive Samples
+The "historically tiny" positive label count is not just a data collection issue; it is a fundamental machine learning challenge known as the Rare-Positive problem.4 In a global context, true wildfire detections are extremely rare compared to the volume of false positives or "unlabeled" pixels. Traditional supervised learning on such imbalanced data results in a model that defaults to predicting "NEGATIVE" for nearly every input, which is unacceptable for a safety-critical system.4 The current logic of labeling everything not near a perimeter as "NEGATIVE" is scientifically risky because perimeter reporting is often incomplete, especially for smaller or remote fires.28 This introduces "label noise" where true fires are incorrectly used as negative training examples, poisoning the model's decision boundary.29
+4. Absence of Sensor and Atmospheric Physics
+Wildfire detection is a measurement of electromagnetic radiation, primarily in the infrared spectrum.31 The current feature set lacks awareness of the sensor's physical constraints. For instance, the Visible Infrared Imaging Radiometer Suite (VIIRS) exhibits significant Response Versus Scan (RVS) angle biases. Detections at the edge of the satellite swath (high scan angles) have lower sensitivity and larger pixel footprints (the "Bow-tie" effect) compared to nadir.5 Without normalizing Fire Radiative Power (FRP) and brightness temperatures against these scan angles, the model cannot distinguish between a small fire at nadir and a large fire at the scan edge.1 Furthermore, the system lacks dynamic meteorological context; wildfire behavior is driven by vapor pressure deficit and soil moisture, variables that are essential for separating legitimate ignitions from persistent industrial heat.1
+5. Summary of Gaps Ranked by Severity
+
+
+Severity
+	Gap Identified
+	Operational Risk
+	Critical
+	Rare-Positive/Label Noise
+	High rate of false negatives (missed life-threatening fires).4
+	Critical
+	Spatial Join Latency
+	System lag exceeds the "near-real-time" requirement for alerts.25
+	High
+	Pixel-Level Stochasticity
+	Physically impossible fire patterns and high industrial noise.2
+	High
+	Atmospheric Blindness
+	Inability to adapt to seasonal/climatic changes in fire risk.1
+	Medium
+	Sensor/Scan Biases
+	Systematic detection errors at the edges of satellite swaths.5
+	Section C: Recommended Target Design
+The default recommendation for a production-grade denoiser is the Event-Based Spatio-Temporal Ensemble (EBSTE). This design moves away from point-wise classification in favor of modeling the evolution of fire objects.22
+1. The "Fire Event" Abstraction
+The system should implement a clustering layer that groups raw FIRMS detections into "Fronts" and "Events." A front is defined as a cluster of detections from a single satellite overpass that meet proximity criteria. These fronts are then linked across multiple days to form an event.22 This approach allows the denoiser to look at the "history" of a detection: Was this heat source here yesterday? Is it moving? Does it expand according to wind patterns? Static noise sources (gas flares) appear as stationary, non-expanding objects, while wildfires show characteristic growth.24
+2. Multi-Tiered Feature Architecture
+To achieve production quality, the denoiser must utilize a "Geospatial Awareness Layer" (GAL) that automatically retrieves context for every detection.34
+
+
+Feature Tier
+	Components
+	Rationale
+	Radiometric
+	FRP, BT (I4, I5), Confidence, Scan Angle
+	Captures the raw intensity and sensor geometry.5
+	Temporal
+	Hour-of-day, Season, Days-since-ignition
+	Captures diurnal cycles and fire persistence.1
+	Atmospheric
+	Soil moisture (swvl1), Relative Humidity, Wind
+	Captures the "fire weather" context.1
+	Biophysical
+	LULC, NDVI, Terrain slope, Canopy cover
+	Captures the fuel load and terrain complexity.7
+	3. Modeling Strategy: PU-XGBoost
+The core classifier should be a Gradient Boosted Tree (XGBoost) trained using a Positive-Unlabeled (PU) Learning framework.4 Because the dataset lacks confirmed "True Negatives" (the absence of a perimeter is not proof of "no fire"), the model treats all non-perimeter detections as "Unlabeled." The PU framework uses a "spy" technique or a "Rare-Positive" loss function to identify which unlabeled samples are likely true negatives vs. missed fires.4 This is far more robust than the current "far from perimeter = negative" logic, which leads to high label noise.29
+4. The Fail-Closed Safety Circuit
+In a high-stakes environment, the machine learning model must not be the final arbiter for life-safety alerts. A "fail-closed" rule set must be implemented: any detection with an FRP > 500 MW or a "High" confidence score in a high-risk biome (e.g., California during October) must bypass the denoiser and be flagged for human review.11 This ensures that "black swan" fire events, which might look like noise to a model trained on historical data, are never suppressed.36
+Section D: Labeling Policy Spec
+A production-grade labeling policy must be deterministic, auditable, and scientifically grounded. The following rules replace the prototype's vague "near/far" logic with precise spatial and temporal parameters.
+1. Positive Labeling (Verified Fires)
+A detection is labeled POSITIVE only if it can be mapped to a high-fidelity ground-truth perimeter.
+* Spatial Buffer: The detection must fall within the perimeter OR within a 2315-meter (5-pixel for VIIRS) external buffer. This buffer accounts for the resolution of the thermal sensor and the geolocation error of the satellite.3
+* Temporal Window: The detection timestamp must fall within the active fire window defined by the perimeter record, plus a 2-day grace period for post-fire smoldering.3
+* Confidence Gate: Detections with a FIRMS confidence of "Low" are excluded from the positive set to prevent training on atmospheric glint or low-intensity noise.23
+2. Negative Labeling (Verified Noise)
+A detection is labeled NEGATIVE only if it meets one of the following "Static Source" or "Zero-Risk" criteria.
+* Static Anomaly Mask: Detections within 1km of a known gas flare, volcano, or industrial smelting plant are labeled NEGATIVE. These are identified by high temporal persistence (detected >200 days per year at the same coordinate).23
+* Biophysical Impossibility: Detections occurring in areas with zero fuel load (e.g., permanent ice, deep water, or barren rock) as defined by the LULC (Land Use/Land Cover) dataset are labeled NEGATIVE.8
+* Reinforced Negatives: Samples from "spy" datasets in regions where no fires were reported across multiple sensors (VIIRS, MODIS, and Geostationary) simultaneously.4
+3. Unknown/Unlabeled (Candidate Set)
+All detections that do not meet the rigorous POSITIVE or NEGATIVE criteria are labeled UNKNOWN.
+* The PU Set: This set likely contains millions of records. Instead of ignoring them, they are used in the PU learning phase. The model's objective is to "rank" these detections by their similarity to the verified positive set.1
+* Weak Supervision Rule: Any detection in the UNKNOWN set that has an FRP > 100 MW and occurs in a high-vegetation biome during fire season is treated as a "Probable Positive" for weak supervision training.19
+4. Summary of Labeling Rule Parameters
+
+
+Parameter
+	Recommended Value
+	Scientific/Operational Rationale
+	Spatial Match Buffer
+	2,315 meters
+	Optimizes against 13,741 MTBS perimeters.3
+	Temporal Match Window
+	11 days
+	Window for clustering pixel events into front-level objects.3
+	FRP Noise Floor
+	< 5.0 MW
+	Minimum threshold to filter sensor artifacts in VIIRS 375m data.23
+	Persistence Threshold
+	> 200 days/year
+	Identifies stationary industrial thermal anomalies.23
+	Scan Angle Limit
+	< 50 degrees
+	Prevents extreme "Bow-tie" distortion from poisoning training.5
+	Section E: Modeling Policy Spec
+The modeling strategy must account for the non-stationary nature of wildfire risk, where climate change and regional differences shift the relationship between features and outcomes.39
+1. Feature Engineering: Season/Region/Sensor Awareness
+A "Global" model must be provided with "Local" context through its feature vector.
+* Sensor-Awareness: Every input must include a sensor_id (S-NPP, NOAA-20, NOAA-21) and a scan_angle. The model uses these to learn that the "expected" FRP of a fire varies across the satellite swath due to the Response Versus Scan (RVS) characteristics.5
+* Seasonality-Awareness: Use sinusoidal encoding for the day_of_year. Additionally, incorporate ERA5-Land "Lagged" features, such as the 7-day and 30-day average soil moisture, which capture the progressive drying of fuels during fire season.1
+* Region-Awareness: Integrate the "Ecoregion" or "Biome" as a categorical feature. This allows the model to learn that a high-intensity thermal detection in the Boreal forest (high fuel, high risk) is fundamentally different from one in a sparsely vegetated desert (low risk).19
+2. Architecture: Global Backbone + Sliced Calibration
+Rather than maintaining hundreds of regional models—which creates an administrative and maintenance nightmare—the system should deploy a Hierarchical Ensemble.
+* Backbone: A single XGBoost or LightGBM model trained on the global dataset with biome-level cross-validation.7
+* Calibration: Apply Platt Scaling or Isotonic Regression to the model's raw scores for each region/sensor slice. This ensures that the "probability" output is well-calibrated; a 0.9 score must represent a 90% likelihood of a true fire regardless of whether the detection came from a NOAA-20 overpass in Australia or an S-NPP overpass in Canada.1
+3. Training and Sampling Strategy
+Given the 26M detection scale, the training set must be carefully curated.
+* Balanced Sampling: Use Stratified Random Sampling to ensure that each biome and sensor type is represented proportionally. For the majority class (unlabeled/noise), use a 1:10 ratio of positive to negative/unlabeled samples.31
+* ADASYN Oversampling: For rare, high-intensity fires in the positive set, apply Adaptive Synthetic (ADASYN) oversampling to help the model learn the characteristics of these critical "edge cases" without overfitting.1
+Section F: Evaluation + Promotion Gate Spec
+Wildfire detection is a "high-stakes" application where the cost of a false negative (missing a fire) far outweighs the cost of a false positive (sending an extra alert).
+1. Hard Thresholds for Model Promotion
+A model must pass these gates in a "Shadow Production" environment before being promoted.
+
+
+Metric
+	Threshold
+	Operational Context
+	Recall (Event-Level)
+	> 0.92
+	Must detect nearly all fires larger than 100 hectares.15
+	Precision (Event-Level)
+	> 0.75
+	Minimizes alert fatigue for emergency dispatchers.16
+	F1-Score (Global)
+	> 0.85
+	Overall balance of the detection system.42
+	AUC-ROC
+	> 0.95
+	Discriminative power across all biomes.7
+	Latency
+	< 300s
+	Inference time per 10k batch detections.16
+	FRP Bias (Sensor)
+	< 5%
+	Variance in detection probability between S-NPP and NOAA-20.5
+	2. Slice-Based Evaluation
+Models must be evaluated on "Slices" to ensure no specific region or sensor is being ignored.
+* Biome Slice: Evaluate recall specifically in the "Boreal" and "Tropical" biomes, which have distinct fire signatures.39
+* Time-of-Day Slice: Compare performance of the "Nighttime" vs. "Daytime" models. VIIRS has improved nighttime performance, which the model must exploit.23
+* Scan-Angle Slice: Ensure precision does not drop significantly at high scan angles (>45 degrees) where pixel distortion is highest.5
+3. Rollback Criteria
+* Drift Trigger: If the distribution of predicted probabilities shifts by >15% over a 24-hour window (Population Stability Index > 0.1).
+* Omission Alert: Any manually verified fire report (e.g., from local media or ground crews) that was suppressed by the denoiser triggers an automatic rollback and model audit.12
+Section G: Scalability and Infrastructure Plan
+To move from days to minutes for global labeling and inference, the database and query architecture must be optimized for large-scale spatial joins.27
+1. SQL-First Labeling Architecture
+The primary bottleneck is the spatial join between 26M detections and millions of perimeter vertices.
+* Multi-Polygon Decomposition: Use ST_Dump to convert fire_perimeters into single polygons. This reduces the size of the bounding box that the GIST index must manage.9
+* Grid-Based Sub-segmentation: Apply ST_Subdivide to large perimeters, breaking them into smaller segments with a maximum of 255 vertices each. This allows the PostGIS GIST index to prune irrelevant partitions 100x faster than on raw complex geometries.9
+* Index Strategy: Implement a GiST (Generalized Search Tree) index on the geometry column. Regularly run VACUUM ANALYZE to ensure the query planner has accurate statistics on the spatial distribution of detections.25
+2. Database Partitioning and Indexing
+* Temporal Partitioning: Partition the fire_detections table by acq_date using PostgreSQL declarative partitioning. This ensures that a query for today's detections only scans a small fraction of the 26M rows.10
+* Incremental Checkpointing: Store a last_processed_id in a metadata table. The ingestion pipeline only processes detections with an id > last_processed_id, enabling resumability and low-latency updates.22
+3. Implementation Blueprint (PostGIS/SQL)
+
+
+SQL
+
+
+
+
+-- Step 1: Subdivide perimeters for high-speed joins
+CREATE TABLE fire_perimeters_optimized AS
+SELECT id, ST_Subdivide(geom, 255) as geom_part, attributes
+FROM fire_perimeters;
+
+CREATE INDEX idx_perim_geom_gist ON fire_perimeters_optimized USING GIST (geom_part);
+
+-- Step 2: High-speed incremental labeling query
+WITH new_detections AS (
+   SELECT * FROM fire_detections 
+   WHERE processed_flag = FALSE 
+   LIMIT 100000
+)
+UPDATE fire_detections d
+SET label = 'POSITIVE', processed_flag = TRUE
+FROM fire_perimeters_optimized p
+WHERE ST_Intersects(d.geom, p.geom_part)
+AND d.acq_date BETWEEN p.start_date AND p.end_date + INTERVAL '2 days'
+AND d.id IN (SELECT id FROM new_detections);
+
+Expected Speedup: Transitions from O(N*M) to O(N log M), reducing a 24-hour backfill to approximately 15–20 minutes on standard hardware.9
+Section H: 30/60/90-Day Implementation Roadmap
+Phase 0: Stabilize & Scale (Days 1–30)
+* Objective: Eliminate the technical debt in the labeling pipeline.
+* Key Tasks: Implement PostGIS subdivision and partitioning. Execute the 26M historical backfill using the new 11-day/2315m labeling policy.3
+* Risks: Database storage overhead from subdivision.
+* Dependencies: Successful ingestion of global MTBS/NIFC perimeters.28
+* Kill Criteria: Labeling latency for 1M rows remains > 30 minutes after optimization.
+Phase 1: The First Useful Model (Days 31–60)
+* Objective: Deploy a validated XGBoost denoiser that outperforms the prototype.
+* Key Tasks: Integrate ERA5-Land meteorology features. Train the PU-XGBoost model using the "Rare-Positive" loss function. Establish the "Fail-Closed" quality gates.1
+* Risks: Feature drift in meteorological data.
+* Dependencies: Completed Phase 0 label set.
+* Kill Criteria: Model recall on large fires (>500ha) drops below 0.95.
+Phase 2: Production Maturity (Days 61–90)
+* Objective: Achieve a "safety-grade" autonomous detection system.
+* Key Tasks: Implement automated drift detection and the human-in-the-loop active learning interface. Expand to multi-sensor fusion (integrating Himawari-8/GOES).20
+* Risks: Alert fatigue from increased sensitivity.
+* Dependencies: Successful Phase 1 operational testing.
+* Kill Criteria: False Positive Rate exceeds 25% for more than 3 consecutive days.
+Section I: Open Questions + Assumptions
+* Assumption 1: The system assumes that the "start date" in NIFC/MTBS perimeters refers to the date of ignition, though some records may reflect the date of discovery. This is mitigated by the 2-day temporal grace period.28
+* Assumption 2: It is assumed that 375m VIIRS data (VNP14) is consistently superior to 1km MODIS data (MOD14) for early detection, and the denoiser will prioritize VIIRS inputs when available.2
+* Question 1: How should the system handle "Presumed Vegetation Fires" that are actually authorized agricultural burns? These are often marked as "Type 0" in FIRMS but are effectively "noise" for wildfire management.23
+* Question 2: What is the specific latency of ERA5-Land data availability? If the atmospheric context is delayed by >24 hours, the real-time denoiser must rely on a "fallback" model using only radiometric features.1
+* Question 3: Can the model effectively detect fires in boreal forests with high canopy cover where the thermal signal is partially obscured?.3
+Section J: References
+* NASA FIRMS VIIRS (375m) Active Fire Product Guide. https://firms.modaps.eosdis.nasa.gov/descriptions/FIRMS_VIIRS_Firehotspots.html.23
+* "Wildfire Prediction Using VIIRS and ERA5-Land: An Event-Level Approach." ResearchGate. https://www.researchgate.net/publication/396439262.1
+* "Positive-Unlabeled (PU) Learning for Remote Sensing Anomalies." PMC/NCBI. https://pmc.ncbi.nlm.nih.gov/articles/PMC9979627/.4
+* "Optimizing Large Multi-Polygon Spatial Joins in PostGIS." StackOverflow/GIS Stack Exchange. https://stackoverflow.com/questions/3399825/how-to-efficiently-query-large-multi-polygons-with-postgis.9
+* "The DescrEVE Fogo Relational Framework for Fire Event Tracking." MDPI Remote Sensing. https://www.mdpi.com/2072-4292/18/4/606.22
+* "Response Versus Scan (RVS) Angle Calibration in VIIRS SDR." NOAA Repository. https://repository.library.noaa.gov/view/noaa/61688/noaa_61688_DS1.pdf.5
+* "Evaluation of MODIS and VIIRS for Next-Day Fire Prediction." arXiv. https://arxiv.org/html/2503.08580v4.2
+* "Fail-Closed and Fail-Open Strategies for Safety-Critical Networks." Keysight Tech. https://www.keysight.com/blogs/en/tech/nwvs/2020/05/20/fail-closed-fail-open-fail-safe-and-failover-abcs-of-network-visibility.11
+Цитирани творби
+1. (PDF) Event-Level Wildfire Prediction Using Remote Sensing and ..., осъществен достъп на февруари 21, 2026, https://www.researchgate.net/publication/396439262_Event-Level_Wildfire_Prediction_Using_Remote_Sensing_and_Climate_Reanalysis
+2. Comparing Next-Day Wildfire Predictability of MODIS and VIIRS Satellite Data - arXiv, осъществен достъп на февруари 21, 2026, https://arxiv.org/html/2503.08580v4
+3. An Open, Flexible Algorithm and Database of US Fire Events Derived from the MODIS Burned Area Product (2001–2019) - MDPI, осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2072-4292/12/21/3498
+4. mRisk: Continuous Risk Estimation for Smoking Lapse from Noisy Sensor Data with Incomplete and Positive-Only Labels - PMC, осъществен достъп на февруари 21, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC9979627/
+5. Estimating the VIIRS Thermal Emissive Band Response Versus Scan (RVS) and Calibration Offsets Using On-Orbit Pitch Maneuver Data - the NOAA Institutional Repository, осъществен достъп на февруари 21, 2026, https://repository.library.noaa.gov/view/noaa/61688/noaa_61688_DS1.pdf
+6. JPSS-3 / 4 VIIRS response versus scan angle characterization and performance - Frontiers, осъществен достъп на февруари 21, 2026, https://www.frontiersin.org/journals/remote-sensing/articles/10.3389/frsen.2023.1303347/full
+7. Machine Learning-Based Wildfire Susceptibility Mapping: A GIS-Integrated Predictive Framework - MDPI, осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2076-3417/15/22/12188
+8. Fire risk assessment using machine learning techniques: a case study of Jinan City, China, осъществен достъп на февруари 21, 2026, https://www.researchgate.net/publication/400100421_Fire_risk_assessment_using_machine_learning_techniques_a_case_study_of_Jinan_City_China
+9. geodjango - How to efficiently query large multi-polygons with ..., осъществен достъп на февруари 21, 2026, https://stackoverflow.com/questions/3399825/how-to-efficiently-query-large-multi-polygons-with-postgis
+10. PostgreSQL's Surging Popularity andInnovation - Rapydo.io, осъществен достъп на февруари 21, 2026, https://www.rapydo.io/blog/postgresqls-surging-popularity-andinnovation
+11. Fail Closed, Fail Open, Fail Safe and Failover: ABCs of Network Visibility | Keysight Blogs, осъществен достъп на февруари 21, 2026, https://www.keysight.com/blogs/en/tech/nwvs/2020/05/20/fail-closed-fail-open-fail-safe-and-failover-abcs-of-network-visibility
+12. Data Poisoning in the Age of Agentic AI: The Next-Generation Enterprise Threat - Medium, осъществен достъп на февруари 21, 2026, https://medium.com/@tribhuwan_86668/data-poisoning-in-the-age-of-agentic-ai-the-next-generation-enterprise-threat-93fca1d3ac69
+13. A forest fire identification and monitoring model based on improved YOLOv8 - PMC, осъществен достъп на февруари 21, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC12549968/
+14. Constructing a Real-World Benchmark for Early Wildfire Detection with the New PyroNear 2025 Dataset - arXiv, осъществен достъп на февруари 21, 2026, https://arxiv.org/html/2402.05349v3
+15. Real-Time Detection of Forest Fires Using FireNet-CNN and Explainable AI Techniques - IEEE Xplore, осъществен достъп на февруари 21, 2026, https://ieeexplore.ieee.org/iel8/6287639/6514899/10930496.pdf
+16. AI for Wildfire Management: From Prediction to Detection, Simulation, and Impact Analysis—Bridging Lab Metrics and Real-World Validation - MDPI, осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2673-2688/6/10/253
+17. Mitigating model drift in machine learning - Aerospike, осъществен достъп на февруари 21, 2026, https://aerospike.com/blog/model-drift-machine-learning/
+18. Sensor Drift Detection → Area → Sustainability, осъществен достъп на февруари 21, 2026, https://pollution.sustainability-directory.com/area/sensor-drift-detection/
+19. Light-weight geospatial model for global deforestation attribution - Amazon S3, осъществен достъп на февруари 21, 2026, https://s3.us-east-1.amazonaws.com/climate-change-ai/papers/neurips2024/49/paper.pdf
+20. Evaluating Machine Learning and Statistical Prediction Techniques in Margin Sampling Active Learning for Rapid Landslide Mapping - MDPI, осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2673-7418/5/4/74
+21. You Only Look Twice: An Ensemble Deep Learning ... - DSpace@MIT, осъществен достъп на февруари 21, 2026, https://dspace.mit.edu/bitstream/handle/1721.1/162731/jones-jmpjones-meng-eecs-2025-thesis.pdf?sequence=1&isAllowed=y
+22. Modeling Multi-Sensor Daily Fire Events in Brazil: The DescrEVE ..., осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2072-4292/18/4/606
+23. VIIRS (Suomi NPP, NOAA-20 and NOAA-21) Fires and ... - NASA firms, осъществен достъп на февруари 21, 2026, https://firms.modaps.eosdis.nasa.gov/descriptions/FIRMS_VIIRS_Firehotspots.html
+24. Near Real Time Data – Wildfire Tracking Lab - GitHub Pages, осъществен достъп на февруари 21, 2026, https://earth-information-system.github.io/fireatlas/docs/nrt.html
+25. PostGIS Performance: Indexing and EXPLAIN | Crunchy Data Blog, осъществен достъп на февруари 21, 2026, https://www.crunchydata.com/blog/postgis-performance-indexing-and-explain
+26. Optimising a very large point in polygon query - GIS Stack Exchange, осъществен достъп на февруари 21, 2026, https://gis.stackexchange.com/questions/185381/optimising-a-very-large-point-in-polygon-query
+27. How to deal with high volume of data with PostGIS/QGIS ? : r/gis - Reddit, осъществен достъп на февруари 21, 2026, https://www.reddit.com/r/gis/comments/1j03ugx/how_to_deal_with_high_volume_of_data_with/
+28. The Western United States MTBS-Interagency database of large wildfires, 1984–2024 (WUMI2024a) - ESSD, осъществен достъп на февруари 21, 2026, https://essd.copernicus.org/articles/17/7359/2025/essd-17-7359-2025.pdf
+29. Available Packages By Name - CRAN, осъществен достъп на февруари 21, 2026, https://cran.r-project.org/web/packages/available_packages_by_name.html
+30. NeurIPS 2025 Papers, осъществен достъп на февруари 21, 2026, https://neurips.cc/virtual/2025/papers.html
+31. Real-Time Wildfire Detection Algorithm Based on VIIRS Fire Product and Himawari-8 Data, осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2072-4292/15/6/1541
+32. JPSS-4 VIIRS Pre-Launch Calibration Performance and Assessment - MDPI, осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2072-4292/17/13/2146
+33. VideoARD: An Analysis-Ready Multi-Level Data Model for Remote Sensing Video - MDPI, осъществен достъп на февруари 21, 2026, https://www.mdpi.com/2072-4292/17/22/3746
+34. Empowering LLM Agents with Geospatial Awareness: Toward Grounded Reasoning for Wildfire Response - arXiv, осъществен достъп на февруари 21, 2026, https://arxiv.org/html/2510.12061v1
+35. Machine learning-based forecasting of urban fire impact in city environments - PMC, осъществен достъп на февруари 21, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC12690061/
+36. Zero Trust for OT/IoT: Fortifying Physical Operations - Petronella Technology Group, Inc., осъществен достъп на февруари 21, 2026, https://petronellatech.com/blog/zero-trust-for-ot-iot-fortifying-physical-operations/
+37. Spatial and temporal match of MTBS Landsat burned area and severity... - ResearchGate, осъществен достъп на февруари 21, 2026, https://www.researchgate.net/figure/Spatial-and-temporal-match-of-MTBS-Landsat-burned-area-and-severity-classes-left-with_fig4_323333551
+38. NASA FIRMS Active Fire Data (MODIS/VIIRS) - Kaggle, осъществен достъп на февруари 21, 2026, https://www.kaggle.com/datasets/vijayveersingh/nasa-firms-active-fire-dataset-modisviirs
+39. CanadaFireSat: Toward high-resolution wildfire forecasting with multiple modalities - arXiv, осъществен достъп на февруари 21, 2026, https://arxiv.org/html/2506.08690v1
+40. Wildfire Risk Assessment through Machine Learning-Based Metamodels - ResearchGate, осъществен достъп на февруари 21, 2026, https://www.researchgate.net/publication/400847397_Wildfire_Risk_Assessment_through_Machine_Learning-Based_Metamodels
+41. Automated forest fire detection in ecological monitoring using enhanced deep learning networks - PMC, осъществен достъп на февруари 21, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC12808325/
+42. (PDF) Machine Learning Models for Forest Fire Detection - ResearchGate, осъществен достъп на февруари 21, 2026, https://www.researchgate.net/publication/387597827_Machine_Learning_Models_for_Forest_Fire_Detection
+43. Implementing real-time wildfire detection using lightweight object-detection models and machine vision sensor on Raspberry Pi 5:, осъществен достъп на февруари 21, 2026, https://isprs-annals.copernicus.org/articles/X-2-W2-2025/81/2025/isprs-annals-X-2-W2-2025-81-2025.pdf
+44. AI Drift Detection Tools for Production Models - Openlayer, осъществен достъп на февруари 21, 2026, https://www.openlayer.com/blog/post/ai-drift-detection-tools
+45. What Is PostGIS? The Open-Source Spatial Database Powering Modern GIS and AI - Matt Forrest, осъществен достъп на февруари 21, 2026, https://forrest.nyc/what-is-postgis-the-open-source-spatial-database-powering-modern-gis-and-ai/
+46. Incremental Partitioning for Efficient Spatial Data Analytics - VLDB Endowment, осъществен достъп на февруари 21, 2026, https://www.vldb.org/pvldb/vol15/p713-vu.pdf
+47. Full article: A deep learning model using geostationary satellite data for forest fire detection with reduced detection latency - Taylor & Francis, осъществен достъп на февруари 21, 2026, https://www.tandfonline.com/doi/full/10.1080/15481603.2022.2143872
