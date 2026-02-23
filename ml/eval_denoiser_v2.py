@@ -17,10 +17,11 @@ from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_
 from api.db import get_engine
 
 
-def _load_snapshot(path: str) -> pd.DataFrame:
+def _load_snapshot(path: str, *, columns: list[str]) -> pd.DataFrame:
+    read_columns = list(dict.fromkeys(columns))
     if os.path.isdir(path):
-        return pd.read_parquet(os.path.join(path, "eval.parquet"))
-    return pd.read_parquet(path)
+        return pd.read_parquet(os.path.join(path, "eval.parquet"), columns=read_columns)
+    return pd.read_parquet(path, columns=read_columns)
 
 
 def _predict_raw(model: Any, x: pd.DataFrame) -> np.ndarray:
@@ -42,6 +43,10 @@ def _apply_calibrator(cal: Dict[str, Any], scores: np.ndarray) -> np.ndarray:
 
 def _slice_key(row: pd.Series, slice_cols: list[str]) -> str:
     return "|".join(f"{col}={row.get(col, 'unknown')}" for col in slice_cols)
+
+
+def _feature_matrix(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    return df[features].astype(np.float32)
 
 
 def _metrics(y_true: np.ndarray, p: np.ndarray, threshold: float) -> Dict[str, Any]:
@@ -99,7 +104,10 @@ def evaluate_denoiser_v2(
     global_calibrator = bundle["global_calibrator"]
     slice_calibrators = dict(bundle.get("slice_calibrators", {}))
 
-    eval_df = _load_snapshot(snapshot_path).copy()
+    snapshot_columns = list(
+        dict.fromkeys(features + ["event_label", "sensor", "biome_slice", "is_day_ratio"] + slice_cols)
+    )
+    eval_df = _load_snapshot(snapshot_path, columns=snapshot_columns).copy()
     for col in features:
         if col not in eval_df.columns:
             eval_df[col] = np.nan
@@ -112,7 +120,7 @@ def evaluate_denoiser_v2(
     if len(eval_known) == 0:
         raise ValueError("No known labels in eval snapshot for denoiser v2 evaluation.")
 
-    raw = _predict_raw(model, eval_known[features])
+    raw = _predict_raw(model, _feature_matrix(eval_known, features))
     calibrated = np.zeros(len(eval_known), dtype=float)
 
     for idx, row in enumerate(eval_known.itertuples(index=False)):

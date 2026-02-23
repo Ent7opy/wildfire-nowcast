@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Iterable, Literal, TYPE_CHECKING
 
@@ -25,6 +26,14 @@ _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD = 5000
 _NEUTRAL_WEATHER_SCORE = 0.5
 _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD = 20000
 _NEUTRAL_PERSISTENCE_SCORE = 0.3
+
+
+def _log_step(step: str, started_at: float, *, batch_id: int, rows: int | None = None) -> None:
+    elapsed = time.perf_counter() - started_at
+    suffix = ""
+    if rows is not None:
+        suffix = f", rows={rows}"
+    LOGGER.info("batch=%s %s completed in %.3fs%s", batch_id, step, elapsed, suffix)
 
 
 def validate_bbox(bbox: BBox) -> None:
@@ -256,15 +265,19 @@ def update_false_source_masking(batch_id: int, conn: Connection | None = None) -
     """)
 
     def _execute(conn: Connection) -> int:
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("false_source.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
             return 0
 
         # Compute masking results
+        started = time.perf_counter()
         masked_results = mask_false_sources(detections)
+        _log_step("false_source.compute_mask", started, batch_id=batch_id, rows=int(len(masked_results)))
 
         # Update fire_detections table with masking results
         update_stmt = text("""
@@ -278,7 +291,9 @@ def update_false_source_masking(batch_id: int, conn: Connection | None = None) -
             for det_id, is_masked in masked_results.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("false_source.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         # Count how many were marked as masked
         return sum(1 for is_masked in masked_results.values() if is_masked)
@@ -314,8 +329,10 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
             WHERE ingest_batch_id = :batch_id
         """)
 
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("persistence.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
@@ -335,6 +352,7 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
                 SET persistence_score = :score
                 WHERE ingest_batch_id = :batch_id
             """)
+            started = time.perf_counter()
             conn.execute(
                 update_stmt,
                 {
@@ -342,10 +360,18 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
                     "score": _NEUTRAL_PERSISTENCE_SCORE,
                 },
             )
+            _log_step("persistence.update_neutral", started, batch_id=batch_id, rows=int(len(detections)))
             return len(detections)
 
         # Compute persistence scores
+        started = time.perf_counter()
         persistence_scores = compute_persistence_scores(detections)
+        _log_step(
+            "persistence.compute_scores",
+            started,
+            batch_id=batch_id,
+            rows=int(len(persistence_scores)),
+        )
 
         # Update fire_detections table with persistence scores
         update_stmt = text("""
@@ -359,7 +385,9 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
             for det_id, score in persistence_scores.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("persistence.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(persistence_scores)
 
@@ -394,8 +422,10 @@ def update_landcover_scores(batch_id: int, conn: Connection | None = None) -> in
             WHERE ingest_batch_id = :batch_id
         """)
 
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("landcover.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
@@ -405,7 +435,14 @@ def update_landcover_scores(batch_id: int, conn: Connection | None = None) -> in
         from api.fires.landcover import compute_landcover_scores
 
         # Compute landcover scores
+        started = time.perf_counter()
         landcover_scores = compute_landcover_scores(detections)
+        _log_step(
+            "landcover.compute_scores",
+            started,
+            batch_id=batch_id,
+            rows=int(len(landcover_scores)),
+        )
 
         # Update fire_detections table with landcover scores
         update_stmt = text("""
@@ -419,7 +456,9 @@ def update_landcover_scores(batch_id: int, conn: Connection | None = None) -> in
             for det_id, score in landcover_scores.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("landcover.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(landcover_scores)
 
@@ -454,8 +493,10 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
             WHERE ingest_batch_id = :batch_id
         """)
 
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("weather.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
@@ -476,6 +517,7 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
                 SET weather_score = :score
                 WHERE ingest_batch_id = :batch_id
             """)
+            started = time.perf_counter()
             conn.execute(
                 update_stmt,
                 {
@@ -483,10 +525,18 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
                     "score": _NEUTRAL_WEATHER_SCORE,
                 },
             )
+            _log_step("weather.update_neutral", started, batch_id=batch_id, rows=int(len(detections)))
             return len(detections)
 
         # Compute weather plausibility scores
+        started = time.perf_counter()
         weather_scores = compute_weather_plausibility_scores(detections)
+        _log_step(
+            "weather.compute_scores",
+            started,
+            batch_id=batch_id,
+            rows=int(len(weather_scores)),
+        )
 
         # Update fire_detections table with weather scores
         update_stmt = text("""
@@ -500,7 +550,9 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
             for det_id, score in weather_scores.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("weather.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(weather_scores)
 
@@ -540,15 +592,17 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
             FROM fire_detections
             WHERE ingest_batch_id = :batch_id
         """)
-
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("likelihood.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         if not rows:
             return 0
 
         # Compute fire likelihood for each detection
         # NULL handling is centralized in compute_fire_likelihood() - pass None values directly
+        started = time.perf_counter()
         params = []
         for row in rows:
             likelihood = compute_fire_likelihood(
@@ -559,6 +613,7 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
                 false_source_masked=bool(row["false_source_masked"]) if row["false_source_masked"] is not None else False,
             )
             params.append({"detection_id": row["id"], "likelihood": likelihood})
+        _log_step("likelihood.compute_scores", started, batch_id=batch_id, rows=int(len(params)))
 
         # Update fire_detections table with fire likelihood
         update_stmt = text("""
@@ -567,7 +622,9 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
             WHERE id = :detection_id
         """)
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("likelihood.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(params)
 
@@ -607,11 +664,18 @@ def update_all_scoring_for_batch(
         Exception: If any scoring update fails, the entire transaction is rolled back
     """
     def _execute(active_conn: Connection) -> dict[str, int]:
+        started_total = time.perf_counter()
         masked_count = update_false_source_masking(batch_id, conn=active_conn)
         persistence_count = update_persistence_scores(batch_id, conn=active_conn)
         landcover_count = update_landcover_scores(batch_id, conn=active_conn)
         weather_count = update_weather_scores(batch_id, conn=active_conn)
         likelihood_count = update_fire_likelihood(batch_id, conn=active_conn)
+        _log_step(
+            "scoring.update_all",
+            started_total,
+            batch_id=batch_id,
+            rows=int(likelihood_count),
+        )
 
         return {
             "masked_count": masked_count,

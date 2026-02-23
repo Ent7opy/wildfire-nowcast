@@ -53,12 +53,14 @@ def _maybe_git_sha() -> Optional[str]:
         return None
 
 
-def _load_snapshot(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _load_snapshot(path: str, *, columns: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    read_columns = list(dict.fromkeys(columns))
     if os.path.isdir(path):
-        train = pd.read_parquet(os.path.join(path, "train.parquet"))
-        eval_df = pd.read_parquet(os.path.join(path, "eval.parquet"))
+        train = pd.read_parquet(os.path.join(path, "train.parquet"), columns=read_columns)
+        eval_df = pd.read_parquet(os.path.join(path, "eval.parquet"), columns=read_columns)
         return train, eval_df
-    full = pd.read_parquet(path)
+    full_columns = list(dict.fromkeys(read_columns + ["start_time"]))
+    full = pd.read_parquet(path, columns=full_columns)
     if "start_time" in full.columns:
         full = full.sort_values("start_time")
     split_dt = full["start_time"].quantile(0.8) if "start_time" in full.columns else None
@@ -73,6 +75,10 @@ def _map_labels(df: pd.DataFrame, label_col: str = "event_label") -> np.ndarray:
     mapping = {"POSITIVE": 1, "NEGATIVE": 0}
     labels = df[label_col].map(mapping).fillna(-1).astype(int).to_numpy()
     return labels
+
+
+def _feature_matrix(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+    return df[features].astype(np.float32)
 
 
 def _build_model(config: Dict[str, Any]) -> Any:
@@ -153,10 +159,11 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     seed = int(config.get("seed", 42))
     np.random.seed(seed)
 
-    train_df, eval_df = _load_snapshot(config["snapshot_path"])
     features = list(config["features"])
     label_col = str(config.get("label_column", "event_label"))
     slice_cols = list(config.get("slice_columns", ["sensor", "biome_slice"]))
+    required_columns = list(dict.fromkeys(features + [label_col] + slice_cols))
+    train_df, eval_df = _load_snapshot(config["snapshot_path"], columns=required_columns)
 
     for col in features:
         if col not in train_df.columns:
@@ -174,7 +181,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         raise ValueError("No known labels (POSITIVE/NEGATIVE) available in train split.")
 
     model_stage1 = _build_model(config)
-    x_train_known = train_df.loc[known_train, features]
+    x_train_known = _feature_matrix(train_df.loc[known_train], features)
     y_train_known = y_train[known_train]
 
     class_weight_pos = float(config.get("pos_class_weight", 1.0))
@@ -185,7 +192,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     reliable_negative_max_prob = float(config.get("pu_reliable_negative_max_prob", 0.15))
     reliable_neg_mask = np.zeros(len(train_df), dtype=bool)
     if unknown_mask.any():
-        p_unknown = _predict_raw(model_stage1, train_df.loc[unknown_mask, features])
+        p_unknown = _predict_raw(model_stage1, _feature_matrix(train_df.loc[unknown_mask], features))
         reliable_idx = train_df.loc[unknown_mask].index[p_unknown <= reliable_negative_max_prob]
         reliable_neg_mask[reliable_idx.to_numpy()] = True
 
@@ -194,7 +201,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     stage2_known = y_stage2 >= 0
 
     model = _build_model(config)
-    x_stage2 = train_df.loc[stage2_known, features]
+    x_stage2 = _feature_matrix(train_df.loc[stage2_known], features)
     y_stage2_known = y_stage2[stage2_known]
     sample_weight_stage2 = np.where(y_stage2_known == 1, class_weight_pos, 1.0)
     model.fit(x_stage2, y_stage2_known, sample_weight=sample_weight_stage2)
@@ -204,7 +211,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     y_eval_known = y_eval[known_eval]
     if len(eval_known_df) == 0:
         raise ValueError("No known labels in eval split; cannot calibrate or compute promotion gates.")
-    raw_eval = _predict_raw(model, eval_known_df[features])
+    raw_eval = _predict_raw(model, _feature_matrix(eval_known_df, features))
 
     global_method = str(config.get("global_calibration", "platt"))
     if np.unique(y_eval_known).size < 2:
@@ -249,7 +256,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
 
     # Operational latency estimate: extrapolate per 10k events from eval prediction speed.
     start = time.perf_counter()
-    _ = _predict_raw(model, eval_df[features])
+    _ = _predict_raw(model, _feature_matrix(eval_df, features))
     elapsed = max(1e-6, time.perf_counter() - start)
     latency_per_10k = float(elapsed * (10000.0 / max(1, len(eval_df))))
 

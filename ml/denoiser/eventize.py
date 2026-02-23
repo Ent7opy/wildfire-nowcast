@@ -12,8 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import text
@@ -64,21 +65,25 @@ def _build_where_clause(
     return " AND ".join(clauses), params
 
 
-def eventize_detections(
+def _log_step(step: str, started_at: float, *, rows: int | None = None) -> None:
+    elapsed = time.perf_counter() - started_at
+    suffix = ""
+    if rows is not None:
+        suffix = f", rows={rows}"
+    LOGGER.info("%s completed in %.3fs%s", step, elapsed, suffix)
+
+
+def _eventize_single_window(
     engine: Engine,
     *,
-    batch_id: Optional[int] = None,
-    start_time: Optional[datetime] = None,
-    end_time: Optional[datetime] = None,
-    source_like: Optional[str] = None,
-    params: EventizeParams = EventizeParams(),
-    dry_run: bool = False,
+    batch_id: Optional[int],
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+    source_like: Optional[str],
+    params: EventizeParams,
+    dry_run: bool,
 ) -> dict[str, int]:
-    """Build front/event assignments and persist mappings."""
     where_clause, query_params = _build_where_clause(batch_id, start_time, end_time, source_like)
-
-    if batch_id is None and start_time is None and end_time is None:
-        raise ValueError("Provide at least one selector: --batch-id or --start/--end")
 
     query_params = {
         **query_params,
@@ -126,7 +131,21 @@ def eventize_detections(
         """
     )
 
-    count_sql = text("SELECT COUNT(*) AS n_rows, COUNT(DISTINCT front_id) AS n_fronts, COUNT(DISTINCT event_id) AS n_events FROM tmp_eventize_selected")
+    create_temp_indexes_sql = [
+        text("CREATE UNIQUE INDEX tmp_eventize_selected_id_idx ON tmp_eventize_selected (id)"),
+        text("CREATE INDEX tmp_eventize_selected_front_idx ON tmp_eventize_selected (front_id)"),
+        text("CREATE INDEX tmp_eventize_selected_event_idx ON tmp_eventize_selected (event_id)"),
+    ]
+
+    count_sql = text(
+        """
+        SELECT
+            COUNT(*) AS n_rows,
+            COUNT(DISTINCT front_id) AS n_fronts,
+            COUNT(DISTINCT event_id) AS n_events
+        FROM tmp_eventize_selected
+        """
+    )
 
     front_upsert_sql = text(
         """
@@ -168,6 +187,16 @@ def eventize_detections(
             confidence_max = EXCLUDED.confidence_max,
             geom = EXCLUDED.geom,
             updated_at = NOW()
+        WHERE
+            fire_fronts.source IS DISTINCT FROM EXCLUDED.source
+            OR fire_fronts.sensor IS DISTINCT FROM EXCLUDED.sensor
+            OR fire_fronts.overpass_start IS DISTINCT FROM EXCLUDED.overpass_start
+            OR fire_fronts.overpass_end IS DISTINCT FROM EXCLUDED.overpass_end
+            OR fire_fronts.detection_count IS DISTINCT FROM EXCLUDED.detection_count
+            OR fire_fronts.frp_max IS DISTINCT FROM EXCLUDED.frp_max
+            OR fire_fronts.frp_mean IS DISTINCT FROM EXCLUDED.frp_mean
+            OR fire_fronts.confidence_max IS DISTINCT FROM EXCLUDED.confidence_max
+            OR fire_fronts.geom IS DISTINCT FROM EXCLUDED.geom
         """
     )
 
@@ -205,6 +234,14 @@ def eventize_detections(
             front_count = EXCLUDED.front_count,
             geom = EXCLUDED.geom,
             updated_at = NOW()
+        WHERE
+            fire_events.source IS DISTINCT FROM EXCLUDED.source
+            OR fire_events.sensor IS DISTINCT FROM EXCLUDED.sensor
+            OR fire_events.start_time IS DISTINCT FROM EXCLUDED.start_time
+            OR fire_events.end_time IS DISTINCT FROM EXCLUDED.end_time
+            OR fire_events.detection_count IS DISTINCT FROM EXCLUDED.detection_count
+            OR fire_events.front_count IS DISTINCT FROM EXCLUDED.front_count
+            OR fire_events.geom IS DISTINCT FROM EXCLUDED.geom
         """
     )
 
@@ -229,6 +266,10 @@ def eventize_detections(
             event_id = EXCLUDED.event_id,
             member_role = EXCLUDED.member_role,
             linked_at = EXCLUDED.linked_at
+        WHERE
+            fire_event_memberships.front_id IS DISTINCT FROM EXCLUDED.front_id
+            OR fire_event_memberships.event_id IS DISTINCT FROM EXCLUDED.event_id
+            OR fire_event_memberships.member_role IS DISTINCT FROM EXCLUDED.member_role
         """
     )
 
@@ -240,11 +281,23 @@ def eventize_detections(
             event_id = s.event_id
         FROM tmp_eventize_selected s
         WHERE d.id = s.id
+          AND (
+            d.front_id IS DISTINCT FROM s.front_id
+            OR d.event_id IS DISTINCT FROM s.event_id
+          )
         """
     )
 
     with engine.begin() as conn:
+        started = time.perf_counter()
         conn.execute(create_temp_sql, query_params)
+        _log_step("eventize.create_temp", started)
+
+        started = time.perf_counter()
+        for stmt in create_temp_indexes_sql:
+            conn.execute(stmt)
+        _log_step("eventize.temp_indexes", started)
+
         stats_row = conn.execute(count_sql).mappings().first()
         if stats_row is None:
             return {"rows": 0, "fronts": 0, "events": 0, "updated_detections": 0}
@@ -261,10 +314,21 @@ def eventize_detections(
                 "updated_detections": 0,
             }
 
-        conn.execute(front_upsert_sql)
-        conn.execute(event_upsert_sql)
-        conn.execute(memberships_upsert_sql)
+        started = time.perf_counter()
+        front_result = conn.execute(front_upsert_sql)
+        _log_step("eventize.upsert_fronts", started, rows=int(front_result.rowcount or 0))
+
+        started = time.perf_counter()
+        event_result = conn.execute(event_upsert_sql)
+        _log_step("eventize.upsert_events", started, rows=int(event_result.rowcount or 0))
+
+        started = time.perf_counter()
+        member_result = conn.execute(memberships_upsert_sql)
+        _log_step("eventize.upsert_memberships", started, rows=int(member_result.rowcount or 0))
+
+        started = time.perf_counter()
         update_result = conn.execute(detections_update_sql)
+        _log_step("eventize.update_detections", started, rows=int(update_result.rowcount or 0))
 
     return {
         "rows": rows,
@@ -280,6 +344,72 @@ def _parse_dt(value: str | None) -> Optional[datetime]:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def eventize_detections(
+    engine: Engine,
+    *,
+    batch_id: Optional[int] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    source_like: Optional[str] = None,
+    params: EventizeParams = EventizeParams(),
+    dry_run: bool = False,
+    chunk_days: int = 0,
+) -> dict[str, int]:
+    """Build front/event assignments and persist mappings."""
+    if batch_id is None and start_time is None and end_time is None:
+        raise ValueError("Provide at least one selector: --batch-id or --start/--end")
+
+    if batch_id is not None or start_time is None or end_time is None or int(chunk_days) <= 0:
+        return _eventize_single_window(
+            engine,
+            batch_id=batch_id,
+            start_time=start_time,
+            end_time=end_time,
+            source_like=source_like,
+            params=params,
+            dry_run=dry_run,
+        )
+
+    if start_time > end_time:
+        raise ValueError("--start must be <= --end")
+
+    chunk_delta = timedelta(days=int(chunk_days))
+    cursor = start_time
+
+    totals = {
+        "rows": 0,
+        "fronts": 0,
+        "events": 0,
+        "updated_detections": 0,
+        "chunks": 0,
+    }
+
+    while cursor <= end_time:
+        chunk_end = min(end_time, cursor + chunk_delta)
+        LOGGER.info("Eventize chunk window: %s -> %s", cursor.isoformat(), chunk_end.isoformat())
+        chunk_stats = _eventize_single_window(
+            engine,
+            batch_id=None,
+            start_time=cursor,
+            end_time=chunk_end,
+            source_like=source_like,
+            params=params,
+            dry_run=dry_run,
+        )
+        totals["rows"] += int(chunk_stats.get("rows", 0))
+        totals["fronts"] += int(chunk_stats.get("fronts", 0))
+        totals["events"] += int(chunk_stats.get("events", 0))
+        totals["updated_detections"] += int(chunk_stats.get("updated_detections", 0))
+        totals["chunks"] += 1
+
+        if chunk_end >= end_time:
+            break
+        cursor = chunk_end + timedelta(microseconds=1)
+
+    LOGGER.info("Eventize chunked totals: %s", totals)
+    return totals
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build event/front mappings for denoiser v2.")
     parser.add_argument("--batch-id", type=int, default=None, help="Restrict to a single ingest batch")
@@ -290,6 +420,7 @@ def main() -> None:
     parser.add_argument("--front-cell-deg", type=float, default=0.05)
     parser.add_argument("--event-cell-deg", type=float, default=0.2)
     parser.add_argument("--event-link-days", type=int, default=3)
+    parser.add_argument("--chunk-days", type=int, default=0, help="Optional chunking window in days")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -308,6 +439,7 @@ def main() -> None:
         source_like=args.source_like,
         params=params,
         dry_run=args.dry_run,
+        chunk_days=args.chunk_days,
     )
     LOGGER.info("Eventize stats: %s", stats)
     print(json.dumps(stats))

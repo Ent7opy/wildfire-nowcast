@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -20,6 +21,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("export_snapshot_v2")
+
+
+def _log_step(step: str, started_at: float, *, rows: int | None = None) -> None:
+    elapsed = time.perf_counter() - started_at
+    suffix = ""
+    if rows is not None:
+        suffix = f", rows={rows}"
+    LOGGER.info("%s completed in %.3fs%s", step, elapsed, suffix)
 
 
 def _derive_event_id(df: pd.DataFrame) -> pd.Series:
@@ -70,7 +79,7 @@ def export_training_snapshot_v2(
             d.landcover_score,
             d.lat,
             d.lon,
-            d.raw_properties
+            CASE WHEN d.raw_properties->>'daynight' = 'D' THEN 1 ELSE 0 END AS is_day
         FROM denoiser_labels_v2 l
         JOIN fire_detections d ON d.id = l.fire_detection_id
         WHERE l.rule_version = :rule_version
@@ -79,6 +88,7 @@ def export_training_snapshot_v2(
         """
     )
 
+    started = time.perf_counter()
     with get_engine().begin() as conn:
         rows = pd.read_sql(
             query,
@@ -93,16 +103,17 @@ def export_training_snapshot_v2(
                 "max_lat": max_lat,
             },
         )
+    _log_step("snapshot_v2.read_sql", started, rows=int(len(rows)))
 
     if rows.empty:
         raise SystemExit("No labeled v2 rows found for export.")
 
+    started = time.perf_counter()
     rows["acq_time"] = pd.to_datetime(rows["acq_time"], utc=True)
     rows["event_id"] = _derive_event_id(rows)
-    rows["is_day"] = rows["raw_properties"].apply(
-        lambda x: 1 if isinstance(x, dict) and x.get("daynight") == "D" else 0
-    )
+    _log_step("snapshot_v2.prepare_rows", started, rows=int(len(rows)))
 
+    started = time.perf_counter()
     event_df = (
         rows.groupby("event_id", dropna=False)
         .agg(
@@ -130,6 +141,7 @@ def export_training_snapshot_v2(
         )
         .reset_index()
     )
+    _log_step("snapshot_v2.group_events", started, rows=int(len(event_df)))
 
     event_df["duration_hours"] = (
         (event_df["end_time"] - event_df["start_time"]).dt.total_seconds() / 3600.0
