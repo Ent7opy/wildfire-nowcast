@@ -91,6 +91,8 @@ def _get_batch_detections(engine: Engine, batch_id: int) -> pd.DataFrame:
             scan,
             track,
             landcover_score,
+            persistence_score,
+            weather_score,
             raw_properties,
             denoised_score,
             is_noise
@@ -129,6 +131,8 @@ def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
             scan_mean=("scan", "mean"),
             track_mean=("track", "mean"),
             landcover_mean=("landcover_score", "mean"),
+            persistence_mean=("persistence_score", "mean"),
+            weather_mean=("weather_score", "mean"),
             is_day_ratio=("is_day", "mean"),
         )
         .reset_index()

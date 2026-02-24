@@ -175,6 +175,17 @@ def _validate_grib_file(path: Path) -> None:
             raise ValueError(f"GRIB file contains no data variables: {path}")
         ds.close()
     except Exception as exc:
+        # Full-field GRIB archives can contain many level groups in one file.
+        # This yields a known cfgrib "multiple values for unique key" error
+        # when opened without filter_by_keys, but the downstream per-variable
+        # loader uses filter_by_keys and can parse the file correctly.
+        message = str(exc)
+        if "multiple values for unique key" in message or "multiple values for key 'typeOfLevel'" in message:
+            LOGGER.debug(
+                "GRIB validation accepted multi-level archive file: %s",
+                path,
+            )
+            return
         raise ValueError(f"GRIB file validation failed for {path}: {exc}") from exc
     
     LOGGER.debug("GRIB file validated: %s (%d bytes)", path, file_size)
@@ -434,7 +445,10 @@ def _open_variable_dataset(
         else:
             raise ValueError(f"Cannot resolve valid_time for shortName={short_name}")
 
-        ds = ds.assign_coords(time=("step", valid_time.data))
+        valid_time_values = np.asarray(valid_time.data)
+        if valid_time_values.ndim == 0:
+            valid_time_values = np.asarray([valid_time_values.item()])
+        ds = ds.assign_coords(time=("step", valid_time_values))
         ds = ds.swap_dims({"step": "time"})
         drop_vars = [var for var in ("step", "valid_time") if var in ds]
         ds = ds.drop_vars(drop_vars, errors="ignore")
@@ -856,17 +870,19 @@ def ingest_weather_for_bbox(
 
     # Use download_bbox for NOMADS filter, but keep original bbox for final output
     dl_min_lon, dl_min_lat, dl_max_lon, dl_max_lat = download_bbox
+    # WeatherIngestSettings uses validation aliases (WEATHER_*). Passing field names
+    # silently falls back to defaults, which would expand requests to global bounds.
     settings = WeatherIngestSettings(
-        model_name=model_name,
-        base_dir=output_dir,
-        bbox_min_lon=dl_min_lon,
-        bbox_min_lat=dl_min_lat,
-        bbox_max_lon=dl_max_lon,
-        bbox_max_lat=dl_max_lat,
-        horizon_hours=horizon_hours,
-        step_hours=step_hours,
-        include_precipitation=include_precipitation,
-        request_timeout_seconds=request_timeout_seconds,
+        WEATHER_MODEL=model_name,
+        WEATHER_BASE_DIR=output_dir,
+        WEATHER_BBOX_MIN_LON=dl_min_lon,
+        WEATHER_BBOX_MIN_LAT=dl_min_lat,
+        WEATHER_BBOX_MAX_LON=dl_max_lon,
+        WEATHER_BBOX_MAX_LAT=dl_max_lat,
+        WEATHER_HORIZON_HOURS=horizon_hours,
+        WEATHER_STEP_HOURS=step_hours,
+        WEATHER_INCLUDE_PRECIP=include_precipitation,
+        WEATHER_REQUEST_TIMEOUT_SECONDS=request_timeout_seconds,
     )
 
     def _attempt_ingest(selected_run_time: datetime) -> None:
@@ -1037,4 +1053,3 @@ def main(argv: List[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-

@@ -77,6 +77,8 @@ def export_training_snapshot_v2(
             d.scan,
             d.track,
             d.landcover_score,
+            d.persistence_score,
+            d.weather_score,
             d.lat,
             d.lon,
             CASE WHEN d.raw_properties->>'daynight' = 'D' THEN 1 ELSE 0 END AS is_day
@@ -135,6 +137,8 @@ def export_training_snapshot_v2(
             scan_mean=("scan", "mean"),
             track_mean=("track", "mean"),
             landcover_mean=("landcover_score", "mean"),
+            persistence_mean=("persistence_score", "mean"),
+            weather_mean=("weather_score", "mean"),
             is_day_ratio=("is_day", "mean"),
             lat_centroid=("lat", "mean"),
             lon_centroid=("lon", "mean"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Iterable, Literal, TYPE_CHECKING
@@ -22,10 +23,21 @@ from api.fires.scoring import (
 
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 LOGGER = logging.getLogger(__name__)
-_LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD = 5000
+_LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD = int(
+    os.getenv("FIRE_SCORING_WEATHER_NEUTRAL_THRESHOLD", "5000")
+)
 _NEUTRAL_WEATHER_SCORE = 0.5
-_LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD = 20000
+_WEATHER_TIME_TOLERANCE_HOURS = float(
+    os.getenv("FIRE_SCORING_WEATHER_TIME_TOLERANCE_HOURS", "6")
+)
+_LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD = int(
+    os.getenv("FIRE_SCORING_PERSISTENCE_NEUTRAL_THRESHOLD", "20000")
+)
 _NEUTRAL_PERSISTENCE_SCORE = 0.3
+_DISABLE_NEUTRAL_FALLBACK = (
+    str(os.getenv("FIRE_SCORING_DISABLE_NEUTRAL_FALLBACK", "false")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 
 def _log_step(step: str, started_at: float, *, batch_id: int, rows: int | None = None) -> None:
@@ -340,7 +352,11 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
 
         # Large global repairs/backfills can make geospatial clustering too slow.
         # Assign neutral persistence for throughput and keep strict completeness gates.
-        if len(detections) >= _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD:
+        if (
+            (not _DISABLE_NEUTRAL_FALLBACK)
+            and _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD > 0
+            and len(detections) >= _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD
+        ):
             LOGGER.warning(
                 "Batch %s has %s detections; assigning neutral persistence_score=%s for bulk throughput.",
                 batch_id,
@@ -505,7 +521,11 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
         # Large global repairs/backfills can make per-detection weather lookup
         # prohibitively slow. Use neutral weather score to keep ingestion fail-closed
         # gates enforceable while preserving throughput.
-        if len(detections) >= _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD:
+        if (
+            (not _DISABLE_NEUTRAL_FALLBACK)
+            and _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD > 0
+            and len(detections) >= _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD
+        ):
             LOGGER.warning(
                 "Batch %s has %s detections; assigning neutral weather_score=%s for bulk throughput.",
                 batch_id,
@@ -530,7 +550,10 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
 
         # Compute weather plausibility scores
         started = time.perf_counter()
-        weather_scores = compute_weather_plausibility_scores(detections)
+        weather_scores = compute_weather_plausibility_scores(
+            detections,
+            time_tolerance_hours=_WEATHER_TIME_TOLERANCE_HOURS,
+        )
         _log_step(
             "weather.compute_scores",
             started,

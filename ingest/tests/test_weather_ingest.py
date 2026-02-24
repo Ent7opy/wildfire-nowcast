@@ -1,11 +1,12 @@
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import tempfile
 
 import pytest
 
-from ingest.weather_ingest import ingest_weather_for_bbox, snap_to_gfs_cycle
+from ingest.weather_ingest import ingest_weather_for_bbox, snap_to_gfs_cycle, _validate_grib_file
 
 
 class TestWeatherIngestLogic(unittest.TestCase):
@@ -63,6 +64,44 @@ class TestWeatherIngestLogic(unittest.TestCase):
         
         # Verify _attempt_ingest called with snapped time
         mock_attempt.assert_called_once_with(datetime(2026, 1, 20, 0, 0, tzinfo=timezone.utc))
+
+
+def test_ingest_weather_for_bbox_respects_bbox_overrides():
+    """Runtime download settings should honor explicit bbox inputs."""
+    requested_bbox = (-125.0, 25.0, -100.0, 40.0)
+    captured: dict[str, tuple[float, float, float, float]] = {}
+
+    def _capture_settings(settings, *args, **kwargs):
+        captured["bbox"] = settings.bbox
+        raise RuntimeError("stop_after_settings_capture")
+
+    with (
+        patch("ingest.weather_ingest.create_weather_run_record", return_value=999),
+        patch("ingest.weather_ingest.finalize_weather_run_record"),
+        patch("ingest.weather_ingest.download_grib_files", side_effect=_capture_settings),
+        pytest.raises(RuntimeError, match="stop_after_settings_capture"),
+    ):
+        ingest_weather_for_bbox(
+            bbox=requested_bbox,
+            forecast_time=datetime(2026, 2, 19, 12, 0, tzinfo=timezone.utc),
+            output_dir="/tmp",
+            patch_mode=False,
+        )
+
+    assert captured.get("bbox") == requested_bbox
+
+
+def test_validate_grib_file_allows_multilevel_archive_layout():
+    """Validation should not reject full archive GRIB files solely on level multiplicity."""
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with patch(
+            "ingest.weather_ingest.xr.open_dataset",
+            side_effect=ValueError("multiple values for unique key"),
+        ):
+            _validate_grib_file(Path(tmp.name))
 
 
 @pytest.mark.skip(reason="Test mocking needs to be updated for httpx.Client.stream() and xarray operations")

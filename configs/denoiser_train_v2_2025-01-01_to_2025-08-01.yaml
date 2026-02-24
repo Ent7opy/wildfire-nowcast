@@ -16,6 +16,8 @@ features:
 - scan_mean
 - track_mean
 - landcover_mean
+- persistence_mean
+- weather_mean
 - is_day_ratio
 - duration_hours
 - sin_doy
