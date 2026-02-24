@@ -81,6 +81,30 @@ class FIRMSIngestSettings(BaseSettings):
         default=0.55,
         validation_alias="DENOISER_UNCERTAINTY_BAND_HIGH",
     )
+    denoiser_event_front_radius_m: float = Field(
+        default=2500.0,
+        validation_alias="DENOISER_EVENT_FRONT_RADIUS_M",
+    )
+    denoiser_event_front_max_gap_minutes: int = Field(
+        default=45,
+        validation_alias="DENOISER_EVENT_FRONT_MAX_GAP_MINUTES",
+    )
+    denoiser_event_link_radius_m: float = Field(
+        default=10000.0,
+        validation_alias="DENOISER_EVENT_LINK_RADIUS_M",
+    )
+    denoiser_event_link_max_gap_days: int = Field(
+        default=11,
+        validation_alias="DENOISER_EVENT_LINK_MAX_GAP_DAYS",
+    )
+    denoiser_event_static_persistence_threshold: float = Field(
+        default=0.85,
+        validation_alias="DENOISER_EVENT_STATIC_PERSISTENCE_THRESHOLD",
+    )
+    denoiser_event_strict_static_split: bool = Field(
+        default=True,
+        validation_alias="DENOISER_EVENT_STRICT_STATIC_SPLIT",
+    )
     denoiser_strict_features: bool = Field(
         default=False,
         validation_alias="DENOISER_STRICT_FEATURES",
@@ -150,6 +174,38 @@ class FIRMSIngestSettings(BaseSettings):
         numeric = float(value)
         if not 0.0 <= numeric <= 1.0:
             raise ValueError("Denoiser thresholds must be between 0.0 and 1.0")
+        return numeric
+
+    @field_validator("denoiser_event_static_persistence_threshold", mode="after")
+    @classmethod
+    def _validate_event_static_threshold(cls, value: float) -> float:
+        numeric = float(value)
+        if not 0.0 <= numeric <= 1.0:
+            raise ValueError("DENOISER_EVENT_STATIC_PERSISTENCE_THRESHOLD must be between 0.0 and 1.0")
+        return numeric
+
+    @field_validator(
+        "denoiser_event_front_radius_m",
+        "denoiser_event_link_radius_m",
+        mode="after",
+    )
+    @classmethod
+    def _validate_positive_radius(cls, value: float) -> float:
+        numeric = float(value)
+        if numeric <= 0.0:
+            raise ValueError("Event association radii must be > 0")
+        return numeric
+
+    @field_validator(
+        "denoiser_event_front_max_gap_minutes",
+        "denoiser_event_link_max_gap_days",
+        mode="after",
+    )
+    @classmethod
+    def _validate_positive_gap(cls, value: int) -> int:
+        numeric = int(value)
+        if numeric <= 0:
+            raise ValueError("Event association gap windows must be > 0")
         return numeric
 
     @field_validator("denoiser_uncertainty_band_high", mode="after")

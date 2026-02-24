@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from api.db import get_engine
-from ml.denoiser.eventize import eventize_detections
+from ml.denoiser.eventize import EventizeParams, eventize_detections
 from ingest.config import settings as ingest_settings
 
 logging.basicConfig(
@@ -184,6 +184,12 @@ def run_inference_v2(
     downweight_threshold: float,
     uncertainty_band_low: float,
     uncertainty_band_high: float,
+    event_front_radius_m: float,
+    event_front_max_gap_minutes: int,
+    event_link_radius_m: float,
+    event_link_max_gap_days: int,
+    event_static_persistence_threshold: float,
+    event_strict_static_split: bool,
     fail_closed_frp_mw: float = 500.0,
     fail_closed_confidence: float = 80.0,
     high_risk_landcover_min: float = 0.6,
@@ -191,7 +197,18 @@ def run_inference_v2(
     engine = get_engine()
 
     # Ensure front/event IDs exist for this batch.
-    eventize_stats = eventize_detections(engine, batch_id=batch_id)
+    eventize_stats = eventize_detections(
+        engine,
+        batch_id=batch_id,
+        params=EventizeParams(
+            front_link_radius_m=float(event_front_radius_m),
+            front_max_gap_minutes=int(event_front_max_gap_minutes),
+            event_link_radius_m=float(event_link_radius_m),
+            event_max_gap_days=int(event_link_max_gap_days),
+            static_persistence_threshold=float(event_static_persistence_threshold),
+            strict_static_split=bool(event_strict_static_split),
+        ),
+    )
     LOGGER.info("Eventize completed for batch %s: %s", batch_id, eventize_stats)
 
     detections = _get_batch_detections(engine, batch_id)
@@ -438,10 +455,43 @@ def main(argv: Optional[list[str]] = None) -> None:
         type=float,
         default=ingest_settings.denoiser_uncertainty_band_high,
     )
+    parser.add_argument(
+        "--event-front-radius-m",
+        type=float,
+        default=ingest_settings.denoiser_event_front_radius_m,
+    )
+    parser.add_argument(
+        "--event-front-max-gap-minutes",
+        type=int,
+        default=ingest_settings.denoiser_event_front_max_gap_minutes,
+    )
+    parser.add_argument(
+        "--event-link-radius-m",
+        type=float,
+        default=ingest_settings.denoiser_event_link_radius_m,
+    )
+    parser.add_argument(
+        "--event-link-max-gap-days",
+        type=int,
+        default=ingest_settings.denoiser_event_link_max_gap_days,
+    )
+    parser.add_argument(
+        "--event-static-persistence-threshold",
+        type=float,
+        default=ingest_settings.denoiser_event_static_persistence_threshold,
+    )
+    parser.add_argument("--event-strict-static-split", action="store_true")
+    parser.add_argument("--no-event-strict-static-split", action="store_true")
     args = parser.parse_args(argv)
 
     if not args.model_run:
         raise SystemExit("Missing --model-run / DENOISER_MODEL_RUN_DIR for v2 inference")
+
+    event_strict_static_split = bool(ingest_settings.denoiser_event_strict_static_split)
+    if args.no_event_strict_static_split:
+        event_strict_static_split = False
+    elif args.event_strict_static_split:
+        event_strict_static_split = True
 
     summary = run_inference_v2(
         batch_id=int(args.batch_id),
@@ -451,6 +501,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         downweight_threshold=float(args.downweight_threshold),
         uncertainty_band_low=float(args.uncertainty_band_low),
         uncertainty_band_high=float(args.uncertainty_band_high),
+        event_front_radius_m=float(args.event_front_radius_m),
+        event_front_max_gap_minutes=int(args.event_front_max_gap_minutes),
+        event_link_radius_m=float(args.event_link_radius_m),
+        event_link_max_gap_days=int(args.event_link_max_gap_days),
+        event_static_persistence_threshold=float(args.event_static_persistence_threshold),
+        event_strict_static_split=event_strict_static_split,
     )
     LOGGER.info("Denoiser v2 inference summary: %s", summary)
     print(json.dumps(summary))

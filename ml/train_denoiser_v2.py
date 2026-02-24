@@ -82,8 +82,14 @@ def _feature_matrix(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
 
 
 def _build_model(config: Dict[str, Any]) -> Any:
+    backend = str(config.get("model_backend", "xgboost")).strip().lower()
     model_params = dict(config.get("model_params", {}))
-    if _HAS_XGBOOST and config.get("model_backend", "xgboost") == "xgboost":
+    if backend == "xgboost":
+        if not _HAS_XGBOOST:
+            raise RuntimeError(
+                "model_backend=xgboost but XGBoost is unavailable. "
+                "Install/fix runtime dependencies (e.g., libomp on macOS)."
+            )
         defaults = {
             "n_estimators": 400,
             "max_depth": 6,
@@ -98,15 +104,18 @@ def _build_model(config: Dict[str, Any]) -> Any:
         defaults.update(model_params)
         return XGBClassifier(**defaults)
 
-    defaults = {
-        "max_iter": 300,
-        "learning_rate": 0.05,
-        "max_depth": 6,
-        "l2_regularization": 0.01,
-        "random_state": int(config.get("seed", 42)),
-    }
-    defaults.update(model_params)
-    return HistGradientBoostingClassifier(**defaults)
+    if backend in {"hist_gradient_boosting", "hgb"}:
+        defaults = {
+            "max_iter": 300,
+            "learning_rate": 0.05,
+            "max_depth": 6,
+            "l2_regularization": 0.01,
+            "random_state": int(config.get("seed", 42)),
+        }
+        defaults.update(model_params)
+        return HistGradientBoostingClassifier(**defaults)
+
+    raise ValueError(f"Unsupported model_backend={backend!r}. Use 'xgboost' or 'hist_gradient_boosting'.")
 
 
 def _predict_raw(model: Any, x: pd.DataFrame) -> np.ndarray:
@@ -158,6 +167,7 @@ def _metrics(y_true: np.ndarray, p: np.ndarray, threshold: float = 0.5) -> Dict[
 def train_denoiser_v2(config: Dict[str, Any]) -> str:
     seed = int(config.get("seed", 42))
     np.random.seed(seed)
+    model_backend = str(config.get("model_backend", "xgboost")).strip().lower()
 
     features = list(config["features"])
     label_col = str(config.get("label_column", "event_label"))
@@ -245,11 +255,10 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
 
     # Evaluate using slice calibrators when available.
     calibrated_scores = np.zeros(len(eval_known_df), dtype=float)
-    for idx, row in enumerate(eval_known_df.itertuples(index=False)):
-        row_series = pd.Series(row._asdict())
+    for idx, (_, row_series) in enumerate(eval_known_df.iterrows()):
         key = _slice_key(row_series, slice_cols)
         cal = slice_calibrators.get(key, global_calibrator)
-        calibrated_scores[idx] = float(_apply_calibrator(cal, np.asarray([row_series["_raw_score"]]))[0])
+        calibrated_scores[idx] = float(_apply_calibrator(cal, np.asarray([raw_eval[idx]]))[0])
 
     threshold = float(config.get("decision_threshold", 0.5))
     metrics = _metrics(y_eval_known, calibrated_scores, threshold=threshold)
@@ -339,7 +348,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
 
     training_summary = {
         "run_id": run_name,
-        "model_backend": "xgboost" if _HAS_XGBOOST else "hist_gradient_boosting",
+        "model_backend": model_backend,
         "train_rows": int(len(train_df)),
         "eval_rows": int(len(eval_df)),
         "train_known_rows": int(known_train.sum()),

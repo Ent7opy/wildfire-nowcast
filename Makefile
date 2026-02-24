@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-drift-monitor denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -279,6 +279,9 @@ denoiser-eval-v2: ## Evaluate v2 denoiser (pass MODEL_RUN="models/denoiser_v2/<r
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT=<snapshot dir/parquet>))
 	$(if $(OUT),,$(error Please provide OUT="reports/denoiser_v2/<run_id>"))
 	$(UV) run --project ml -m ml.eval_denoiser_v2 --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) --out $(OUT) $(ARGS)
+
+denoiser-association-report: ## Compare baseline vs updated event association quality (pass ARGS="--start ... --end ...")
+	$(UV) run --project ml -m ml.denoiser.eval_event_association $(ARGS)
 
 denoiser-drift-monitor: ## Run denoiser drift monitor (+ optional rollback) (pass ARGS="--dry-run")
 	$(UV) run --project ingest -m ingest.denoiser_drift_monitor $(ARGS)

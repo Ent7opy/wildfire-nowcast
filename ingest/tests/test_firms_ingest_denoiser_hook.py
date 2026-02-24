@@ -18,6 +18,12 @@ class TestFirmsIngestDenoiserHook(unittest.TestCase):
         self.config.denoiser_downweight_threshold = 0.7
         self.config.denoiser_uncertainty_band_low = 0.45
         self.config.denoiser_uncertainty_band_high = 0.55
+        self.config.denoiser_event_front_radius_m = 2500.0
+        self.config.denoiser_event_front_max_gap_minutes = 45
+        self.config.denoiser_event_link_radius_m = 10000.0
+        self.config.denoiser_event_link_max_gap_days = 11
+        self.config.denoiser_event_static_persistence_threshold = 0.85
+        self.config.denoiser_event_strict_static_split = True
 
     @patch("subprocess.run")
     @patch("ingest.firms_ingest.log_event")
@@ -99,6 +105,12 @@ class TestFirmsIngestDenoiserHook(unittest.TestCase):
         self.assertIn("--downweight-threshold", cmd)
         self.assertIn("--uncertainty-band-low", cmd)
         self.assertIn("--uncertainty-band-high", cmd)
+        self.assertIn("--event-front-radius-m", cmd)
+        self.assertIn("--event-front-max-gap-minutes", cmd)
+        self.assertIn("--event-link-radius-m", cmd)
+        self.assertIn("--event-link-max-gap-days", cmd)
+        self.assertIn("--event-static-persistence-threshold", cmd)
+        self.assertIn("--event-strict-static-split", cmd)
         self.assertIn("--shadow-mode", cmd)
         self.assertNotIn("--threshold", cmd)
         self.assertNotIn("--batch-size", cmd)

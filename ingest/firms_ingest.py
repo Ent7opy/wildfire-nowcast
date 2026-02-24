@@ -569,8 +569,20 @@ def _build_denoiser_argv(
                 str(getattr(config, "denoiser_uncertainty_band_low", 0.45)),
                 "--uncertainty-band-high",
                 str(getattr(config, "denoiser_uncertainty_band_high", 0.55)),
+                "--event-front-radius-m",
+                str(getattr(config, "denoiser_event_front_radius_m", 2500.0)),
+                "--event-front-max-gap-minutes",
+                str(getattr(config, "denoiser_event_front_max_gap_minutes", 45)),
+                "--event-link-radius-m",
+                str(getattr(config, "denoiser_event_link_radius_m", 10000.0)),
+                "--event-link-max-gap-days",
+                str(getattr(config, "denoiser_event_link_max_gap_days", 11)),
+                "--event-static-persistence-threshold",
+                str(getattr(config, "denoiser_event_static_persistence_threshold", 0.85)),
             ]
         )
+        if bool(getattr(config, "denoiser_event_strict_static_split", True)):
+            argv.append("--event-strict-static-split")
         if bool(getattr(config, "denoiser_shadow_mode", False)):
             argv.append("--shadow-mode")
         return argv

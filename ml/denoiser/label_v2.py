@@ -36,6 +36,9 @@ DEFAULT_PARAMS = {
     "probable_positive_frp_mw": 100.0,
     "probable_positive_confidence": 70.0,
     "probable_positive_landcover_min": 0.5,
+    "negative_event_static_ratio_min": 0.7,
+    "negative_event_persistence_min": 0.85,
+    "negative_event_min_days": 3,
 }
 
 
@@ -158,6 +161,9 @@ def _label_single_window(
         "probable_positive_frp_mw": float(p["probable_positive_frp_mw"]),
         "probable_positive_confidence": float(p["probable_positive_confidence"]),
         "probable_positive_landcover_min": float(p["probable_positive_landcover_min"]),
+        "negative_event_static_ratio_min": float(p["negative_event_static_ratio_min"]),
+        "negative_event_persistence_min": float(p["negative_event_persistence_min"]),
+        "negative_event_min_days": int(p["negative_event_min_days"]),
         "rule_version": rule_version,
         "source": "ground_truth_v2",
         "rule_params": json.dumps(p),
@@ -176,6 +182,8 @@ def _label_single_window(
             confidence,
             frp,
             landcover_score,
+            COALESCE(false_source_masked, FALSE) AS false_source_masked,
+            COALESCE(persistence_score, 0.0) AS persistence_score,
             geom,
             (
                 lon >= :cov_min_lon
@@ -285,6 +293,8 @@ def _label_single_window(
         UNION
         SELECT id FROM tmp_label_chronic_ids
         UNION
+        SELECT id FROM tmp_label_event_static_ids
+        UNION
         SELECT c.id
         FROM tmp_label_candidates c
         WHERE c.in_coverage
@@ -301,6 +311,35 @@ def _label_single_window(
           AND COALESCE(c.frp, 0) >= :probable_positive_frp_mw
           AND COALESCE(c.confidence, 0) >= :probable_positive_confidence
           AND COALESCE(c.landcover_score, 0.5) >= :probable_positive_landcover_min
+        """
+    )
+
+    create_event_static_ids_sql = text(
+        """
+        CREATE TEMP TABLE tmp_label_event_static_ids ON COMMIT DROP AS
+        WITH event_static AS (
+            SELECT
+                event_id
+            FROM tmp_label_candidates
+            WHERE in_coverage
+              AND event_id IS NOT NULL
+            GROUP BY event_id
+            HAVING AVG(
+                CASE
+                    WHEN false_source_masked
+                         OR COALESCE(persistence_score, 0.0) >= :negative_event_persistence_min
+                    THEN 1.0
+                    ELSE 0.0
+                END
+            ) >= :negative_event_static_ratio_min
+               AND (
+                    EXTRACT(EPOCH FROM (MAX(acq_time) - MIN(acq_time))) / 86400.0
+               ) >= :negative_event_min_days
+        )
+        SELECT c.id
+        FROM tmp_label_candidates c
+        JOIN event_static e ON e.event_id = c.event_id
+        WHERE c.in_coverage
         """
     )
 
@@ -345,7 +384,7 @@ def _label_single_window(
             label,
             :rule_version,
             :source,
-            :rule_params::jsonb,
+            CAST(:rule_params AS jsonb),
             weak_supervision,
             :labeled_at
         FROM tmp_label_final
@@ -401,6 +440,11 @@ def _label_single_window(
         started = time.perf_counter()
         conn.execute(create_chronic_ids_sql, query_params)
         _log_step("label_v2.negative_chronic", started)
+
+        started = time.perf_counter()
+        conn.execute(create_event_static_ids_sql, query_params)
+        static_rows = int(conn.execute(text("SELECT COUNT(*) FROM tmp_label_event_static_ids")).scalar_one() or 0)
+        _log_step("label_v2.negative_event_static", started, rows=static_rows)
 
         started = time.perf_counter()
         conn.execute(create_negative_sql, query_params)
