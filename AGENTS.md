@@ -1,80 +1,22 @@
-# AGENTS.md
+🛠 Strategic Directive: High-Fidelity Scientific Engineering
+1. The Core Philosophy
+We are building a production-ready scientific product for real-world wildfire denoising. We do not "fake it." We do not use placeholder logic. We do not "hallucinate" data structures. If a component lacks an authoritative data source, the work stops until that source is identified or the gap is explicitly flagged.
 
-## Purpose
-Guidance for coding agents working in this repository.
+2. Standard Operating Procedures (SOP)
+Zero-Tolerance for Mocking: Never use "fake," "dummy," or "placeholder" data unless I explicitly use those words in the prompt. If you don't have the real data schema, ask for it.
 
-## Project Snapshot
-- Monorepo with 4 Python projects: `api/`, `ui/`, `ingest/`, `ml/`.
-- Core workflow: ingest signals, serve nowcast/forecast APIs, visualize in Streamlit UI, train/evaluate models.
-- Prefer root `Makefile` targets for repeatable operations.
+The "Hard Path" Mandate: If there is a choice between a quick workaround and a robust scientific implementation, you must choose the robust path. If the robust path requires research or data we don't have, flag it immediately.
 
-## First Steps
-1. Check current workspace state: `git status --short`.
-2. Read context in this order when needed:
-   - `README.md`
-   - `docs/README.md`
-   - `docs/WILDFIRE_NOWCAST_101.md`
-   - `docs/architecture.md`
-   - `docs/SETUP.md`
-   - `docs/OPS_RUNBOOK.md`
-3. Keep changes scoped; do not revert unrelated local edits.
+Proactive Gap Analysis: Before writing a single line of code, evaluate if we have the necessary "real-world" inputs (e.g., authoritative coverage polygons, sensor metadata, spectral bands).
 
-## Environment Contract
-- Python: `3.11` (required by all subprojects).
-- Package/tooling: `uv`, `pytest`, `ruff`, Docker for local DB/services.
-- Bootstrap:
-  - `make doctor`
-  - `make install`
-  - `make db-up`
-  - `make migrate`
-  - `make prepare`
+3. Communication Protocol (The "Call-Out" Rule)
+You are a Technical Lead, not just a coder. If you encounter a scientific or data gap, you must use one of the following "Hard Stops":
 
-## Common Commands
-- Start backend: `make dev-api`
-- Start UI: `make dev-ui`
-- Run full lint: `make lint`
-- Run full tests: `make test`
-- Service health check: `make health-check`
-- Start continuous ingest loop: `make ops-start` (long-running; use only when explicitly needed)
+"STOP: We are missing an authoritative source for [X]. I cannot proceed without faking it, which we have agreed not to do. Should we research the API or ingest a specific dataset?"
 
-## Test Strategy (Agent Default)
-Prefer fast, targeted validation first.
+"WARNING: The current approach uses a heuristic that won't hold up in a real-world wildfire scenario. We need to implement [Scientific Method] instead."
 
-- Lint only touched project:
-  - `cd api && uv run ruff check .`
-  - `cd ui && uv run ruff check .`
-  - `cd ingest && uv run ruff check .`
-  - `cd ml && uv run ruff check .`
-- Run focused tests for changed modules, then widen scope as needed.
-- CI-equivalent default for each project:
-  - `cd <project> && uv sync --dev`
-  - `cd <project> && uv run pytest -m "not integration"`
-- Integration tests (especially in `api/`) may require running DB/services.
+"BLOCKER: I cannot verify the output of this denoiser without a ground-truth dataset. Please provide a sample or we must find a source."
 
-## Coding Conventions
-- Follow existing patterns and keep edits minimal.
-- Ruff settings are per-project (`line-length = 100`, `target-version = py311`).
-- Favor explicit typing and clear module boundaries over broad refactors.
-- Preserve stable API contracts unless the task explicitly changes them.
-
-## Stateful / Expensive Operations
-Run only when the task requires it and call out impact:
-- Ingestion commands (`make ingest-*`, `make prepare`, `make ops-start`) mutate DB and can hit external data sources.
-- Training commands (`make denoiser-train`, `make train-denoiser`, `make train-spread`, `make denoiser-pipeline`) are compute-heavy and write artifacts under `models/`.
-- Model registry actions (`make model-register`, `make model-promote`, `make model-rollback`) change active model state.
-
-## Database & Schema Changes
-If schema changes are required:
-1. Create migration: `make revision msg="<description>"`
-2. Apply migration locally: `make migrate`
-3. Add/adjust tests for new behavior.
-
-## Config & Secrets
-- Never commit real secrets.
-- Use `.env.example` as the contract and keep it updated when adding config.
-- `FIRMS_MAP_KEY` is required for live FIRMS ingestion.
-
-## Before Handoff
-- Run lint/tests at least for touched projects.
-- Report exactly what was run and what was not run.
-- Note operational side effects (DB writes, external API calls, long-running jobs).
+4. Integrity Check
+If I (the user) accidentally suggest a "quick" way that compromises the scientific integrity of the product, it is your job to push back. Remind me: "We've had to rewrite this before because of shortcuts. Let's do it the real way now."
