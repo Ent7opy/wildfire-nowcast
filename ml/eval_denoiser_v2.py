@@ -19,9 +19,18 @@ from api.db import get_engine
 
 def _load_snapshot(path: str, *, columns: list[str]) -> pd.DataFrame:
     read_columns = list(dict.fromkeys(columns))
+    def _read_with_fallback(parquet_path: str) -> pd.DataFrame:
+        try:
+            return pd.read_parquet(parquet_path, columns=read_columns)
+        except Exception:
+            full = pd.read_parquet(parquet_path)
+            keep = [c for c in read_columns if c in full.columns]
+            return full[keep]
+
     if os.path.isdir(path):
-        return pd.read_parquet(os.path.join(path, "eval.parquet"), columns=read_columns)
-    return pd.read_parquet(path, columns=read_columns)
+        eval_path = os.path.join(path, "eval.parquet")
+        return _read_with_fallback(eval_path)
+    return _read_with_fallback(path)
 
 
 def _predict_raw(model: Any, x: pd.DataFrame) -> np.ndarray:
@@ -34,9 +43,9 @@ def _predict_raw(model: Any, x: pd.DataFrame) -> np.ndarray:
 def _apply_calibrator(cal: Dict[str, Any], scores: np.ndarray) -> np.ndarray:
     ctype = cal.get("type")
     model = cal.get("model")
-    if ctype == "isotonic":
+    if ctype == "isotonic" and model is not None:
         return np.asarray(model.predict(scores), dtype=float)
-    if ctype == "platt":
+    if ctype == "platt" and model is not None:
         return np.asarray(model.predict_proba(scores.reshape(-1, 1))[:, 1], dtype=float)
     return np.asarray(scores, dtype=float)
 
@@ -86,69 +95,42 @@ def _pick_downweight(sweep: pd.DataFrame, target_recall: float) -> Dict[str, Any
     return sweep.sort_values(["f1", "recall", "threshold"], ascending=[False, False, True]).iloc[0].to_dict()
 
 
-def evaluate_denoiser_v2(
-    model_run_dir: str,
-    snapshot_path: str,
-    out_dir: str,
+def _collect_mask_ids(series: pd.Series) -> list[str]:
+    out: set[str] = set()
+    for value in series:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, np.ndarray)):
+            for item in value:
+                if item is not None:
+                    out.add(str(item))
+            continue
+        if isinstance(value, str):
+            out.add(value)
+    return sorted(out)
+
+
+def _evaluate_scope(
     *,
-    target_precision: float = 0.9,
-    target_recall: float = 0.9,
-    threshold_step: float = 0.01,
-    write_db: bool = False,
-    model_id: str | None = None,
-) -> str:
-    bundle = joblib.load(os.path.join(model_run_dir, "model_bundle.pkl"))
-    model = bundle["model"]
-    features = list(bundle["features"])
-    slice_cols = list(bundle.get("slice_cols", ["sensor", "biome_slice"]))
-    global_calibrator = bundle["global_calibrator"]
-    slice_calibrators = dict(bundle.get("slice_calibrators", {}))
-
-    snapshot_columns = list(
-        dict.fromkeys(features + ["event_label", "sensor", "biome_slice", "is_day_ratio"] + slice_cols)
-    )
-    eval_df = _load_snapshot(snapshot_path, columns=snapshot_columns).copy()
-    for col in features:
-        if col not in eval_df.columns:
-            eval_df[col] = np.nan
-
-    label_map = {"POSITIVE": 1, "NEGATIVE": 0}
-    y_all = eval_df["event_label"].map(label_map).fillna(-1).astype(int).to_numpy()
-    known_mask = y_all >= 0
-    eval_known = eval_df.loc[known_mask].reset_index(drop=True)
-    y = y_all[known_mask]
-    if len(eval_known) == 0:
-        raise ValueError("No known labels in eval snapshot for denoiser v2 evaluation.")
-
-    raw = _predict_raw(model, _feature_matrix(eval_known, features))
-    calibrated = np.zeros(len(eval_known), dtype=float)
-
-    for idx, row in enumerate(eval_known.itertuples(index=False)):
-        row_series = pd.Series(row._asdict())
-        key = _slice_key(row_series, slice_cols)
-        cal = slice_calibrators.get(key, global_calibrator)
-        calibrated[idx] = float(_apply_calibrator(cal, np.asarray([raw[idx]]))[0])
-
+    scope_name: str,
+    eval_known: pd.DataFrame,
+    y: np.ndarray,
+    calibrated: np.ndarray,
+    default_threshold: float,
+    target_precision: float,
+    target_recall: float,
+    threshold_step: float,
+    gate_thresholds: dict[str, Any],
+    latency_per_10k: float,
+) -> dict[str, Any]:
     sweep = _sweep(y, calibrated, step=threshold_step)
     strong = _pick_strong_filter(sweep, target_precision=target_precision)
     downweight = _pick_downweight(sweep, target_recall=target_recall)
-
-    default_threshold = float(bundle.get("thresholds", {}).get("decision", 0.5))
     default_metrics = _metrics(y, calibrated, threshold=default_threshold)
 
-    gate_thresholds = {
-        "event_recall_min": 0.92,
-        "event_precision_min": 0.75,
-        "global_f1_min": 0.85,
-        "roc_auc_min": 0.95,
-        "latency_per_10k_max_seconds": 300.0,
-        "min_event_positives": 50,
-        "min_event_negatives": 50,
-    }
     n_pos = int((y == 1).sum())
     n_neg = int((y == 0).sum())
 
-    latency_per_10k = float(bundle.get("latency_per_10k_seconds", default_metrics.get("latency_per_10k_seconds", 0.0)))
     gate_results = {
         "event_recall": {
             "value": float(default_metrics["recall"]),
@@ -182,9 +164,6 @@ def evaluate_denoiser_v2(
     }
     gate_pass = all(bool(x["pass"]) for x in gate_results.values())
 
-    os.makedirs(out_dir, exist_ok=True)
-    sweep.to_csv(os.path.join(out_dir, "threshold_sweep.csv"), index=False)
-
     slice_metrics: dict[str, list[dict[str, Any]]] = {}
     for col in [c for c in ["sensor", "biome_slice", "is_day_ratio"] if c in eval_known.columns]:
         rows: list[dict[str, Any]] = []
@@ -199,23 +178,200 @@ def evaluate_denoiser_v2(
             })
         slice_metrics[col] = rows
 
-    summary = {
-        "run_id": os.path.basename(model_run_dir.rstrip(os.sep)),
-        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+    return {
+        "scope": scope_name,
         "n_eval": int(len(eval_known)),
-        "n_pos": int((y == 1).sum()),
-        "n_neg": int((y == 0).sum()),
-        "default_threshold": default_threshold,
+        "n_pos": n_pos,
+        "n_neg": n_neg,
         "default_metrics": default_metrics,
         "threshold_recommendations": {
             "strong_filter": strong,
             "downweight": downweight,
+        },
+        "gate_results": gate_results,
+        "gate_pass": gate_pass,
+        "slice_metrics": slice_metrics,
+        "sweep": sweep,
+    }
+
+
+def evaluate_denoiser_v2(
+    model_run_dir: str,
+    snapshot_path: str,
+    out_dir: str,
+    *,
+    target_precision: float = 0.9,
+    target_recall: float = 0.9,
+    threshold_step: float = 0.01,
+    write_db: bool = False,
+    model_id: str | None = None,
+    gate_scope: str = "covered",
+    coverage_mask_source: str = "db_mask",
+    fail_on_missing_coverage_mask: bool = True,
+) -> str:
+    gate_scope = str(gate_scope).strip().lower()
+    if gate_scope not in {"covered", "global", "both"}:
+        raise ValueError("gate_scope must be one of: covered, global, both")
+
+    bundle = joblib.load(os.path.join(model_run_dir, "model_bundle.pkl"))
+    model = bundle["model"]
+    features = list(bundle["features"])
+    slice_cols = list(bundle.get("slice_cols", ["sensor", "biome_slice"]))
+    global_calibrator = bundle["global_calibrator"]
+    slice_calibrators = dict(bundle.get("slice_calibrators", {}))
+
+    snapshot_columns = list(
+        dict.fromkeys(
+            features
+            + ["event_label", "sensor", "biome_slice", "is_day_ratio", "truth_covered_mask", "coverage_mask_ids"]
+            + slice_cols
+        )
+    )
+    eval_df = _load_snapshot(snapshot_path, columns=snapshot_columns).copy()
+    for col in features:
+        if col not in eval_df.columns:
+            eval_df[col] = np.nan
+
+    label_map = {"POSITIVE": 1, "NEGATIVE": 0}
+    y_all = eval_df["event_label"].map(label_map).fillna(-1).astype(int).to_numpy()
+    known_mask = y_all >= 0
+    eval_known = eval_df.loc[known_mask].reset_index(drop=True)
+    y = y_all[known_mask]
+    if len(eval_known) == 0:
+        raise ValueError("No known labels in eval snapshot for denoiser v2 evaluation.")
+
+    raw = _predict_raw(model, _feature_matrix(eval_known, features))
+    calibrated = np.zeros(len(eval_known), dtype=float)
+
+    for idx, row in enumerate(eval_known.itertuples(index=False)):
+        row_series = pd.Series(row._asdict())
+        key = _slice_key(row_series, slice_cols)
+        cal = slice_calibrators.get(key, global_calibrator)
+        calibrated[idx] = float(_apply_calibrator(cal, np.asarray([raw[idx]]))[0])
+
+    default_threshold = float(bundle.get("thresholds", {}).get("decision", 0.5))
+    latency_per_10k = float(bundle.get("latency_per_10k_seconds", 0.0))
+
+    gate_thresholds = {
+        "event_recall_min": 0.92,
+        "event_precision_min": 0.75,
+        "global_f1_min": 0.85,
+        "roc_auc_min": 0.95,
+        "latency_per_10k_max_seconds": 300.0,
+        "min_event_positives": 50,
+        "min_event_negatives": 50,
+    }
+
+    global_eval = _evaluate_scope(
+        scope_name="global",
+        eval_known=eval_known,
+        y=y,
+        calibrated=calibrated,
+        default_threshold=default_threshold,
+        target_precision=target_precision,
+        target_recall=target_recall,
+        threshold_step=threshold_step,
+        gate_thresholds=gate_thresholds,
+        latency_per_10k=latency_per_10k,
+    )
+
+    covered_eval: dict[str, Any] | None = None
+    needs_covered = gate_scope in {"covered", "both"}
+    has_coverage_col = "truth_covered_mask" in eval_known.columns
+    if needs_covered:
+        if not has_coverage_col:
+            if fail_on_missing_coverage_mask:
+                raise ValueError("gate_scope requires truth_covered_mask in snapshot but column is missing")
+        else:
+            covered_mask = eval_known["truth_covered_mask"].fillna(False).astype(bool).to_numpy()
+            covered_idx = np.flatnonzero(covered_mask)
+            if covered_idx.size == 0:
+                if fail_on_missing_coverage_mask:
+                    raise ValueError("gate_scope requires covered rows but none found in truth_covered_mask")
+            else:
+                covered_eval = _evaluate_scope(
+                    scope_name="covered",
+                    eval_known=eval_known.iloc[covered_idx].reset_index(drop=True),
+                    y=y[covered_idx],
+                    calibrated=calibrated[covered_idx],
+                    default_threshold=default_threshold,
+                    target_precision=target_precision,
+                    target_recall=target_recall,
+                    threshold_step=threshold_step,
+                    gate_thresholds=gate_thresholds,
+                    latency_per_10k=latency_per_10k,
+                )
+
+    if gate_scope == "global":
+        primary_name = "global"
+        primary_eval = global_eval
+    elif gate_scope == "covered":
+        primary_name = "covered" if covered_eval is not None else "global"
+        primary_eval = covered_eval if covered_eval is not None else global_eval
+    else:  # both
+        primary_name = "covered" if covered_eval is not None else "global"
+        primary_eval = covered_eval if covered_eval is not None else global_eval
+
+    gate_pass = bool(primary_eval["gate_pass"])
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    global_eval["sweep"].to_csv(os.path.join(out_dir, "threshold_sweep_global.csv"), index=False)
+    if covered_eval is not None:
+        covered_eval["sweep"].to_csv(os.path.join(out_dir, "threshold_sweep_covered.csv"), index=False)
+    primary_eval["sweep"].to_csv(os.path.join(out_dir, "threshold_sweep.csv"), index=False)
+
+    coverage_mask_ids = []
+    if "coverage_mask_ids" in eval_known.columns:
+        coverage_mask_ids = _collect_mask_ids(eval_known["coverage_mask_ids"])
+
+    summary = {
+        "run_id": os.path.basename(model_run_dir.rstrip(os.sep)),
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "gate_scope": gate_scope,
+        "gate_scope_primary": primary_name,
+        "coverage_mask_source": coverage_mask_source,
+        "coverage_mask_ids": coverage_mask_ids,
+        "n_eval": int(primary_eval["n_eval"]),
+        "n_pos": int(primary_eval["n_pos"]),
+        "n_neg": int(primary_eval["n_neg"]),
+        "default_threshold": default_threshold,
+        "default_metrics": primary_eval["default_metrics"],
+        "threshold_recommendations": {
+            "strong_filter": primary_eval["threshold_recommendations"]["strong_filter"],
+            "downweight": primary_eval["threshold_recommendations"]["downweight"],
             "uncertainty_band_low": float(bundle.get("thresholds", {}).get("uncertainty_band_low", 0.45)),
             "uncertainty_band_high": float(bundle.get("thresholds", {}).get("uncertainty_band_high", 0.55)),
         },
         "gate_thresholds": gate_thresholds,
-        "gate_results": gate_results,
+        "gate_results": primary_eval["gate_results"],
         "gate_pass": gate_pass,
+        "global": {
+            "n_eval": int(global_eval["n_eval"]),
+            "n_pos": int(global_eval["n_pos"]),
+            "n_neg": int(global_eval["n_neg"]),
+            "default_metrics": global_eval["default_metrics"],
+            "gate_results": global_eval["gate_results"],
+            "gate_pass": bool(global_eval["gate_pass"]),
+            "threshold_recommendations": global_eval["threshold_recommendations"],
+        },
+        "covered": None,
+    }
+    if covered_eval is not None:
+        summary["covered"] = {
+            "n_eval": int(covered_eval["n_eval"]),
+            "n_pos": int(covered_eval["n_pos"]),
+            "n_neg": int(covered_eval["n_neg"]),
+            "default_metrics": covered_eval["default_metrics"],
+            "gate_results": covered_eval["gate_results"],
+            "gate_pass": bool(covered_eval["gate_pass"]),
+            "threshold_recommendations": covered_eval["threshold_recommendations"],
+        }
+
+    slice_metrics = {
+        "primary": primary_eval["slice_metrics"],
+        "global": global_eval["slice_metrics"],
+        "covered": covered_eval["slice_metrics"] if covered_eval is not None else None,
     }
 
     with open(os.path.join(out_dir, "metrics_summary.json"), "w", encoding="utf-8") as f:
@@ -226,8 +382,14 @@ def evaluate_denoiser_v2(
     gate_report = {
         "run_id": summary["run_id"],
         "pass": gate_pass,
+        "gate_scope": gate_scope,
+        "gate_scope_primary": primary_name,
+        "coverage_mask_source": coverage_mask_source,
+        "coverage_mask_ids": coverage_mask_ids,
         "thresholds": gate_thresholds,
-        "results": gate_results,
+        "results": primary_eval["gate_results"],
+        "global_results": global_eval["gate_results"],
+        "covered_results": covered_eval["gate_results"] if covered_eval is not None else None,
         "evaluated_at": summary["evaluated_at"],
     }
     with open(os.path.join(out_dir, "gate_report.json"), "w", encoding="utf-8") as f:
@@ -239,8 +401,10 @@ def evaluate_denoiser_v2(
                 [
                     f"# denoiser-v2 thresholds ({summary['run_id']})",
                     "",
-                    f"- strong_filter_threshold: {float(strong['threshold']):.2f}",
-                    f"- downweight_threshold: {float(downweight['threshold']):.2f}",
+                    f"- gate_scope: {gate_scope}",
+                    f"- gate_scope_primary: {primary_name}",
+                    f"- strong_filter_threshold: {float(summary['threshold_recommendations']['strong_filter']['threshold']):.2f}",
+                    f"- downweight_threshold: {float(summary['threshold_recommendations']['downweight']['threshold']):.2f}",
                     f"- uncertainty_band_low: {summary['threshold_recommendations']['uncertainty_band_low']:.2f}",
                     f"- uncertainty_band_high: {summary['threshold_recommendations']['uncertainty_band_high']:.2f}",
                     "",
@@ -306,6 +470,19 @@ def main() -> None:
     parser.add_argument("--target_recall", type=float, default=0.9)
     parser.add_argument("--write-db", action="store_true")
     parser.add_argument("--model-id", type=str, default=None)
+    parser.add_argument("--gate-scope", type=str, default="covered", choices=["covered", "global", "both"])
+    parser.add_argument("--coverage-mask-source", type=str, default="db_mask")
+    parser.add_argument(
+        "--fail-on-missing-coverage-mask",
+        dest="fail_on_missing_coverage_mask",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--allow-missing-coverage-mask",
+        dest="fail_on_missing_coverage_mask",
+        action="store_false",
+    )
     args = parser.parse_args()
 
     out_dir = evaluate_denoiser_v2(
@@ -317,6 +494,9 @@ def main() -> None:
         threshold_step=args.threshold_step,
         write_db=args.write_db,
         model_id=args.model_id,
+        gate_scope=args.gate_scope,
+        coverage_mask_source=args.coverage_mask_source,
+        fail_on_missing_coverage_mask=bool(args.fail_on_missing_coverage_mask),
     )
     print(out_dir)
 

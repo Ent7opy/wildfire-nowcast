@@ -23,6 +23,11 @@ logging.basicConfig(
 LOGGER = logging.getLogger("export_snapshot_v2")
 
 
+_NEUTRAL_LANDCOVER = (0.5, -1.0)
+_NEUTRAL_PERSISTENCE = (0.3, 0.5, -1.0)
+_NEUTRAL_WEATHER = (0.5, -1.0)
+
+
 def _log_step(step: str, started_at: float, *, rows: int | None = None) -> None:
     elapsed = time.perf_counter() - started_at
     suffix = ""
@@ -41,6 +46,30 @@ def _mode_or_unknown(series: pd.Series) -> str:
         return "unknown"
     mode = series.dropna().mode()
     return str(mode.iloc[0]) if not mode.empty else "unknown"
+
+
+def _normalize_static_score(series: pd.Series, neutral_values: tuple[float, ...]) -> tuple[pd.Series, pd.Series]:
+    numeric = pd.to_numeric(series, errors="coerce")
+    available = numeric.notna()
+    for neutral in neutral_values:
+        available &= ~np.isclose(numeric, neutral, atol=1e-12, rtol=0.0)
+    cleaned = numeric.where(available, np.nan)
+    return available.astype(bool), cleaned.astype(float)
+
+
+def _merge_mask_ids(series: pd.Series) -> list[str]:
+    seen: set[str] = set()
+    for value in series:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                if item is not None:
+                    seen.add(str(item))
+            continue
+        if isinstance(value, str):
+            seen.add(value)
+    return sorted(seen)
 
 
 def export_training_snapshot_v2(
@@ -81,9 +110,22 @@ def export_training_snapshot_v2(
             d.weather_score,
             d.lat,
             d.lon,
+            COALESCE(cm.truth_covered_mask, FALSE) AS truth_covered_mask,
+            COALESCE(cm.coverage_mask_ids, ARRAY[]::text[]) AS coverage_mask_ids,
             CASE WHEN d.raw_properties->>'daynight' = 'D' THEN 1 ELSE 0 END AS is_day
         FROM denoiser_labels_v2 l
         JOIN fire_detections d ON d.id = l.fire_detection_id
+        LEFT JOIN LATERAL (
+            SELECT
+                TRUE AS truth_covered_mask,
+                ARRAY_AGG(DISTINCT pcm.mask_id)::text[] AS coverage_mask_ids
+            FROM perimeter_coverage_masks pcm
+            WHERE pcm.is_active
+              AND pcm.geom && d.geom
+              AND ST_Intersects(pcm.geom, d.geom)
+              AND (pcm.valid_from IS NULL OR d.acq_time >= pcm.valid_from)
+              AND (pcm.valid_to IS NULL OR d.acq_time <= pcm.valid_to)
+        ) cm ON TRUE
         WHERE l.rule_version = :rule_version
           AND d.acq_time BETWEEN :start_time AND :end_time
           AND d.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
@@ -113,6 +155,17 @@ def export_training_snapshot_v2(
     started = time.perf_counter()
     rows["acq_time"] = pd.to_datetime(rows["acq_time"], utc=True)
     rows["event_id"] = _derive_event_id(rows)
+    rows["truth_covered_mask"] = rows["truth_covered_mask"].fillna(False).astype(bool)
+
+    rows["landcover_is_available"], rows["landcover_score_clean"] = _normalize_static_score(
+        rows["landcover_score"], _NEUTRAL_LANDCOVER
+    )
+    rows["persistence_is_available"], rows["persistence_score_clean"] = _normalize_static_score(
+        rows["persistence_score"], _NEUTRAL_PERSISTENCE
+    )
+    rows["weather_is_available"], rows["weather_score_clean"] = _normalize_static_score(
+        rows["weather_score"], _NEUTRAL_WEATHER
+    )
     _log_step("snapshot_v2.prepare_rows", started, rows=int(len(rows)))
 
     started = time.perf_counter()
@@ -136,9 +189,14 @@ def export_training_snapshot_v2(
             bright_t31_mean=("bright_t31", "mean"),
             scan_mean=("scan", "mean"),
             track_mean=("track", "mean"),
-            landcover_mean=("landcover_score", "mean"),
-            persistence_mean=("persistence_score", "mean"),
-            weather_mean=("weather_score", "mean"),
+            landcover_mean=("landcover_score_clean", "mean"),
+            persistence_mean=("persistence_score_clean", "mean"),
+            weather_mean=("weather_score_clean", "mean"),
+            landcover_is_available=("landcover_is_available", "max"),
+            persistence_is_available=("persistence_is_available", "max"),
+            weather_is_available=("weather_is_available", "max"),
+            truth_covered_mask=("truth_covered_mask", "all"),
+            coverage_mask_ids=("coverage_mask_ids", _merge_mask_ids),
             is_day_ratio=("is_day", "mean"),
             lat_centroid=("lat", "mean"),
             lon_centroid=("lon", "mean"),
@@ -154,7 +212,11 @@ def export_training_snapshot_v2(
     event_df["sin_doy"] = np.sin(2 * np.pi * doy / 365.25)
     event_df["cos_doy"] = np.cos(2 * np.pi * doy / 365.25)
 
-    # Perimeter-covered-first proxy slice.
+    event_df["landcover_is_available"] = event_df["landcover_is_available"].astype(np.float32)
+    event_df["persistence_is_available"] = event_df["persistence_is_available"].astype(np.float32)
+    event_df["weather_is_available"] = event_df["weather_is_available"].astype(np.float32)
+    event_df["truth_covered_mask"] = event_df["truth_covered_mask"].astype(bool)
+
     event_df["biome_slice"] = pd.cut(
         event_df["landcover_mean"].fillna(0.5),
         bins=[-np.inf, 0.25, 0.6, np.inf],
@@ -180,6 +242,11 @@ def export_training_snapshot_v2(
     eval_df.to_parquet(eval_path, index=False)
     event_df.to_parquet(full_path, index=False)
 
+    coverage_mask_ids: set[str] = set()
+    for ids in event_df["coverage_mask_ids"]:
+        if isinstance(ids, list):
+            coverage_mask_ids.update(str(x) for x in ids)
+
     metadata = {
         "run_id": run_id,
         "exported_at": datetime.utcnow().isoformat() + "Z",
@@ -193,6 +260,11 @@ def export_training_snapshot_v2(
             "event_positive": int((event_df["event_label"] == "POSITIVE").sum()),
             "event_negative": int((event_df["event_label"] == "NEGATIVE").sum()),
             "event_unknown": int((event_df["event_label"] == "UNKNOWN").sum()),
+            "event_truth_covered": int(event_df["truth_covered_mask"].sum()),
+        },
+        "coverage": {
+            "mask_ids": sorted(coverage_mask_ids),
+            "truth_covered_ratio": float(event_df["truth_covered_mask"].mean()) if len(event_df) else 0.0,
         },
         "split": {
             "strategy": "time_percentile",
@@ -209,6 +281,7 @@ def export_training_snapshot_v2(
                 "label_numeric",
                 "start_time",
                 "end_time",
+                "coverage_mask_ids",
             }
         ],
         "paths": {

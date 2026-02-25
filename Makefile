@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -274,7 +274,7 @@ denoiser-snapshot-v2: ## Export v2 event snapshot (pass ARGS="--bbox ... --start
 denoiser-train-v2: ## Train v2 denoiser (pass CONFIG="configs/denoiser_train_v2.yaml")
 	$(UV) run --project ml -m ml.train_denoiser_v2 --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v2.yaml)
 
-denoiser-eval-v2: ## Evaluate v2 denoiser (pass MODEL_RUN="models/denoiser_v2/<run_id>" SNAPSHOT=".../run_<id>" OUT="reports/denoiser_v2/<run_id>")
+denoiser-eval-v2: ## Evaluate v2 denoiser (pass MODEL_RUN="models/denoiser_v2/<run_id>" SNAPSHOT=".../run_<id>" OUT="reports/denoiser_v2/<run_id>" ARGS="--gate-scope covered")
 	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v2/<run_id>"))
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT=<snapshot dir/parquet>))
 	$(if $(OUT),,$(error Please provide OUT="reports/denoiser_v2/<run_id>"))
@@ -285,6 +285,15 @@ denoiser-association-report: ## Compare baseline vs updated event association qu
 
 denoiser-drift-monitor: ## Run denoiser drift monitor (+ optional rollback) (pass ARGS="--dry-run")
 	$(UV) run --project ingest -m ingest.denoiser_drift_monitor $(ARGS)
+
+denoiser-load-coverage-masks: ## Load coverage masks (pass ARGS="--input path/to/masks.geojson --provider ...")
+	$(UV) run --project api scripts/load_perimeter_coverage_masks.py $(ARGS)
+
+denoiser-freeze-baseline: ## Freeze baseline artifacts (pass ARGS="--model-run models/denoiser_v2/<run_id> --snapshot ...")
+	$(UV) run --project api scripts/denoiser_v2_freeze_baseline.py $(ARGS)
+
+denoiser-sweep-v2: ## Run/dry-run constrained PU-bagging sweep (pass ARGS="--base-config ... --snapshot ... [--execute]")
+	$(UV) run --project api scripts/denoiser_v2_sweep.py $(ARGS)
 
 ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 --year 2025")
 	$(UV) run --project ingest -m ingest.nifc_perimeters_ingest $(ARGS)

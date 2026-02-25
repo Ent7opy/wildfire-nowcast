@@ -25,6 +25,19 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("denoiser_inference_v2")
 
+_NEUTRAL_LANDCOVER = (0.5, -1.0)
+_NEUTRAL_PERSISTENCE = (0.3, 0.5, -1.0)
+_NEUTRAL_WEATHER = (0.5, -1.0)
+
+
+def _normalize_static_score(series: pd.Series, neutral_values: tuple[float, ...]) -> tuple[pd.Series, pd.Series]:
+    numeric = pd.to_numeric(series, errors="coerce")
+    available = numeric.notna()
+    for neutral in neutral_values:
+        available &= ~np.isclose(numeric, neutral, atol=1e-12, rtol=0.0)
+    cleaned = numeric.where(available, np.nan)
+    return available.astype(bool), cleaned.astype(float)
+
 
 def _load_bundle(model_run_dir: str) -> dict[str, Any]:
     bundle_path = os.path.join(model_run_dir, "model_bundle.pkl")
@@ -113,6 +126,15 @@ def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
     df["is_day"] = df["raw_properties"].apply(
         lambda x: 1 if isinstance(x, dict) and x.get("daynight") == "D" else 0
     )
+    df["landcover_is_available"], df["landcover_score_clean"] = _normalize_static_score(
+        df["landcover_score"], _NEUTRAL_LANDCOVER
+    )
+    df["persistence_is_available"], df["persistence_score_clean"] = _normalize_static_score(
+        df["persistence_score"], _NEUTRAL_PERSISTENCE
+    )
+    df["weather_is_available"], df["weather_score_clean"] = _normalize_static_score(
+        df["weather_score"], _NEUTRAL_WEATHER
+    )
 
     out = (
         df.groupby("event_id", dropna=False)
@@ -130,13 +152,19 @@ def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
             bright_t31_mean=("bright_t31", "mean"),
             scan_mean=("scan", "mean"),
             track_mean=("track", "mean"),
-            landcover_mean=("landcover_score", "mean"),
-            persistence_mean=("persistence_score", "mean"),
-            weather_mean=("weather_score", "mean"),
+            landcover_mean=("landcover_score_clean", "mean"),
+            persistence_mean=("persistence_score_clean", "mean"),
+            weather_mean=("weather_score_clean", "mean"),
+            landcover_is_available=("landcover_is_available", "max"),
+            persistence_is_available=("persistence_is_available", "max"),
+            weather_is_available=("weather_is_available", "max"),
             is_day_ratio=("is_day", "mean"),
         )
         .reset_index()
     )
+    out["landcover_is_available"] = out["landcover_is_available"].astype(np.float32)
+    out["persistence_is_available"] = out["persistence_is_available"].astype(np.float32)
+    out["weather_is_available"] = out["weather_is_available"].astype(np.float32)
     out["duration_hours"] = (out["end_time"] - out["start_time"]).dt.total_seconds() / 3600.0
     doy = out["start_time"].dt.dayofyear.fillna(1)
     out["sin_doy"] = np.sin(2 * np.pi * doy / 365.25)

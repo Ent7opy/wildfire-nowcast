@@ -52,11 +52,11 @@ def _check_perimeter_coverage(
     stmt = text(
         """
         SELECT COUNT(*) AS n
-        FROM fire_perimeters
-        WHERE geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
-          AND fire_start IS NOT NULL
-          AND fire_start <= :end_time
-          AND (fire_end IS NULL OR fire_end >= :start_time)
+        FROM perimeter_coverage_masks
+        WHERE is_active
+          AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+          AND (valid_from IS NULL OR valid_from <= :end_time)
+          AND (valid_to IS NULL OR valid_to >= :start_time)
         """
     )
     with engine.begin() as conn:
@@ -74,40 +74,30 @@ def _check_perimeter_coverage(
     return int(row["n"]) if row else 0
 
 
-def _get_perimeter_coverage_bbox(
+def _active_coverage_mask_ids(
     engine: Engine,
     start_time: datetime,
     end_time: datetime,
-) -> Optional[Tuple[float, float, float, float]]:
+) -> list[str]:
     stmt = text(
         """
-        SELECT
-            ST_XMin(ST_Extent(geom)) AS min_lon,
-            ST_YMin(ST_Extent(geom)) AS min_lat,
-            ST_XMax(ST_Extent(geom)) AS max_lon,
-            ST_YMax(ST_Extent(geom)) AS max_lat
-        FROM fire_perimeters
-        WHERE fire_start IS NOT NULL
-          AND fire_start <= :end_time
-          AND (fire_end IS NULL OR fire_end >= :start_time)
+        SELECT mask_id
+        FROM perimeter_coverage_masks
+        WHERE is_active
+          AND (valid_from IS NULL OR valid_from <= :end_time)
+          AND (valid_to IS NULL OR valid_to >= :start_time)
+        ORDER BY mask_id
         """
     )
     with engine.begin() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             stmt,
             {
                 "start_time": start_time,
                 "end_time": end_time,
             },
-        ).mappings().first()
-    if row and row["min_lon"] is not None:
-        return (
-            float(row["min_lon"]),
-            float(row["min_lat"]),
-            float(row["max_lon"]),
-            float(row["max_lat"]),
-        )
-    return None
+        ).mappings().all()
+    return [str(row["mask_id"]) for row in rows]
 
 
 def _log_step(step: str, started_at: float, *, rows: int | None = None) -> None:
@@ -122,14 +112,12 @@ def _label_single_window(
     engine: Engine,
     *,
     aoi_bbox: Tuple[float, float, float, float],
-    coverage_bbox: Tuple[float, float, float, float],
     start_time: datetime,
     end_time: datetime,
     rule_version: str,
     params: Dict,
 ) -> dict[str, int]:
     min_lon, min_lat, max_lon, max_lat = aoi_bbox
-    cov_min_lon, cov_min_lat, cov_max_lon, cov_max_lat = coverage_bbox
 
     p = params
     meters_to_deg = 1.0 / 111000.0
@@ -140,10 +128,6 @@ def _label_single_window(
         "min_lat": min_lat,
         "max_lon": max_lon,
         "max_lat": max_lat,
-        "cov_min_lon": cov_min_lon,
-        "cov_min_lat": cov_min_lat,
-        "cov_max_lon": cov_max_lon,
-        "cov_max_lat": cov_max_lat,
         "positive_buffer_m": float(p["positive_buffer_m"]),
         "positive_buffer_deg": float(p["positive_buffer_m"]) * meters_to_deg,
         "positive_time_pad_hours": int(p["positive_time_pad_hours"]),
@@ -174,26 +158,29 @@ def _label_single_window(
         """
         CREATE TEMP TABLE tmp_label_candidates ON COMMIT DROP AS
         SELECT
-            id,
-            event_id,
-            lat,
-            lon,
-            acq_time,
-            confidence,
-            frp,
-            landcover_score,
-            COALESCE(false_source_masked, FALSE) AS false_source_masked,
-            COALESCE(persistence_score, 0.0) AS persistence_score,
-            geom,
-            (
-                lon >= :cov_min_lon
-                AND lon <= :cov_max_lon
-                AND lat >= :cov_min_lat
-                AND lat <= :cov_max_lat
+            d.id,
+            d.event_id,
+            d.lat,
+            d.lon,
+            d.acq_time,
+            d.confidence,
+            d.frp,
+            d.landcover_score,
+            COALESCE(d.false_source_masked, FALSE) AS false_source_masked,
+            COALESCE(d.persistence_score, 0.0) AS persistence_score,
+            d.geom,
+            EXISTS (
+                SELECT 1
+                FROM perimeter_coverage_masks pcm
+                WHERE pcm.is_active
+                  AND pcm.geom && d.geom
+                  AND ST_Intersects(pcm.geom, d.geom)
+                  AND (pcm.valid_from IS NULL OR d.acq_time >= pcm.valid_from)
+                  AND (pcm.valid_to IS NULL OR d.acq_time <= pcm.valid_to)
             ) AS in_coverage
-        FROM fire_detections
-        WHERE acq_time BETWEEN :start_time AND :end_time
-          AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+        FROM fire_detections d
+        WHERE d.acq_time BETWEEN :start_time AND :end_time
+          AND d.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
         """
     )
 
@@ -484,18 +471,17 @@ def label_detections_v2(
     coverage_count = _check_perimeter_coverage(engine, aoi_bbox, start_time, end_time)
     if coverage_count == 0:
         raise SystemExit(
-            "No perimeter coverage found for selected window. Load perimeter data before labeling v2."
+            "No active perimeter coverage masks found for selected window. "
+            "Load perimeter_coverage_masks before labeling v2."
         )
 
-    coverage_bbox = _get_perimeter_coverage_bbox(engine, start_time, end_time)
-    if coverage_bbox is None:
-        coverage_bbox = aoi_bbox
+    mask_ids = _active_coverage_mask_ids(engine, start_time, end_time)
+    LOGGER.info("Label v2 coverage mask count=%s", len(mask_ids))
 
     if int(chunk_days) <= 0:
         counts = _label_single_window(
             engine,
             aoi_bbox=aoi_bbox,
-            coverage_bbox=coverage_bbox,
             start_time=start_time,
             end_time=end_time,
             rule_version=rule_version,
@@ -520,7 +506,6 @@ def label_detections_v2(
         counts = _label_single_window(
             engine,
             aoi_bbox=aoi_bbox,
-            coverage_bbox=coverage_bbox,
             start_time=cursor,
             end_time=chunk_end,
             rule_version=rule_version,
