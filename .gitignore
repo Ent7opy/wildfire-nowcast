@@ -102,6 +102,7 @@ logs/
 # checkpoints/
 
 # Local outputs / downloaded datasets (keep repo clean)
+*.parquet
 data/ingest/
 data/denoiser/snapshots/
 data/denoiser/*.parquet
