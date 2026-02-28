@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -179,6 +179,9 @@ repair-fire-detections: ## Repair synthetic rows, thermal fields, stale running 
 recompute-fire-scores: ## Recompute scoring fields for batches with incomplete derived columns
 	$(UV) run --project api scripts/recompute_fire_scores.py $(ARGS)
 
+denoiser-data-coverage-report: ## Export denoiser data coverage/neutral report (pass ARGS="--start ... --end ...")
+	$(UV) run --project api scripts/denoiser_data_coverage_report.py $(ARGS)
+
 ingest-weather: ## Run NOAA GFS weather ingestion (pass ARGS="--run-time 2025-12-06T00:00Z")
 	$(UV) run --project ingest -m ingest.weather_ingest $(ARGS)
 
@@ -265,7 +268,7 @@ denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="model
 denoiser-eventize: ## Build front/event clusters for v2 (pass ARGS="--batch-id ... | --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.eventize $(ARGS)
 
-denoiser-label-v2: ## Run v2 labeling (pass ARGS="--bbox ... --start ... --end ... --version ...")
+denoiser-label-v2: ## Run v2 labeling (pass ARGS="--start ... --end ... [--bbox ...] --version ... --authority-profile wfigs_us --perimeter-source authoritative_perimeters --authoritative-tier both")
 	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)
 
 denoiser-snapshot-v2: ## Export v2 event snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
@@ -286,8 +289,11 @@ denoiser-association-report: ## Compare baseline vs updated event association qu
 denoiser-drift-monitor: ## Run denoiser drift monitor (+ optional rollback) (pass ARGS="--dry-run")
 	$(UV) run --project ingest -m ingest.denoiser_drift_monitor $(ARGS)
 
-denoiser-load-coverage-masks: ## Load coverage masks (pass ARGS="--input path/to/masks.geojson --provider ...")
+denoiser-load-coverage-masks: ## Load coverage masks (pass ARGS="--input ... --authority-profile wfigs_us --source-uri ... --source-version ...")
 	$(UV) run --project api scripts/load_perimeter_coverage_masks.py $(ARGS)
+
+denoiser-build-coverage-masks: ## Build coverage masks from authoritative geometry (pass ARGS="--input ... --authority-profile wfigs_us --source-uri ... --source-version ...")
+	$(UV) run --project ingest -m ingest.coverage_mask_builder $(ARGS)
 
 denoiser-freeze-baseline: ## Freeze baseline artifacts (pass ARGS="--model-run models/denoiser_v2/<run_id> --snapshot ...")
 	$(UV) run --project api scripts/denoiser_v2_freeze_baseline.py $(ARGS)
@@ -297,6 +303,9 @@ denoiser-sweep-v2: ## Run/dry-run constrained PU-bagging sweep (pass ARGS="--bas
 
 ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 --year 2025")
 	$(UV) run --project ingest -m ingest.nifc_perimeters_ingest $(ARGS)
+
+ingest-authoritative-perimeters: ## Ingest authoritative WFIGS perimeters (pass ARGS="--source-profile ... [--start ... --end ...]")
+	$(UV) run --project ingest -m ingest.wfigs_authority_ingest $(ARGS)
 
 ingest-orchestrator: ## Run unified FIRMS/weather/terrain/perimeters orchestrator (pass ARGS="--loop --poll-seconds 30")
 	$(UV) run --project ingest -m ingest.orchestrator $(ARGS)
@@ -343,14 +352,19 @@ train-denoiser: ## Train/eval/register/promote denoiser champion from latest run
 	if [ ! -f "$$metrics_file" ]; then echo "Missing metrics file: $$metrics_file"; exit 1; fi; \
 	if [ "$(TRAIN_DENOISER_REQUIRE_GATE)" = "true" ] && [ ! -f "$$gate_file" ]; then echo "Missing required gate report: $$gate_file"; exit 1; fi; \
 	gate_pass="true"; \
+	coverage_fresh="true"; \
 	if [ -f "$$gate_file" ]; then \
 		gate_pass=$$($(PYTHON) -c 'import json,sys; payload=json.load(open(sys.argv[1], "r", encoding="utf-8")); print("true" if bool(payload.get("pass", False)) else "false")' "$$gate_file"); \
 		if [ "$$gate_pass" != "true" ]; then echo "Promotion blocked: gate report failed ($$gate_file)"; exit 1; fi; \
+		if [ "$(TRAIN_DENOISER_PIPELINE)" = "v2" ]; then \
+			coverage_fresh=$$($(PYTHON) -c 'import json,sys; payload=json.load(open(sys.argv[1], "r", encoding="utf-8")); freshness=payload.get("coverage_data_freshness") or {}; print("true" if bool(freshness.get("fresh", False)) else "false")' "$$gate_file"); \
+			if [ "$$coverage_fresh" != "true" ]; then echo "Promotion blocked: authoritative coverage freshness check failed ($$gate_file)"; exit 1; fi; \
+		fi; \
 	fi; \
 	registry_metrics="$$latest_run/registry_metrics.json"; \
-	$(PYTHON) -c 'import json, os, sys; metrics_path, gate_path, out_path, gate_pass = sys.argv[1:5]; metrics=json.load(open(metrics_path, "r", encoding="utf-8")); out=dict(metrics) if isinstance(metrics, dict) else {"metrics": metrics}; out["gate_pass"]=(gate_pass=="true"); \
+	$(PYTHON) -c 'import json, os, sys; metrics_path, gate_path, out_path, gate_pass, coverage_fresh = sys.argv[1:6]; metrics=json.load(open(metrics_path, "r", encoding="utf-8")); out=dict(metrics) if isinstance(metrics, dict) else {"metrics": metrics}; out["gate_pass"]=(gate_pass=="true"); out["coverage_fresh"]=(coverage_fresh=="true"); \
 if gate_path and os.path.exists(gate_path): out["gate_report"]=json.load(open(gate_path, "r", encoding="utf-8")); \
-json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file" "$$gate_file" "$$registry_metrics" "$$gate_pass"; \
+json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file" "$$gate_file" "$$registry_metrics" "$$gate_pass" "$$coverage_fresh"; \
 	echo "Registering $$latest_run"; \
 	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_DENOISER_FAMILY) --artifact "$$latest_run" --metrics "@$$registry_metrics"); \
 	echo "Promoting $$model_id"; \

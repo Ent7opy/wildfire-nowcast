@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
 
 from api.db import get_engine
+from ml.denoiser.coverage_authority import get_coverage_freshness, require_coverage_freshness
 
 
 def _load_snapshot(path: str, *, columns: list[str]) -> pd.DataFrame:
@@ -208,6 +209,9 @@ def evaluate_denoiser_v2(
     gate_scope: str = "covered",
     coverage_mask_source: str = "db_mask",
     fail_on_missing_coverage_mask: bool = True,
+    coverage_authority_profile: str = "wfigs_us",
+    coverage_max_age_hours: float = 72.0,
+    fail_on_stale_coverage_mask: bool = True,
 ) -> str:
     gate_scope = str(gate_scope).strip().lower()
     if gate_scope not in {"covered", "global", "both"}:
@@ -276,9 +280,21 @@ def evaluate_denoiser_v2(
     )
 
     covered_eval: dict[str, Any] | None = None
+    coverage_freshness: dict[str, Any] | None = None
     needs_covered = gate_scope in {"covered", "both"}
     has_coverage_col = "truth_covered_mask" in eval_known.columns
     if needs_covered:
+        if coverage_mask_source == "db_mask":
+            if fail_on_stale_coverage_mask:
+                coverage_freshness = require_coverage_freshness(
+                    authority_profile=coverage_authority_profile,
+                    max_age_hours=float(coverage_max_age_hours),
+                )
+            else:
+                coverage_freshness = get_coverage_freshness(
+                    authority_profile=coverage_authority_profile,
+                    max_age_hours=float(coverage_max_age_hours),
+                )
         if not has_coverage_col:
             if fail_on_missing_coverage_mask:
                 raise ValueError("gate_scope requires truth_covered_mask in snapshot but column is missing")
@@ -331,6 +347,9 @@ def evaluate_denoiser_v2(
         "gate_scope": gate_scope,
         "gate_scope_primary": primary_name,
         "coverage_mask_source": coverage_mask_source,
+        "coverage_authority_profile": coverage_authority_profile,
+        "coverage_data_freshness": coverage_freshness,
+        "coverage_run_id": (coverage_freshness or {}).get("run_id"),
         "coverage_mask_ids": coverage_mask_ids,
         "n_eval": int(primary_eval["n_eval"]),
         "n_pos": int(primary_eval["n_pos"]),
@@ -385,6 +404,9 @@ def evaluate_denoiser_v2(
         "gate_scope": gate_scope,
         "gate_scope_primary": primary_name,
         "coverage_mask_source": coverage_mask_source,
+        "coverage_authority_profile": coverage_authority_profile,
+        "coverage_data_freshness": coverage_freshness,
+        "coverage_run_id": (coverage_freshness or {}).get("run_id"),
         "coverage_mask_ids": coverage_mask_ids,
         "thresholds": gate_thresholds,
         "results": primary_eval["gate_results"],
@@ -472,6 +494,8 @@ def main() -> None:
     parser.add_argument("--model-id", type=str, default=None)
     parser.add_argument("--gate-scope", type=str, default="covered", choices=["covered", "global", "both"])
     parser.add_argument("--coverage-mask-source", type=str, default="db_mask")
+    parser.add_argument("--coverage-authority-profile", type=str, default="wfigs_us")
+    parser.add_argument("--coverage-max-age-hours", type=float, default=72.0)
     parser.add_argument(
         "--fail-on-missing-coverage-mask",
         dest="fail_on_missing_coverage_mask",
@@ -481,6 +505,17 @@ def main() -> None:
     parser.add_argument(
         "--allow-missing-coverage-mask",
         dest="fail_on_missing_coverage_mask",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--fail-on-stale-coverage-mask",
+        dest="fail_on_stale_coverage_mask",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--allow-stale-coverage-mask",
+        dest="fail_on_stale_coverage_mask",
         action="store_false",
     )
     args = parser.parse_args()
@@ -497,6 +532,9 @@ def main() -> None:
         gate_scope=args.gate_scope,
         coverage_mask_source=args.coverage_mask_source,
         fail_on_missing_coverage_mask=bool(args.fail_on_missing_coverage_mask),
+        coverage_authority_profile=args.coverage_authority_profile,
+        coverage_max_age_hours=float(args.coverage_max_age_hours),
+        fail_on_stale_coverage_mask=bool(args.fail_on_stale_coverage_mask),
     )
     print(out_dir)
 

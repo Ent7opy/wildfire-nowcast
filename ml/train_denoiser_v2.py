@@ -22,6 +22,8 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
 
+from ml.denoiser.coverage_authority import get_coverage_freshness, require_coverage_freshness
+
 try:
     from xgboost import XGBClassifier
 
@@ -273,6 +275,7 @@ def _fit_teacher_student_pu(
     train_df: pd.DataFrame,
     y_train: np.ndarray,
     features: list[str],
+    slice_cols: list[str],
     rng: np.random.Generator,
 ) -> tuple[Any, dict[str, Any]]:
     known_mask = y_train >= 0
@@ -293,6 +296,10 @@ def _fit_teacher_student_pu(
     min_oob_votes = max(1, int(pu_cfg.get("min_oob_votes", 3)))
     pos_threshold = float(pu_cfg.get("pos_threshold", 0.70))
     neg_threshold = float(pu_cfg.get("neg_threshold", 0.30))
+    pseudo_negative_max_ratio = float(pu_cfg.get("pseudo_negative_max_ratio", 3.0))
+    max_pseudo_negative_rows = int(pu_cfg.get("max_pseudo_negative_rows", 0))
+    min_pseudo_positive_rows = int(pu_cfg.get("min_pseudo_positive_rows", 500))
+    oob_margin_min = max(0.0, float(pu_cfg.get("oob_margin_min", 0.05)))
 
     class_weight_pos = float(config.get("pos_class_weight", 1.0))
 
@@ -348,16 +355,57 @@ def _fit_teacher_student_pu(
         score_sums[oob_idx] += oob_scores
         vote_counts[oob_idx] += 1
 
+    unknown_meta_cols = [c for c in list(dict.fromkeys(slice_cols + ["start_time"])) if c in train_df.columns]
+    unknown_meta = train_df.loc[unknown_mask, unknown_meta_cols].reset_index(drop=True)
+
     if unknown_count > 0:
         oob_mean, valid_votes = _oob_mean_scores(score_sums, vote_counts, min_oob_votes=min_oob_votes)
-        pseudo_pos_mask = valid_votes & (oob_mean >= pos_threshold)
-        pseudo_neg_mask = valid_votes & (oob_mean <= neg_threshold)
+        pseudo_pos_mask, pseudo_neg_mask, ignored_mask, pos_cut, neg_cut = _build_pseudo_label_masks(
+            oob_mean=oob_mean,
+            valid_votes=valid_votes,
+            pos_threshold=pos_threshold,
+            neg_threshold=neg_threshold,
+            oob_margin_min=oob_margin_min,
+        )
+        pseudo_pos_count = int(pseudo_pos_mask.sum())
+        if pseudo_pos_count < min_pseudo_positive_rows:
+            raise ValueError(
+                "xgboost_pu_bagging produced too few pseudo positives: "
+                f"pseudo_positive_rows={pseudo_pos_count}, "
+                f"min_pseudo_positive_rows={min_pseudo_positive_rows}. "
+                "Adjust PU thresholds or improve label/feature coverage."
+            )
+        pseudo_neg_mask, neg_cap = _apply_pseudo_negative_caps(
+            pseudo_neg_mask=pseudo_neg_mask,
+            pseudo_positive_rows=pseudo_pos_count,
+            pseudo_negative_max_ratio=pseudo_negative_max_ratio,
+            max_pseudo_negative_rows=max_pseudo_negative_rows,
+            rng=rng,
+        )
         ignored_mask = ~(pseudo_pos_mask | pseudo_neg_mask)
+        pseudo_diagnostics = _build_pseudo_diagnostics(
+            unknown_meta=unknown_meta,
+            pseudo_pos_mask=pseudo_pos_mask,
+            pseudo_neg_mask=pseudo_neg_mask,
+            valid_votes=valid_votes,
+            vote_counts=vote_counts,
+            slice_cols=slice_cols,
+        )
     else:
         pseudo_pos_mask = np.asarray([], dtype=bool)
         pseudo_neg_mask = np.asarray([], dtype=bool)
         ignored_mask = np.asarray([], dtype=bool)
+        valid_votes = np.asarray([], dtype=bool)
         vote_counts = np.asarray([], dtype=np.int32)
+        pos_cut = pos_threshold
+        neg_cut = neg_threshold
+        neg_cap = {
+            "pseudo_negative_rows_before_cap": 0,
+            "pseudo_negative_rows_after_cap": 0,
+            "pseudo_negative_rows_cap_target": 0,
+            "pseudo_negative_rows_dropped": 0,
+        }
+        pseudo_diagnostics = {"by_month": [], "by_slice": []}
 
     x_parts = [x_pos, x_neg]
     y_parts = [
@@ -393,8 +441,130 @@ def _fit_teacher_student_pu(
         "ignored_rows": int(ignored_mask.sum()) if unknown_count > 0 else 0,
         "pos_threshold": float(pos_threshold),
         "neg_threshold": float(neg_threshold),
+        "pos_threshold_effective": float(pos_cut),
+        "neg_threshold_effective": float(neg_cut),
+        "oob_margin_min": float(oob_margin_min),
+        "pseudo_negative_max_ratio": float(pseudo_negative_max_ratio),
+        "max_pseudo_negative_rows": int(max_pseudo_negative_rows),
+        "min_pseudo_positive_rows": int(min_pseudo_positive_rows),
+        **neg_cap,
+        "pseudo_label_diagnostics": pseudo_diagnostics,
     }
     return student, stats
+
+
+def _build_pseudo_label_masks(
+    *,
+    oob_mean: np.ndarray,
+    valid_votes: np.ndarray,
+    pos_threshold: float,
+    neg_threshold: float,
+    oob_margin_min: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+    margin = max(0.0, float(oob_margin_min))
+    pos_cut = min(1.0, float(pos_threshold) + margin)
+    neg_cut = max(0.0, float(neg_threshold) - margin)
+    pseudo_pos_mask = valid_votes & (oob_mean >= pos_cut)
+    pseudo_neg_mask = valid_votes & (oob_mean <= neg_cut)
+    ignored_mask = ~(pseudo_pos_mask | pseudo_neg_mask)
+    return pseudo_pos_mask, pseudo_neg_mask, ignored_mask, pos_cut, neg_cut
+
+
+def _apply_pseudo_negative_caps(
+    *,
+    pseudo_neg_mask: np.ndarray,
+    pseudo_positive_rows: int,
+    pseudo_negative_max_ratio: float,
+    max_pseudo_negative_rows: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, dict[str, int]]:
+    total_neg = int(pseudo_neg_mask.sum())
+    if total_neg == 0:
+        return pseudo_neg_mask, {
+            "pseudo_negative_rows_before_cap": 0,
+            "pseudo_negative_rows_after_cap": 0,
+            "pseudo_negative_rows_cap_target": 0,
+            "pseudo_negative_rows_dropped": 0,
+        }
+
+    cap_target = total_neg
+    ratio = float(pseudo_negative_max_ratio)
+    if ratio >= 0.0:
+        cap_target = min(cap_target, int(max(0.0, ratio) * max(0, int(pseudo_positive_rows))))
+    if int(max_pseudo_negative_rows) > 0:
+        cap_target = min(cap_target, int(max_pseudo_negative_rows))
+    cap_target = max(0, int(cap_target))
+
+    if cap_target >= total_neg:
+        return pseudo_neg_mask, {
+            "pseudo_negative_rows_before_cap": total_neg,
+            "pseudo_negative_rows_after_cap": total_neg,
+            "pseudo_negative_rows_cap_target": cap_target,
+            "pseudo_negative_rows_dropped": 0,
+        }
+
+    neg_idx = np.flatnonzero(pseudo_neg_mask)
+    keep_idx = rng.choice(neg_idx, size=cap_target, replace=False) if cap_target > 0 else np.asarray([], dtype=int)
+    capped = np.zeros_like(pseudo_neg_mask, dtype=bool)
+    capped[keep_idx] = True
+    return capped, {
+        "pseudo_negative_rows_before_cap": total_neg,
+        "pseudo_negative_rows_after_cap": int(capped.sum()),
+        "pseudo_negative_rows_cap_target": cap_target,
+        "pseudo_negative_rows_dropped": int(total_neg - capped.sum()),
+    }
+
+
+def _build_pseudo_diagnostics(
+    *,
+    unknown_meta: pd.DataFrame,
+    pseudo_pos_mask: np.ndarray,
+    pseudo_neg_mask: np.ndarray,
+    valid_votes: np.ndarray,
+    vote_counts: np.ndarray,
+    slice_cols: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    if unknown_meta.empty:
+        return {"by_month": [], "by_slice": []}
+
+    diag = unknown_meta.copy()
+    diag["pseudo_state"] = np.where(
+        pseudo_pos_mask,
+        "pseudo_positive",
+        np.where(pseudo_neg_mask, "pseudo_negative", np.where(valid_votes, "ignored_uncertain", "insufficient_oob")),
+    )
+    diag["oob_votes"] = np.asarray(vote_counts, dtype=int)
+    month_rows: list[dict[str, Any]] = []
+    if "start_time" in diag.columns:
+        month_key = pd.to_datetime(diag["start_time"], errors="coerce", utc=True).dt.strftime("%Y-%m")
+        month_df = pd.DataFrame({"month": month_key, "pseudo_state": diag["pseudo_state"]})
+        month_counts = (
+            month_df.groupby(["month", "pseudo_state"], dropna=False).size().reset_index(name="rows")
+        )
+        month_rows = [
+            {
+                "month": str(r["month"]) if pd.notna(r["month"]) else "unknown",
+                "pseudo_state": str(r["pseudo_state"]),
+                "rows": int(r["rows"]),
+            }
+            for _, r in month_counts.iterrows()
+        ]
+
+    use_slice_cols = [c for c in slice_cols if c in diag.columns]
+    slice_rows: list[dict[str, Any]] = []
+    if use_slice_cols:
+        grouped = diag.groupby(use_slice_cols + ["pseudo_state"], dropna=False).size().reset_index(name="rows")
+        for _, row in grouped.iterrows():
+            label = "|".join(f"{c}={row[c]}" for c in use_slice_cols)
+            slice_rows.append(
+                {
+                    "slice": label,
+                    "pseudo_state": str(row["pseudo_state"]),
+                    "rows": int(row["rows"]),
+                }
+            )
+
+    return {"by_month": month_rows, "by_slice": slice_rows}
 
 
 def _oob_mean_scores(
@@ -486,6 +656,22 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     model_backend = str(config.get("model_backend", "xgboost")).strip().lower()
     coverage_scope = str(config.get("coverage_scope", "covered")).strip().lower()
     coverage_mask_source = str(config.get("coverage_mask_source", "db_mask")).strip()
+    coverage_authority_profile = str(config.get("coverage_authority_profile", "wfigs_us")).strip()
+    coverage_max_age_hours = float(config.get("coverage_max_age_hours", 72.0))
+    coverage_fail_on_stale = bool(config.get("coverage_fail_on_stale", True))
+    coverage_freshness: dict[str, Any] | None = None
+
+    if coverage_scope == "covered" and coverage_mask_source == "db_mask":
+        if coverage_fail_on_stale:
+            coverage_freshness = require_coverage_freshness(
+                authority_profile=coverage_authority_profile,
+                max_age_hours=coverage_max_age_hours,
+            )
+        else:
+            coverage_freshness = get_coverage_freshness(
+                authority_profile=coverage_authority_profile,
+                max_age_hours=coverage_max_age_hours,
+            )
 
     features = list(config["features"])
     label_col = str(config.get("label_column", "event_label"))
@@ -516,6 +702,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
             train_df=train_scope,
             y_train=y_train,
             features=features,
+            slice_cols=slice_cols,
             rng=rng,
         )
     else:
@@ -646,6 +833,9 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "model_backend": model_backend,
         "gate_scope": coverage_scope,
         "coverage_mask_source": coverage_mask_source,
+        "coverage_authority_profile": coverage_authority_profile,
+        "coverage_run_id": (coverage_freshness or {}).get("run_id"),
+        "coverage_data_freshness": coverage_freshness,
     }
 
     joblib.dump(bundle, os.path.join(run_dir, "model_bundle.pkl"))
@@ -659,6 +849,8 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "model_backend": model_backend,
         "coverage_scope": coverage_scope,
         "coverage_mask_source": coverage_mask_source,
+        "coverage_authority_profile": coverage_authority_profile,
+        "coverage_data_freshness": coverage_freshness,
         "train_rows": int(len(train_df)),
         "train_scope_rows": int(len(train_scope)),
         "eval_rows": int(len(eval_df)),
@@ -680,6 +872,9 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "pass": gate_pass,
         "gate_scope": coverage_scope,
         "coverage_mask_source": coverage_mask_source,
+        "coverage_authority_profile": coverage_authority_profile,
+        "coverage_data_freshness": coverage_freshness,
+        "coverage_run_id": (coverage_freshness or {}).get("run_id"),
         "thresholds": gates,
         "results": gate_results,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),

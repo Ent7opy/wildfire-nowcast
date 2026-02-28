@@ -804,6 +804,101 @@ def get_latest_denoiser_gate_report() -> dict | None:
     return dict(row) if row else None
 
 
+def get_latest_denoiser_coverage_status(authority_profile: str = "wfigs_us") -> dict | None:
+    """Return latest authoritative coverage ingest status + active mask summary."""
+    run_stmt = text(
+        """
+        WITH run_candidates AS (
+            SELECT
+                air.run_id,
+                air.source_profile,
+                air.source_uri,
+                air.source_layer,
+                air.status,
+                air.started_at,
+                air.finished_at,
+                air.source_last_edit,
+                air.records_fetched,
+                air.records_upserted,
+                air.records_skipped,
+                air.http_429_count,
+                air.max_backoff_seconds
+            FROM authoritative_perimeter_ingest_runs air
+            JOIN perimeter_coverage_masks pcm
+              ON pcm.run_id = air.run_id
+            WHERE pcm.authority_profile = :authority_profile
+              AND pcm.is_active
+              AND air.status = 'succeeded'
+            UNION
+            SELECT
+                run_id,
+                source_profile,
+                source_uri,
+                source_layer,
+                status,
+                started_at,
+                finished_at,
+                source_last_edit,
+                records_fetched,
+                records_upserted,
+                records_skipped,
+                http_429_count,
+                max_backoff_seconds
+            FROM authoritative_perimeter_ingest_runs
+            WHERE source_profile = :authority_profile
+              AND status = 'succeeded'
+        )
+        SELECT
+            run_id,
+            source_profile,
+            source_uri,
+            source_layer,
+            status,
+            started_at,
+            finished_at,
+            source_last_edit,
+            records_fetched,
+            records_upserted,
+            records_skipped,
+            http_429_count,
+            max_backoff_seconds
+        FROM run_candidates
+        ORDER BY finished_at DESC NULLS LAST, started_at DESC
+        LIMIT 1
+        """
+    )
+    mask_stmt = text(
+        """
+        SELECT
+            COUNT(*) AS active_mask_count,
+            (ARRAY_AGG(mask_id ORDER BY mask_id))[1:20] AS sample_mask_ids,
+            MIN(valid_from) AS min_valid_from,
+            MAX(valid_to) AS max_valid_to
+        FROM perimeter_coverage_masks
+        WHERE is_active
+          AND authority_profile = :authority_profile
+        """
+    )
+    with get_engine().begin() as conn:
+        run_row = conn.execute(run_stmt, {"authority_profile": authority_profile}).mappings().first()
+        if run_row is None:
+            return None
+        mask_row = conn.execute(mask_stmt, {"authority_profile": authority_profile}).mappings().first()
+
+    payload = dict(run_row)
+    if mask_row is not None:
+        payload["active_mask_count"] = int(mask_row["active_mask_count"] or 0)
+        payload["sample_mask_ids"] = list(mask_row["sample_mask_ids"] or [])
+        payload["min_valid_from"] = mask_row["min_valid_from"]
+        payload["max_valid_to"] = mask_row["max_valid_to"]
+    else:
+        payload["active_mask_count"] = 0
+        payload["sample_mask_ids"] = []
+        payload["min_valid_from"] = None
+        payload["max_valid_to"] = None
+    return payload
+
+
 def list_recent_denoiser_drift(limit: int = 50) -> list[dict]:
     """Return recent drift metric rows."""
     stmt = text(

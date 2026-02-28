@@ -57,7 +57,7 @@ def _normalize_static_score(series: pd.Series, neutral_values: tuple[float, ...]
     return available.astype(bool), cleaned.astype(float)
 
 
-def _merge_mask_ids(series: pd.Series) -> list[str]:
+def _merge_text_values(series: pd.Series) -> list[str]:
     seen: set[str] = set()
     for value in series:
         if value is None:
@@ -112,13 +112,17 @@ def export_training_snapshot_v2(
             d.lon,
             COALESCE(cm.truth_covered_mask, FALSE) AS truth_covered_mask,
             COALESCE(cm.coverage_mask_ids, ARRAY[]::text[]) AS coverage_mask_ids,
+            COALESCE(cm.coverage_authority_profiles, ARRAY[]::text[]) AS coverage_authority_profiles,
+            COALESCE(cm.coverage_run_ids, ARRAY[]::text[]) AS coverage_run_ids,
             CASE WHEN d.raw_properties->>'daynight' = 'D' THEN 1 ELSE 0 END AS is_day
         FROM denoiser_labels_v2 l
         JOIN fire_detections d ON d.id = l.fire_detection_id
         LEFT JOIN LATERAL (
             SELECT
                 TRUE AS truth_covered_mask,
-                ARRAY_AGG(DISTINCT pcm.mask_id)::text[] AS coverage_mask_ids
+                ARRAY_AGG(DISTINCT pcm.mask_id)::text[] AS coverage_mask_ids,
+                ARRAY_AGG(DISTINCT pcm.authority_profile)::text[] AS coverage_authority_profiles,
+                ARRAY_REMOVE(ARRAY_AGG(DISTINCT pcm.run_id), NULL)::text[] AS coverage_run_ids
             FROM perimeter_coverage_masks pcm
             WHERE pcm.is_active
               AND pcm.geom && d.geom
@@ -196,7 +200,9 @@ def export_training_snapshot_v2(
             persistence_is_available=("persistence_is_available", "max"),
             weather_is_available=("weather_is_available", "max"),
             truth_covered_mask=("truth_covered_mask", "all"),
-            coverage_mask_ids=("coverage_mask_ids", _merge_mask_ids),
+            coverage_mask_ids=("coverage_mask_ids", _merge_text_values),
+            coverage_authority_profiles=("coverage_authority_profiles", _merge_text_values),
+            coverage_run_ids=("coverage_run_ids", _merge_text_values),
             is_day_ratio=("is_day", "mean"),
             lat_centroid=("lat", "mean"),
             lon_centroid=("lon", "mean"),
@@ -243,9 +249,17 @@ def export_training_snapshot_v2(
     event_df.to_parquet(full_path, index=False)
 
     coverage_mask_ids: set[str] = set()
+    coverage_authority_profiles: set[str] = set()
+    coverage_run_ids: set[str] = set()
     for ids in event_df["coverage_mask_ids"]:
         if isinstance(ids, list):
             coverage_mask_ids.update(str(x) for x in ids)
+    for ids in event_df["coverage_authority_profiles"]:
+        if isinstance(ids, list):
+            coverage_authority_profiles.update(str(x) for x in ids)
+    for ids in event_df["coverage_run_ids"]:
+        if isinstance(ids, list):
+            coverage_run_ids.update(str(x) for x in ids)
 
     metadata = {
         "run_id": run_id,
@@ -264,6 +278,8 @@ def export_training_snapshot_v2(
         },
         "coverage": {
             "mask_ids": sorted(coverage_mask_ids),
+            "authority_profiles": sorted(coverage_authority_profiles),
+            "run_ids": sorted(coverage_run_ids),
             "truth_covered_ratio": float(event_df["truth_covered_mask"].mean()) if len(event_df) else 0.0,
         },
         "split": {
@@ -282,6 +298,8 @@ def export_training_snapshot_v2(
                 "start_time",
                 "end_time",
                 "coverage_mask_ids",
+                "coverage_authority_profiles",
+                "coverage_run_ids",
             }
         ],
         "paths": {

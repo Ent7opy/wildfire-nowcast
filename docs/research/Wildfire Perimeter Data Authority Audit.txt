@@ -1,0 +1,328 @@
+﻿AUTHORITATIVE_PERIMETERS.md
+Technical Audit of Wildfire Geospatial Intelligence and Global Perimeter Promotion Logic
+The development of a high-fidelity wildfire denoiser requires a rigorous engineering framework to distinguish between transient operational noise and authoritative administrative truth. In the geospatial domain, a fire perimeter is not a static geometry but a dynamic record governed by agency-specific protocols, technical schemas, and validation gates. The primary objective of this technical audit is to define the exact criteria and API architectures necessary to implement an "Authoritative Perimeter Promotion Gate." This gate serves as the decision-making engine that promotes inbound geospatial data from a "Monitoring Tier" (Bronze) to an "Operational Tier" (Silver) and, finally, to a "Certified Ground Truth" (Gold). By refusing the ingestion of unverified polygons or dummy data, this system ensures that only incident-command-approved data points inform the operational model.
+I. Primary Authority (USA): NIFC WFIGS/NIFS Governance and Data Lifecycle
+The National Interagency Fire Center (NIFC) is the central authority for wildland fire data in the United States. Through the Wildland Fire Interagency Geospatial Services (WFIGS) group, authoritative data products are distributed to federal, state, and local agencies.1 The core of this system is the Integrated Reporting of Wildland Fire Information (IRWIN) service, which brokers data between disparate applications to ensure consistency and eliminate redundancy.3
+1. Integrated Reporting of Wildfire Information (IRWIN) Mechanics
+The IRWIN service is the "system of record" for incident attributes, which are then synchronized with geospatial geometries in the National Incident Feature Service (NIFS). IRWIN operates as a RESTful web API that allows authenticated systems to perform Add, Query, and Update operations.3 For a perimeter to be promoted, it must first be valid within the IRWIN integration service. IRWIN supports conflict detection and resolution to ensure a unique record for each incident.5 If an incident is identified as a duplicate, it may be quarantined or deprecated, which immediately impacts its visibility in public geospatial services.1
+Systems interacting with IRWIN are assigned specific roles. The IRWINREAD role is utilized by systems that only consume data, while IRWINCAD and DISPATCH roles allow for write actions from Computer-Aided Dispatch systems.3 A critical component for the promotion gate is the Authoritative Data Source (ADS) matrix. This matrix defines which system has the primary authority over a specific attribute at a given time.3 During the initial attack and active growth phases, the ADS for a perimeter is typically the NIFS; however, once the fire is contained and the final fire report is certified, the ADS transitions to InFORM (Interagency Fire Occurrence Reporting Modules).5
+2. The National Incident Feature Service (NIFS) Geospatial Schema
+The NIFS is a hosted feature service within NIFC's ArcGIS Online organization. It implements the NWCG Wildland Fire Event Polygon standard (PMS 936).8 This standard ensures that perimeters from diverse agencies—such as the US Forest Service (USFS), Bureau of Land Management (BLM), and National Park Service (NPS)—are interoperable.8 For the denoiser, the most critical layers are the Wildfire Daily Fire Perimeter and the Wildfire Final Fire Perimeter.8
+
+
+Feature Class
+	Purpose
+	Data Source
+	Reliability Tier
+	Wildfire Daily Fire Perimeter
+	Tracks the ongoing progression of an active fire.8
+	Incident Management Team (IMT) GISS.8
+	Silver (Operational)
+	Wildfire Final Fire Perimeter
+	The definitive, post-incident spatial extent.8
+	Certified InFORM Record.2
+	Gold (Certified Truth)
+	3. WFIGS API REST Endpoints for 2025 Ingestion
+For the 2025 Jan-Aug window, the system must interface with specific WFIGS endpoints. These services are optimized for public release and are subsets of the internal NIFS operational data.14
+* Current/Active Perimeters: https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Current_Interagency_Fire_Perimeters/FeatureServer/0 16
+   * Function: Captures incidents that are actively being managed or have been recently updated.
+   * Governance: Subject to "fall-off" rules where records are removed based on size class and lack of updates (e.g., Class A/B fires drop after 3 days without updates).17
+* 2025 Year-to-Date Perimeters: https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Interagency_Perimeters_YearToDate/FeatureServer/0 19
+   * Function: Accumulates all perimeters discovered in 2025, regardless of their current containment status.
+   * Strategy: This is the primary endpoint for the 2025 Window Strategy to ensure incidents are not missed if they fall off the "Current" service.
+* Interagency Fire Perimeters (Full History): https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Interagency_Perimeters/FeatureServer/0 21
+   * Function: A consolidated project back to 2021 providing the best-available perimeters.23
+4. Specific Metadata Flags for Promotion Logic
+The "Promotion Gate" must evaluate the following technical fields to decide if a perimeter is promoted to "Real World Truth."
+
+
+Attribute Field
+	Required Value
+	Technical Significance
+	poly_FeatureStatus
+	'Approved'
+	Confirms the Situation Unit Leader (SITL) has reviewed and approved the geometry.8
+	poly_FeatureAccess
+	'Public'
+	Distinguishes between internal operational drafts and data cleared for public release.1
+	poly_IsVisible
+	'Yes'
+	Acts as the final gatekeeper for visibility; records set to 'No' are often erroneous or redundant.1
+	attr_IsValid
+	1
+	Indicates the underlying IRWIN record is valid and not in a quarantined state.1
+	poly_Source
+	'FFP'
+	Specific to the Gold Tier; indicates the perimeter is sourced from InFORM Final Fire Perimeters.13
+	poly_MapMethod
+	Various
+	Defines how the geometry was derived (e.g., GPS-Walked, Infrared Flight).27
+	The poly_MapMethod field is a critical weighted variable for denoising. Perimeters derived from "Infrared Flights" (NIROPS) or "GPS-Walked" edges carry significantly higher spatial reliability than "Hand Sketch" or "Digitized" methods.11 The denoiser should assign a higher probability score to geometries with these specific methods.
+II. Infrastructure Governance and API Performance Constraints
+In the context of mission-critical engineering, the infrastructure hosting the data is as significant as the data itself. NIFC utilizes the ArcGIS Online host services3.arcgis.com. Interacting with this host at high frequencies (e.g., for real-time alerting) requires strict adherence to organization-wide performance rules.
+1. Rate Limiting and Request Units (RU)
+ArcGIS Online subscriptions enforce limits based on "Request Units" (RUs). RUs are not a simple query count; they represent a cumulative "weight" based on the load the query puts on the Feature Data Store.29
+* Standard Organizations: Shared limit of approximately 10,000 RUs per minute.29
+* Premium Data Stores (M2/M4): Higher capacity, up to 96,000 RUs per minute, with dedicated database processing power.29
+* Error Handling: When the organization's limit is reached, the server returns a 429 (Too Many Requests) error. A one-minute "cooling off" period is triggered during which non-cacheable queries are rejected.29
+2. Polling Strategy and Latency Management
+Data in WFIGS is refreshed from IRWIN every 5 minutes.1 However, there is an additional latency for the source polygon updates to appear in the public portal, which can take up to 15 minutes.1
+The coding agent must implement the following polling discipline:
+* Minimum Polling Interval: 10 seconds. ArcGIS Velocity and other polling-type feeds enforce this to prevent overloading the feature service.33
+* Cache Utilization: To avoid 429 errors, queries must be designed to be cache-repeatable. This means avoiding the use of CURRENT_TIMESTAMP or "in the last X days" filters within the SQL WHERE clause, as these force the system to bypass the Content Delivery Network (CDN) and query the source database directly.23
+* Refresh Intervals: For web applications, a "refresh interval" property can be set on the layer to sync automatically with the latest data while the map is open. The valid range for hosted feature layers is 0.5 minutes (30 seconds) to 1 day.34
+3. API Key and Authentication Requirements
+While the WFIGS services are public, high-frequency access or integration with secure resources may require API Key authentication. API keys are long-lived access tokens (valid for up to one year) that can be scoped to specific services.36 They are the recommended type of authentication for standalone automation scripts that perform operations with a personal scope.37 For public-facing web applications, storing credentials with the service item allows the public to access secure services via an ArcGIS item proxy without signing in.39
+III. Secondary Authority (Canada): CWFIS and the Completeness Lag
+The Canadian wildland fire geospatial ecosystem, managed by the Canadian Wildland Fire Information System (CWFIS), differs significantly from the US model. While CWFIS provides a national view, the authoritative data is collected at the provincial and territorial levels by agencies such as the British Columbia Wildfire Service and Alberta Wildfire.41
+1. Completeness Lag and Approval Stages
+There is a documented "completeness lag" in the Canadian National Fire Database (CNFDB). This database is a collection of forest fire perimeters projected into a common format, but data accuracy and quality vary among contributing agencies and between years.43
+* Estimated/Rough (Bronze): These are "Fire Perimeter Estimates" generated from satellite-detected hotspots in near-real time (e.g., MODIS/VIIRS). These approximate burned area perimeters are considered very rough and are intended primarily for large fires when no other mapping options exist.42
+* Agency Approved (Silver): During the fire season, provinces provide reported active fire locations updated daily.42 These are operational estimates but are not "final."
+* Certified Truth (Gold): The National Burned Area Composite (NBAC) is the definitive national geospatial product. It chooses the "best available source" for each burned area, incorporating refined provincial data and satellite analysis. However, the NBAC update cycle is slow, with the previous year's fires typically finalized once a year in July.42
+2. 2025 Canadian Context: The "Zombie Fire" Phenomenon
+The 2025 Canadian wildfire season was heavily influenced by the extreme 2023 and 2024 seasons. By mid-June 2025, the season was on track to be the second-worst on record.47 A unique challenge for a 2025 denoiser is the presence of holdover "zombie fires"—fires that smolder under the snow for up to two years and re-emerge in the spring.47
+From an engineering perspective, these fires have an ignition date in 2023 but appear as active in 2025. The denoiser must use the poly_PolygonDateTime or DATE_CUR field rather than discovery date alone to track current fire progression.1
+3. CWFIS Technical Access and API Endpoints
+Unlike WFIGS, Canada relies heavily on OGC-standard web services through GeoServer.
+* Web Feature Service (WFS) for Vector Data: https://cwfis.cfs.nrcan.gc.ca/geoserver/wfs? 42
+* Web Map Service (WMS) for Visualization: https://cwfis.cfs.nrcan.gc.ca/geoserver/wms? 42
+* Downloadable Indices (SHP): Current Active Fires are available at https://cwfis.cfs.nrcan.gc.ca/downloads/activefires/.42
+Promotion Rule for Canada: National data remains in the Monitoring Tier (Bronze/Silver) until the annual NBAC release. Real-time promotion to "Gold" is not technically feasible for 2025 incidents at the national level without direct provincial-tier WFS ingestion.
+IV. EU and Global Authorities: EFFIS/GWIS Satellite Reality
+For Europe, the Middle East, and North Africa (MENA), the authoritative monitoring system is the European Forest Fire Information System (EFFIS), part of the Copernicus Emergency Management Service (CEMS).48 A fundamental technical conclusion of this audit is that EFFIS and GWIS perimeters are purely satellite-derived and lack incident-command verification.50
+1. Methodology of Satellite Delineation
+EFFIS utilizes a semi-automatic procedure for mapping burned areas through its Rapid Damage Assessment (RDA) module.50
+* Detection: MODIS (250m) and VIIRS (375m) sensors identify thermal anomalies ("hotspots") by comparing pixel temperature against surrounding land cover.51
+* Initial Mapping: Polygons are automatically derived from the coordinates of active fires, allowing for near-real-time processing even in light cloudy or smoke situations.50
+* Refinement: Since 2018, Sentinel-2 imagery (20m resolution) has been used to map fires smaller than 30 ha and refine the final perimeters of larger fires.50
+* Denoising Step: Trained analysts inspect satellite imagery to delineate boundaries and perform visual interpretation to ensure non-fire heat sources (like photovoltaic installations) are not mistakenly mapped as burned areas.53
+2. Copernicus EMS Rapid Mapping API
+For high-intensity events, the Copernicus Rapid Mapping team produces "Activations" that provide detailed damage assessments. These activations are accessible programmatically via a JSON API.54
+* JSON API Listing: https://rapidmapping.emergency.copernicus.eu/backend/dashboard-api/public-activations-info/ 54
+* Activation Search: Filtering by code (e.g., EMSR833 for Greece 2025) provides full activation metadata, including Areas of Interest (AOIs) and product links.54
+* Product Types:
+   * DEL (Delineation Map): Provides the extent of the event.
+   * GRA (Grading Map): Provides damage assessment (severity).
+   * Reliability Logic: Only products flagged as feasible (cloud-free imagery available) should be ingested.54
+Promotion Rule for EU/Global: No authoritative promotion source found for incident command verification in real-time. All EFFIS perimeters must remain in the Silver (Satellite-Analyst Verified) tier and never be promoted to Gold (Ground Truth).
+V. Technical Contract Requirements for U.S. WFIGS Source
+To establish the "Promotion Gate" logic for the United States, the following technical contract must be implemented by the coding agent. This schema analysis is based on the authoritative NIFS and IRWIN data dictionaries.
+1. Primary Unique Identifier
+The immutable GUID for linking perimeters with incident reports and cross-system records is poly_IRWINID.21
+* Legacy Note: The attr_IrwinID is used for linking to wildland fire locations (point data), which must match the poly_IRWINID in the polygon layer for valid promotion.25
+* Alternative Identifier: For geospatial versioning, poly_SourceGlobalID represents the GUID of the specific geometry update in the source NIFS dataset.7
+2. Temporal Metadata Fields
+Promotion to "Real World Truth" requires consistent timestamp verification across discovery, operational, and containment fields.
+
+
+Field Name
+	Type
+	Description
+	attr_FireDiscoveryDateTime
+	Date (UTC)
+	The official discovery date/time; used as the start boundary for temporal window queries.56
+	poly_PolygonDateTime
+	Date (UTC)
+	The exact date/time the polygon geometry was captured by the field or satellite sensor.1
+	attr_ContainmentDateTime
+	Date (UTC)
+	The date/time a wildfire was declared contained (Silver Gate).56
+	attr_ControlDateTime
+	Date (UTC)
+	The date/time a wildfire was declared under control (Gold Gate).56
+	poly_DateCurrent
+	Date (UTC)
+	System-generated date for the last edit of the GIS record.1
+	3. Reliability Logic: Tier Policy Definition
+The denoiser must apply the following reliability scoring logic to determine promotion eligibility.
+* Gold Tier (Certified Ground Truth)
+   * Source: WFIGS Certified Interagency Fire Perimeters / InFORM FODR.
+   * Logic: WHERE poly_Source = 'FFP' AND poly_FeatureStatus = 'Approved'.
+   * Verification: Geometry is derived from a certified fire report and has passed post-incident QA/QC.2
+* Silver Tier (Operational Approved)
+   * Source: WFIGS Current or Year-to-Date services.
+   * Logic: WHERE poly_FeatureStatus = 'Approved' AND poly_FeatureAccess = 'Public' AND poly_IsVisible = 'Yes'.
+   * Verification: Data has been reviewed and approved by the Situation Unit Leader (SITL) on an active incident.8
+* Bronze Tier (Estimated/Working)
+   * Source: FIRMS / CWFIS Fire Perimeter Estimates / VIIRS FEDS Algorithms.
+   * Logic: WHERE poly_MapMethod = 'Auto-generated' OR poly_FeatureStatus = 'Internal'.
+   * Verification: Unverified by command personnel; purely satellite-detected or operational draft.45
+VI. Deprecated Systems and Data Redirection
+A robust denoiser must proactively exclude legacy data feeds that are no longer considered authoritative.
+1. BLM FPER Deprecation
+The Bureau of Land Management Fire Occurrence and History Perimeter (FPER) dataset is explicitly non-authoritative post-2019.14
+* Official Redirection: Per FA IM-2020-009, management and certification of perimeters were transferred to the NIFS via NIFC.14
+* Engineering Action: Flag any system using gis.blm.gov/arcgis/rest/services/fire/BLM_Natl_FirePerimeter for 2025 data as an "Invalid Source".61
+2. GeoMAC Decommissioning
+The legacy Geospatial Multi-Agency Coordination (GeoMAC) application has been replaced by the WFIGS services.5
+* Engineering Action: Perimeter data between 2000–2018 is archived and static. All 2019 and later perimeters must be pulled from the NIFS-based WFIGS services.12
+VII. Implementation: The 2025 Window Strategy
+For the Jan-Aug 2025 timeframe, the query strategy must account for both "discovery" and "polygon capture" timestamps to handle the overlap between active 2025 fires and holdover 2023/2024 incidents.
+1. Ingestion Query for 2025 Jan-Aug Window
+The following SQL-style filter must be applied to the 2025 Year-to-Date Feature Service to capture the requested timeframe.
+
+
+SQL
+
+
+
+
+/* 2025 Jan-Aug Authoritative Capture Query */
+SELECT 
+   poly_IRWINID, poly_IncidentName, poly_GISAcres, 
+   poly_MapMethod, poly_PolygonDateTime, 
+   attr_FireDiscoveryDateTime, attr_ContainmentDateTime 
+FROM WFIGS_YearToDate_2025
+WHERE attr_FireDiscoveryDateTime >= '2025-01-01 00:00:00'
+ AND attr_FireDiscoveryDateTime <= '2025-08-31 23:59:59'
+ AND poly_FeatureStatus = 'Approved'
+ AND poly_FeatureAccess = 'Public'
+ AND poly_IsVisible = 'Yes'
+ AND attr_IsValid = 1;
+
+2. Geometry and Acreage Validation Logic
+A significant source of noise in wildland fire data is the discrepancy between GIS-calculated area and manually reported acreage.
+* Validation Rule: Cross-check poly_GISAcres against attr_IncidentSize (or attr_DiscoveryAcres for early starts).
+* Denoising Heuristic: If poly_GISAcres is 0.0 or null, reject promotion. If the difference between poly_GISAcres and attr_IncidentSize is greater than 20%, flag for "Manual Review" rather than automatic promotion.18
+3. Handling Size Classes for Fall-off Logic
+The system should be aware that smaller fires are less likely to have perimeters. For Class A and B fires (   acres), perimeters are often not captured at all.17 The denoiser must expect a lack of polygons for these size classes and rely on the 2025 Wildland Fire Incident Locations to Date (point) service for those incidents.1
+VIII. Stop/Go Statement for coding Agent Promotion
+The Authoritative Perimeter Promotion Gate is authorized to promote a record to "Real World Truth" ONLY under the following conditions:
+1. GO: The source is NIFC WFIGS AND poly_FeatureStatus = 'Approved' AND poly_FeatureAccess = 'Public' AND poly_IsVisible = 'Yes' AND attr_IsValid = 1.1
+2. STOP: If the source is EFFIS, GWIS, or CWFIS Fire Perimeter Estimates (Satellite-derived), the record MAY NOT be promoted beyond the "Monitoring Tier" (Bronze). These records are estimates and fail the "Incident Command Approved" ground-truth requirement.45
+3. STOP: If the attr_IsQuarantined flag is set to True (1) in the US source, or if a potential conflict is detected by the IRWIN broker.1
+4. GO (Gold Certification): If the incident has a containment date and the poly_Source = 'FFP', it is promoted to the highest historical ground-truth tier.2
+IX. Technical Summary of US WFIGS Attribute Domains
+To ensure precise filtering, the domain values for key fields must be hardcoded into the promotion logic.
+
+
+Field
+	Tier
+	Acceptable Domain Values
+	poly_FeatureStatus
+	Silver
+	'Approved', 'Certified' 8
+	poly_FeatureAccess
+	Silver
+	'Public' 1
+	poly_IsVisible
+	Silver
+	'Yes' 1
+	poly_Source
+	Gold
+	'FFP', 'FODR' 7
+	poly_MapMethod
+	Reliability Weight
+	'GPS-Walked', 'Infrared Flight', 'Mixed Methods' 28
+	attr_ADSPermissionState
+	Integration Gate
+	'DEFAULT', 'CERTIFIED' 1
+	The logic provided in this audit replaces heuristics with agency-defined metadata gates. By strictly enforcing these parameters, the coding agent creates a denoising engine that reflects the technical reality of real-world wildland fire management. Adherence to these REST endpoints, organization-wide rate limits, and multi-tiered reliability policies ensures the integrity of the ground-truth data used for model training and active monitoring during the 2025 wildfire season.
+X. Causal Relationships in Operational Wildfire Data
+To understand the reliability of a perimeter, one must analyze the causal relationship between discovery, resource mobilization, and geospatial reporting. The IRWIN service facilitates near-real-time synchronization between disparate agencies, but the "Truth" of a fire perimeter is a function of the tools used by the GISS (Geographic Information System Specialist) assigned to the incident.3
+1. Data Inception and CAD Integration
+A fire record typically originates in a Computer-Aided Dispatch (CAD) system (e.g., WildCAD) when a report is received.3 This record is pushed to IRWIN, creating a "Point" location with initial estimated acreage.5 At this stage, the fire is in the Bronze Tier. No perimeter exists, only a center point.
+2. GISS Mobilization and NIFS Synchronization
+Once an Incident Management Team (IMT) is assigned, a GISS is tasked with mapping the fire. They create an "Offline Copy" of the NIFS Event Polygon layer in ArcGIS Pro.11
+* The Sync Cycle: The specialist performs a "Sync – Edit – Sync" workflow. Before editing, they pull the latest geometries from the server to avoid conflicts. After editing (e.g., after an overnight IR flight or a morning GPS walk), they sync their changes back to the NIFS.11
+* Public Visibility: These edits are initially "Internal." Only when the SITL or GISS sets poly_FeatureAccess = 'Public' and poly_FeatureStatus = 'Approved' does the perimeter flow into the public WFIGS perimeters used by applications like InciWeb.11 This transition is the moment of promotion to the Silver Tier.
+3. Post-Incident QA/QC and InFORM Certification
+After the fire is declared "Out," the operational phase ends, but the data lifecycle continues. The incident record moves into the InFORM application for certification.2
+* Certification Gate: A regional or local authority reviews the final acreage, cause, and final perimeter. Upon certification, the poly_Source is updated to 'FFP' (Final Fire Perimeter).2
+* ADS Shift: The ADS for the record shifts from NIFS to InFORM FODR (Fire Occurrence Data Records).5 This is the final promotion to the Gold Tier.
+XI. Infrastructure Performance: Detailed RU and CDN Dynamics
+High-frequency polling for a wildfire denoiser can inadvertently trigger a denial-of-service state on the public feature service if query weighting is not optimized.
+1. Query Weighting in ArcGIS Online
+Different REST operations consume different amounts of Request Units (RUs).
+* Simple Attributes: Querying basic fields (e.g., WHERE poly_IRWINID = '{...}') is low weight.
+* Geometry Queries: Spatial queries (e.g., ST_Intersects) and pulling full multipart polygons are high weight.29
+* Cache Misses: Queries with non-repeatable parameters (like a sliding time window) bypass the CDN cache and hit the database directly, incurring 100% of the RU cost.29
+2. Mitigation for 429 Errors
+To maintain a performant denoiser without hitting RU limits:
+* Referrer Restriction: The API should be configured with specific Referrer URLs/IPs to ensure requests are recognized as coming from a legitimate service rather than an anonymous bot.39
+* Paginated Requests: Pulling large datasets (e.g., the 2025 Full History) should be paginated. Pulling 3,000 records in one request is significantly more RU-intensive than three requests of 1,000 records each.29
+* Webhook Alternatives: While not always available for public feeds, checking the lastEditDate property of the service allows the denoiser to skip querying if no changes have occurred since the last poll.
+XII. Global Perspective: Regional Limitations and Authenticity
+The audit confirms that while the US and Canada have structured (though lagged) authoritative systems, other global regions rely heavily on satellite estimates.
+1. EFFIS/GWIS Regional Accuracy
+EFFIS coverage represents about 95% of the total burned area in the EU.50 However, the spatial resolution of the original EFFIS product (250m) refined with Sentinel-2 (20m) does not match the underlying Map Tiler imagery used for visualization.50
+* Global Wildfire Information System (GWIS): GWIS provides a synoptic view of global fire activity but uses the MODIS burned area product (MCD64A1) as its base. This product takes approximately two months to be available, creating a significant temporal gap for 2025 real-time monitoring.52
+* Authenticity Note: In many parts of the EU, Middle East, and North Africa (MENA), there is no public-facing incident command perimeter endpoint. For these regions, the denoiser must explicitly stay in the Monitoring Tier (Bronze/Silver) and acknowledge that perimeters are estimates based on manual analyst refinement of satellite imagery.50
+2. Australia and Southeast Asia (Inferred)
+While not the primary focus of the US/Canada/EU audit, research into GWIS confirms that global wildfire data is "fragmented and inconsistent" outside of these major authorities.52 For Indonesia and Nepal, specific SMS alert systems exist based on FIRMS hotspots (Bronze tier), but authoritative, command-approved polygons are not identified in the public API scope.66
+XIII. Final Technical Implementation Contract Summary
+This document serves as the final technical contract for the build-out of the "Authoritative Perimeter Promotion Gate."
+1. Direct API Integration: All inbound data must flow from the WFIGS and CEMS Rapid Mapping REST endpoints. Legacy BLM and GeoMAC sources are strictly deprecated.
+2. Logic over Heuristics: Promotion decisions must be binary metadata matches (poly_FeatureStatus = 'Approved'). There is no "guessing" based on fire name or proximity.
+3. Temporal Precision: The 2025 Window Strategy uses attr_FireDiscoveryDateTime for inclusion and poly_PolygonDateTime for progression tracking.
+4. Tiered Reliability: Gold/Silver/Bronze tiers are assigned based on poly_Source and poly_MapMethod.
+5. Infrastructure Health: Polling must adhere to a 10-second minimum and utilize CDN-friendly queries to avoid 429 throttling.
+The "Stop/Go" definition is final. If a perimeter fails the command-approval metadata check, it remains "Operationally Unverified" and is excluded from the ground-truth model. This ensures that the wildfire denoiser operates with maximum precision, reflecting the administrative and geospatial reality on the ground during the 2025 fire season.
+Цитирани творби
+1. WFIGS 2025 Wildfire Perimeters - California State Geoportal, осъществен достъп на февруари 25, 2026, https://gis.data.ca.gov/datasets/CALFIRE-Forestry::wfigs-2025-wildfire-perimeters/about
+2. WFIGS - National Interagency Fire Center, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/pages/wfigs-page
+3. IRWIN Integration Specification Frequencies API v11 - Draft.docx - AWS, осъществен достъп на февруари 25, 2026, https://wildfireweb-prod-media-bucket.s3.us-gov-west-1.amazonaws.com/s3fs-public/2025-09/IRWIN%20Integration%20Specification%20Frequencies%20API%20v11.docx.pdf
+4. Integration Specification Incidents API v9 - AWS, осъществен достъп на февруари 25, 2026, https://wildfireweb-prod-media-bucket.s3.us-gov-west-1.amazonaws.com/s3fs-public/2024-05/IRWIN%20Integration%20Specification%20Incidents%20API%20v9.pdf
+5. New_FireHistory_Services - National Interagency Fire Center, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/pages/new_firehistory_services
+6. IRWIN Integration Specification Resources API v11 - AWS, осъществен достъп на февруари 25, 2026, https://wildfireweb-prod-media-bucket.s3.us-gov-west-1.amazonaws.com/s3fs-public/2025-09/IRWIN%20Integration%20Specification%20Resources%20API%20v11.docx.pdf
+7. WFIGS Fire History - Wildland Fire Interagency Geospatial Services, осъществен достъп на февруари 25, 2026, https://wfigs-nifc.hub.arcgis.com/pages/wfigs-fire-history
+8. National Incident Feature Services | NWCG, осъществен достъп на февруари 25, 2026, https://www.nwcg.gov/publications/pms936/event-geodatabase-national-incident-feature-services
+9. Wildland Fire Event Polygon | NWCG, осъществен достъп на февруари 25, 2026, http://www.nwcg.gov/node/5305928
+10. Jurisdictional Units Public | National Interagency Fire Center - ArcGIS Online, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::jurisdictional-units-public/about
+11. Edit Event Data - National Wildfire Coordinating Group | NWCG, осъществен достъп на февруари 25, 2026, https://www.nwcg.gov/publications/pms936-1/edit-event-data
+12. FAQs | National Interagency Fire Center, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/pages/faqs
+13. WFIGS Certified Interagency Fire Perimeters - Overview, осъществен достъп на февруари 25, 2026, https://nifc.maps.arcgis.com/home/item.html?id=df60e07e9ba64dddb6bdc99578d5b2a5
+14. BLM Natl Fire Perimeters Polygon - Dataset - Catalog - Data.gov, осъществен достъп на февруари 25, 2026, https://catalog.data.gov/dataset/blm-natl-fire-perimeters-polygon-5a2b4
+15. WFIGS Current Interagency Fire Perimeters — OpenEnergyDataPortal - OpenEnergy Hub, осъществен достъп на февруари 25, 2026, https://openenergyhub.ornl.gov/explore/dataset/wfigs-current-interagency-fire-perimeters/
+16. WFIGS Current Interagency Fire Perimeters, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::wfigs-current-interagency-fire-perimeters/about
+17. WFIGS Current Interagency Fire Perimeters - Overview - ArcGIS Online, осъществен достъп на февруари 25, 2026, https://www.arcgis.com/home/item.html?id=d1c32af3212341869b3c810f1a215824
+18. WFIGS Current Interagency Fire Perimeters - ArcGIS Hub, осъществен достъп на февруари 25, 2026, https://hub.arcgis.com/datasets/nifc::wfigs-current-interagency-fire-perimeters/about
+19. WFIGS 2025 Wildfire Perimeters | California State Geoportal, осъществен достъп на февруари 25, 2026, https://gis.data.ca.gov/datasets/f72ebe741e3b4f0db376b4e765728339_0/api
+20. WFIGS 2025 Wildfire Perimeters - California State Geoportal, осъществен достъп на февруари 25, 2026, https://gis.data.ca.gov/datasets/f72ebe741e3b4f0db376b4e765728339_0/about
+21. WFIGS Interagency Fire Perimeters, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::wfigs-interagency-fire-perimeters/api
+22. WFIGS Interagency Fire Perimeters, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::wfigs-interagency-fire-perimeters/about
+23. WFIGS Interagency Fire Perimeters - Overview - ArcGIS Online, осъществен достъп на февруари 25, 2026, https://www.arcgis.com/home/item.html?id=5e72b1699bf74eefb3f3aff6f4ba5511
+24. HIFLD Open WFIGS Interagency Fire Perimeters - Data Rescue Project Portal, осъществен достъп на февруари 25, 2026, https://portal.datarescueproject.org/datasets/hifld-open-wfigs-interagency-fire-perimeters/
+25. WFIGS 2026 Interagency Fire Perimeters to Date, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/7c81ab78d8464e5c9771e49b64e834e9_0/about
+26. Current Wildland Fire Incident Locations - National Interagency Fire Center - ArcGIS Online, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::current-wildland-fire-incident-locations/about
+27. InterAgencyFirePerimeterHistory All Years View - National Interagency Fire Center, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::interagencyfireperimeterhistory-all-years-view/about
+28. PMS 936 Polygon Feature Symbology - NWCG, осъществен достъп на февруари 25, 2026, https://www.nwcg.gov/publications/pms936/symbology/pms-936-polygon-feature-symbology
+29. Solved: Map performance and org query maximum request rate... - Esri Community, осъществен достъп на февруари 25, 2026, https://community.esri.com/t5/arcgis-online-questions/map-performance-and-org-query-maximum-request-rate/td-p/1266328
+30. FAQ—ArcGIS Online Help, осъществен достъп на февруари 25, 2026, https://doc.arcgis.com/en/arcgis-online/reference/faq.htm
+31. Share Public Web Products | NWCG, осъществен достъп на февруари 25, 2026, https://www.nwcg.gov/publications/pms936-1/share-public-web-products
+32. Wildland Fire Incident Locations - National Interagency Fire Center - ArcGIS Online, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::wildland-fire-incident-locations/about
+33. Feed polling interval scheduling—ArcGIS Velocity | Documentation, осъществен достъп на февруари 25, 2026, https://doc.arcgis.com/en/velocity/ingest/schedule-feed-polling-interval.htm
+34. Set refresh interval (Map Viewer)—Portal for ArcGIS, осъществен достъп на февруари 25, 2026, https://enterprise.arcgis.com/en/portal/11.4/use/set-refresh-interval-mv.htm
+35. Set refresh interval (Map Viewer Classic)—ArcGIS Online Help | Documentation, осъществен достъп на февруари 25, 2026, https://doc.arcgis.com/en/arcgis-online/reference/set-refresh-interval.htm
+36. FAQ | ArcGIS Location Platform, осъществен достъп на февруари 25, 2026, https://location.arcgis.com/faq/
+37. API key authentication | Documentation - Esri Developer - ArcGIS Online, осъществен достъп на февруари 25, 2026, https://developers.arcgis.com/documentation/glossary/api-key-authentication/
+38. Introduction to API key authentication | Documentation - Esri Developer - ArcGIS Online, осъществен достъп на февруари 25, 2026, https://developers.arcgis.com/documentation/security-and-authentication/api-key-authentication/
+39. Limit usage of secure services—ArcGIS Online Help | Documentation, осъществен достъп на февруари 25, 2026, https://doc.arcgis.com/en/arcgis-online/manage-data/limit-usage-of-secure-services.htm
+40. Limit usage of secure services—Portal for ArcGIS, осъществен достъп на февруари 25, 2026, https://enterprise.arcgis.com/en/portal/10.9.1/use/limit-usage-of-secure-services.htm
+41. Canadian Wildland Fire Information System (CWFIS), осъществен достъп на февруари 25, 2026, https://cwfis.cfs.nrcan.gc.ca/home
+42. CWFIS Datamart - Canadian Wildland Fire Information System - Natural Resources Canada, осъществен достъп на февруари 25, 2026, https://cwfis.cfs.nrcan.gc.ca/datamart
+43. CWFIS Datamart - Canadian Wildland Fire Information System | Metadata, осъществен достъп на февруари 25, 2026, https://cwfis.cfs.nrcan.gc.ca/datamart/metadata/nfdbpnt
+44. CWFIS Datamart - Canadian Wildland Fire Information System | Metadata, осъществен достъп на февруари 25, 2026, https://cwfis.cfs.nrcan.gc.ca/datamart/metadata/nfdbpoly
+45. CWFIS Datamart - Canadian Wildland Fire Information System | Metadata, осъществен достъп на февруари 25, 2026, https://cwfis.cfs.nrcan.gc.ca/datamart/metadata/fm3buffered
+46. Active Wildfires in Canada | Climate Change Data and Resources, осъществен достъп на февруари 25, 2026, https://climate.esri.ca/pages/wildfire
+47. 2025 Canadian wildfires - Wikipedia, осъществен достъп на февруари 25, 2026, https://en.wikipedia.org/wiki/2025_Canadian_wildfires
+48. European Forest Fire Information System - Copernicus, осъществен достъп на февруари 25, 2026, https://effis.emergency.copernicus.eu/
+49. The CEMS Early warning & monitoring component for wildfires - Copernicus Emergency Management Service, осъществен достъп на февруари 25, 2026, https://emergency.copernicus.eu/use-cases/wildfires-early-warning-and-monitoring/
+50. Rapid Damage Assessment - EFFIS, осъществен достъп на февруари 25, 2026, https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/rapid-damage-assessment
+51. Active Fire Detection - EFFIS, осъществен достъп на февруари 25, 2026, https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/active-fire-detection
+52. GWIS - Burnt Areas - Global Wildfire Information System, осъществен достъп на февруари 25, 2026, https://gwis.jrc.ec.europa.eu/about-gwis/technical-background/burnt-areas
+53. Current wildfire situation in Europe - Joint Research Centre - European Union, осъществен достъп на февруари 25, 2026, https://joint-research-centre.ec.europa.eu/projects-and-activities/natural-and-man-made-hazards/forest-fires/current-wildfire-situation-europe_en
+54. Emergency Response data - Copernicus EMS Mapping, осъществен достъп на февруари 25, 2026, https://mapping.emergency.copernicus.eu/about/how-to-harvest-cems-mapping-data/emergency-response-data/
+55. How to harvest CEMS Mapping data, осъществен достъп на февруари 25, 2026, https://mapping.emergency.copernicus.eu/about/how-to-harvest-cems-mapping-data/
+56. GeoPlatform Service User Guide, осъществен достъп на февруари 25, 2026, https://www.doi.gov/sites/doi.gov/files/uploads/irwin_geoplatform_service_user_guide_2017_05_25_v1.0.pdf
+57. Layer: Perimeters (ID:0) - ArcGIS, осъществен достъп на февруари 25, 2026, https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Interagency_Perimeters/FeatureServer/0
+58. WFIGS 2025 Wildfire Perimeters - California State Geoportal, осъществен достъп на февруари 25, 2026, https://gis.data.ca.gov/datasets/CALFIRE-Forestry::wfigs-2025-wildfire-perimeters
+59. VIIRS Modeled Fire Perimeters - NASA | LANCE | FIRMS, осъществен достъп на февруари 25, 2026, https://firms.modaps.eosdis.nasa.gov/descriptions/FEDS_VIIRS_SNPP.html
+60. BLM Natl Fire Perimeters Polygon | BLM GBP Hub - ArcGIS, осъществен достъп на февруари 25, 2026, https://gbp-blm-egis.hub.arcgis.com/datasets/BLM-EGIS::blm-natl-fire-perimeters-polygon/about
+61. fire/BLM_Natl_FirePerimeter (MapServer), осъществен достъп на февруари 25, 2026, https://gis.blm.gov/arcgis/rest/services/fire/BLM_Natl_FirePerimeter/MapServer
+62. Wildland Fire Emissions Inventory System v2.2025.10 - WFEIS, осъществен достъп на февруари 25, 2026, https://wfeis.mtri.org/calculator?burnedarea_source=WFIGS_current&aoi_category=countries&aoi_name=united_states&start_date=2026-01-01&end_date=2026-01-11
+63. Situation Report September 30, 2025 - CIFFC, осъществен достъп на февруари 25, 2026, https://ciffc.net/situation/2025-09-30
+64. WFIGS Interagency Fire Perimeters - NIFC Open Data Site, осъществен достъп на февруари 25, 2026, https://data-nifc.opendata.arcgis.com/datasets/nifc::wfigs-interagency-fire-perimeters/explore?location=0.000000%2C0.000000%2C1.82
+65. Limit usage of secure services—Portal for ArcGIS, осъществен достъп на февруари 25, 2026, https://enterprise.arcgis.com/en/portal/12.0/use/limit-usage-of-secure-services.htm
+66. Wildfire Early Warning and Rapid Response - NASA Lifelines, осъществен достъп на февруари 25, 2026, https://nasalifelines.org/hfs-data-series/wildfire-early-warning-and-rapid-response/

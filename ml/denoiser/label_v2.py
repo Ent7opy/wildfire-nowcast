@@ -11,9 +11,11 @@ from typing import Dict, Optional, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.sql.elements import TextClause
 
 from api.core.grid import DEFAULT_CELL_SIZE_DEG
 from api.db import get_engine
+from ml.denoiser.coverage_authority import require_coverage_freshness
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,12 +43,139 @@ DEFAULT_PARAMS = {
     "negative_event_min_days": 3,
 }
 
+_DEFAULT_GLOBAL_BBOX: tuple[float, float, float, float] = (-180.0, -90.0, 180.0, 90.0)
+_ALLOWED_PERIMETER_SOURCES = {"authoritative_perimeters", "fire_perimeters"}
+_ALLOWED_AUTHORITATIVE_TIERS = {"silver", "gold", "both"}
+
+_GOVERNANCE_SQL = """
+      AND ap.is_authoritative
+      AND ap.poly_featurestatus IN ('Approved', 'Certified')
+      AND ap.poly_featureaccess = 'Public'
+      AND ap.poly_isvisible = 'Yes'
+      AND COALESCE(ap.attr_isvalid, 1) = 1
+      AND COALESCE(ap.attr_isquarantined, 0) = 0
+"""
+
+
+def _authoritative_tier_sql(alias: str = "ap") -> str:
+    return f"""
+      AND (
+            (:authoritative_tier = 'both' AND {alias}.tier IN ('silver', 'gold'))
+         OR (:authoritative_tier = 'silver' AND {alias}.tier = 'silver')
+         OR (:authoritative_tier = 'gold' AND {alias}.tier = 'gold')
+      )
+    """
+
+
+def _build_perimeter_sql(*, perimeter_source: str) -> tuple[TextClause, TextClause]:
+    if perimeter_source == "authoritative_perimeters":
+        positive_sql = text(
+            f"""
+            CREATE TEMP TABLE tmp_label_positive_ids ON COMMIT DROP AS
+            SELECT DISTINCT c.id
+            FROM tmp_label_candidates c
+            JOIN authoritative_perimeters ap
+              ON ap.geom && ST_Expand(c.geom, :positive_buffer_deg)
+             AND ST_DWithin(c.geom::geography, ap.geom::geography, :positive_buffer_m)
+            WHERE c.in_coverage
+              {_GOVERNANCE_SQL}
+              {_authoritative_tier_sql("ap")}
+              AND c.acq_time >= COALESCE(
+                    ap.attr_firediscoverydatetime,
+                    ap.poly_polygondatetime,
+                    c.acq_time
+                  ) - make_interval(hours => :positive_time_pad_hours)
+              AND c.acq_time <= COALESCE(
+                    ap.attr_containmentdatetime,
+                    ap.attr_controldatetime,
+                    ap.poly_polygondatetime,
+                    c.acq_time
+                  ) + make_interval(hours => :positive_time_pad_hours)
+              AND COALESCE(c.confidence, 0) >= :positive_confidence_floor
+            """
+        )
+
+        far_low_sql = text(
+            f"""
+            CREATE TEMP TABLE tmp_label_far_low_ids ON COMMIT DROP AS
+            SELECT c.id
+            FROM tmp_label_candidates c
+            WHERE c.in_coverage
+              AND COALESCE(c.frp, 0) < :negative_frp_floor_mw
+              AND NOT EXISTS (
+                SELECT 1
+                FROM authoritative_perimeters ap
+                WHERE ap.geom && ST_Expand(c.geom, :negative_far_dist_deg)
+                  AND ST_DWithin(c.geom::geography, ap.geom::geography, :negative_far_dist_m)
+                  {_GOVERNANCE_SQL}
+                  {_authoritative_tier_sql("ap")}
+                  AND c.acq_time >= COALESCE(
+                        ap.attr_firediscoverydatetime,
+                        ap.poly_polygondatetime,
+                        c.acq_time
+                      ) - make_interval(days => :negative_time_pad_days)
+                  AND c.acq_time <= COALESCE(
+                        ap.attr_containmentdatetime,
+                        ap.attr_controldatetime,
+                        ap.poly_polygondatetime,
+                        c.acq_time
+                      ) + make_interval(days => :negative_time_pad_days)
+              )
+            """
+        )
+        return positive_sql, far_low_sql
+
+    if perimeter_source == "fire_perimeters":
+        positive_sql = text(
+            """
+            CREATE TEMP TABLE tmp_label_positive_ids ON COMMIT DROP AS
+            SELECT DISTINCT c.id
+            FROM tmp_label_candidates c
+            JOIN fire_perimeters fp
+              ON fp.geom && ST_Expand(c.geom, :positive_buffer_deg)
+             AND ST_DWithin(c.geom::geography, fp.geom::geography, :positive_buffer_m)
+            WHERE c.in_coverage
+              AND c.acq_time >= fp.fire_start - make_interval(hours => :positive_time_pad_hours)
+              AND (
+                fp.fire_end IS NULL
+                OR c.acq_time <= fp.fire_end + make_interval(hours => :positive_time_pad_hours)
+              )
+              AND COALESCE(c.confidence, 0) >= :positive_confidence_floor
+            """
+        )
+
+        far_low_sql = text(
+            """
+            CREATE TEMP TABLE tmp_label_far_low_ids ON COMMIT DROP AS
+            SELECT c.id
+            FROM tmp_label_candidates c
+            WHERE c.in_coverage
+              AND COALESCE(c.frp, 0) < :negative_frp_floor_mw
+              AND NOT EXISTS (
+                SELECT 1
+                FROM fire_perimeters fp
+                WHERE fp.geom && ST_Expand(c.geom, :negative_far_dist_deg)
+                  AND ST_DWithin(c.geom::geography, fp.geom::geography, :negative_far_dist_m)
+                  AND c.acq_time >= fp.fire_start - make_interval(days => :negative_time_pad_days)
+                  AND (
+                    fp.fire_end IS NULL
+                    OR c.acq_time <= fp.fire_end + make_interval(days => :negative_time_pad_days)
+                  )
+              )
+            """
+        )
+        return positive_sql, far_low_sql
+
+    raise ValueError(f"Unsupported perimeter_source={perimeter_source!r}")
+
 
 def _check_perimeter_coverage(
     engine: Engine,
     aoi_bbox: Tuple[float, float, float, float],
     start_time: datetime,
     end_time: datetime,
+    *,
+    authority_profile: str,
 ) -> int:
     min_lon, min_lat, max_lon, max_lat = aoi_bbox
     stmt = text(
@@ -54,6 +183,7 @@ def _check_perimeter_coverage(
         SELECT COUNT(*) AS n
         FROM perimeter_coverage_masks
         WHERE is_active
+          AND authority_profile = :authority_profile
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND (valid_from IS NULL OR valid_from <= :end_time)
           AND (valid_to IS NULL OR valid_to >= :start_time)
@@ -69,6 +199,7 @@ def _check_perimeter_coverage(
                 "max_lat": max_lat,
                 "start_time": start_time,
                 "end_time": end_time,
+                "authority_profile": authority_profile,
             },
         ).mappings().first()
     return int(row["n"]) if row else 0
@@ -78,12 +209,15 @@ def _active_coverage_mask_ids(
     engine: Engine,
     start_time: datetime,
     end_time: datetime,
+    *,
+    authority_profile: str,
 ) -> list[str]:
     stmt = text(
         """
         SELECT mask_id
         FROM perimeter_coverage_masks
         WHERE is_active
+          AND authority_profile = :authority_profile
           AND (valid_from IS NULL OR valid_from <= :end_time)
           AND (valid_to IS NULL OR valid_to >= :start_time)
         ORDER BY mask_id
@@ -95,6 +229,7 @@ def _active_coverage_mask_ids(
             {
                 "start_time": start_time,
                 "end_time": end_time,
+                "authority_profile": authority_profile,
             },
         ).mappings().all()
     return [str(row["mask_id"]) for row in rows]
@@ -116,6 +251,10 @@ def _label_single_window(
     end_time: datetime,
     rule_version: str,
     params: Dict,
+    authority_profile: str,
+    perimeter_source: str,
+    authoritative_tier: str,
+    rule_params_payload: Dict,
 ) -> dict[str, int]:
     min_lon, min_lat, max_lon, max_lat = aoi_bbox
 
@@ -149,9 +288,13 @@ def _label_single_window(
         "negative_event_persistence_min": float(p["negative_event_persistence_min"]),
         "negative_event_min_days": int(p["negative_event_min_days"]),
         "rule_version": rule_version,
-        "source": "ground_truth_v2",
-        "rule_params": json.dumps(p),
+        "source": "ground_truth_v2_authoritative"
+        if perimeter_source == "authoritative_perimeters"
+        else "ground_truth_v2_legacy",
+        "rule_params": json.dumps(rule_params_payload, default=str),
         "labeled_at": datetime.utcnow(),
+        "authority_profile": authority_profile,
+        "authoritative_tier": authoritative_tier,
     }
 
     create_candidates_sql = text(
@@ -173,6 +316,7 @@ def _label_single_window(
                 SELECT 1
                 FROM perimeter_coverage_masks pcm
                 WHERE pcm.is_active
+                  AND pcm.authority_profile = :authority_profile
                   AND pcm.geom && d.geom
                   AND ST_Intersects(pcm.geom, d.geom)
                   AND (pcm.valid_from IS NULL OR d.acq_time >= pcm.valid_from)
@@ -208,23 +352,7 @@ def _label_single_window(
         "CREATE INDEX tmp_label_chronic_cells_idx ON tmp_label_chronic_cells (i_lat, j_lon)"
     )
 
-    create_positive_sql = text(
-        """
-        CREATE TEMP TABLE tmp_label_positive_ids ON COMMIT DROP AS
-        SELECT DISTINCT c.id
-        FROM tmp_label_candidates c
-        JOIN fire_perimeters fp
-          ON fp.geom && ST_Expand(c.geom, :positive_buffer_deg)
-         AND ST_DWithin(c.geom::geography, fp.geom::geography, :positive_buffer_m)
-        WHERE c.in_coverage
-          AND c.acq_time >= fp.fire_start - make_interval(hours => :positive_time_pad_hours)
-          AND (
-            fp.fire_end IS NULL
-            OR c.acq_time <= fp.fire_end + make_interval(hours => :positive_time_pad_hours)
-          )
-          AND COALESCE(c.confidence, 0) >= :positive_confidence_floor
-        """
-    )
+    create_positive_sql, create_far_low_sql = _build_perimeter_sql(perimeter_source=perimeter_source)
 
     create_industrial_sql = text(
         """
@@ -235,27 +363,6 @@ def _label_single_window(
           ON i.geom && ST_Expand(c.geom, :negative_industrial_radius_deg)
          AND ST_DWithin(c.geom::geography, i.geom::geography, :negative_industrial_radius_m)
         WHERE c.in_coverage
-        """
-    )
-
-    create_far_low_sql = text(
-        """
-        CREATE TEMP TABLE tmp_label_far_low_ids ON COMMIT DROP AS
-        SELECT c.id
-        FROM tmp_label_candidates c
-        WHERE c.in_coverage
-          AND COALESCE(c.frp, 0) < :negative_frp_floor_mw
-          AND NOT EXISTS (
-            SELECT 1
-            FROM fire_perimeters fp
-            WHERE fp.geom && ST_Expand(c.geom, :negative_far_dist_deg)
-              AND ST_DWithin(c.geom::geography, fp.geom::geography, :negative_far_dist_m)
-              AND c.acq_time >= fp.fire_start - make_interval(days => :negative_time_pad_days)
-              AND (
-                fp.fire_end IS NULL
-                OR c.acq_time <= fp.fire_end + make_interval(days => :negative_time_pad_days)
-              )
-          )
         """
     )
 
@@ -465,18 +572,72 @@ def label_detections_v2(
     rule_version: str = "v2_default",
     params: Optional[Dict] = None,
     chunk_days: int = 0,
+    authority_profile: str = "wfigs_us",
+    coverage_max_age_hours: float = 72.0,
+    perimeter_source: str = "authoritative_perimeters",
+    authoritative_tier: str = "both",
 ) -> dict[str, int]:
-    p = {**DEFAULT_PARAMS, **(params or {})}
-
-    coverage_count = _check_perimeter_coverage(engine, aoi_bbox, start_time, end_time)
-    if coverage_count == 0:
-        raise SystemExit(
-            "No active perimeter coverage masks found for selected window. "
-            "Load perimeter_coverage_masks before labeling v2."
+    perimeter_source = str(perimeter_source).strip().lower()
+    if perimeter_source not in _ALLOWED_PERIMETER_SOURCES:
+        raise ValueError(
+            f"perimeter_source must be one of {sorted(_ALLOWED_PERIMETER_SOURCES)}"
+        )
+    authoritative_tier = str(authoritative_tier).strip().lower()
+    if authoritative_tier not in _ALLOWED_AUTHORITATIVE_TIERS:
+        raise ValueError(
+            f"authoritative_tier must be one of {sorted(_ALLOWED_AUTHORITATIVE_TIERS)}"
         )
 
-    mask_ids = _active_coverage_mask_ids(engine, start_time, end_time)
-    LOGGER.info("Label v2 coverage mask count=%s", len(mask_ids))
+    p = {**DEFAULT_PARAMS, **(params or {})}
+
+    freshness = require_coverage_freshness(
+        authority_profile=authority_profile,
+        max_age_hours=float(coverage_max_age_hours),
+        engine=engine,
+    )
+    LOGGER.info(
+        "Label v2 authority profile=%s run_id=%s age_hours=%s",
+        authority_profile,
+        freshness.get("run_id"),
+        freshness.get("age_hours"),
+    )
+
+    coverage_count = _check_perimeter_coverage(
+        engine,
+        aoi_bbox,
+        start_time,
+        end_time,
+        authority_profile=authority_profile,
+    )
+    if coverage_count == 0:
+        raise SystemExit(
+            "No active perimeter coverage masks found for selected window and authority profile. "
+            "Build perimeter_coverage_masks from authoritative source before labeling v2."
+        )
+
+    mask_ids = _active_coverage_mask_ids(
+        engine,
+        start_time,
+        end_time,
+        authority_profile=authority_profile,
+    )
+    LOGGER.info("Label v2 coverage mask count=%s authority_profile=%s", len(mask_ids), authority_profile)
+
+    rule_params_payload: Dict[str, object] = {
+        "label_params": p,
+        "perimeter_source": perimeter_source,
+        "authoritative_tier": authoritative_tier,
+        "authority_profile": authority_profile,
+        "coverage_run_id": freshness.get("run_id"),
+        "coverage_mask_ids": mask_ids,
+        "governance_filters": {
+            "poly_featurestatus": ["Approved", "Certified"],
+            "poly_featureaccess": "Public",
+            "poly_isvisible": "Yes",
+            "attr_isvalid": 1,
+            "attr_isquarantined": 0,
+        },
+    }
 
     if int(chunk_days) <= 0:
         counts = _label_single_window(
@@ -486,6 +647,10 @@ def label_detections_v2(
             end_time=end_time,
             rule_version=rule_version,
             params=p,
+            authority_profile=authority_profile,
+            perimeter_source=perimeter_source,
+            authoritative_tier=authoritative_tier,
+            rule_params_payload=rule_params_payload,
         )
         if not counts:
             raise SystemExit("No detections found in selected window for labeling v2.")
@@ -510,6 +675,10 @@ def label_detections_v2(
             end_time=chunk_end,
             rule_version=rule_version,
             params=p,
+            authority_profile=authority_profile,
+            perimeter_source=perimeter_source,
+            authoritative_tier=authoritative_tier,
+            rule_params_payload=rule_params_payload,
         )
         if counts:
             for key, value in counts.items():
@@ -534,13 +703,28 @@ def main() -> None:
         "--bbox",
         type=float,
         nargs=4,
-        required=True,
+        default=list(_DEFAULT_GLOBAL_BBOX),
         metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
+        help="Optional AOI bounding box. Defaults to global extent.",
     )
     parser.add_argument("--start", type=str, required=True, help="YYYY-MM-DD")
     parser.add_argument("--end", type=str, required=True, help="YYYY-MM-DD")
     parser.add_argument("--version", type=str, default="v2_default")
     parser.add_argument("--chunk-days", type=int, default=0, help="Optional chunking window in days")
+    parser.add_argument("--authority-profile", type=str, default="wfigs_us")
+    parser.add_argument("--coverage-max-age-hours", type=float, default=72.0)
+    parser.add_argument(
+        "--perimeter-source",
+        type=str,
+        default="authoritative_perimeters",
+        choices=sorted(_ALLOWED_PERIMETER_SOURCES),
+    )
+    parser.add_argument(
+        "--authoritative-tier",
+        type=str,
+        default="both",
+        choices=sorted(_ALLOWED_AUTHORITATIVE_TIERS),
+    )
     args = parser.parse_args()
 
     start = datetime.strptime(args.start, "%Y-%m-%d")
@@ -553,6 +737,10 @@ def main() -> None:
         end,
         rule_version=args.version,
         chunk_days=args.chunk_days,
+        authority_profile=args.authority_profile,
+        coverage_max_age_hours=args.coverage_max_age_hours,
+        perimeter_source=args.perimeter_source,
+        authoritative_tier=args.authoritative_tier,
     )
     print(json.dumps(counts))
 

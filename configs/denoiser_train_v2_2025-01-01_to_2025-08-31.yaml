@@ -1,6 +1,6 @@
 seed: 42
 model_output_root: models/denoiser_v2
-snapshot_path: data/denoiser/snapshots_v2/full_2025-01-01_to_2025-08-01.parquet
+snapshot_path: /Users/vanyoivanov/Projects/wildfire-nowcast/data/denoiser/snapshots_v2/run_20260228_181934
 label_column: event_label
 slice_columns:
 - sensor

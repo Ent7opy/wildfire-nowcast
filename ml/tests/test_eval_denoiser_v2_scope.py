@@ -57,7 +57,7 @@ def test_eval_denoiser_v2_both_scope_outputs(tmp_path: Path) -> None:
         snapshot_path=str(snapshot),
         out_dir=str(out_dir),
         gate_scope="both",
-        coverage_mask_source="db_mask",
+        coverage_mask_source="snapshot_only",
     )
 
     summary = json.loads((out_dir / "metrics_summary.json").read_text(encoding="utf-8"))
@@ -103,5 +103,6 @@ def test_eval_denoiser_v2_covered_scope_requires_mask_column(tmp_path: Path) -> 
             snapshot_path=str(snapshot),
             out_dir=str(tmp_path / "report_no_mask"),
             gate_scope="covered",
+            coverage_mask_source="snapshot_only",
             fail_on_missing_coverage_mask=True,
         )

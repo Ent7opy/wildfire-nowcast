@@ -42,6 +42,9 @@ pos_class_weight: 2.0
 pu_reliable_negative_max_prob: 0.15
 coverage_scope: "covered"
 coverage_mask_source: "db_mask"
+coverage_authority_profile: "wfigs_us"
+coverage_max_age_hours: 72
+coverage_fail_on_stale: true
 calibration_holdout_fraction: 0.5
 
 pu_bagging:
@@ -52,6 +55,10 @@ pu_bagging:
   pos_threshold: 0.70
   neg_threshold: 0.30
   min_oob_votes: 3
+  pseudo_negative_max_ratio: 3.0
+  max_pseudo_negative_rows: 0
+  min_pseudo_positive_rows: 500
+  oob_margin_min: 0.05
 
 global_calibration: "platt"
 slice_calibration_min_samples: 50
