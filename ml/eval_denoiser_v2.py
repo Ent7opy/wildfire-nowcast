@@ -111,6 +111,81 @@ def _collect_mask_ids(series: pd.Series) -> list[str]:
     return sorted(out)
 
 
+def _load_industrial_policy_provenance(policy_version: str | None = None) -> dict[str, Any] | None:
+    policy_stmt = text(
+        """
+        SELECT
+            policy_version,
+            strict_no_go,
+            gold_buffer_m,
+            silver_buffer_min_m,
+            silver_buffer_max_m,
+            active_from,
+            active_to
+        FROM industrial_mask_policies
+        WHERE (
+                :policy_version IS NOT NULL
+                AND policy_version = :policy_version
+              )
+           OR (
+                :policy_version IS NULL
+                AND (active_to IS NULL OR active_to > NOW())
+              )
+        ORDER BY active_from DESC, policy_version DESC
+        LIMIT 1
+        """
+    )
+    tier_stats_stmt = text(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'gold') AS gold_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'silver') AS silver_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'blocked') AS blocked_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE)) AS active_sources
+        FROM industrial_sources
+        """
+    )
+    no_go_stmt = text(
+        """
+        SELECT COUNT(*) AS active_no_go_zones
+        FROM industrial_no_go_zones
+        WHERE is_active
+          AND (:policy_version IS NULL OR policy_version = :policy_version)
+        """
+    )
+    try:
+        with get_engine().begin() as conn:
+            policy_row = conn.execute(
+                policy_stmt,
+                {"policy_version": policy_version},
+            ).mappings().first()
+            if policy_row is None:
+                return None
+            resolved_policy_version = str(policy_row["policy_version"])
+            tier_row = conn.execute(tier_stats_stmt).mappings().first()
+            no_go_row = conn.execute(
+                no_go_stmt,
+                {"policy_version": resolved_policy_version},
+            ).mappings().first()
+    except Exception:
+        return None
+
+    return {
+        "policy_version": str(policy_row["policy_version"]),
+        "strict_no_go": bool(policy_row["strict_no_go"]),
+        "gold_buffer_m": float(policy_row["gold_buffer_m"]),
+        "silver_buffer_min_m": float(policy_row["silver_buffer_min_m"]),
+        "silver_buffer_max_m": float(policy_row["silver_buffer_max_m"]),
+        "active_from": policy_row["active_from"].isoformat() if policy_row["active_from"] is not None else None,
+        "active_to": policy_row["active_to"].isoformat() if policy_row["active_to"] is not None else None,
+        "active_sources": int((tier_row or {}).get("active_sources") or 0),
+        "gold_sources": int((tier_row or {}).get("gold_sources") or 0),
+        "silver_sources": int((tier_row or {}).get("silver_sources") or 0),
+        "blocked_sources": int((tier_row or {}).get("blocked_sources") or 0),
+        "active_no_go_zones": int((no_go_row or {}).get("active_no_go_zones") or 0),
+    }
+
+
 def _evaluate_scope(
     *,
     scope_name: str,
@@ -212,6 +287,7 @@ def evaluate_denoiser_v2(
     coverage_authority_profile: str = "wfigs_us",
     coverage_max_age_hours: float = 72.0,
     fail_on_stale_coverage_mask: bool = True,
+    industrial_policy_version: str | None = None,
 ) -> str:
     gate_scope = str(gate_scope).strip().lower()
     if gate_scope not in {"covered", "global", "both"}:
@@ -340,6 +416,7 @@ def evaluate_denoiser_v2(
     coverage_mask_ids = []
     if "coverage_mask_ids" in eval_known.columns:
         coverage_mask_ids = _collect_mask_ids(eval_known["coverage_mask_ids"])
+    industrial_policy = _load_industrial_policy_provenance(policy_version=industrial_policy_version)
 
     summary = {
         "run_id": os.path.basename(model_run_dir.rstrip(os.sep)),
@@ -351,6 +428,7 @@ def evaluate_denoiser_v2(
         "coverage_data_freshness": coverage_freshness,
         "coverage_run_id": (coverage_freshness or {}).get("run_id"),
         "coverage_mask_ids": coverage_mask_ids,
+        "industrial_policy": industrial_policy,
         "n_eval": int(primary_eval["n_eval"]),
         "n_pos": int(primary_eval["n_pos"]),
         "n_neg": int(primary_eval["n_neg"]),
@@ -408,6 +486,7 @@ def evaluate_denoiser_v2(
         "coverage_data_freshness": coverage_freshness,
         "coverage_run_id": (coverage_freshness or {}).get("run_id"),
         "coverage_mask_ids": coverage_mask_ids,
+        "industrial_policy": industrial_policy,
         "thresholds": gate_thresholds,
         "results": primary_eval["gate_results"],
         "global_results": global_eval["gate_results"],
@@ -496,6 +575,7 @@ def main() -> None:
     parser.add_argument("--coverage-mask-source", type=str, default="db_mask")
     parser.add_argument("--coverage-authority-profile", type=str, default="wfigs_us")
     parser.add_argument("--coverage-max-age-hours", type=float, default=72.0)
+    parser.add_argument("--industrial-policy-version", type=str, default=None)
     parser.add_argument(
         "--fail-on-missing-coverage-mask",
         dest="fail_on_missing_coverage_mask",
@@ -535,6 +615,7 @@ def main() -> None:
         coverage_authority_profile=args.coverage_authority_profile,
         coverage_max_age_hours=float(args.coverage_max_age_hours),
         fail_on_stale_coverage_mask=bool(args.fail_on_stale_coverage_mask),
+        industrial_policy_version=args.industrial_policy_version,
     )
     print(out_dir)
 

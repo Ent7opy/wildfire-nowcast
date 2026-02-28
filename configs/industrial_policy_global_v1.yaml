@@ -1,0 +1,95 @@
+policy_version: global_authoritative_industrial_v1
+strict_no_go: true
+gold_buffer_m: 375.0
+silver_buffer_min_m: 750.0
+silver_buffer_max_m: 1000.0
+active_from: 2025-01-01T00:00:00Z
+
+# Countries where masking is expected to run once source coverage exists.
+mask_eligible_country_groups:
+  gold_first:
+    - AUT
+    - BEL
+    - BGR
+    - HRV
+    - CYP
+    - CZE
+    - DNK
+    - EST
+    - FIN
+    - FRA
+    - DEU
+    - GRC
+    - HUN
+    - IRL
+    - ITA
+    - LVA
+    - LTU
+    - LUX
+    - MLT
+    - NLD
+    - POL
+    - PRT
+    - ROU
+    - SVK
+    - SVN
+    - ESP
+    - SWE
+    - NOR
+    - ISL
+    - CHE
+    - SRB
+    - CAN
+    - AUS
+    - CHN
+    - BRA
+  silver_fallback:
+    - ARG
+    - CHL
+    - COL
+    - MEX
+    - PER
+    - TUR
+    - UKR
+    - USA
+
+# India exception list can be populated for explicitly validated units.
+india_validated_source_ids: []
+
+# Strict no-go zones for automated industrial masking.
+# Geometry is represented as bbox [min_lon, min_lat, max_lon, max_lat]
+no_go_zones:
+  - zone_id: russia_cis_west
+    zone_name: Russia and CIS (West)
+    reason: No unified transparent facility-level authoritative PRTR with stable public geodata
+    region_code: RUS_CIS
+    is_active: true
+    bbox: [19.0, 41.0, 90.0, 82.0]
+
+  - zone_id: russia_cis_east
+    zone_name: Russia and CIS (East)
+    reason: No unified transparent facility-level authoritative PRTR with stable public geodata
+    region_code: RUS_CIS
+    is_active: true
+    bbox: [90.0, 41.0, 180.0, 82.0]
+
+  - zone_id: india_partial_no_go
+    zone_name: India Partial Coverage No-Go
+    reason: Public geotagged industrial facility data remains inconsistent across states; allow only explicitly validated units
+    region_code: IND_PARTIAL
+    is_active: true
+    bbox: [68.0, 6.0, 98.0, 37.0]
+
+  - zone_id: ssa_core_excluding_south_tip
+    zone_name: Sub-Saharan Africa Data Gap Core
+    reason: Facility-level authoritative geolocation is broadly unavailable for automated masking
+    region_code: SSA_CORE
+    is_active: true
+    bbox: [-20.0, -28.0, 55.0, 20.0]
+
+  - zone_id: sea_emerging_gap
+    zone_name: Southeast Asia Emerging Transparency Gap
+    reason: Centralized industrial registries exist but public facility-level geocoordinates are incomplete for production masking
+    region_code: SEA_GAP
+    is_active: true
+    bbox: [92.0, -12.0, 142.0, 25.0]

@@ -1,7 +1,13 @@
 import argparse
 import unittest
 
-from ingest.orchestrator import ScheduledJob, _build_weather_argv, run_once, run_scheduler
+from ingest.orchestrator import (
+    ScheduledJob,
+    _build_industrial_argv,
+    _build_weather_argv,
+    run_once,
+    run_scheduler,
+)
 
 
 class FakeClock:
@@ -46,6 +52,43 @@ class TestOrchestrator(unittest.TestCase):
                 "6",
                 "--include-precip",
                 "--patch-mode",
+            ],
+        )
+
+    def test_build_industrial_argv(self):
+        args = argparse.Namespace(
+            industrial_source_profile="eu_eprtr_gold",
+            industrial_config="/tmp/industrial_authority_profiles.yaml",
+            industrial_start="2025-01-01T00:00:00Z",
+            industrial_end="2025-01-31T23:59:59Z",
+            industrial_run_id="industrial_run_1",
+            industrial_curated_file=["/tmp/eu_part1.csv", "/tmp/eu_part2.csv"],
+            industrial_timeout_seconds=60.0,
+            industrial_dry_run=True,
+        )
+
+        argv = _build_industrial_argv(args)
+
+        self.assertEqual(
+            argv,
+            [
+                "--source-profile",
+                "eu_eprtr_gold",
+                "--config",
+                "/tmp/industrial_authority_profiles.yaml",
+                "--start",
+                "2025-01-01T00:00:00Z",
+                "--end",
+                "2025-01-31T23:59:59Z",
+                "--run-id",
+                "industrial_run_1",
+                "--curated-file",
+                "/tmp/eu_part1.csv",
+                "--curated-file",
+                "/tmp/eu_part2.csv",
+                "--timeout-seconds",
+                "60.0",
+                "--dry-run",
             ],
         )
 

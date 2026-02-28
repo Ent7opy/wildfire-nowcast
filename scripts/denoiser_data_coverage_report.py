@@ -32,6 +32,33 @@ _TARGETS = {
 }
 
 
+def _active_industrial_policy(policy_version: str | None) -> dict[str, Any] | None:
+    stmt = text(
+        """
+        SELECT
+            policy_version,
+            strict_no_go,
+            gold_buffer_m,
+            silver_buffer_min_m,
+            silver_buffer_max_m
+        FROM industrial_mask_policies
+        WHERE (
+                :policy_version IS NOT NULL
+                AND policy_version = :policy_version
+              )
+           OR (
+                :policy_version IS NULL
+                AND (active_to IS NULL OR active_to > NOW())
+              )
+        ORDER BY active_from DESC, policy_version DESC
+        LIMIT 1
+        """
+    )
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt, {"policy_version": policy_version}).mappings().first()
+    return dict(row) if row else None
+
+
 def _parse_dt(value: str, *, end: bool = False) -> datetime:
     raw = str(value).strip()
     if not raw:
@@ -95,6 +122,7 @@ def build_data_coverage_report(
     end_time: datetime,
     rule_version: str,
     authority_profile: str,
+    industrial_policy_version: str | None = None,
 ) -> dict[str, Any]:
     params = {
         "start_time": start_time,
@@ -177,11 +205,116 @@ def build_data_coverage_report(
         """
     )
 
+    industrial_policy = _active_industrial_policy(policy_version=industrial_policy_version)
+    industrial_metrics: dict[str, Any] | None = None
+    if industrial_policy is not None:
+        industrial_sql = text(
+            """
+            WITH base AS (
+                SELECT d.id, d.geom
+                FROM denoiser_labels_v2 l
+                JOIN fire_detections d ON d.id = l.fire_detection_id
+                WHERE l.rule_version = :rule_version
+                  AND l.label IN ('POSITIVE', 'NEGATIVE')
+                  AND d.acq_time >= :start_time
+                  AND d.acq_time < :end_time
+                  AND EXISTS (
+                    SELECT 1
+                    FROM perimeter_coverage_masks pcm
+                    WHERE pcm.is_active
+                      AND pcm.authority_profile = :authority_profile
+                      AND pcm.geom && d.geom
+                      AND ST_Intersects(pcm.geom, d.geom)
+                      AND (pcm.valid_from IS NULL OR d.acq_time >= pcm.valid_from)
+                      AND (pcm.valid_to IS NULL OR d.acq_time <= pcm.valid_to)
+                  )
+            ),
+            no_go AS (
+                SELECT DISTINCT b.id
+                FROM base b
+                JOIN industrial_no_go_zones z
+                  ON z.is_active
+                 AND z.policy_version = :industrial_policy_version
+                 AND z.geom && b.geom
+                 AND ST_Intersects(z.geom, b.geom)
+            ),
+            gold_match AS (
+                SELECT DISTINCT b.id
+                FROM base b
+                JOIN industrial_sources i
+                  ON COALESCE(i.is_active, TRUE)
+                 AND i.authority_tier = 'gold'
+                 AND ST_DWithin(b.geom::geography, i.geom::geography, :gold_buffer_m)
+            ),
+            silver_match AS (
+                SELECT DISTINCT b.id
+                FROM base b
+                JOIN industrial_sources i
+                  ON COALESCE(i.is_active, TRUE)
+                 AND i.authority_tier = 'silver'
+                 AND ST_DWithin(
+                    b.geom::geography,
+                    i.geom::geography,
+                    LEAST(
+                        :silver_buffer_max_m,
+                        GREATEST(
+                            :silver_buffer_min_m,
+                            COALESCE(i.coordinate_precision_m::double precision, :silver_buffer_min_m)
+                        )
+                    )
+                 )
+            )
+            SELECT
+                COUNT(*) AS n_rows,
+                COUNT(*) FILTER (
+                    WHERE (
+                        g.id IS NOT NULL
+                        OR (s.id IS NOT NULL AND g.id IS NULL)
+                    ) AND ng.id IS NULL
+                ) AS mask_eligible_rows,
+                COUNT(*) FILTER (WHERE g.id IS NOT NULL AND ng.id IS NULL) AS masked_gold_rows,
+                COUNT(*) FILTER (WHERE s.id IS NOT NULL AND g.id IS NULL AND ng.id IS NULL) AS masked_silver_rows,
+                COUNT(*) FILTER (WHERE ng.id IS NOT NULL) AS no_go_rows
+            FROM base b
+            LEFT JOIN gold_match g ON g.id = b.id
+            LEFT JOIN silver_match s ON s.id = b.id
+            LEFT JOIN no_go ng ON ng.id = b.id
+            """
+        )
+
     with get_engine().begin() as conn:
         overall = conn.execute(overall_sql, params).mappings().first()
         by_label = conn.execute(by_label_sql, params).mappings().all()
         by_month = conn.execute(by_month_sql, params).mappings().all()
         by_sensor = conn.execute(by_sensor_sql, params).mappings().all()
+        if industrial_policy is not None:
+            industrial_row = conn.execute(
+                industrial_sql,
+                {
+                    **params,
+                    "industrial_policy_version": str(industrial_policy["policy_version"]),
+                    "gold_buffer_m": float(industrial_policy["gold_buffer_m"]),
+                    "silver_buffer_min_m": float(industrial_policy["silver_buffer_min_m"]),
+                    "silver_buffer_max_m": float(industrial_policy["silver_buffer_max_m"]),
+                },
+            ).mappings().first()
+            if industrial_row is not None:
+                total = int(industrial_row["n_rows"] or 0)
+                industrial_metrics = {
+                    "policy_version": str(industrial_policy["policy_version"]),
+                    "strict_no_go": bool(industrial_policy["strict_no_go"]),
+                    "gold_buffer_m": float(industrial_policy["gold_buffer_m"]),
+                    "silver_buffer_min_m": float(industrial_policy["silver_buffer_min_m"]),
+                    "silver_buffer_max_m": float(industrial_policy["silver_buffer_max_m"]),
+                    "mask_eligible_rows": int(industrial_row["mask_eligible_rows"] or 0),
+                    "masked_gold_rows": int(industrial_row["masked_gold_rows"] or 0),
+                    "masked_silver_rows": int(industrial_row["masked_silver_rows"] or 0),
+                    "no_go_rows": int(industrial_row["no_go_rows"] or 0),
+                    "mask_eligible_rate": float((industrial_row["mask_eligible_rows"] or 0) / total) if total else 0.0,
+                    "masked_gold_rate": float((industrial_row["masked_gold_rows"] or 0) / total) if total else 0.0,
+                    "masked_silver_rate": float((industrial_row["masked_silver_rows"] or 0) / total) if total else 0.0,
+                    "no_go_rate": float((industrial_row["no_go_rows"] or 0) / total) if total else 0.0,
+                }
 
     if overall is None:
         raise SystemExit("No covered known labels found in requested window.")
@@ -217,6 +350,7 @@ def build_data_coverage_report(
         "by_label": _rows_to_dict([dict(r) for r in by_label]),
         "by_month_label": _rows_to_dict([dict(r) for r in by_month]),
         "by_sensor_label": _rows_to_dict([dict(r) for r in by_sensor]),
+        "industrial_metrics": industrial_metrics,
     }
 
 
@@ -228,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", required=True, help="End datetime (YYYY-MM-DD or ISO8601)")
     parser.add_argument("--rule-version", default="v2_default")
     parser.add_argument("--authority-profile", default="wfigs_us")
+    parser.add_argument("--industrial-policy-version", default=None)
     parser.add_argument(
         "--out",
         default=None,
@@ -245,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         end_time=end_time,
         rule_version=str(args.rule_version),
         authority_profile=str(args.authority_profile),
+        industrial_policy_version=args.industrial_policy_version,
     )
 
     if args.out:

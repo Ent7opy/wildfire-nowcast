@@ -124,6 +124,24 @@ def test_denoiser_drift_endpoint(monkeypatch) -> None:
     assert body["rows"] == rows
 
 
+def test_denoiser_industrial_coverage_endpoint(monkeypatch) -> None:
+    payload = {
+        "latest_run": {"run_id": "industrial_run_1", "source_profile": "global_wri_gppd_silver"},
+        "policy": {"policy_version": "global_authoritative_industrial_v1", "strict_no_go": True},
+        "source_stats": {"gold_sources": 100, "silver_sources": 50, "active_sources": 150},
+    }
+    monkeypatch.setattr(
+        "api.routes.internal.get_latest_denoiser_industrial_coverage_status",
+        lambda source_profile=None, policy_version=None: payload,
+    )
+
+    response = client.get("/internal/denoiser/industrial-coverage/latest")
+    assert response.status_code == 200
+    body = response.json()
+    assert "as_of" in body
+    assert body["coverage"] == payload
+
+
 def test_denoiser_review_queue_endpoints(monkeypatch) -> None:
     rows = [{"id": 1, "event_id": "evt_1", "status": "open"}]
     monkeypatch.setattr("api.routes.internal.list_denoiser_review_queue", lambda limit=200, status="open": rows)

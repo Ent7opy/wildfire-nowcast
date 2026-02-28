@@ -1,4 +1,4 @@
-"""Scheduler/orchestrator for FIRMS, weather, terrain, and perimeter ingestion."""
+"""Scheduler/orchestrator for FIRMS, weather, terrain, perimeter, and industrial ingestion."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from typing import Any, Callable, Sequence
 from ingest.config import REPO_ROOT
 from ingest.dem_preprocess import DemIngestSettings, ingest_terrain_for_bbox
 from ingest.firms_ingest import run_firms_ingest
+from ingest.industrial_sources_ingest import run_industrial_ingest
 from ingest.nifc_perimeters_ingest import fetch_nifc_perimeters, ingest_perimeters
 from ingest.weather_ingest import run_weather_ingest
 
@@ -29,7 +30,8 @@ JOB_FIRMS = "firms"
 JOB_WEATHER = "weather"
 JOB_TERRAIN = "terrain"
 JOB_PERIMETERS = "perimeters"
-JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_TERRAIN, JOB_PERIMETERS)
+JOB_INDUSTRIAL = "industrial"
+JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 
@@ -97,8 +99,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=",".join(JOB_ORDER),
         help=(
-            "Comma-separated job list. Supported: firms,weather,terrain,perimeters. "
-            "Execution order is fixed as firms->weather->terrain->perimeters."
+            "Comma-separated job list. Supported: firms,weather,terrain,perimeters,industrial. "
+            "Execution order is fixed as firms->weather->terrain->perimeters->industrial."
         ),
     )
     parser.add_argument(
@@ -166,6 +168,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1440.0,
         help="Perimeters run interval in minutes (loop mode).",
+    )
+    parser.add_argument(
+        "--industrial-interval-minutes",
+        type=float,
+        default=1440.0,
+        help="Industrial source ingest interval in minutes (loop mode).",
     )
 
     parser.add_argument(
@@ -269,6 +277,54 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="NIFC request timeout per page.",
     )
 
+    parser.add_argument(
+        "--industrial-source-profile",
+        type=str,
+        default=None,
+        help="Industrial source profile key from configs/industrial_authority_profiles.yaml.",
+    )
+    parser.add_argument(
+        "--industrial-config",
+        type=str,
+        default=None,
+        help="Optional path to industrial authority profile config.",
+    )
+    parser.add_argument(
+        "--industrial-start",
+        type=str,
+        default=None,
+        help="Optional industrial ingest window start (ISO8601).",
+    )
+    parser.add_argument(
+        "--industrial-end",
+        type=str,
+        default=None,
+        help="Optional industrial ingest window end (ISO8601).",
+    )
+    parser.add_argument(
+        "--industrial-run-id",
+        type=str,
+        default=None,
+        help="Optional explicit run id for industrial ingest.",
+    )
+    parser.add_argument(
+        "--industrial-curated-file",
+        action="append",
+        default=None,
+        help="Repeatable curated file path for curated/hybrid industrial profiles.",
+    )
+    parser.add_argument(
+        "--industrial-timeout-seconds",
+        type=float,
+        default=45.0,
+        help="Timeout for industrial endpoint checks and HTTP downloads.",
+    )
+    parser.add_argument(
+        "--industrial-dry-run",
+        action="store_true",
+        help="Run industrial ingest in dry-run mode.",
+    )
+
     args = parser.parse_args(argv)
     _validate_args(args)
     return args
@@ -291,6 +347,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--weather-interval-minutes", args.weather_interval_minutes),
         ("--terrain-interval-minutes", args.terrain_interval_minutes),
         ("--perimeters-interval-minutes", args.perimeters_interval_minutes),
+        ("--industrial-interval-minutes", args.industrial_interval_minutes),
     )
     for flag, value in interval_flags:
         if value <= 0:
@@ -373,6 +430,32 @@ def _run_perimeters(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_industrial_argv(args: argparse.Namespace) -> list[str]:
+    argv: list[str] = []
+    source_profile = args.industrial_source_profile or "global_wri_gppd_silver"
+    argv.extend(["--source-profile", source_profile])
+    if args.industrial_config:
+        argv.extend(["--config", args.industrial_config])
+    if args.industrial_start:
+        argv.extend(["--start", args.industrial_start])
+    if args.industrial_end:
+        argv.extend(["--end", args.industrial_end])
+    if args.industrial_run_id:
+        argv.extend(["--run-id", args.industrial_run_id])
+    if args.industrial_curated_file:
+        for path in args.industrial_curated_file:
+            argv.extend(["--curated-file", str(path)])
+    if args.industrial_timeout_seconds:
+        argv.extend(["--timeout-seconds", str(args.industrial_timeout_seconds)])
+    if args.industrial_dry_run:
+        argv.append("--dry-run")
+    return argv
+
+
+def _run_industrial(args: argparse.Namespace) -> int:
+    return int(run_industrial_ingest(_build_industrial_argv(args)))
+
+
 def _run_with_logging(name: str, runner: Callable[[], int]) -> int:
     started = time.monotonic()
     LOGGER.info("Job started: %s", name)
@@ -398,6 +481,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_WEATHER: lambda: _run_weather(args),
         JOB_TERRAIN: lambda: _run_terrain(args),
         JOB_PERIMETERS: lambda: _run_perimeters(args),
+        JOB_INDUSTRIAL: lambda: _run_industrial(args),
     }
 
     intervals_seconds = {
@@ -405,6 +489,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_WEATHER: args.weather_interval_minutes * 60.0,
         JOB_TERRAIN: args.terrain_interval_minutes * 60.0,
         JOB_PERIMETERS: args.perimeters_interval_minutes * 60.0,
+        JOB_INDUSTRIAL: args.industrial_interval_minutes * 60.0,
     }
 
     return [

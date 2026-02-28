@@ -899,6 +899,146 @@ def get_latest_denoiser_coverage_status(authority_profile: str = "wfigs_us") -> 
     return payload
 
 
+def get_latest_denoiser_industrial_coverage_status(
+    source_profile: str | None = None,
+    policy_version: str | None = None,
+) -> dict | None:
+    """Return latest authoritative industrial ingest + policy/no-go coverage summary."""
+    run_filter = ""
+    params: dict[str, object] = {}
+    if source_profile:
+        run_filter = "AND source_profile = :source_profile"
+        params["source_profile"] = source_profile
+
+    run_stmt = text(
+        f"""
+        SELECT
+            run_id,
+            source_profile,
+            status,
+            started_at,
+            finished_at,
+            records_fetched,
+            records_upserted,
+            records_skipped,
+            source_uri,
+            source_version,
+            metrics_json
+        FROM authoritative_industrial_ingest_runs
+        WHERE status = 'succeeded'
+          {run_filter}
+        ORDER BY finished_at DESC NULLS LAST, started_at DESC
+        LIMIT 1
+        """
+    )
+
+    policy_stmt = text(
+        """
+        SELECT
+            policy_version,
+            strict_no_go,
+            gold_buffer_m,
+            silver_buffer_min_m,
+            silver_buffer_max_m,
+            active_from,
+            active_to
+        FROM industrial_mask_policies
+        WHERE (
+                :policy_version IS NOT NULL
+                AND policy_version = :policy_version
+              )
+           OR (
+                :policy_version IS NULL
+                AND (active_to IS NULL OR active_to > NOW())
+              )
+        ORDER BY active_from DESC, policy_version DESC
+        LIMIT 1
+        """
+    )
+
+    source_stats_stmt = text(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE)) AS active_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'gold') AS gold_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'silver') AS silver_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'blocked') AS blocked_sources,
+            COUNT(DISTINCT country_iso3) FILTER (WHERE COALESCE(is_active, TRUE)) AS active_countries
+        FROM industrial_sources
+        WHERE (:source_profile IS NULL OR source_profile = :source_profile)
+        """
+    )
+
+    no_go_stmt = text(
+        """
+        SELECT COUNT(*) AS active_no_go_zones
+        FROM industrial_no_go_zones
+        WHERE is_active
+          AND (:policy_version IS NULL OR policy_version = :policy_version)
+        """
+    )
+
+    profile_breakdown_stmt = text(
+        """
+        SELECT source_profile, COUNT(*) AS n
+        FROM industrial_sources
+        WHERE COALESCE(is_active, TRUE)
+        GROUP BY source_profile
+        ORDER BY COUNT(*) DESC, source_profile
+        LIMIT 25
+        """
+    )
+
+    try:
+        with get_engine().begin() as conn:
+            latest_run = conn.execute(run_stmt, params).mappings().first()
+            if latest_run is None:
+                return None
+
+            policy_row = conn.execute(
+                policy_stmt,
+                {"policy_version": policy_version},
+            ).mappings().first()
+
+            stats_row = conn.execute(
+                source_stats_stmt,
+                {"source_profile": source_profile},
+            ).mappings().first()
+
+            effective_policy_version = policy_version
+            if not effective_policy_version and policy_row is not None:
+                effective_policy_version = str(policy_row["policy_version"])
+
+            no_go_row = conn.execute(
+                no_go_stmt,
+                {"policy_version": effective_policy_version},
+            ).mappings().first()
+
+            profile_rows = conn.execute(profile_breakdown_stmt).mappings().all()
+    except Exception:
+        return None
+
+    payload = {
+        "latest_run": dict(latest_run),
+        "policy": dict(policy_row) if policy_row is not None else None,
+        "source_profile_filter": source_profile,
+        "source_stats": {
+            "active_sources": int((stats_row or {}).get("active_sources") or 0),
+            "gold_sources": int((stats_row or {}).get("gold_sources") or 0),
+            "silver_sources": int((stats_row or {}).get("silver_sources") or 0),
+            "blocked_sources": int((stats_row or {}).get("blocked_sources") or 0),
+            "active_countries": int((stats_row or {}).get("active_countries") or 0),
+        },
+        "active_no_go_zones": int((no_go_row or {}).get("active_no_go_zones") or 0),
+        "active_profiles": [
+            {"source_profile": str(row["source_profile"]), "count": int(row["n"])}
+            for row in profile_rows
+            if row.get("source_profile")
+        ],
+    }
+    return payload
+
+
 def list_recent_denoiser_drift(limit: int = 50) -> list[dict]:
     """Return recent drift metric rows."""
     stmt = text(

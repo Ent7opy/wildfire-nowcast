@@ -9,6 +9,7 @@ from api.model_registry import list_active_models
 from api.fires.repo import (
     get_latest_denoiser_gate_report,
     get_latest_denoiser_coverage_status,
+    get_latest_denoiser_industrial_coverage_status,
     list_recent_denoiser_drift,
     list_denoiser_review_queue,
     resolve_denoiser_review_event,
@@ -137,6 +138,23 @@ async def denoiser_latest_coverage_status(authority_profile: str = "wfigs_us") -
     as_of = datetime.now(timezone.utc).isoformat()
     try:
         payload = get_latest_denoiser_coverage_status(authority_profile=authority_profile)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "coverage": None, "error": str(exc)}
+    return {"as_of": as_of, "coverage": payload}
+
+
+@internal_router.get("/internal/denoiser/industrial-coverage/latest")
+async def denoiser_latest_industrial_coverage_status(
+    source_profile: str | None = None,
+    policy_version: str | None = None,
+) -> dict:
+    """Return latest authoritative industrial ingest and policy coverage status."""
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        payload = get_latest_denoiser_industrial_coverage_status(
+            source_profile=source_profile,
+            policy_version=policy_version,
+        )
     except Exception as exc:  # pragma: no cover - defensive fallback
         return {"as_of": as_of, "coverage": None, "error": str(exc)}
     return {"as_of": as_of, "coverage": payload}
