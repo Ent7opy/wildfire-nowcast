@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-industrial-authoritative industrial-build-policy industrial-load-no-go-zones industrial-coverage-report ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-industrial-authoritative industrial-build-policy industrial-load-no-go-zones industrial-coverage-report br-build-hybrid-curated ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -211,6 +211,9 @@ industrial-load-no-go-zones: ## Load industrial no-go zones (pass ARGS="--config
 
 industrial-coverage-report: ## Export denoiser data coverage report incl. industrial policy metrics
 	$(UV) run --project api scripts/denoiser_data_coverage_report.py $(ARGS)
+
+br-build-hybrid-curated: ## Build BR hybrid curated CSV from CTF identity + IBGE coordinate base
+	$(UV) run --project ingest python scripts/build_br_ctf_ibge_hybrid_curated.py $(ARGS)
 
 ingest-viirs: ## Alias for ingest-firms
 	$(MAKE) ingest-firms ARGS="$(ARGS)"

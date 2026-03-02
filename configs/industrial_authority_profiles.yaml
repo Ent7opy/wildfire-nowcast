@@ -126,7 +126,12 @@ profiles:
     country_iso3_default: CHN
     requires_curated_files: true
     endpoint_required: true
-    endpoint_check_url: https://permit.mee.gov.cn/
+    endpoint_check_url: https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!licenseInformation.action
+    endpoint_check_method: GET
+    endpoint_check_headers:
+      User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36
+      Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+      Accept-Language: en-US,en;q=0.9
     adapters:
       type: hybrid_curated_csv
       column_map:
@@ -156,6 +161,11 @@ profiles:
     requires_curated_files: true
     endpoint_required: true
     endpoint_check_url: https://www.gov.br/ibama/pt-br
+    endpoint_check_method: GET
+    endpoint_check_headers:
+      User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36
+      Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+      Accept-Language: pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7
     adapters:
       type: hybrid_curated_csv
       column_map:

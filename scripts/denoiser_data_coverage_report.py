@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,8 @@ def _rows_to_dict(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for key, value in row.items():
             if isinstance(value, datetime):
                 clean[key] = value.isoformat()
+            elif isinstance(value, Decimal):
+                clean[key] = float(value)
             elif isinstance(value, float):
                 clean[key] = float(value)
             elif isinstance(value, int):

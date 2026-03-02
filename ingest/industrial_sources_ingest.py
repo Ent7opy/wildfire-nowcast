@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,20 +36,53 @@ class IngestStats:
     records_skipped: int = 0
 
 
+@dataclass
+class EndpointCheckResult:
+    url: str
+    method: str
+    status_code: int
+    content_type: str | None
+    body_sha256: str
+
+
 def _parse_dt(value: str | None) -> datetime | None:
     if value is None:
         return None
+    if pd.isna(value):
+        return None
     raw = str(value).strip()
+    if raw.lower() in {"", "nan", "none", "null", "nat"}:
+        return None
+    # Accept year-only timestamps (e.g., WRI commissioning_year=2012)
+    if raw.isdigit() and len(raw) == 4:
+        year = int(raw)
+        if 1800 <= year <= 2200:
+            return datetime(year, 1, 1, tzinfo=timezone.utc)
+    # Accept float-like year strings (e.g., "2012.0")
+    if raw.replace(".", "", 1).isdigit() and raw.count(".") <= 1:
+        try:
+            fval = float(raw)
+            year = int(fval)
+            if 1800 <= year <= 2200:
+                return datetime(year, 1, 1, tzinfo=timezone.utc)
+        except ValueError:
+            pass
     if not raw:
         return None
-    if len(raw) == 10:
+    if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
         return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except ValueError:
+        parsed = pd.to_datetime(raw, errors="coerce", utc=True)
+        if pd.isna(parsed):
+            return None
+        return parsed.to_pydatetime()
 
 
 def _now_utc() -> datetime:
@@ -131,16 +164,29 @@ def _require_columns(df: pd.DataFrame, required: list[str], profile_name: str) -
         )
 
 
-def _check_endpoint(profile: dict[str, Any], timeout_seconds: float) -> None:
+def _check_endpoint(profile: dict[str, Any], timeout_seconds: float) -> EndpointCheckResult | None:
     if not _coerce_bool(profile.get("endpoint_required"), default=False):
-        return
+        return None
     url = str(profile.get("endpoint_check_url") or profile.get("source_uri") or "").strip()
     if not url:
         raise ValueError("Hybrid/endpoint profile requires endpoint_check_url or source_uri")
+    method = str(profile.get("endpoint_check_method") or "GET").strip().upper()
+    if method not in {"GET", "HEAD"}:
+        raise ValueError(f"Unsupported endpoint_check_method={method!r}; expected GET or HEAD")
+    headers_raw = profile.get("endpoint_check_headers") or {}
+    headers = {str(k): str(v) for k, v in headers_raw.items()} if isinstance(headers_raw, dict) else {}
     try:
         with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
-            response = client.get(url)
+            response = client.request(method, url, headers=headers)
             response.raise_for_status()
+            body_bytes = response.content or b""
+            return EndpointCheckResult(
+                url=str(response.request.url),
+                method=method,
+                status_code=int(response.status_code),
+                content_type=response.headers.get("content-type"),
+                body_sha256=hashlib.sha256(body_bytes).hexdigest(),
+            )
     except Exception as exc:
         raise RuntimeError(f"Endpoint verification failed for profile={profile.get('source_profile')}: {exc}")
 
@@ -158,7 +204,7 @@ def _load_source_frame(
     if adapter_type == "http_csv":
         source_uri = str(profile["source_uri"])
         LOGGER.info("Downloading source profile=%s uri=%s", profile_name, source_uri)
-        return pd.read_csv(source_uri)
+        return pd.read_csv(source_uri, low_memory=False)
 
     if adapter_type in {"curated_csv", "hybrid_curated_csv"}:
         if not curated_files:
@@ -479,7 +525,7 @@ def _upsert_sources(rows: list[dict[str, Any]]) -> int:
             :meta,
             NOW()
         )
-        ON CONFLICT (source_profile, source_id) DO UPDATE SET
+        ON CONFLICT (source_profile, source_id) WHERE source_id IS NOT NULL DO UPDATE SET
             name = EXCLUDED.name,
             type = EXCLUDED.type,
             source = EXCLUDED.source,
@@ -533,7 +579,7 @@ def ingest_sources(
     profile = profiles[source_profile]
     resolved_run_id = _resolve_run_id(source_profile, run_id)
 
-    _check_endpoint(profile, timeout_seconds=timeout_seconds)
+    endpoint_check = _check_endpoint(profile, timeout_seconds=timeout_seconds)
 
     frame = _load_source_frame(
         profile_name=source_profile,
@@ -575,6 +621,17 @@ def ingest_sources(
             "records_fetched": stats.records_fetched,
             "records_upserted": 0,
             "records_skipped": stats.records_skipped,
+            "endpoint_check": (
+                {
+                    "url": endpoint_check.url,
+                    "method": endpoint_check.method,
+                    "status_code": endpoint_check.status_code,
+                    "content_type": endpoint_check.content_type,
+                    "body_sha256": endpoint_check.body_sha256,
+                }
+                if endpoint_check is not None
+                else None
+            ),
             "dry_run": True,
         }
 
@@ -594,6 +651,17 @@ def ingest_sources(
             metrics={
                 "verification_mode": profile.get("verification_mode"),
                 "authority_tier": profile.get("authority_tier"),
+                "endpoint_check": (
+                    {
+                        "url": endpoint_check.url,
+                        "method": endpoint_check.method,
+                        "status_code": endpoint_check.status_code,
+                        "content_type": endpoint_check.content_type,
+                        "body_sha256": endpoint_check.body_sha256,
+                    }
+                    if endpoint_check is not None
+                    else None
+                ),
             },
         )
     except Exception as exc:

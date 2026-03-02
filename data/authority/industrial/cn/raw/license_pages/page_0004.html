@@ -1,0 +1,646 @@
+
+
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="ie=edge">
+<title>许可信息公开</title>
+ 
+ 
+ 
+
+
+
+
+
+
+
+
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/thscommon/style/artDialog/aero.css" />
+
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/baiduStatistics.js"></script>
+
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/jquery.min.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/json2.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/jquery.artDialog.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/My97DatePicker/WdatePicker.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/jquery.media.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/upload.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/exportWord.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/util/xzxk/swfupload/swfupload.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/util/xzxk/swfupload/handlers.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/util/xzxk/swfupload/fileprogress.js"></script>
+
+<!--validate start  -->
+<link rel="stylesheet" href="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/css/validationEngine.jquery.css" type="text/css" />
+<link rel="stylesheet" href="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/css/template.css" type="text/css" />
+ <script src="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/js/languages/jquery.validationEngine-zh_CN.js" type="text/javascript" charset="utf-8"></script>
+<script src="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/js/jquery.validationEngine.js" type="text/javascript" charset="utf-8"></script>
+<!--validate end  -->
+
+<script type="text/javascript" src="/perxxgkinfo/js/urlhanzi.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/outside/choosedate/WdatePicker.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/outside/js/main.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/outside/js/scroll.js"></script>
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/outside/choosedate/skin/WdatePicker.css" >
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/outside/css/style5.css" />
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/outside/css/check5.css" />
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/outside/css/style6.css" />
+<link rel="stylesheet" href="/perxxgkinfo/outside/default/css/indexold.css" />
+<script type="text/javascript">
+$(document).ready(function(){
+	$("div.list_lh").myScroll({
+		speed:4000, //数值越大，速度越慢
+		rowHeight:24 //li的高度
+	});
+	
+	// 加载省
+	getProvinces();
+	// 加载市
+	getCitys();
+	
+});
+
+
+// 加载省
+function getProvinces(){
+	var province = '';
+	$.ajax({
+		url:"/perxxgkinfo/syssb/xkgg/xkgg!getRegions.action",
+		type:"post",
+		async: true,
+		dataType:"json",				
+		data:{"parentCode":"000000000000"},
+		success: function(msg){
+					var res=msg.regions;
+	        		for(var i=0;i<res.length;i++){
+			         	if(province==res[i].regioncode){
+			        		$("#province").append("<option selected='selected' value='"+res[i].regioncode+"'>"+res[i].regionname+"</option>");  
+			        	}else{
+			                $("#province").append("<option value='"+res[i].regioncode+"'>"+res[i].regionname+"</option>");
+			        	}
+	       			}
+				},
+		error:function(){
+				alert("网络繁忙，请稍后重试！");
+				}			
+		});
+}
+
+
+// 加载市
+function getCitys(){
+	var province = $("#province").val();
+	if(province=="" || province==null){
+		province = "";
+    }
+	var city = '';
+	$("#city").empty();
+    $("#city").prepend('<option value="" selected="selected">==请选择城市==</option>');
+	$.ajax({
+		url:"/perxxgkinfo/syssb/xkgg/xkgg!getRegions.action",
+		type:"post",
+		async: true,
+		dataType:"json",				
+		data:{"parentCode":province},
+		success: function(msg){
+					var res=msg.regions;
+	        		for(var i=0;i<res.length;i++){
+			         	if(city==res[i].regioncode){
+			        		$("#city").append("<option selected='selected' value='"+res[i].regioncode+"'>"+res[i].regionname+"</option>");
+			        	}else{
+			                $("#city").append("<option value='"+res[i].regioncode+"'>"+res[i].regionname+"</option>");
+			        	}
+	       			}
+				},
+		error:function(){
+				alert("网络繁忙，请稍后重试！");
+				}			
+		});
+}
+
+
+// 点击查询
+function query(){
+	$('#mainForm').submit();
+}
+
+
+// 弹出选择行业类别
+function getHy(hytype) {
+	var hyids=$("#treadcode").val();
+	$.dialog.openhanzi('/perxxgkinfo/common/tree/xzxk-common-trade!selectHylist.action?hyids='+hyids+'&hytype='+hytype,{
+		lock: true,
+		background: '#333', // 背景色
+		opacity: 0.30,	// 透明度
+		title:'选择行业类别',
+		lock:'ture',
+		width:'580px',
+		height:'450px',
+		fixed: true
+	}); 
+}
+	
+
+// 行业类别选择回显（hynamehyid  hyname+hyid  火力发电4411）
+function returnTreeValue(hyid,hynamehyid,singlehyname,hytype){
+	if(hytype=='one'){	
+		//防止undefinded
+		if(typeof(hyid) == undefined){
+			hyid="";
+		}
+	    var hyidarry = hyid.split(",");
+	    $("#treadcode").val(hyid[0]);
+	    //防止undefinded
+	    if(typeof(singlehyname) == undefined){
+	      singlehyname="";
+	    }
+	    var hyname = singlehyname.split(",");
+	    $("#treadname").val(hyname[0]);
+	}else if(hytype=='more'){
+	    $("#treadcode").val(hyid);
+	    $("#treadname").val(singlehyname);
+	}
+}
+
+
+// 查询行业后添加行业回显（hynameids  hyname+hyid 如'火力发电D4411'）
+function addHyid(hyid,hynameids,singlehyname,hytype){
+    var oldhyid=$("#treadcode").val();
+    var oldhyname=$("#treadname").val();
+    //hytype more 多选   one 单选
+    if(hytype=='more'){
+        if(hyid!=''){
+            var hyidsarry=hyid.split(",");
+            var hynamesarry=singlehyname.split(",");
+            for(var i=0;i<hyidsarry.length;i++){
+                var thishyid=hyidsarry[i];
+                var thishyname=hynamesarry[i];
+                if(typeof(thishyid)!='undefined'&&thishyid!=''&&(','+oldhyid+',').indexOf(','+thishyid+',')<0){
+                    if(oldhyid!=''){    
+                        oldhyid+=','+thishyid;
+                        oldhyname+=','+thishyname;
+                    }else{
+                        oldhyid=thishyid;
+                        oldhyname=thishyname;
+                    }
+                }
+            }
+            $("#treadcode").val(oldhyid);
+            $("#treadname").val(oldhyname);
+        }
+    }else if(hytype=='one'){
+        $("#treadcode").val(hyid);
+        $("#treadname").val(singlehyname);
+    }
+}
+
+
+// 清空行业输入框
+function clearAll(){
+	$("#treadcode").val('');
+	$("#treadname").val('');
+}
+</script>
+</head>
+<body style="background-color: #fff;">
+	<div class="header">
+		<div class="banner-3d-l" id="particles-js"></div>
+		<img class="banner-img" src="/perxxgkinfo/outside/images/logo.png">
+		<div class="ggao">
+			<div class="ggao-w">
+				
+
+
+
+<!-- <li>全国排污许可证管理信息平台V2.0版本上线</li> -->
+<!-- <li>因系统迁移过程中附件传输速率问题，若出现附件无法下载等情况，请在2019年1月17日后进行下载操作。</li>
+<li style="list-style:none;color: #fff;"><img src="../outside/images/ggao.png" style="width:17px;height:15px;">&nbsp;&nbsp;声明内容如下：因安全管理要求，取消邮箱找回用户名和密码功能，改为通过手机短信找回。如尚未设置手机号，请与当地环境主管部门联系，在企业库设置手机号</li> -->
+
+<!--<li>【重要通知】：全国排污许可证管理信息平台预计于2024年1月3日晚18点-23点，将进行升级维护。届时许可平台企业端将无法访问，系统更新期间请勿操作，谢谢合作</li>-->
+<style>
+/* 小喇叭&公告内容 */
+.tips {
+	color: white;
+	font-size: 14px;
+	width: 1100px;
+	height: 24px;
+	display: flex;
+	align-items: center;
+}
+
+/* 小喇叭图标容器 */
+.tips-img {
+	width: 17px;
+	height: 15px;
+	cursor: pointer;
+	margin-right: 4px;
+}
+
+/* 小喇叭图标 */
+.tips-img img {
+	width: 17px;
+	height: 15px;
+	cursor: pointer;
+}
+
+/* 公告文字容器 */
+.tips-font-box {
+	width: 100%;
+	overflow: hidden;
+	white-space: nowrap;
+	box-sizing: border-box;
+}
+
+/* 公告文字 */
+.tips-font {
+	display: inline-block;
+	padding-left: 20px;
+	animation: marquee 36s linear infinite;
+}
+
+.tips-font:hover {
+	display: inline-block;
+	padding-left: 20px;
+	animation-play-state: paused;
+	/* cursor: pointer; */
+}
+
+/* 公告文字动画效果 */
+@keyframes marquee {
+	0% {
+		transform: translateX(0);
+	}
+
+	100% {
+		transform: translateX(-100%);
+	}
+}
+</style>
+<div class="tips">
+	<!-- 小喇叭 -->
+	<div class="tips-img"
+		title="关于调整 2024 年排污许可证年度执行报告报送时间的公告
+		为保障 2024 年排污许可证年度执行报告报送工作顺利开展，切实服务企业发展，提升执行报告填报效率，减轻基层管理人员负担，我部拟调整排污许可证年度执行报告报送时间，火电行业于 2025 年1月底前完成 2024 年统一信息报表年报填报，其余行业于 2025 年2月底前完成 2024 年排污许可证年度执行报告报送。
+		请各省级生态环境部门加大对企业提醒和指导力度，引导企业合理安排执行报告填报时间，鼓励企业错峰填报。我部将组织在线客服、平台问题处理等工作人员全面值守，提供技术指导。">
+		<img src="../../outside/images/ggao.png" alt="" />
+	</div>
+	<!-- 公告内容 -->
+	<div class="tips-font-box">
+		<p class="tips-font">
+			关于调整 2024 年排污许可证年度执行报告报送时间的公告
+			为保障 2024 年排污许可证年度执行报告报送工作顺利开展，切实服务企业发展，提升执行报告填报效率，减轻基层管理人员负担，我部拟调整排污许可证年度执行报告报送时间，火电行业于 2025 年1月底前完成 2024 年统一信息报表年报填报，其余行业于 2025 年2月底前完成 2024 年排污许可证年度执行报告报送。
+			请各省级生态环境部门加大对企业提醒和指导力度，引导企业合理安排执行报告填报时间，鼓励企业错峰填报。我部将组织在线客服、平台问题处理等工作人员全面值守，提供技术指导。
+		</p>
+	</div>
+</div>
+ 
+			</div>
+		</div>
+	</div>
+	<!-- 导航标签开始 -->
+	<div class="top-nav" style="background-color: #fff;width: 84%;margin: 15px auto 0;border-bottom: 2px solid #449d59;">
+		<ul class="clear_float" id="top-nav">
+			<li style="width:13%"><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xxgk/xxgk!sqqlist.action">申请前信息公开</a></li>
+			<li class="cur"><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!licenseInformation.action">许可信息公开</a></li>
+			<li><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!xxgkXqzgList.action">限期整改</a></li>
+			<li><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!getRegisterInfo.action">登记信息公开</a></li>
+			<li><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!xkgg_zxggList.action">许可注销公告</a></li>
+			<li><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!xkgg_cxggList.action">许可撤销公告</a></li>
+			<li><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!xkgg_yssmList.action">许可遗失声明</a></li>
+			<li><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!xkgg_zytzList.action">重要通知</a></li>
+			<li><a href="https://permit.mee.gov.cn/perxxgkinfo/syssb/xkgg/xkgg!lawsStandard.action">法规标准</a></li>
+			<li><a href="https://permit.mee.gov.cn/permitExt/outside/LicenseRedirect" style="color: orange">网上申报</a></li>
+		</ul>
+	</div>
+	<!-- 导航标签结束 -->
+	<!-- 如需将页面做成iframe嵌套，请从这里开始剪切。请注意img标签的路径 -->
+	<div class="content" style="padding: 0;width: 100%;">
+		<div class="content-title clear_float">
+			<div class="fl" style="color:#595758">
+				<span><a href="https://permit.mee.gov.cn/permitExt/defaults/default-index!getInformation.action">首页</a></span>/<span class="font-green">许可信息公开</span>
+			</div>
+		</div>
+		<div class="bord-b"></div>
+		
+		<!-- 查询条件开始 -->
+		<form id="mainForm" method="post" action="/perxxgkinfo/syssb/xkgg/xkgg!licenseInformation.action">
+            <input type="hidden" name="page.pageNo" id="pageNo" value="4" />
+            <input type="hidden" name="page.orderBy" id="orderBy" value="" /> 
+            <input type="hidden" name="page.order" id="order" value="" />
+            <input type="hidden" name="tempReportKey"  value="b1d8e4b54d71426d8e8e3e9db5d033a7" />
+			<div class="content-search bg-gray" style="height:120px">
+				<span style="width:10%">&nbsp;&nbsp;省/直辖市：</span>
+				<select class="margin-r-33" id="province" name="province" style="width:15%" onchange="getCitys()">
+					<option value="" selected="selected">==请选择省份==</option>
+				</select>
+				<span style="width:10%">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;地市：</span>
+				<select class="margin-r-33" id="city" name="city" style="width:15%">
+	              	<option value="" selected="selected">==请选择城市==</option>
+				</select>
+				<span style="width:10%">&nbsp;&nbsp;&nbsp;管理类别：</span>
+				<select class="margin-r-33" id="management" name="management" style="width:10%">
+					<option value="" >==请选择管理类别==</option>
+					<option value="1" >重点管理</option>
+					<option value="0" >简化管理</option>
+				</select>
+				<span style="width:10%">&nbsp;单位名称：</span>
+				<input type="text" id="registerentername" name="registerentername" class="margin-r-33" style="width: 20%;height: 33px;" value="">
+				<br>
+				<br>
+				<span style="width:10%">许可证编号：</span>
+				<input type="text" id="xkznum" name="xkznum" class="margin-r-33" style="width: 15%;height: 33px;" value="" >
+				<span style="width:10%">行业类别：</span>
+				<input type='text' name='treadname' class="margin-r-33" id='treadname' style="width: 15%;height: 33px;" value='' onclick="getHy('more')" readonly="readonly" />
+				<input type='hidden' name='treadcode' id='treadcode' value='' />
+				<span style="width:10%">发证日期：</span>
+				<input type="text" id="publishtime" name="publishtime" class="Wdate" onClick="WdatePicker()" style="width: 10%;height: 33px;" value="">
+				<br>
+				<input type="button" name="" onclick="query()" class="search-btn fr" />
+			</div>
+		</form>
+		<!-- 查询条件结束 -->
+		
+		<!-- 列表数据开始 -->
+		<div class="content-result clear_float">
+			<div class="tb-con">
+				<table cellspacing="0" cellpadding="0" class="tabtd" >
+					<tr class="tbhead">
+						<td width="8%">省/直辖市</td>
+						<td width="6%">地市</td>
+						<td width="17%">许可证编号</td>
+						<td width="17%">单位名称</td>
+						<td width="14%">行业类别</td>
+						<td width="16%">有效期限</td>
+						<td width="10%">发证日期</td>
+						<td width="6%">管理类别</td>
+						<td width="6%">查看</td>
+					</tr>
+					
+						
+							<tr>
+								<td title="山东省">山东省</td>
+								<td title="济南市">济南市</td>
+					          	<td title="91371200MA3FBBM81Y002V" class="font-green" >91371200MA3FBBM81Y002V</td>
+								<td title="莱芜寨里镇污水处理厂" style="text-align: left;padding-left: 5px;">莱芜寨里镇污水处理厂</td>
+								<td title="污水处理及其再生利用">污水处理及其再生利用</td>
+								<td title="2024-04-26至2029-04-25">2024-04-26至2029-04-25</td>
+								<td title="2024-04-26">2024-04-26</td>
+								<td title="重点管理">重点管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=84ab2a57c6e5497b8e6a38089b078f38" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="四川省">四川省</td>
+								<td title="成都市">成都市</td>
+					          	<td title="915101152024565593001Q" class="font-green" >915101152024565593001Q</td>
+								<td title="中国石油天然气股份有限公司四川成都销售分公司温江永胜加油站" style="text-align: left;padding-left: 5px;">中国石油天然气股份有限公司四川成都销售分公司温江永胜加油站</td>
+								<td title="机动车燃油零售">机动车燃油零售</td>
+								<td title="2023-06-24至2028-06-23">2023-06-24至2028-06-23</td>
+								<td title="2023-06-24">2023-06-24</td>
+								<td title="简化管理">简化管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=47e4a99107b74495af0e79e35047ec2f" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="山东省">山东省</td>
+								<td title="济南市">济南市</td>
+					          	<td title="91370100MA3W9KFP53001Q" class="font-green" >91370100MA3W9KFP53001Q</td>
+								<td title="光大生态环保（济南）有限公司" style="text-align: left;padding-left: 5px;">光大生态环保（济南）有限公司</td>
+								<td title="环境卫生管理">环境卫生管理</td>
+								<td title="2024-12-16至2029-12-15">2024-12-16至2029-12-15</td>
+								<td title="2024-12-16">2024-12-16</td>
+								<td title="简化管理">简化管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=dbb2a036636b413d9cc753eb5c7bf7e6" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="河北省">河北省</td>
+								<td title="沧州市">沧州市</td>
+					          	<td title="91130900766618365X001U" class="font-green" >91130900766618365X001U</td>
+								<td title="泰乐（献县）铸造有限公司" style="text-align: left;padding-left: 5px;">泰乐（献县）铸造有限公司</td>
+								<td title="黑色金属铸造">黑色金属铸造</td>
+								<td title="2026-02-28至2031-02-27">2026-02-28至2031-02-27</td>
+								<td title="2026-02-28">2026-02-28</td>
+								<td title="重点管理">重点管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=9b062d2bdd904490bb05cb2ad479d79e" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="河北省">河北省</td>
+								<td title="沧州市">沧州市</td>
+					          	<td title="91130984758912986H001R" class="font-green" >91130984758912986H001R</td>
+								<td title="河间市龙兴油墨有限公司" style="text-align: left;padding-left: 5px;">河间市龙兴油墨有限公司</td>
+								<td title="油墨及类似产品制造">油墨及类似产品制造</td>
+								<td title="2026-03-09至2031-03-08">2026-03-09至2031-03-08</td>
+								<td title="2026-02-28">2026-02-28</td>
+								<td title="简化管理">简化管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=b8ce199dc3ba4087a077c215b91e0065" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="河北省">河北省</td>
+								<td title="沧州市">沧州市</td>
+					          	<td title="91130925799582792N001Q" class="font-green" >91130925799582792N001Q</td>
+								<td title="中国石油天然气股份有限公司河北沧州销售分公司第六十三加油站" style="text-align: left;padding-left: 5px;">中国石油天然气股份有限公司河北沧州销售分公司第六十三加油站</td>
+								<td title="机动车燃油零售">机动车燃油零售</td>
+								<td title="2026-03-02至2031-03-01">2026-03-02至2031-03-01</td>
+								<td title="2026-02-28">2026-02-28</td>
+								<td title="简化管理">简化管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=ded1f1da9d02454482bb7099ec2b76af" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="上海市">上海市</td>
+								<td title="市辖区">市辖区</td>
+					          	<td title="913100000878082556001U" class="font-green" >913100000878082556001U</td>
+								<td title="上海嘉定南翔水环境净化有限公司" style="text-align: left;padding-left: 5px;">上海嘉定南翔水环境净化有限公司</td>
+								<td title="污水处理及其再生利用">污水处理及其再生利用</td>
+								<td title="2026-02-28至2031-02-27">2026-02-28至2031-02-27</td>
+								<td title="2026-02-28">2026-02-28</td>
+								<td title="重点管理">重点管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=11f44b8089db4fc3bdec1a0ed5a68183" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="山东省">山东省</td>
+								<td title="潍坊市">潍坊市</td>
+					          	<td title="91370783681712643J002U" class="font-green" >91370783681712643J002U</td>
+								<td title="寿光环保科技有限公司羊口镇城镇污水处理厂" style="text-align: left;padding-left: 5px;">寿光环保科技有限公司羊口镇城镇污水处理厂</td>
+								<td title="污水处理及其再生利用">污水处理及其再生利用</td>
+								<td title="2025-05-16至2030-05-15">2025-05-16至2030-05-15</td>
+								<td title="2025-05-16">2025-05-16</td>
+								<td title="简化管理">简化管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=af10d304905e4164a42777f3bd4eb424" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="山东省">山东省</td>
+								<td title="潍坊市">潍坊市</td>
+					          	<td title="91370783MA3N8LB12J001R" class="font-green" >91370783MA3N8LB12J001R</td>
+								<td title="寿光净源水务有限公司" style="text-align: left;padding-left: 5px;">寿光净源水务有限公司</td>
+								<td title="污水处理及其再生利用">污水处理及其再生利用</td>
+								<td title="2025-04-24至2030-04-23">2025-04-24至2030-04-23</td>
+								<td title="2025-04-24">2025-04-24</td>
+								<td title="简化管理">简化管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=c7615d5040cc410fae6008f05b2101e5" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+							<tr>
+								<td title="广东省">广东省</td>
+								<td title="梅州市">梅州市</td>
+					          	<td title="12441403456767381W001V" class="font-green" >12441403456767381W001V</td>
+								<td title="中山大学附属第三医院粤东医院" style="text-align: left;padding-left: 5px;">中山大学附属第三医院粤东医院</td>
+								<td title="综合医院">综合医院</td>
+								<td title="2023-08-04至2028-08-03">2023-08-04至2028-08-03</td>
+								<td title="2023-07-31">2023-07-31</td>
+								<td title="重点管理">重点管理</td>
+					            <td class="bgcolor1"><a href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContent&dataid=8755232eac774e1cb32c1774bb07d651" target="_blank" ><img src="/perxxgkinfo/outside/img/img/check.png" /></a></td>
+							</tr>
+						
+					
+					
+				</table>
+			</div>
+		</div>
+		<!-- 列表数据结束 -->
+		
+		<!-- 分页插件 -->
+        <div style="padding-right: 70px">
+			
+<link href="../outside/choosedate/skin/WdatePicker.css" rel="stylesheet" type="text/css">
+<script language="javascript" type="text/javascript" src="../outside/choosedate/WdatePicker.js"></script>
+	<script type="text/javascript" src="../outside/js/jquery.js"></script>
+	<script type="text/javascript" src="../outside/js/main.js"></script>
+	<link rel="stylesheet" type="text/css" href="../outside/css/style5.css" />
+	<link rel="stylesheet" type="text/css" href="../outside/css/check5.css" />
+	<script language="javascript"> 
+		function clearNoNum(obj){
+	  //把非数字的都替换掉，除了数字
+	  obj.value = obj.value.replace(/[^\d]/g,"");
+
+ 	}
+ 	function yanzNum(obj){
+	 		var totalPages = 37671;
+		  var validNum = (obj>=1&&obj<=totalPages);
+		  if(!validNum){
+		  	alert('当前页号无效!')
+	  		document.getElementById("num").value="1";
+	  		return false;
+	  };
+ 	}
+    function checkPageNo()
+    {
+        if(parseInt($("#pageNo").val())>0)
+            $("#pageNo").val("1");
+        
+    }
+    function ANP_keydown(e,btnId){
+    	var kcode;
+    	if(window.event){
+    		kcode=e.keyCode;
+    	}else if(e.which){
+    		kcode=e.which;
+    	}
+    	var validKey=(kcode==8||kcode==46||kcode==37||kcode==39||(kcode>=48&&kcode<=57)||(kcode>=96&&kcode<=105));
+    	if(!validKey){
+    		if(kcode==13) document.getElementById(btnId).click();
+    		if(e.preventDefault) e.preventDefault();
+    		else{event.returnValue=false};
+    	}
+    }
+    function gojumpPage(){
+    	var pagesum = 37671;
+    	var inPageNo = $("#inPageNo").val()*1;
+    	if(isNaN(inPageNo)){
+    		$("pageNo").val('4');
+    	}else if(inPageNo>pagesum){
+    		jumpPage2(pagesum);
+    	}else if(inPageNo<1){
+    		jumpPage2(1);
+    	}else{
+    		jumpPage2(inPageNo);
+    	}
+    }
+    function jumpPage2(pageNo){
+    	$("#pageNo").val(pageNo);
+    	if($("#keys").val()=='请输入文件号、标题...'){
+    		$("#keys").val("");
+    	}
+    	$("#mainForm").submit();
+    }
+	</script>
+<!--翻页样式-->
+
+        <div class="fr margin-t-33 margin-b-20" style="height: 26px;text-align: right;padding-right: 35px;">
+		  
+		        共37671页
+       
+       
+        
+        	&nbsp;<a href="###" onclick="javascript:jumpPage2(1)">首页</a>&nbsp;
+			&nbsp;<a href="###" onclick="javascript:jumpPage2(3)">上一页</a>&nbsp;
+        
+        
+		
+			
+			
+		
+		
+			
+			
+			
+			
+			
+			   
+			   
+			   
+			   	
+			   	
+			     &nbsp;<a href="#" onclick="javascript:jumpPage2(1);">1</a>&nbsp;
+			    
+			   
+			   	
+			   	
+			     &nbsp;<a href="#" onclick="javascript:jumpPage2(2);">2</a>&nbsp;
+			    
+			   
+			   	
+			   	
+			     &nbsp;<a href="#" onclick="javascript:jumpPage2(3);">3</a>&nbsp;
+			    
+			   
+			   	
+			   	 &nbsp;<span style="color: red">4</span>&nbsp;
+			   	
+			   	
+			   
+			   	
+			   	
+			     &nbsp;<a href="#" onclick="javascript:jumpPage2(5);">5</a>&nbsp;
+			    
+			   
+			 
+			
+			 &nbsp;<a href="###" onclick="javascript:jumpPage2(5)" >下一页</a>&nbsp;
+		     &nbsp;<a href="###" onclick="javascript:jumpPage2(37671)">尾页</a>&nbsp;
+			
+			
+		&nbsp;&nbsp;转到第<input type="text" value="4" name="inPageNo" id="inPageNo"  style="width:30px;" />页
+		<input type="submit" name="pageNo_" value="跳转" id="pageNo_" style="width:40px; height:25px;" class="login-style" onclick="javascript:gojumpPage()"/>
+		</div>
+		
+		
+		</div>
+	</div>
+	
+	<!-- 如需将页面做成iframe嵌套，请从这里结束剪切 -->
+	<div style="height: 80px"></div>
+	<div class="footer bg-gray font-gray">
+		<p>版权所有©中华人民共和国生态环境部</p>
+	</div> 
+<script type="text/javascript" src="/perxxgkinfo/outside/js/particles.min.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/outside/js/app.js"></script>
+</body>
+</html>

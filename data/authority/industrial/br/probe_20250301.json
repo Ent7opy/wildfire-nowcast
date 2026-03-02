@@ -1,0 +1,37 @@
+{
+  "generated_at": "2026-03-01T09:44:37.856558+00:00",
+  "candidate_endpoints": [
+    "https://siscom.ibama.gov.br/geoserver/wfs?service=WFS&version=1.1.0&request=GetCapabilities",
+    "https://siscom.ibama.gov.br/geoserver/ows?service=WFS&version=1.1.0&request=GetCapabilities",
+    "https://pamgia.ibama.gov.br/server/rest/services?f=pjson"
+  ],
+  "results": [
+    {
+      "url": "https://siscom.ibama.gov.br/geoserver/wfs?service=WFS&version=1.1.0&request=GetCapabilities",
+      "status_code": 403,
+      "content_type": "text/html; charset=UTF-8",
+      "body_sha256": "8b3b992d02f5f1bcfe13e57f9c3c2152ee007c5936bfd019258b6db0e2a9d50e",
+      "sample": "<!DOCTYPE html>\n<html lang=\"pt-BR\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Acesso Bloqueado - Segurança IBAMA</title>\n    <style>\n        body {\n            margin: 0;\n            font-family: Arial, Helvetica, sans-serif;\n            background: linear-gradient(135deg, #0f172a, #1e293b);\n            color: #f1f5f9;\n            display: flex;\n            align-items: center;\n            justify-content: center;\n    ",
+      "error": null,
+      "fetched_at": "2026-03-01T09:44:37.667803+00:00"
+    },
+    {
+      "url": "https://siscom.ibama.gov.br/geoserver/ows?service=WFS&version=1.1.0&request=GetCapabilities",
+      "status_code": 403,
+      "content_type": "text/html; charset=UTF-8",
+      "body_sha256": "815e1a18d9c85d08d09f577d76c708d56a265a96a5ffab1ec757ebf392ec2ac7",
+      "sample": "<!DOCTYPE html>\n<html lang=\"pt-BR\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Acesso Bloqueado - Segurança IBAMA</title>\n    <style>\n        body {\n            margin: 0;\n            font-family: Arial, Helvetica, sans-serif;\n            background: linear-gradient(135deg, #0f172a, #1e293b);\n            color: #f1f5f9;\n            display: flex;\n            align-items: center;\n            justify-content: center;\n    ",
+      "error": null,
+      "fetched_at": "2026-03-01T09:44:37.711776+00:00"
+    },
+    {
+      "url": "https://pamgia.ibama.gov.br/server/rest/services?f=pjson",
+      "status_code": 403,
+      "content_type": "text/html; charset=UTF-8",
+      "body_sha256": "636705292d3be332f4a6d1ac3f12c7e6a7da9705166230bf1a411ae0c7d7c573",
+      "sample": "<!DOCTYPE html>\n<html lang=\"pt-BR\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Acesso Bloqueado - Segurança IBAMA</title>\n    <style>\n        body {\n            margin: 0;\n            font-family: Arial, Helvetica, sans-serif;\n            background: linear-gradient(135deg, #0f172a, #1e293b);\n            color: #f1f5f9;\n            display: flex;\n            align-items: center;\n            justify-content: center;\n    ",
+      "error": null,
+      "fetched_at": "2026-03-01T09:44:37.856502+00:00"
+    }
+  ]
+}
