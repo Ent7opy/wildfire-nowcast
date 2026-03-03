@@ -169,13 +169,20 @@ def _build_perimeter_sql(*, perimeter_source: str) -> tuple[TextClause, TextClau
     raise ValueError(f"Unsupported perimeter_source={perimeter_source!r}")
 
 
+def _parse_authority_profiles(raw: str) -> list[str]:
+    profiles = [token.strip() for token in str(raw).split(",") if token.strip()]
+    if not profiles:
+        raise ValueError("authority_profile cannot be empty")
+    return sorted(set(profiles))
+
+
 def _check_perimeter_coverage(
     engine: Engine,
     aoi_bbox: Tuple[float, float, float, float],
     start_time: datetime,
     end_time: datetime,
     *,
-    authority_profile: str,
+    authority_profiles: list[str],
 ) -> int:
     min_lon, min_lat, max_lon, max_lat = aoi_bbox
     stmt = text(
@@ -183,7 +190,7 @@ def _check_perimeter_coverage(
         SELECT COUNT(*) AS n
         FROM perimeter_coverage_masks
         WHERE is_active
-          AND authority_profile = :authority_profile
+          AND authority_profile = ANY(:authority_profiles)
           AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
           AND (valid_from IS NULL OR valid_from <= :end_time)
           AND (valid_to IS NULL OR valid_to >= :start_time)
@@ -199,7 +206,7 @@ def _check_perimeter_coverage(
                 "max_lat": max_lat,
                 "start_time": start_time,
                 "end_time": end_time,
-                "authority_profile": authority_profile,
+                "authority_profiles": authority_profiles,
             },
         ).mappings().first()
     return int(row["n"]) if row else 0
@@ -210,14 +217,14 @@ def _active_coverage_mask_ids(
     start_time: datetime,
     end_time: datetime,
     *,
-    authority_profile: str,
+    authority_profiles: list[str],
 ) -> list[str]:
     stmt = text(
         """
         SELECT mask_id
         FROM perimeter_coverage_masks
         WHERE is_active
-          AND authority_profile = :authority_profile
+          AND authority_profile = ANY(:authority_profiles)
           AND (valid_from IS NULL OR valid_from <= :end_time)
           AND (valid_to IS NULL OR valid_to >= :start_time)
         ORDER BY mask_id
@@ -229,7 +236,7 @@ def _active_coverage_mask_ids(
             {
                 "start_time": start_time,
                 "end_time": end_time,
-                "authority_profile": authority_profile,
+                "authority_profiles": authority_profiles,
             },
         ).mappings().all()
     return [str(row["mask_id"]) for row in rows]
@@ -283,10 +290,12 @@ def _label_single_window(
     rule_version: str,
     params: Dict,
     authority_profile: str,
+    authority_profiles: list[str],
     perimeter_source: str,
     authoritative_tier: str,
     rule_params_payload: Dict,
     industrial_policy: dict | None,
+    industrial_negatives_global: bool,
 ) -> dict[str, int]:
     min_lon, min_lat, max_lon, max_lat = aoi_bbox
 
@@ -326,6 +335,7 @@ def _label_single_window(
         "rule_params": json.dumps(rule_params_payload, default=str),
         "labeled_at": datetime.utcnow(),
         "authority_profile": authority_profile,
+        "authority_profiles": authority_profiles,
         "authoritative_tier": authoritative_tier,
         "industrial_policy_version": (
             str(industrial_policy.get("policy_version")) if industrial_policy is not None else None
@@ -334,12 +344,21 @@ def _label_single_window(
         "industrial_gold_buffer_m": float(
             (industrial_policy or {}).get("gold_buffer_m", p["negative_industrial_radius_m"])
         ),
+        "industrial_gold_buffer_deg": float(
+            (industrial_policy or {}).get("gold_buffer_m", p["negative_industrial_radius_m"])
+        )
+        * meters_to_deg,
         "industrial_silver_buffer_min_m": float(
             (industrial_policy or {}).get("silver_buffer_min_m", p["negative_industrial_radius_m"])
         ),
         "industrial_silver_buffer_max_m": float(
             (industrial_policy or {}).get("silver_buffer_max_m", p["negative_industrial_radius_m"])
         ),
+        "industrial_silver_buffer_max_deg": float(
+            (industrial_policy or {}).get("silver_buffer_max_m", p["negative_industrial_radius_m"])
+        )
+        * meters_to_deg,
+        "industrial_negatives_global": bool(industrial_negatives_global),
     }
 
     create_candidates_sql = text(
@@ -361,7 +380,7 @@ def _label_single_window(
                 SELECT 1
                 FROM perimeter_coverage_masks pcm
                 WHERE pcm.is_active
-                  AND pcm.authority_profile = :authority_profile
+                  AND pcm.authority_profile = ANY(:authority_profiles)
                   AND pcm.geom && d.geom
                   AND ST_Intersects(pcm.geom, d.geom)
                   AND (pcm.valid_from IS NULL OR d.acq_time >= pcm.valid_from)
@@ -400,80 +419,109 @@ def _label_single_window(
     create_positive_sql, create_far_low_sql = _build_perimeter_sql(perimeter_source=perimeter_source)
 
     if industrial_policy is not None:
-        create_industrial_sql = text(
+        create_industrial_sources_sql = text(
             """
-            CREATE TEMP TABLE tmp_label_industrial_ids ON COMMIT DROP AS
-            WITH no_go AS (
-                SELECT DISTINCT c.id
-                FROM tmp_label_candidates c
-                JOIN industrial_no_go_zones z
-                  ON z.is_active
-                 AND z.policy_version = :industrial_policy_version
-                 AND z.geom && c.geom
-                 AND ST_Intersects(z.geom, c.geom)
-                WHERE c.in_coverage
-            ),
-            candidates AS (
-                SELECT
-                    c.id,
-                    i.id AS industrial_source_id,
-                    i.authority_tier,
-                    ST_Distance(c.geom::geography, i.geom::geography) AS distance_m
-                FROM tmp_label_candidates c
-                JOIN industrial_sources i
-                  ON COALESCE(i.is_active, TRUE)
-                 AND i.authority_tier IN ('gold', 'silver')
-                 AND (i.valid_from IS NULL OR i.valid_from <= c.acq_time)
-                 AND (i.valid_to IS NULL OR i.valid_to >= c.acq_time)
-                 AND ST_DWithin(
-                    c.geom::geography,
+            CREATE TEMP TABLE tmp_label_industrial_sources ON COMMIT DROP AS
+            SELECT
+                i.id,
+                i.authority_tier,
+                i.valid_from,
+                i.valid_to,
+                ST_Buffer(
                     i.geom::geography,
                     CASE
                         WHEN i.authority_tier = 'gold' THEN :industrial_gold_buffer_m
-                        WHEN i.authority_tier = 'silver' THEN LEAST(
+                        ELSE LEAST(
                             :industrial_silver_buffer_max_m,
                             GREATEST(
                                 :industrial_silver_buffer_min_m,
                                 COALESCE(i.coordinate_precision_m::double precision, :industrial_silver_buffer_min_m)
                             )
                         )
-                        ELSE 0.0
                     END
-                 )
-                WHERE c.in_coverage
+                )::geometry AS eff_geom
+            FROM industrial_sources i
+            WHERE COALESCE(i.is_active, TRUE)
+              AND i.authority_tier IN ('gold', 'silver')
+            """
+        )
+        create_industrial_sources_indexes = [
+            text("CREATE INDEX tmp_label_industrial_sources_eff_gix ON tmp_label_industrial_sources USING GIST (eff_geom)"),
+            text(
+                "CREATE INDEX tmp_label_industrial_sources_tier_time_idx "
+                "ON tmp_label_industrial_sources (authority_tier, valid_from, valid_to)"
             ),
-            ranked AS (
+        ]
+        create_industrial_sql = text(
+            """
+            CREATE TEMP TABLE tmp_label_industrial_ids ON COMMIT DROP AS
+            WITH base AS (
                 SELECT
-                    c.*,
-                    BOOL_OR(c.authority_tier = 'gold') OVER (PARTITION BY c.id) AS has_gold_candidate,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY c.id
-                        ORDER BY
-                            CASE c.authority_tier WHEN 'gold' THEN 0 ELSE 1 END,
-                            c.distance_m ASC,
-                            c.industrial_source_id ASC
-                    ) AS rn
-                FROM candidates c
+                    c.id,
+                    c.geom,
+                    c.acq_time
+                FROM tmp_label_candidates c
+                WHERE (:industrial_negatives_global OR c.in_coverage)
             ),
-            best AS (
-                SELECT
-                    id,
-                    authority_tier,
-                    has_gold_candidate
-                FROM ranked
-                WHERE rn = 1
+            no_go AS (
+                SELECT DISTINCT c.id
+                FROM base c
+                JOIN industrial_no_go_zones z
+                  ON z.is_active
+                 AND z.policy_version = :industrial_policy_version
+                 AND z.geom && c.geom
+                 AND ST_Intersects(z.geom, c.geom)
+            ),
+            gold_ids AS (
+                SELECT b.id
+                FROM base b
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM tmp_label_industrial_sources i
+                    WHERE i.authority_tier = 'gold'
+                      AND (i.valid_from IS NULL OR i.valid_from <= b.acq_time)
+                      AND (i.valid_to IS NULL OR i.valid_to >= b.acq_time)
+                      AND i.eff_geom && b.geom
+                      AND ST_Intersects(i.eff_geom, b.geom)
+                )
+            ),
+            silver_ids AS (
+                SELECT b.id
+                FROM base b
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM tmp_label_industrial_sources i
+                    WHERE i.authority_tier = 'silver'
+                      AND (i.valid_from IS NULL OR i.valid_from <= b.acq_time)
+                      AND (i.valid_to IS NULL OR i.valid_to >= b.acq_time)
+                      AND i.eff_geom && b.geom
+                      AND ST_Intersects(i.eff_geom, b.geom)
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM tmp_label_industrial_sources i
+                    WHERE i.authority_tier = 'gold'
+                      AND (i.valid_from IS NULL OR i.valid_from <= b.acq_time)
+                      AND (i.valid_to IS NULL OR i.valid_to >= b.acq_time)
+                      AND i.eff_geom && b.geom
+                      AND ST_Intersects(i.eff_geom, b.geom)
+                )
             )
-            SELECT b.id
-            FROM best b
-            LEFT JOIN no_go ng ON ng.id = b.id
-            WHERE NOT (:industrial_strict_no_go AND ng.id IS NOT NULL)
-              AND (
-                    b.authority_tier = 'gold'
-                    OR (b.authority_tier = 'silver' AND COALESCE(b.has_gold_candidate, FALSE) = FALSE)
-              )
+            SELECT id
+            FROM (
+                SELECT id FROM gold_ids
+                UNION
+                SELECT id FROM silver_ids
+            ) matched
+            WHERE NOT (
+                :industrial_strict_no_go
+                AND EXISTS (SELECT 1 FROM no_go ng WHERE ng.id = matched.id)
+            )
             """
         )
     else:
+        create_industrial_sources_sql = None
+        create_industrial_sources_indexes: list[TextClause] = []
         create_industrial_sql = text(
             """
             CREATE TEMP TABLE tmp_label_industrial_ids ON COMMIT DROP AS
@@ -482,7 +530,7 @@ def _label_single_window(
             JOIN industrial_sources i
               ON i.geom && ST_Expand(c.geom, :negative_industrial_radius_deg)
              AND ST_DWithin(c.geom::geography, i.geom::geography, :negative_industrial_radius_m)
-            WHERE c.in_coverage
+            WHERE (:industrial_negatives_global OR c.in_coverage)
             """
         )
 
@@ -644,6 +692,12 @@ def _label_single_window(
         _log_step("label_v2.positive", started)
 
         started = time.perf_counter()
+        if create_industrial_sources_sql is not None:
+            conn.execute(create_industrial_sources_sql, query_params)
+            for stmt in create_industrial_sources_indexes:
+                conn.execute(stmt)
+            _log_step("label_v2.industrial_sources_temp", started)
+            started = time.perf_counter()
         conn.execute(create_industrial_sql, query_params)
         _log_step("label_v2.negative_industrial", started)
 
@@ -697,6 +751,7 @@ def label_detections_v2(
     perimeter_source: str = "authoritative_perimeters",
     authoritative_tier: str = "both",
     industrial_policy_version: str | None = "global_authoritative_industrial_v1",
+    industrial_negatives_global: bool = False,
 ) -> dict[str, int]:
     perimeter_source = str(perimeter_source).strip().lower()
     if perimeter_source not in _ALLOWED_PERIMETER_SOURCES:
@@ -709,18 +764,31 @@ def label_detections_v2(
             f"authoritative_tier must be one of {sorted(_ALLOWED_AUTHORITATIVE_TIERS)}"
         )
 
+    authority_profiles = _parse_authority_profiles(authority_profile)
+
     p = {**DEFAULT_PARAMS, **(params or {})}
 
-    freshness = require_coverage_freshness(
-        authority_profile=authority_profile,
-        max_age_hours=float(coverage_max_age_hours),
-        engine=engine,
-    )
+    freshness_rows: list[dict] = []
+    for profile in authority_profiles:
+        freshness_rows.append(
+            require_coverage_freshness(
+                authority_profile=profile,
+                max_age_hours=float(coverage_max_age_hours),
+                engine=engine,
+            )
+        )
+    freshness = freshness_rows[0]
     LOGGER.info(
-        "Label v2 authority profile=%s run_id=%s age_hours=%s",
-        authority_profile,
-        freshness.get("run_id"),
-        freshness.get("age_hours"),
+        "Label v2 authority profiles=%s freshest_runs=%s",
+        authority_profiles,
+        [
+            {
+                "authority_profile": row.get("authority_profile"),
+                "run_id": row.get("run_id"),
+                "age_hours": row.get("age_hours"),
+            }
+            for row in freshness_rows
+        ],
     )
 
     coverage_count = _check_perimeter_coverage(
@@ -728,7 +796,7 @@ def label_detections_v2(
         aoi_bbox,
         start_time,
         end_time,
-        authority_profile=authority_profile,
+        authority_profiles=authority_profiles,
     )
     if coverage_count == 0:
         raise SystemExit(
@@ -740,9 +808,13 @@ def label_detections_v2(
         engine,
         start_time,
         end_time,
-        authority_profile=authority_profile,
+        authority_profiles=authority_profiles,
     )
-    LOGGER.info("Label v2 coverage mask count=%s authority_profile=%s", len(mask_ids), authority_profile)
+    LOGGER.info(
+        "Label v2 coverage mask count=%s authority_profiles=%s",
+        len(mask_ids),
+        authority_profiles,
+    )
     industrial_policy = _active_industrial_policy(
         engine,
         policy_version=industrial_policy_version,
@@ -763,13 +835,18 @@ def label_detections_v2(
         "perimeter_source": perimeter_source,
         "authoritative_tier": authoritative_tier,
         "authority_profile": authority_profile,
+        "authority_profiles": authority_profiles,
         "coverage_run_id": freshness.get("run_id"),
+        "coverage_runs": {
+            row.get("authority_profile"): row.get("run_id") for row in freshness_rows
+        },
         "coverage_mask_ids": mask_ids,
         "industrial_policy_version": industrial_policy.get("policy_version"),
         "industrial_strict_no_go": bool(industrial_policy.get("strict_no_go")),
         "industrial_gold_buffer_m": float(industrial_policy.get("gold_buffer_m")),
         "industrial_silver_buffer_min_m": float(industrial_policy.get("silver_buffer_min_m")),
         "industrial_silver_buffer_max_m": float(industrial_policy.get("silver_buffer_max_m")),
+        "industrial_negatives_global": bool(industrial_negatives_global),
         "governance_filters": {
             "poly_featurestatus": ["Approved", "Certified"],
             "poly_featureaccess": "Public",
@@ -788,10 +865,12 @@ def label_detections_v2(
             rule_version=rule_version,
             params=p,
             authority_profile=authority_profile,
+            authority_profiles=authority_profiles,
             perimeter_source=perimeter_source,
             authoritative_tier=authoritative_tier,
             rule_params_payload=rule_params_payload,
             industrial_policy=industrial_policy,
+            industrial_negatives_global=industrial_negatives_global,
         )
         if not counts:
             raise SystemExit("No detections found in selected window for labeling v2.")
@@ -817,10 +896,12 @@ def label_detections_v2(
             rule_version=rule_version,
             params=p,
             authority_profile=authority_profile,
+            authority_profiles=authority_profiles,
             perimeter_source=perimeter_source,
             authoritative_tier=authoritative_tier,
             rule_params_payload=rule_params_payload,
             industrial_policy=industrial_policy,
+            industrial_negatives_global=industrial_negatives_global,
         )
         if counts:
             for key, value in counts.items():
@@ -873,6 +954,14 @@ def main() -> None:
         default="global_authoritative_industrial_v1",
         help="Industrial masking policy version used for policy-aligned negatives.",
     )
+    parser.add_argument(
+        "--industrial-negatives-global",
+        action="store_true",
+        help=(
+            "Apply authoritative industrial-negative labeling outside perimeter-covered scope. "
+            "Perimeter-positive logic remains covered-first."
+        ),
+    )
     args = parser.parse_args()
 
     start = datetime.strptime(args.start, "%Y-%m-%d")
@@ -890,6 +979,7 @@ def main() -> None:
         perimeter_source=args.perimeter_source,
         authoritative_tier=args.authoritative_tier,
         industrial_policy_version=args.industrial_policy_version,
+        industrial_negatives_global=args.industrial_negatives_global,
     )
     print(json.dumps(counts))
 

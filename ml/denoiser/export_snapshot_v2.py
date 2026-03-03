@@ -15,6 +15,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from api.db import get_engine
+from ml.parquet_io import write_parquet_with_fallback
 
 logging.basicConfig(
     level=logging.INFO,
@@ -244,9 +245,9 @@ def export_training_snapshot_v2(
     eval_path = os.path.join(run_dir, "eval.parquet")
     full_path = os.path.join(run_dir, "full.parquet")
 
-    train_df.to_parquet(train_path, index=False)
-    eval_df.to_parquet(eval_path, index=False)
-    event_df.to_parquet(full_path, index=False)
+    write_parquet_with_fallback(train_df, train_path, index=False)
+    write_parquet_with_fallback(eval_df, eval_path, index=False)
+    write_parquet_with_fallback(event_df, full_path, index=False)
 
     coverage_mask_ids: set[str] = set()
     coverage_authority_profiles: set[str] = set()

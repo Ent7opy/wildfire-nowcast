@@ -1,0 +1,77 @@
+{
+  "run_id": "20260302_223100",
+  "exported_at": "2026-03-02T22:49:10.362479Z",
+  "rule_version": "v2_default",
+  "aoi_bbox": [
+    -180.0,
+    -90.0,
+    180.0,
+    90.0
+  ],
+  "time_range": [
+    "2025-01-01T00:00:00",
+    "2025-09-01T00:00:00"
+  ],
+  "counts": {
+    "event_total": 2278835,
+    "event_train": 1823054,
+    "event_eval": 455781,
+    "event_positive": 2673,
+    "event_negative": 104950,
+    "event_unknown": 2171212,
+    "event_truth_covered": 2278835
+  },
+  "coverage": {
+    "mask_ids": [
+      "wfigs_us_coverage_2025_v1"
+    ],
+    "authority_profiles": [
+      "wfigs_us"
+    ],
+    "run_ids": [
+      "wfigs_interagency_perimeters_full_history_20260228150521"
+    ],
+    "truth_covered_ratio": 1.0
+  },
+  "split": {
+    "strategy": "time_percentile",
+    "percentile": 0.8,
+    "split_dt": "2025-05-21T07:50:00+00:00"
+  },
+  "features": [
+    "detection_count",
+    "positive_count",
+    "negative_count",
+    "probable_positive_count",
+    "weak_supervision_count",
+    "sensor",
+    "source",
+    "confidence_mean",
+    "confidence_max",
+    "frp_mean",
+    "frp_max",
+    "brightness_mean",
+    "bright_t31_mean",
+    "scan_mean",
+    "track_mean",
+    "landcover_mean",
+    "persistence_mean",
+    "weather_mean",
+    "landcover_is_available",
+    "persistence_is_available",
+    "weather_is_available",
+    "truth_covered_mask",
+    "is_day_ratio",
+    "lat_centroid",
+    "lon_centroid",
+    "duration_hours",
+    "sin_doy",
+    "cos_doy",
+    "biome_slice"
+  ],
+  "paths": {
+    "train": "data/denoiser/snapshots_v2/run_20260302_223100/train.parquet",
+    "eval": "data/denoiser/snapshots_v2/run_20260302_223100/eval.parquet",
+    "full": "data/denoiser/snapshots_v2/run_20260302_223100/full.parquet"
+  }
+}

@@ -45,6 +45,23 @@ def _run(cmd: list[str], cwd: Path) -> str:
     return out[-1].strip() if out else ""
 
 
+def _run_ml_module(
+    module: str,
+    module_args: list[str],
+    *,
+    cwd: Path,
+    ml_python: Path,
+) -> str:
+    direct_cmd = [str(ml_python), "-m", module, *module_args]
+    if ml_python.exists():
+        try:
+            return _run(direct_cmd, cwd=cwd)
+        except FileNotFoundError:
+            pass
+    uv_cmd = ["uv", "run", "--project", "ml", "-m", module, *module_args]
+    return _run(uv_cmd, cwd=cwd)
+
+
 def _build_grid(args: argparse.Namespace) -> list[SweepPoint]:
     grid = itertools.product(
         _parse_int_list(args.num_bags),
@@ -70,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-config", required=True)
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--workspace", default=".")
+    parser.add_argument("--ml-python", default=None, help="Path to ML Python executable")
     parser.add_argument("--out-root", default=None)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--num-bags", default="10,15,20")
@@ -83,6 +101,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     workspace = Path(args.workspace).resolve()
+    # Preserve the provided interpreter path as-is; resolving symlinks can
+    # collapse a venv interpreter to the system Python and lose project deps.
+    ml_python = (
+        Path(args.ml_python).expanduser()
+        if args.ml_python
+        else workspace / "ml" / ".venv" / "bin" / "python"
+    )
+    if not ml_python.is_absolute():
+        ml_python = (workspace / ml_python).resolve()
+    if not ml_python.exists():
+        print(
+            f"WARNING: ML python executable not found: {ml_python}. "
+            "Falling back to `uv run --project ml` for train/eval subprocesses."
+        )
     run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_root = Path(args.out_root) if args.out_root else workspace / "reports" / "denoiser_v2" / f"sweep_{run_ts}"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -125,21 +157,18 @@ def main() -> None:
         cfg_path = cfg_root / f"{idx:03d}.yaml"
         cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
-        run_dir = _run(
-            ["uv", "run", "--project", "ml", "-m", "ml.train_denoiser_v2", "--config", str(cfg_path)],
+        run_dir = _run_ml_module(
+            "ml.train_denoiser_v2",
+            ["--config", str(cfg_path)],
             cwd=workspace,
+            ml_python=ml_python,
         )
         report_dir = out_root / "reports" / Path(run_dir).name
         report_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        _run(
+        _run_ml_module(
+            "ml.eval_denoiser_v2",
             [
-                "uv",
-                "run",
-                "--project",
-                "ml",
-                "-m",
-                "ml.eval_denoiser_v2",
                 "--model_run",
                 run_dir,
                 "--snapshot",
@@ -150,6 +179,7 @@ def main() -> None:
                 "both",
             ],
             cwd=workspace,
+            ml_python=ml_python,
         )
 
         summary = json.loads((report_dir / "metrics_summary.json").read_text(encoding="utf-8"))

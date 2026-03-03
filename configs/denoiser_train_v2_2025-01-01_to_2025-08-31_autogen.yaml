@@ -1,0 +1,64 @@
+seed: 42
+model_output_root: models/denoiser_v2
+snapshot_path: /Users/vanyoivanov/Projects/wildfire-nowcast/data/denoiser/snapshots_v2/run_20260302_143101
+label_column: event_label
+slice_columns:
+- sensor
+- biome_slice
+features:
+- detection_count
+- confidence_mean
+- confidence_max
+- frp_mean
+- frp_max
+- brightness_mean
+- bright_t31_mean
+- scan_mean
+- track_mean
+- landcover_mean
+- persistence_mean
+- weather_mean
+- landcover_is_available
+- persistence_is_available
+- weather_is_available
+- is_day_ratio
+- duration_hours
+- sin_doy
+- cos_doy
+model_backend: xgboost_pu_bagging
+model_params:
+  n_estimators: 400
+  max_depth: 6
+  learning_rate: 0.05
+  subsample: 0.8
+  colsample_bytree: 0.8
+  random_state: 42
+  n_jobs: 4
+pos_class_weight: 2.0
+pu_reliable_negative_max_prob: 0.15
+coverage_scope: covered
+coverage_mask_source: db_mask
+coverage_authority_profile: wfigs_us
+coverage_max_age_hours: 72
+coverage_fail_on_stale: true
+calibration_holdout_fraction: 0.5
+pu_bagging:
+  num_bags: 15
+  unlabeled_multiplier: 4
+  teacher_max_depth: 4
+  teacher_colsample_bytree: 0.8
+  pos_threshold: 0.7
+  neg_threshold: 0.3
+  min_oob_votes: 3
+  pseudo_negative_max_ratio: 3.0
+  max_pseudo_negative_rows: 0
+  min_pseudo_positive_rows: 500
+  oob_margin_min: 0.05
+global_calibration: platt
+slice_calibration_min_samples: 50
+isotonic_min_samples: 150
+decision_threshold: 0.5
+strong_filter_threshold: 0.5
+downweight_threshold: 0.7
+uncertainty_band_low: 0.45
+uncertainty_band_high: 0.55

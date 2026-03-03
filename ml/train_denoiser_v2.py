@@ -23,6 +23,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
 
 from ml.denoiser.coverage_authority import get_coverage_freshness, require_coverage_freshness
+from ml.parquet_io import read_parquet_with_fallback
 
 try:
     from xgboost import XGBClassifier
@@ -57,11 +58,12 @@ def _maybe_git_sha() -> Optional[str]:
 
 def _load_snapshot(path: str, *, columns: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     read_columns = list(dict.fromkeys(columns))
+
     def _read_with_fallback(parquet_path: str) -> pd.DataFrame:
         try:
-            return pd.read_parquet(parquet_path, columns=read_columns)
+            return read_parquet_with_fallback(parquet_path, columns=read_columns)
         except Exception:
-            full = pd.read_parquet(parquet_path)
+            full = read_parquet_with_fallback(parquet_path)
             keep = [c for c in read_columns if c in full.columns]
             return full[keep]
 
@@ -73,9 +75,9 @@ def _load_snapshot(path: str, *, columns: list[str]) -> tuple[pd.DataFrame, pd.D
         return train, eval_df
     full_columns = list(dict.fromkeys(read_columns + ["start_time"]))
     try:
-        full = pd.read_parquet(path, columns=full_columns)
+        full = read_parquet_with_fallback(path, columns=full_columns)
     except Exception:
-        full = pd.read_parquet(path)
+        full = read_parquet_with_fallback(path)
         keep = [c for c in full_columns if c in full.columns]
         full = full[keep]
     if "start_time" in full.columns:

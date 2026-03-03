@@ -16,15 +16,17 @@ from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_
 
 from api.db import get_engine
 from ml.denoiser.coverage_authority import get_coverage_freshness, require_coverage_freshness
+from ml.parquet_io import read_parquet_with_fallback
 
 
 def _load_snapshot(path: str, *, columns: list[str]) -> pd.DataFrame:
     read_columns = list(dict.fromkeys(columns))
+
     def _read_with_fallback(parquet_path: str) -> pd.DataFrame:
         try:
-            return pd.read_parquet(parquet_path, columns=read_columns)
+            return read_parquet_with_fallback(parquet_path, columns=read_columns)
         except Exception:
-            full = pd.read_parquet(parquet_path)
+            full = read_parquet_with_fallback(parquet_path)
             keep = [c for c in read_columns if c in full.columns]
             return full[keep]
 
