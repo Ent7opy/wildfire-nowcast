@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-industrial-authoritative industrial-build-policy industrial-load-no-go-zones industrial-coverage-report br-build-hybrid-curated ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-industrial-authoritative industrial-build-policy industrial-load-no-go-zones industrial-coverage-report br-build-hybrid-curated ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-authoritative-perimeters-ca ingest-authoritative-perimeters-eu ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -321,6 +321,12 @@ ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 -
 
 ingest-authoritative-perimeters: ## Ingest authoritative WFIGS perimeters (pass ARGS="--source-profile ... [--start ... --end ...]")
 	$(UV) run --project ingest -m ingest.wfigs_authority_ingest $(ARGS)
+
+ingest-authoritative-perimeters-ca: ## Ingest authoritative Canada perimeters from CWFIS (pass ARGS="--source-profile cwfis_nbac_historical [--start ... --end ...]")
+	$(UV) run --project ingest -m ingest.cwfis_authority_ingest $(ARGS)
+
+ingest-authoritative-perimeters-eu: ## Ingest Copernicus EMS wildfire AOIs as silver perimeters (pass ARGS="--start ... --end ... [--category Wildfire]")
+	$(UV) run --project ingest -m ingest.copernicus_ems_authority_ingest $(ARGS)
 
 ingest-orchestrator: ## Run unified FIRMS/weather/terrain/perimeters orchestrator (pass ARGS="--loop --poll-seconds 30")
 	$(UV) run --project ingest -m ingest.orchestrator $(ARGS)

@@ -1,0 +1,18 @@
+profiles:
+  - source_profile: cwfis_nbac_historical
+    provider: cwfis
+    authority_profile: cwfis_ca
+    source_uri: https://cwfis.cfs.nrcan.gc.ca/geoserver/wfs
+    source_layer: public:nbac
+    tier: gold
+    is_authoritative: true
+    notes: "National Burned Area Composite (historical certified truth; annual lag)."
+
+  - source_profile: copernicus_ems_wildfire_activations
+    provider: copernicus_ems
+    authority_profile: copernicus_ems_eu
+    source_uri: https://rapidmapping.emergency.copernicus.eu/backend/dashboard-api/public-activations/
+    source_layer: public_activations_aois
+    tier: silver
+    is_authoritative: true
+    notes: "Rapid Mapping wildfire activation AOIs (public analyst-verified operational layer)."
