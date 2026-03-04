@@ -16,6 +16,8 @@ from sqlalchemy import text
 
 from api.db import get_engine
 from ml.parquet_io import write_parquet_with_fallback
+from ml.denoiser.weather_context import WeatherContextParams, append_weather_context_features
+from ml.denoiser.moisture_context import MoistureContextParams, append_moisture_context_features
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +29,13 @@ LOGGER = logging.getLogger("export_snapshot_v2")
 _NEUTRAL_LANDCOVER = (0.5, -1.0)
 _NEUTRAL_PERSISTENCE = (0.3, 0.5, -1.0)
 _NEUTRAL_WEATHER = (0.5, -1.0)
+_SCAN_ANGLE_MAX_DEG = 50.0
+_WEATHER_TIME_TOLERANCE_HOURS = float(
+    os.getenv("FIRE_SCORING_WEATHER_TIME_TOLERANCE_HOURS", "6")
+)
+_MOISTURE_TIME_TOLERANCE_HOURS = float(
+    os.getenv("DENOISER_MOISTURE_TIME_TOLERANCE_HOURS", "48")
+)
 
 
 def _log_step(step: str, started_at: float, *, rows: int | None = None) -> None:
@@ -73,6 +82,23 @@ def _merge_text_values(series: pd.Series) -> list[str]:
     return sorted(seen)
 
 
+def _normalize_sensor_id(*, sensor: object, source: object, satellite_name: object) -> str:
+    joined = " ".join(
+        str(value).strip().lower()
+        for value in (sensor, source, satellite_name)
+        if value is not None and str(value).strip()
+    )
+    if not joined:
+        return "unknown"
+    if "noaa-21" in joined or "noaa21" in joined or "j02" in joined or "j2" in joined:
+        return "NOAA-21"
+    if "noaa-20" in joined or "noaa20" in joined or "j01" in joined or "j1" in joined:
+        return "NOAA-20"
+    if "s-npp" in joined or "snpp" in joined or "suomi" in joined or "npp" in joined:
+        return "S-NPP"
+    return "unknown"
+
+
 def export_training_snapshot_v2(
     aoi_bbox: Tuple[float, float, float, float],
     start_time: datetime,
@@ -100,11 +126,23 @@ def export_training_snapshot_v2(
             d.acq_time,
             d.sensor,
             d.source,
+            d.raw_properties->>'satellite' AS satellite_name,
             d.confidence,
             d.frp,
             d.brightness,
             d.bright_t31,
             d.scan,
+            CASE
+                WHEN COALESCE(d.raw_properties->>'scan_angle', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (d.raw_properties->>'scan_angle')::double precision
+                WHEN COALESCE(d.raw_properties->>'scan_angle_deg', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (d.raw_properties->>'scan_angle_deg')::double precision
+                WHEN COALESCE(d.raw_properties->>'satellite_zenith_angle', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (d.raw_properties->>'satellite_zenith_angle')::double precision
+                WHEN COALESCE(d.raw_properties->>'sensor_zenith_angle', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (d.raw_properties->>'sensor_zenith_angle')::double precision
+                ELSE NULL
+            END AS scan_angle,
             d.track,
             d.landcover_score,
             d.persistence_score,
@@ -158,9 +196,44 @@ def export_training_snapshot_v2(
         raise SystemExit("No labeled v2 rows found for export.")
 
     started = time.perf_counter()
+    rows_before_scan_filter = int(len(rows))
     rows["acq_time"] = pd.to_datetime(rows["acq_time"], utc=True)
     rows["event_id"] = _derive_event_id(rows)
     rows["truth_covered_mask"] = rows["truth_covered_mask"].fillna(False).astype(bool)
+    rows["sensor_id"] = rows.apply(
+        lambda row: _normalize_sensor_id(
+            sensor=row.get("sensor"),
+            source=row.get("source"),
+            satellite_name=row.get("satellite_name"),
+        ),
+        axis=1,
+    )
+    rows["sensor_id_code"] = rows["sensor_id"].astype("category").cat.codes.astype(np.int16)
+    rows["scan_angle"] = pd.to_numeric(rows["scan_angle"], errors="coerce")
+    rows["scan_angle_is_available"] = rows["scan_angle"].notna().astype(bool)
+
+    scan_angle_drop_mask = rows["scan_angle"] > _SCAN_ANGLE_MAX_DEG
+    dropped_high_scan = int(scan_angle_drop_mask.sum())
+    if dropped_high_scan > 0:
+        LOGGER.warning(
+            "Dropping %d detections with scan_angle > %.1f degrees.",
+            dropped_high_scan,
+            _SCAN_ANGLE_MAX_DEG,
+        )
+        rows = rows.loc[~scan_angle_drop_mask].copy()
+    if rows.empty:
+        raise SystemExit("All candidate rows were dropped by scan_angle > 50° training filter.")
+
+    rows = append_weather_context_features(
+        rows,
+        engine=get_engine(),
+        params=WeatherContextParams(time_tolerance_hours=_WEATHER_TIME_TOLERANCE_HOURS),
+    )
+    rows = append_moisture_context_features(
+        rows,
+        engine=get_engine(),
+        params=MoistureContextParams(time_tolerance_hours=_MOISTURE_TIME_TOLERANCE_HOURS),
+    )
 
     rows["landcover_is_available"], rows["landcover_score_clean"] = _normalize_static_score(
         rows["landcover_score"], _NEUTRAL_LANDCOVER
@@ -185,6 +258,8 @@ def export_training_snapshot_v2(
             probable_positive_count=("label", lambda s: int((s == "PROBABLE_POSITIVE").sum())),
             weak_supervision_count=("weak_supervision", lambda s: int(pd.Series(s).fillna(False).sum())),
             sensor=("sensor", _mode_or_unknown),
+            sensor_id=("sensor_id", _mode_or_unknown),
+            sensor_id_code=("sensor_id_code", "max"),
             source=("source", _mode_or_unknown),
             confidence_mean=("confidence", "mean"),
             confidence_max=("confidence", "max"),
@@ -193,6 +268,8 @@ def export_training_snapshot_v2(
             brightness_mean=("brightness", "mean"),
             bright_t31_mean=("bright_t31", "mean"),
             scan_mean=("scan", "mean"),
+            scan_angle_mean=("scan_angle", "mean"),
+            scan_angle_max=("scan_angle", "max"),
             track_mean=("track", "mean"),
             landcover_mean=("landcover_score_clean", "mean"),
             persistence_mean=("persistence_score_clean", "mean"),
@@ -200,6 +277,17 @@ def export_training_snapshot_v2(
             landcover_is_available=("landcover_is_available", "max"),
             persistence_is_available=("persistence_is_available", "max"),
             weather_is_available=("weather_is_available", "max"),
+            scan_angle_is_available=("scan_angle_is_available", "max"),
+            rh2m_mean=("rh2m", "mean"),
+            u10_mean=("u10", "mean"),
+            v10_mean=("v10", "mean"),
+            wind_speed_mean=("wind_speed", "mean"),
+            rh2m_is_available=("rh2m_is_available", "max"),
+            wind_is_available=("wind_is_available", "max"),
+            lfmc_mean=("lfmc", "mean"),
+            dfmc_10hr_mean=("dfmc_10hr", "mean"),
+            lfmc_is_available=("lfmc_is_available", "max"),
+            dfmc_is_available=("dfmc_is_available", "max"),
             truth_covered_mask=("truth_covered_mask", "all"),
             coverage_mask_ids=("coverage_mask_ids", _merge_text_values),
             coverage_authority_profiles=("coverage_authority_profiles", _merge_text_values),
@@ -215,13 +303,28 @@ def export_training_snapshot_v2(
     event_df["duration_hours"] = (
         (event_df["end_time"] - event_df["start_time"]).dt.total_seconds() / 3600.0
     )
-    doy = event_df["start_time"].dt.dayofyear.fillna(1)
-    event_df["sin_doy"] = np.sin(2 * np.pi * doy / 365.25)
-    event_df["cos_doy"] = np.cos(2 * np.pi * doy / 365.25)
+    event_df["hour_of_day"] = (
+        event_df["start_time"].dt.hour
+        + event_df["start_time"].dt.minute / 60.0
+        + event_df["start_time"].dt.second / 3600.0
+    )
+    event_df["day_of_year"] = event_df["start_time"].dt.dayofyear.fillna(1).astype(np.int16)
+    event_df["sin_hour"] = np.sin(2 * np.pi * event_df["hour_of_day"] / 24.0)
+    event_df["cos_hour"] = np.cos(2 * np.pi * event_df["hour_of_day"] / 24.0)
+    event_df["sin_day_of_year"] = np.sin(2 * np.pi * event_df["day_of_year"] / 365.25)
+    event_df["cos_day_of_year"] = np.cos(2 * np.pi * event_df["day_of_year"] / 365.25)
+    # Backward-compatible aliases used by existing training configs.
+    event_df["sin_doy"] = event_df["sin_day_of_year"]
+    event_df["cos_doy"] = event_df["cos_day_of_year"]
 
     event_df["landcover_is_available"] = event_df["landcover_is_available"].astype(np.float32)
     event_df["persistence_is_available"] = event_df["persistence_is_available"].astype(np.float32)
     event_df["weather_is_available"] = event_df["weather_is_available"].astype(np.float32)
+    event_df["scan_angle_is_available"] = event_df["scan_angle_is_available"].astype(np.float32)
+    event_df["rh2m_is_available"] = event_df["rh2m_is_available"].astype(np.float32)
+    event_df["wind_is_available"] = event_df["wind_is_available"].astype(np.float32)
+    event_df["lfmc_is_available"] = event_df["lfmc_is_available"].astype(np.float32)
+    event_df["dfmc_is_available"] = event_df["dfmc_is_available"].astype(np.float32)
     event_df["truth_covered_mask"] = event_df["truth_covered_mask"].astype(bool)
 
     event_df["biome_slice"] = pd.cut(
@@ -269,6 +372,8 @@ def export_training_snapshot_v2(
         "aoi_bbox": list(aoi_bbox),
         "time_range": [start_time.isoformat(), end_time.isoformat()],
         "counts": {
+            "detection_rows_before_scan_filter": rows_before_scan_filter,
+            "detection_rows_dropped_scan_angle_gt_50": dropped_high_scan,
             "event_total": int(len(event_df)),
             "event_train": int(len(train_df)),
             "event_eval": int(len(eval_df)),
@@ -276,6 +381,12 @@ def export_training_snapshot_v2(
             "event_negative": int((event_df["event_label"] == "NEGATIVE").sum()),
             "event_unknown": int((event_df["event_label"] == "UNKNOWN").sum()),
             "event_truth_covered": int(event_df["truth_covered_mask"].sum()),
+            "sensor_id_known": int((event_df["sensor_id"] != "unknown").sum()),
+            "scan_angle_available": int(event_df["scan_angle_is_available"].sum()),
+            "rh2m_available": int(event_df["rh2m_is_available"].sum()),
+            "wind_available": int(event_df["wind_is_available"].sum()),
+            "lfmc_available": int(event_df["lfmc_is_available"].sum()),
+            "dfmc_10hr_available": int(event_df["dfmc_is_available"].sum()),
         },
         "coverage": {
             "mask_ids": sorted(coverage_mask_ids),

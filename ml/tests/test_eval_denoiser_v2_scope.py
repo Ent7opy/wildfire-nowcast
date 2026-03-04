@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 
-from ml.eval_denoiser_v2 import evaluate_denoiser_v2
+from ml.eval_denoiser_v2 import ModelPromotionError, evaluate_denoiser_v2
 
 
 def _write_bundle(path: Path) -> None:
@@ -105,4 +105,33 @@ def test_eval_denoiser_v2_covered_scope_requires_mask_column(tmp_path: Path) -> 
             gate_scope="covered",
             coverage_mask_source="snapshot_only",
             fail_on_missing_coverage_mask=True,
+        )
+
+
+def test_eval_denoiser_v2_raises_model_promotion_error_when_gate_fails(tmp_path: Path) -> None:
+    model_run = tmp_path / "run"
+    model_run.mkdir()
+    _write_bundle(model_run)
+
+    snapshot = tmp_path / "snapshot_fail.parquet"
+    df = pd.DataFrame(
+        {
+            "f1": [0.9, 1.0, 0.8, 0.7, 0.1, 0.2],
+            "event_label": ["NEGATIVE", "NEGATIVE", "NEGATIVE", "NEGATIVE", "POSITIVE", "POSITIVE"],
+            "sensor": ["VIIRS"] * 6,
+            "biome_slice": ["mixed_fuel"] * 6,
+            "is_day_ratio": [0.1, 0.1, 0.2, 0.2, 0.9, 0.9],
+            "truth_covered_mask": [True] * 6,
+            "coverage_mask_ids": [["mask_a"]] * 6,
+        }
+    )
+    df.to_parquet(snapshot, index=False)
+
+    with pytest.raises(ModelPromotionError, match="Promotion gate failed"):
+        evaluate_denoiser_v2(
+            model_run_dir=str(model_run),
+            snapshot_path=str(snapshot),
+            out_dir=str(tmp_path / "report_fail"),
+            gate_scope="covered",
+            coverage_mask_source="snapshot_only",
         )

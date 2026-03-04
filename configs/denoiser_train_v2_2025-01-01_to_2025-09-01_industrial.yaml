@@ -1,6 +1,6 @@
 seed: 42
 model_output_root: models/denoiser_v2
-snapshot_path: data/denoiser/snapshots_v2/full_2025-01-01_to_2025-08-01.parquet
+snapshot_path: data/denoiser/snapshots_v2/run_20260304_094951
 label_column: event_label
 slice_columns:
 - sensor_id
@@ -59,7 +59,7 @@ pu_reliable_negative_max_prob: 0.15
 coverage_scope: covered
 coverage_mask_source: db_mask
 coverage_authority_profile: wfigs_us
-coverage_max_age_hours: 72
+coverage_max_age_hours: 240
 coverage_fail_on_stale: true
 calibration_holdout_fraction: 0.5
 pu_bagging:
@@ -72,7 +72,7 @@ pu_bagging:
   min_oob_votes: 3
   pseudo_negative_max_ratio: 3.0
   max_pseudo_negative_rows: 0
-  min_pseudo_positive_rows: 500
+  min_pseudo_positive_rows: 0
   oob_margin_min: 0.05
   spy_fraction: 0.15
   spy_min_rows: 30

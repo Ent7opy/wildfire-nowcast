@@ -3,7 +3,7 @@ model_output_root: models/denoiser_v2
 snapshot_path: /Users/vanyoivanov/Projects/wildfire-nowcast/data/denoiser/snapshots_v2/run_20260302_143101
 label_column: event_label
 slice_columns:
-- sensor
+- sensor_id
 - biome_slice
 features:
 - detection_count
@@ -14,7 +14,21 @@ features:
 - brightness_mean
 - bright_t31_mean
 - scan_mean
+- scan_angle_mean
+- scan_angle_max
+- scan_angle_is_available
 - track_mean
+- sensor_id_code
+- rh2m_mean
+- u10_mean
+- v10_mean
+- wind_speed_mean
+- rh2m_is_available
+- wind_is_available
+- lfmc_mean
+- dfmc_10hr_mean
+- lfmc_is_available
+- dfmc_is_available
 - landcover_mean
 - persistence_mean
 - weather_mean
@@ -23,6 +37,12 @@ features:
 - weather_is_available
 - is_day_ratio
 - duration_hours
+- hour_of_day
+- day_of_year
+- sin_hour
+- cos_hour
+- sin_day_of_year
+- cos_day_of_year
 - sin_doy
 - cos_doy
 model_backend: xgboost_pu_bagging
@@ -54,6 +74,25 @@ pu_bagging:
   max_pseudo_negative_rows: 0
   min_pseudo_positive_rows: 500
   oob_margin_min: 0.05
+  spy_fraction: 0.15
+  spy_min_rows: 30
+  spy_pos_quantile: 0.65
+  spy_neg_quantile: 0.1
+sampling:
+  enabled: true
+  majority_ratio: 10.0
+adasyn:
+  enabled: true
+  intensity_feature: frp_max
+  high_intensity_quantile: 0.9
+  multiplier: 2.0
+  k_neighbors: 5
+  min_high_intensity_rows: 10
+  max_synthetic_rows: 20000
+cross_validation:
+  enabled: true
+  folds: 3
+  max_known_rows: 150000
 global_calibration: platt
 slice_calibration_min_samples: 50
 isotonic_min_samples: 150

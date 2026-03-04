@@ -1,13 +1,15 @@
-"""Fuel/moisture feature ingestion for spread forecasting.
+"""UNSAFE synthetic fuel/moisture feature ingestion (deprecated).
 
-This module builds a cached gridded cube with dynamic fuel proxies used by
-the spread v2 training pipeline (ndvi/lfmc/dfmc/precip_24h).
+WARNING: UNSAFE_FOR_PRODUCTION
+This module generates deterministic synthetic priors and must not be used for
+production denoiser or forecast training.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,25 @@ from api.db import get_engine
 from ingest.config import fuel_settings
 
 LOGGER = logging.getLogger(__name__)
+UNSAFE_FOR_PRODUCTION = True
+_ALLOW_UNSAFE_ENV = "ALLOW_UNSAFE_SYNTHETIC_FUELS"
+
+
+def _assert_not_production_synthetic(*, allow_unsafe_synthetic: bool) -> None:
+    if not UNSAFE_FOR_PRODUCTION:
+        return
+    env_allow = str(os.getenv(_ALLOW_UNSAFE_ENV, "false")).strip().lower() in {"1", "true", "yes", "on"}
+    if allow_unsafe_synthetic or env_allow:
+        LOGGER.warning(
+            "WARNING: UNSAFE_FOR_PRODUCTION synthetic fuel ingestion enabled via explicit override."
+        )
+        return
+    raise RuntimeError(
+        "WARNING: UNSAFE_FOR_PRODUCTION synthetic fuel/moisture cube is deprecated. "
+        "Use authoritative ingestors (lfmc_ecland_ingest.py and dfmc_sjsu_ingest.py) instead. "
+        "To run this script only for controlled local tests, pass --allow-unsafe-synthetic "
+        f"or set {_ALLOW_UNSAFE_ENV}=true."
+    )
 
 
 def _parse_run_time(value: str | None) -> datetime:
@@ -146,8 +167,10 @@ def ingest_fuel_moisture_for_bbox(
     run_time: datetime | None = None,
     output_dir: Path | None = None,
     resolution_deg: float = 0.01,
+    allow_unsafe_synthetic: bool = False,
 ) -> dict[str, Any]:
     """Build and persist a cached fuel/moisture feature cube for an AOI."""
+    _assert_not_production_synthetic(allow_unsafe_synthetic=allow_unsafe_synthetic)
     resolved_time = (run_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
     out_root = output_dir or fuel_settings.cache_root
     out_root.mkdir(parents=True, exist_ok=True)
@@ -196,6 +219,11 @@ def _parse_args() -> argparse.Namespace:
         default=0.01,
         help="Grid resolution in degrees.",
     )
+    parser.add_argument(
+        "--allow-unsafe-synthetic",
+        action="store_true",
+        help="Explicitly allow deprecated synthetic cube generation for local tests only.",
+    )
     return parser.parse_args()
 
 
@@ -207,6 +235,7 @@ def main() -> None:
         run_time=_parse_run_time(args.run_time),
         output_dir=args.output_dir,
         resolution_deg=float(args.resolution_deg),
+        allow_unsafe_synthetic=bool(args.allow_unsafe_synthetic),
     )
     LOGGER.info("Fuel ingestion completed: %s", result)
 

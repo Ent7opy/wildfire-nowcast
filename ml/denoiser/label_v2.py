@@ -46,6 +46,8 @@ DEFAULT_PARAMS = {
 _DEFAULT_GLOBAL_BBOX: tuple[float, float, float, float] = (-180.0, -90.0, 180.0, 90.0)
 _ALLOWED_PERIMETER_SOURCES = {"authoritative_perimeters", "fire_perimeters"}
 _ALLOWED_AUTHORITATIVE_TIERS = {"silver", "gold", "both"}
+_INDUSTRIAL_GOLD_BUFFER_M = 375.0
+_INDUSTRIAL_SILVER_BUFFER_M = 750.0
 
 _GOVERNANCE_SQL = """
       AND ap.is_authoritative
@@ -342,21 +344,14 @@ def _label_single_window(
         ),
         "industrial_strict_no_go": bool((industrial_policy or {}).get("strict_no_go", False)),
         "industrial_gold_buffer_m": float(
-            (industrial_policy or {}).get("gold_buffer_m", p["negative_industrial_radius_m"])
+            _INDUSTRIAL_GOLD_BUFFER_M
         ),
         "industrial_gold_buffer_deg": float(
-            (industrial_policy or {}).get("gold_buffer_m", p["negative_industrial_radius_m"])
+            _INDUSTRIAL_GOLD_BUFFER_M
         )
         * meters_to_deg,
-        "industrial_silver_buffer_min_m": float(
-            (industrial_policy or {}).get("silver_buffer_min_m", p["negative_industrial_radius_m"])
-        ),
-        "industrial_silver_buffer_max_m": float(
-            (industrial_policy or {}).get("silver_buffer_max_m", p["negative_industrial_radius_m"])
-        ),
-        "industrial_silver_buffer_max_deg": float(
-            (industrial_policy or {}).get("silver_buffer_max_m", p["negative_industrial_radius_m"])
-        )
+        "industrial_silver_buffer_m": float(_INDUSTRIAL_SILVER_BUFFER_M),
+        "industrial_silver_buffer_deg": float(_INDUSTRIAL_SILVER_BUFFER_M)
         * meters_to_deg,
         "industrial_negatives_global": bool(industrial_negatives_global),
     }
@@ -431,13 +426,7 @@ def _label_single_window(
                     i.geom::geography,
                     CASE
                         WHEN i.authority_tier = 'gold' THEN :industrial_gold_buffer_m
-                        ELSE LEAST(
-                            :industrial_silver_buffer_max_m,
-                            GREATEST(
-                                :industrial_silver_buffer_min_m,
-                                COALESCE(i.coordinate_precision_m::double precision, :industrial_silver_buffer_min_m)
-                            )
-                        )
+                        ELSE :industrial_silver_buffer_m
                     END
                 )::geometry AS eff_geom
             FROM industrial_sources i
@@ -461,7 +450,6 @@ def _label_single_window(
                     c.geom,
                     c.acq_time
                 FROM tmp_label_candidates c
-                WHERE (:industrial_negatives_global OR c.in_coverage)
             ),
             no_go AS (
                 SELECT DISTINCT c.id
@@ -530,7 +518,6 @@ def _label_single_window(
             JOIN industrial_sources i
               ON i.geom && ST_Expand(c.geom, :negative_industrial_radius_deg)
              AND ST_DWithin(c.geom::geography, i.geom::geography, :negative_industrial_radius_m)
-            WHERE (:industrial_negatives_global OR c.in_coverage)
             """
         )
 
@@ -843,9 +830,8 @@ def label_detections_v2(
         "coverage_mask_ids": mask_ids,
         "industrial_policy_version": industrial_policy.get("policy_version"),
         "industrial_strict_no_go": bool(industrial_policy.get("strict_no_go")),
-        "industrial_gold_buffer_m": float(industrial_policy.get("gold_buffer_m")),
-        "industrial_silver_buffer_min_m": float(industrial_policy.get("silver_buffer_min_m")),
-        "industrial_silver_buffer_max_m": float(industrial_policy.get("silver_buffer_max_m")),
+        "industrial_gold_buffer_m": float(_INDUSTRIAL_GOLD_BUFFER_M),
+        "industrial_silver_buffer_m": float(_INDUSTRIAL_SILVER_BUFFER_M),
         "industrial_negatives_global": bool(industrial_negatives_global),
         "governance_filters": {
             "poly_featurestatus": ["Approved", "Certified"],

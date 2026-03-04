@@ -1,9 +1,12 @@
 import numpy as np
+import pandas as pd
 
 from ml.train_denoiser_v2 import (
+    _apply_adasyn_high_intensity,
     _apply_pseudo_negative_caps,
     _build_pseudo_label_masks,
     _oob_mean_scores,
+    _stratified_majority_sample,
 )
 
 
@@ -81,3 +84,60 @@ def test_apply_pseudo_negative_caps_drops_all_when_no_pseudo_positives() -> None
     assert stats["pseudo_negative_rows_after_cap"] == 0
     assert stats["pseudo_negative_rows_cap_target"] == 0
     assert stats["pseudo_negative_rows_dropped"] == 3
+
+
+def test_stratified_majority_sample_respects_1_to_10_ratio() -> None:
+    df = pd.DataFrame(
+        {
+            "sensor_id": ["S-NPP"] * 3 + ["NOAA-20"] * 6 + ["NOAA-21"] * 31,
+            "biome_slice": ["forest"] * 40,
+            "x": np.linspace(0.0, 1.0, 40),
+        }
+    )
+    y = np.asarray([1, 1, 1] + [0] * 6 + [-1] * 31, dtype=int)
+
+    sampled_df, sampled_y, stats = _stratified_majority_sample(
+        train_df=df,
+        y_train=y,
+        ratio_majority_to_positive=10.0,
+        slice_cols=["sensor_id", "biome_slice"],
+        rng=np.random.default_rng(42),
+    )
+
+    assert len(sampled_df) == len(sampled_y)
+    assert int((sampled_y == 1).sum()) == 3
+    assert int((sampled_y != 1).sum()) == 30
+    assert stats["sampling_applied"] is True
+
+
+def test_apply_adasyn_high_intensity_generates_positive_rows() -> None:
+    x = pd.DataFrame(
+        {
+            "frp_max": [10, 20, 40, 80, 100, 5, 6, 7, 8, 9, 11, 12],
+            "f1": np.linspace(0.0, 1.0, 12),
+            "f2": np.linspace(1.0, 2.0, 12),
+        }
+    )
+    y = np.asarray([1, 1, 1, 1, 1, 0, 0, 0, -1, -1, 0, -1], dtype=int)
+    config = {
+        "adasyn": {
+            "enabled": True,
+            "intensity_feature": "frp_max",
+            "high_intensity_quantile": 0.6,
+            "multiplier": 2.0,
+            "k_neighbors": 3,
+            "min_high_intensity_rows": 2,
+            "max_synthetic_rows": 100,
+        }
+    }
+
+    x_aug, y_aug, stats = _apply_adasyn_high_intensity(
+        config=config,
+        x_train=x,
+        y_train=y,
+        rng=np.random.default_rng(7),
+    )
+
+    assert len(x_aug) == len(y_aug)
+    assert stats["generated_rows"] > 0
+    assert int((y_aug == 1).sum()) > int((y == 1).sum())

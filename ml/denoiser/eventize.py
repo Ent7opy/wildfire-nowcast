@@ -13,21 +13,27 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
+import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from api.db import get_engine
+from ml.denoiser.moisture_context import MoistureContextParams, append_moisture_context_features
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("denoiser_eventize")
+_MOISTURE_TIME_TOLERANCE_HOURS = float(
+    os.getenv("DENOISER_MOISTURE_TIME_TOLERANCE_HOURS", "48")
+)
 
 
 @dataclass(frozen=True)
@@ -519,6 +525,10 @@ def _eventize_single_window(
             end_time,
             detection_count,
             front_count,
+            lfmc_mean,
+            dfmc_10hr_mean,
+            lfmc_is_available,
+            dfmc_is_available,
             geom,
             updated_at
         )
@@ -530,6 +540,10 @@ def _eventize_single_window(
             e.end_time,
             e.detection_count,
             e.front_count,
+            NULL::double precision AS lfmc_mean,
+            NULL::double precision AS dfmc_10hr_mean,
+            FALSE AS lfmc_is_available,
+            FALSE AS dfmc_is_available,
             e.geom,
             NOW() AS updated_at
         FROM tmp_eventize_event_summary e
@@ -541,6 +555,10 @@ def _eventize_single_window(
             end_time = EXCLUDED.end_time,
             detection_count = EXCLUDED.detection_count,
             front_count = EXCLUDED.front_count,
+            lfmc_mean = EXCLUDED.lfmc_mean,
+            dfmc_10hr_mean = EXCLUDED.dfmc_10hr_mean,
+            lfmc_is_available = EXCLUDED.lfmc_is_available,
+            dfmc_is_available = EXCLUDED.dfmc_is_available,
             geom = EXCLUDED.geom,
             updated_at = NOW()
         WHERE
@@ -550,7 +568,37 @@ def _eventize_single_window(
             OR fire_events.end_time IS DISTINCT FROM EXCLUDED.end_time
             OR fire_events.detection_count IS DISTINCT FROM EXCLUDED.detection_count
             OR fire_events.front_count IS DISTINCT FROM EXCLUDED.front_count
+            OR fire_events.lfmc_mean IS DISTINCT FROM EXCLUDED.lfmc_mean
+            OR fire_events.dfmc_10hr_mean IS DISTINCT FROM EXCLUDED.dfmc_10hr_mean
+            OR fire_events.lfmc_is_available IS DISTINCT FROM EXCLUDED.lfmc_is_available
+            OR fire_events.dfmc_is_available IS DISTINCT FROM EXCLUDED.dfmc_is_available
             OR fire_events.geom IS DISTINCT FROM EXCLUDED.geom
+        """
+    )
+
+    event_moisture_source_sql = text(
+        """
+        SELECT
+            e.event_id,
+            e.start_time AS acq_time,
+            ST_Y(ST_Centroid(e.geom)) AS lat,
+            ST_X(ST_Centroid(e.geom)) AS lon
+        FROM tmp_eventize_event_summary e
+        JOIN tmp_eventize_target_events te ON te.event_id = e.event_id
+        WHERE e.geom IS NOT NULL
+        """
+    )
+
+    event_moisture_update_sql = text(
+        """
+        UPDATE fire_events
+        SET
+            lfmc_mean = :lfmc_mean,
+            dfmc_10hr_mean = :dfmc_10hr_mean,
+            lfmc_is_available = :lfmc_is_available,
+            dfmc_is_available = :dfmc_is_available,
+            updated_at = NOW()
+        WHERE event_id = :event_id
         """
     )
 
@@ -677,6 +725,42 @@ def _eventize_single_window(
         started = time.perf_counter()
         event_result = conn.execute(event_upsert_sql)
         _log_step("eventize.upsert_events", started, rows=int(event_result.rowcount or 0))
+
+        started = time.perf_counter()
+        event_points = pd.read_sql(event_moisture_source_sql, conn)
+        moisture_updates: list[dict[str, object]] = []
+        if not event_points.empty:
+            event_points["acq_time"] = pd.to_datetime(event_points["acq_time"], utc=True)
+            event_points["lat"] = pd.to_numeric(event_points["lat"], errors="coerce")
+            event_points["lon"] = pd.to_numeric(event_points["lon"], errors="coerce")
+            event_points = event_points.dropna(subset=["acq_time", "lat", "lon"])
+            if not event_points.empty:
+                enriched = append_moisture_context_features(
+                    event_points,
+                    engine=engine,
+                    params=MoistureContextParams(time_tolerance_hours=_MOISTURE_TIME_TOLERANCE_HOURS),
+                )
+                moisture_updates = [
+                    {
+                        "event_id": str(row["event_id"]),
+                        "lfmc_mean": (
+                            None
+                            if pd.isna(row.get("lfmc"))
+                            else float(row["lfmc"])
+                        ),
+                        "dfmc_10hr_mean": (
+                            None
+                            if pd.isna(row.get("dfmc_10hr"))
+                            else float(row["dfmc_10hr"])
+                        ),
+                        "lfmc_is_available": bool(row.get("lfmc_is_available", False)),
+                        "dfmc_is_available": bool(row.get("dfmc_is_available", False)),
+                    }
+                    for _, row in enriched.iterrows()
+                ]
+        if moisture_updates:
+            conn.execute(event_moisture_update_sql, moisture_updates)
+        _log_step("eventize.update_event_moisture", started, rows=int(len(moisture_updates)))
 
         started = time.perf_counter()
         member_result = conn.execute(memberships_upsert_sql)

@@ -17,6 +17,8 @@ from sqlalchemy.engine import Engine
 
 from api.db import get_engine
 from ml.denoiser.eventize import EventizeParams, eventize_detections
+from ml.denoiser.weather_context import WeatherContextParams, append_weather_context_features
+from ml.denoiser.moisture_context import MoistureContextParams, append_moisture_context_features
 from ingest.config import settings as ingest_settings
 
 logging.basicConfig(
@@ -28,6 +30,159 @@ LOGGER = logging.getLogger("denoiser_inference_v2")
 _NEUTRAL_LANDCOVER = (0.5, -1.0)
 _NEUTRAL_PERSISTENCE = (0.3, 0.5, -1.0)
 _NEUTRAL_WEATHER = (0.5, -1.0)
+_SCAN_ANGLE_MAX_DEG = 50.0
+_WEATHER_TIME_TOLERANCE_HOURS = float(
+    os.getenv("FIRE_SCORING_WEATHER_TIME_TOLERANCE_HOURS", "6")
+)
+_MOISTURE_TIME_TOLERANCE_HOURS = float(
+    os.getenv("DENOISER_MOISTURE_TIME_TOLERANCE_HOURS", "48")
+)
+_INDUSTRIAL_GOLD_BUFFER_M = 375.0
+_INDUSTRIAL_SILVER_BUFFER_M = 750.0
+_DEFAULT_INDUSTRIAL_POLICY_VERSION = "global_authoritative_industrial_v1"
+
+
+def _confidence_is_high(
+    confidence_series: pd.Series,
+    raw_properties_series: pd.Series,
+    *,
+    fail_closed_confidence: float,
+) -> pd.Series:
+    conf_num = pd.to_numeric(confidence_series, errors="coerce")
+    conf_label = confidence_series.astype(str).str.strip().str.lower()
+    from_conf_col = conf_label.isin({"h", "high"})
+
+    def _raw_has_high(value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        for key in ("confidence", "confidence_label", "firms_confidence", "viirs_confidence"):
+            raw = value.get(key)
+            if raw is None:
+                continue
+            s = str(raw).strip().lower()
+            if s in {"h", "high"}:
+                return True
+        return False
+
+    from_raw = raw_properties_series.apply(_raw_has_high)
+    return ((conf_num >= float(fail_closed_confidence)) | from_conf_col | from_raw).fillna(False)
+
+
+def _build_minimal_event_rollup(detections: pd.DataFrame) -> pd.DataFrame:
+    if detections.empty:
+        return pd.DataFrame(columns=["event_id", "frp_max", "confidence_max", "landcover_mean"])
+    det = detections.copy()
+    det["event_id"] = det["event_id"].fillna(det["id"].map(lambda x: f"det_{int(x)}"))
+    det["frp"] = pd.to_numeric(det["frp"], errors="coerce")
+    det["confidence"] = pd.to_numeric(det["confidence"], errors="coerce")
+    _, det["landcover_clean"] = _normalize_static_score(det["landcover_score"], _NEUTRAL_LANDCOVER)
+    out = (
+        det.groupby("event_id", dropna=False)
+        .agg(
+            frp_max=("frp", "max"),
+            confidence_max=("confidence", "max"),
+            landcover_mean=("landcover_clean", "mean"),
+        )
+        .reset_index()
+    )
+    return out
+
+
+def _active_industrial_policy(
+    engine: Engine,
+    *,
+    policy_version: str | None = None,
+) -> dict[str, Any] | None:
+    stmt = text(
+        """
+        SELECT
+            policy_version,
+            strict_no_go
+        FROM industrial_mask_policies
+        WHERE (
+                :policy_version IS NOT NULL
+                AND policy_version = :policy_version
+              )
+           OR (
+                :policy_version IS NULL
+                AND (active_to IS NULL OR active_to > NOW())
+              )
+        ORDER BY active_from DESC, policy_version DESC
+        LIMIT 1
+        """
+    )
+    with engine.begin() as conn:
+        row = conn.execute(stmt, {"policy_version": policy_version}).mappings().first()
+    return dict(row) if row else None
+
+
+def _load_industrial_masked_event_ids(
+    engine: Engine,
+    *,
+    batch_id: int,
+    policy_version: str | None,
+    strict_no_go: bool,
+) -> set[str]:
+    meters_to_deg = 1.0 / 111000.0
+    stmt = text(
+        """
+        WITH base AS (
+            SELECT
+                d.event_id,
+                d.geom,
+                d.acq_time
+            FROM fire_detections d
+            WHERE d.ingest_batch_id = :batch_id
+              AND d.event_id IS NOT NULL
+        )
+        SELECT DISTINCT b.event_id::text AS event_id
+        FROM base b
+        JOIN industrial_sources i
+          ON COALESCE(i.is_active, TRUE)
+         AND i.authority_tier IN ('gold', 'silver')
+         AND (i.valid_from IS NULL OR i.valid_from <= b.acq_time)
+         AND (i.valid_to IS NULL OR i.valid_to >= b.acq_time)
+         AND i.geom && ST_Expand(
+                b.geom,
+                CASE
+                    WHEN i.authority_tier = 'gold' THEN :gold_buffer_deg
+                    ELSE :silver_buffer_deg
+                END
+            )
+         AND ST_DWithin(
+                b.geom::geography,
+                i.geom::geography,
+                CASE
+                    WHEN i.authority_tier = 'gold' THEN :gold_buffer_m
+                    ELSE :silver_buffer_m
+                END
+            )
+        WHERE NOT (
+            :strict_no_go
+            AND :policy_version IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                FROM industrial_no_go_zones z
+                WHERE z.is_active
+                  AND z.policy_version = :policy_version
+                  AND z.geom && b.geom
+                  AND ST_Intersects(z.geom, b.geom)
+            )
+        )
+        """
+    )
+    params = {
+        "batch_id": int(batch_id),
+        "policy_version": policy_version,
+        "strict_no_go": bool(strict_no_go),
+        "gold_buffer_m": float(_INDUSTRIAL_GOLD_BUFFER_M),
+        "silver_buffer_m": float(_INDUSTRIAL_SILVER_BUFFER_M),
+        "gold_buffer_deg": float(_INDUSTRIAL_GOLD_BUFFER_M) * meters_to_deg,
+        "silver_buffer_deg": float(_INDUSTRIAL_SILVER_BUFFER_M) * meters_to_deg,
+    }
+    with engine.begin() as conn:
+        rows = conn.execute(stmt, params).mappings().all()
+    return {str(row["event_id"]) for row in rows if row.get("event_id") is not None}
 
 
 def _normalize_static_score(series: pd.Series, neutral_values: tuple[float, ...]) -> tuple[pd.Series, pd.Series]:
@@ -51,7 +206,7 @@ def _load_bundle(model_run_dir: str) -> dict[str, Any]:
     return {
         "model": model,
         "features": features,
-        "slice_cols": ["sensor", "biome_slice"],
+        "slice_cols": ["sensor_id", "biome_slice"],
         "global_calibrator": {"type": "identity", "model": None},
         "slice_calibrators": {},
         "thresholds": {
@@ -76,6 +231,23 @@ def _apply_calibrator(cal: dict[str, Any], scores: np.ndarray) -> np.ndarray:
 
 def _slice_key(row: pd.Series, slice_cols: list[str]) -> str:
     return "|".join(f"{col}={row.get(col, 'unknown')}" for col in slice_cols)
+
+
+def _normalize_sensor_id(*, sensor: object, source: object, satellite_name: object) -> str:
+    joined = " ".join(
+        str(value).strip().lower()
+        for value in (sensor, source, satellite_name)
+        if value is not None and str(value).strip()
+    )
+    if not joined:
+        return "unknown"
+    if "noaa-21" in joined or "noaa21" in joined or "j02" in joined or "j2" in joined:
+        return "NOAA-21"
+    if "noaa-20" in joined or "noaa20" in joined or "j01" in joined or "j1" in joined:
+        return "NOAA-20"
+    if "s-npp" in joined or "snpp" in joined or "suomi" in joined or "npp" in joined:
+        return "S-NPP"
+    return "unknown"
 
 
 def _predict_raw(model: Any, x: pd.DataFrame) -> np.ndarray:
@@ -103,6 +275,18 @@ def _get_batch_detections(engine: Engine, batch_id: int) -> pd.DataFrame:
             bright_t31,
             scan,
             track,
+            raw_properties->>'satellite' AS satellite_name,
+            CASE
+                WHEN COALESCE(raw_properties->>'scan_angle', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (raw_properties->>'scan_angle')::double precision
+                WHEN COALESCE(raw_properties->>'scan_angle_deg', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (raw_properties->>'scan_angle_deg')::double precision
+                WHEN COALESCE(raw_properties->>'satellite_zenith_angle', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (raw_properties->>'satellite_zenith_angle')::double precision
+                WHEN COALESCE(raw_properties->>'sensor_zenith_angle', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
+                    THEN (raw_properties->>'sensor_zenith_angle')::double precision
+                ELSE NULL
+            END AS scan_angle,
             landcover_score,
             persistence_score,
             weather_score,
@@ -117,12 +301,37 @@ def _get_batch_detections(engine: Engine, batch_id: int) -> pd.DataFrame:
         return pd.read_sql(query, conn, params={"batch_id": int(batch_id)})
 
 
-def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
+def _build_event_features(batch_df: pd.DataFrame, *, engine: Engine) -> pd.DataFrame:
     df = batch_df.copy()
     if df.empty:
         return pd.DataFrame()
     df["acq_time"] = pd.to_datetime(df["acq_time"], utc=True)
     df["event_id"] = df["event_id"].fillna(df["id"].map(lambda x: f"det_{int(x)}"))
+    df["sensor_id"] = df.apply(
+        lambda row: _normalize_sensor_id(
+            sensor=row.get("sensor"),
+            source=row.get("source"),
+            satellite_name=row.get("satellite_name"),
+        ),
+        axis=1,
+    )
+    df["sensor_id_code"] = df["sensor_id"].astype("category").cat.codes.astype(np.int16)
+    df["scan_angle"] = pd.to_numeric(df["scan_angle"], errors="coerce")
+    df["scan_angle_is_available"] = df["scan_angle"].notna().astype(bool)
+    # Match training hard-filter policy for extreme scan distortion.
+    df = df[(df["scan_angle"].isna()) | (df["scan_angle"] <= _SCAN_ANGLE_MAX_DEG)].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df = append_weather_context_features(
+        df,
+        engine=engine,
+        params=WeatherContextParams(time_tolerance_hours=_WEATHER_TIME_TOLERANCE_HOURS),
+    )
+    df = append_moisture_context_features(
+        df,
+        engine=engine,
+        params=MoistureContextParams(time_tolerance_hours=_MOISTURE_TIME_TOLERANCE_HOURS),
+    )
     df["is_day"] = df["raw_properties"].apply(
         lambda x: 1 if isinstance(x, dict) and x.get("daynight") == "D" else 0
     )
@@ -141,6 +350,8 @@ def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             source=("source", lambda s: str(s.dropna().mode().iloc[0]) if not s.dropna().empty else "unknown"),
             sensor=("sensor", lambda s: str(s.dropna().mode().iloc[0]) if not s.dropna().empty else "unknown"),
+            sensor_id=("sensor_id", lambda s: str(s.dropna().mode().iloc[0]) if not s.dropna().empty else "unknown"),
+            sensor_id_code=("sensor_id_code", "max"),
             detection_count=("id", "count"),
             start_time=("acq_time", "min"),
             end_time=("acq_time", "max"),
@@ -151,6 +362,8 @@ def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
             brightness_mean=("brightness", "mean"),
             bright_t31_mean=("bright_t31", "mean"),
             scan_mean=("scan", "mean"),
+            scan_angle_mean=("scan_angle", "mean"),
+            scan_angle_max=("scan_angle", "max"),
             track_mean=("track", "mean"),
             landcover_mean=("landcover_score_clean", "mean"),
             persistence_mean=("persistence_score_clean", "mean"),
@@ -158,6 +371,17 @@ def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
             landcover_is_available=("landcover_is_available", "max"),
             persistence_is_available=("persistence_is_available", "max"),
             weather_is_available=("weather_is_available", "max"),
+            scan_angle_is_available=("scan_angle_is_available", "max"),
+            rh2m_mean=("rh2m", "mean"),
+            u10_mean=("u10", "mean"),
+            v10_mean=("v10", "mean"),
+            wind_speed_mean=("wind_speed", "mean"),
+            rh2m_is_available=("rh2m_is_available", "max"),
+            wind_is_available=("wind_is_available", "max"),
+            lfmc_mean=("lfmc", "mean"),
+            dfmc_10hr_mean=("dfmc_10hr", "mean"),
+            lfmc_is_available=("lfmc_is_available", "max"),
+            dfmc_is_available=("dfmc_is_available", "max"),
             is_day_ratio=("is_day", "mean"),
         )
         .reset_index()
@@ -165,10 +389,24 @@ def _build_event_features(batch_df: pd.DataFrame) -> pd.DataFrame:
     out["landcover_is_available"] = out["landcover_is_available"].astype(np.float32)
     out["persistence_is_available"] = out["persistence_is_available"].astype(np.float32)
     out["weather_is_available"] = out["weather_is_available"].astype(np.float32)
+    out["scan_angle_is_available"] = out["scan_angle_is_available"].astype(np.float32)
+    out["rh2m_is_available"] = out["rh2m_is_available"].astype(np.float32)
+    out["wind_is_available"] = out["wind_is_available"].astype(np.float32)
+    out["lfmc_is_available"] = out["lfmc_is_available"].astype(np.float32)
+    out["dfmc_is_available"] = out["dfmc_is_available"].astype(np.float32)
     out["duration_hours"] = (out["end_time"] - out["start_time"]).dt.total_seconds() / 3600.0
-    doy = out["start_time"].dt.dayofyear.fillna(1)
-    out["sin_doy"] = np.sin(2 * np.pi * doy / 365.25)
-    out["cos_doy"] = np.cos(2 * np.pi * doy / 365.25)
+    out["hour_of_day"] = (
+        out["start_time"].dt.hour
+        + out["start_time"].dt.minute / 60.0
+        + out["start_time"].dt.second / 3600.0
+    )
+    out["day_of_year"] = out["start_time"].dt.dayofyear.fillna(1).astype(np.int16)
+    out["sin_hour"] = np.sin(2 * np.pi * out["hour_of_day"] / 24.0)
+    out["cos_hour"] = np.cos(2 * np.pi * out["hour_of_day"] / 24.0)
+    out["sin_day_of_year"] = np.sin(2 * np.pi * out["day_of_year"] / 365.25)
+    out["cos_day_of_year"] = np.cos(2 * np.pi * out["day_of_year"] / 365.25)
+    out["sin_doy"] = out["sin_day_of_year"]
+    out["cos_doy"] = out["cos_day_of_year"]
     out["biome_slice"] = pd.cut(
         out["landcover_mean"].fillna(0.5),
         bins=[-np.inf, 0.25, 0.6, np.inf],
@@ -225,6 +463,7 @@ def run_inference_v2(
     fail_closed_frp_mw: float = 500.0,
     fail_closed_confidence: float = 80.0,
     high_risk_landcover_min: float = 0.6,
+    industrial_policy_version: str | None = _DEFAULT_INDUSTRIAL_POLICY_VERSION,
 ) -> dict[str, Any]:
     engine = get_engine()
 
@@ -246,41 +485,99 @@ def run_inference_v2(
     detections = _get_batch_detections(engine, batch_id)
     if detections.empty:
         return {"batch_id": batch_id, "count": 0, "events": 0, "shadow_mode": shadow_mode}
+    detections["event_id"] = detections["event_id"].fillna(detections["id"].map(lambda x: f"det_{int(x)}"))
+
+    # Hard fail-closed bypass must execute before model scoring.
+    detection_frp = pd.to_numeric(detections["frp"], errors="coerce")
+    _, detection_landcover_clean = _normalize_static_score(detections["landcover_score"], _NEUTRAL_LANDCOVER)
+    high_risk_detection = detection_landcover_clean >= float(high_risk_landcover_min)
+    confidence_high = _confidence_is_high(
+        detections["confidence"],
+        detections["raw_properties"],
+        fail_closed_confidence=float(fail_closed_confidence),
+    )
+    hard_bypass_mask = (detection_frp > float(fail_closed_frp_mw)) | (
+        confidence_high & high_risk_detection.fillna(False)
+    )
+    hard_bypass_event_ids = set(detections.loc[hard_bypass_mask, "event_id"].astype(str).tolist())
+    industrial_policy = _active_industrial_policy(engine, policy_version=industrial_policy_version)
+    industrial_mask_event_ids = _load_industrial_masked_event_ids(
+        engine,
+        batch_id=int(batch_id),
+        policy_version=(
+            str(industrial_policy.get("policy_version"))
+            if industrial_policy is not None
+            else industrial_policy_version
+        ),
+        strict_no_go=bool((industrial_policy or {}).get("strict_no_go", False)),
+    )
 
     bundle = _load_bundle(model_run_dir)
     model = bundle["model"]
     features = list(bundle["features"])
-    slice_cols = list(bundle.get("slice_cols", ["sensor", "biome_slice"]))
+    slice_cols = list(bundle.get("slice_cols", ["sensor_id", "biome_slice"]))
     global_cal = bundle.get("global_calibrator", {"type": "identity", "model": None})
     slice_cals = dict(bundle.get("slice_calibrators", {}))
 
-    events_df = _build_event_features(detections)
+    events_df = _build_event_features(detections, engine=engine)
+    if events_df.empty and not hard_bypass_event_ids:
+        LOGGER.warning(
+            "No eligible events for inference after scan_angle <= %.1f filter (batch_id=%s).",
+            _SCAN_ANGLE_MAX_DEG,
+            batch_id,
+        )
+        return {"batch_id": batch_id, "count": int(len(detections)), "events": 0, "shadow_mode": shadow_mode}
+    minimal_events = _build_minimal_event_rollup(detections)
+    if events_df.empty and hard_bypass_event_ids:
+        events_df = minimal_events[minimal_events["event_id"].astype(str).isin(hard_bypass_event_ids)].copy()
+    elif not events_df.empty and hard_bypass_event_ids:
+        missing_bypass = hard_bypass_event_ids - set(events_df["event_id"].astype(str).tolist())
+        if missing_bypass:
+            add_rows = minimal_events[minimal_events["event_id"].astype(str).isin(missing_bypass)].copy()
+            events_df = pd.concat([events_df, add_rows], ignore_index=True, sort=False)
+
     for col in features:
         if col not in events_df.columns:
             events_df[col] = np.nan
 
-    raw = _predict_raw(model, events_df[features])
-    calibrated = np.zeros(len(events_df), dtype=float)
-    for idx, row in events_df.iterrows():
-        key = _slice_key(row, slice_cols)
-        cal = slice_cals.get(key, global_cal)
-        calibrated[idx] = float(_apply_calibrator(cal, np.asarray([raw[idx]]))[0])
-
-    events_df["event_score"] = calibrated
+    events_df["event_score"] = np.nan
+    events_df["fail_closed_hard_bypass"] = events_df["event_id"].astype(str).isin(hard_bypass_event_ids)
+    events_df["industrial_masked"] = events_df["event_id"].astype(str).isin(industrial_mask_event_ids)
+    score_mask = ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
+    if bool(score_mask.any()):
+        score_df = events_df.loc[score_mask].copy().reset_index()
+        raw = _predict_raw(model, score_df[features])
+        calibrated = np.zeros(len(score_df), dtype=float)
+        for i, row in score_df.iterrows():
+            key = _slice_key(row, slice_cols)
+            cal = slice_cals.get(key, global_cal)
+            calibrated[i] = float(_apply_calibrator(cal, np.asarray([raw[i]]))[0])
+        events_df.loc[score_df["index"].to_numpy(dtype=int), "event_score"] = calibrated
+    events_df.loc[events_df["fail_closed_hard_bypass"], "event_score"] = 1.0
+    industrial_suppress_mask = (
+        events_df["industrial_masked"].fillna(False).astype(bool)
+        & ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
+    )
+    events_df.loc[industrial_suppress_mask, "event_score"] = 0.0
 
     decisions: list[str] = []
     review_flags: list[bool] = []
     for _, row in events_df.iterrows():
-        decision, review_required = _decide_event(
-            row,
-            strong_filter_threshold=strong_filter_threshold,
-            downweight_threshold=downweight_threshold,
-            uncertainty_band_low=uncertainty_band_low,
-            uncertainty_band_high=uncertainty_band_high,
-            fail_closed_frp_mw=fail_closed_frp_mw,
-            fail_closed_confidence=fail_closed_confidence,
-            high_risk_landcover_min=high_risk_landcover_min,
-        )
+        if bool(row.get("fail_closed_hard_bypass")):
+            decision, review_required = "review", True
+        elif bool(row.get("industrial_masked")):
+            decision, review_required = "drop", False
+        else:
+            decision, review_required = _decide_event(
+                row,
+                strong_filter_threshold=strong_filter_threshold,
+                downweight_threshold=downweight_threshold,
+                uncertainty_band_low=uncertainty_band_low,
+                uncertainty_band_high=uncertainty_band_high,
+                fail_closed_frp_mw=fail_closed_frp_mw,
+                fail_closed_confidence=fail_closed_confidence,
+                high_risk_landcover_min=high_risk_landcover_min,
+            )
         decisions.append(decision)
         review_flags.append(review_required)
 
@@ -376,13 +673,20 @@ def run_inference_v2(
                     review_upsert_stmt,
                     {
                         "event_id": row.event_id,
-                        "reason": "fail_closed_or_uncertainty",
+                        "reason": (
+                            "fail_closed_hard_bypass"
+                            if bool(getattr(row, "fail_closed_hard_bypass", False))
+                            else "fail_closed_or_uncertainty"
+                        ),
                         "severity": "high",
                         "payload_json": json.dumps(
                             {
                                 "event_score": float(row.event_score),
                                 "frp_max": float(row.frp_max or 0),
                                 "confidence_max": float(row.confidence_max or 0),
+                                "fail_closed_hard_bypass": bool(
+                                    getattr(row, "fail_closed_hard_bypass", False)
+                                ),
                             }
                         ),
                     },
@@ -453,6 +757,9 @@ def run_inference_v2(
         "mean_event_score": float(events_df["event_score"].mean()),
         "decision_counts": decision_counts,
         "review_count": int(events_df["review_required"].sum()),
+        "hard_bypass_event_count": int(events_df["fail_closed_hard_bypass"].sum()),
+        "industrial_masked_event_count": int(events_df["industrial_masked"].sum()),
+        "industrial_suppressed_event_count": int(industrial_suppress_mask.sum()),
         "shadow_mode": bool(shadow_mode),
         "strong_filter_threshold": float(strong_filter_threshold),
         "downweight_threshold": float(downweight_threshold),
@@ -514,6 +821,11 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
     parser.add_argument("--event-strict-static-split", action="store_true")
     parser.add_argument("--no-event-strict-static-split", action="store_true")
+    parser.add_argument(
+        "--industrial-policy-version",
+        type=str,
+        default=_DEFAULT_INDUSTRIAL_POLICY_VERSION,
+    )
     args = parser.parse_args(argv)
 
     if not args.model_run:
@@ -539,6 +851,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         event_link_max_gap_days=int(args.event_link_max_gap_days),
         event_static_persistence_threshold=float(args.event_static_persistence_threshold),
         event_strict_static_split=event_strict_static_split,
+        industrial_policy_version=args.industrial_policy_version,
     )
     LOGGER.info("Denoiser v2 inference summary: %s", summary)
     print(json.dumps(summary))

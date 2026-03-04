@@ -1,0 +1,106 @@
+{
+  "run_id": "20260303_213307",
+  "exported_at": "2026-03-03T21:35:57.288815Z",
+  "rule_version": "v2_jurisdiction_extent_v1",
+  "aoi_bbox": [
+    -179.5,
+    18.0,
+    -66.0,
+    72.0
+  ],
+  "time_range": [
+    "2025-01-01T00:00:00",
+    "2025-09-01T00:00:00"
+  ],
+  "counts": {
+    "detection_rows_before_scan_filter": 1521983,
+    "detection_rows_dropped_scan_angle_gt_50": 0,
+    "event_total": 213453,
+    "event_train": 170760,
+    "event_eval": 42693,
+    "event_positive": 2683,
+    "event_negative": 163764,
+    "event_unknown": 47006,
+    "event_truth_covered": 213453,
+    "sensor_id_known": 213453,
+    "scan_angle_available": 0,
+    "rh2m_available": 29,
+    "wind_available": 29,
+    "lfmc_available": 0,
+    "dfmc_10hr_available": 0
+  },
+  "coverage": {
+    "mask_ids": [
+      "wfigs_us_jurisdiction_extent_v1"
+    ],
+    "authority_profiles": [
+      "wfigs_us"
+    ],
+    "run_ids": [
+      "wfigs_2025_ytd_perimeters_20260228145847"
+    ],
+    "truth_covered_ratio": 1.0
+  },
+  "split": {
+    "strategy": "time_percentile",
+    "percentile": 0.8,
+    "split_dt": "2025-05-23T09:11:00+00:00"
+  },
+  "features": [
+    "detection_count",
+    "positive_count",
+    "negative_count",
+    "probable_positive_count",
+    "weak_supervision_count",
+    "sensor",
+    "sensor_id",
+    "sensor_id_code",
+    "source",
+    "confidence_mean",
+    "confidence_max",
+    "frp_mean",
+    "frp_max",
+    "brightness_mean",
+    "bright_t31_mean",
+    "scan_mean",
+    "scan_angle_mean",
+    "scan_angle_max",
+    "track_mean",
+    "landcover_mean",
+    "persistence_mean",
+    "weather_mean",
+    "landcover_is_available",
+    "persistence_is_available",
+    "weather_is_available",
+    "scan_angle_is_available",
+    "rh2m_mean",
+    "u10_mean",
+    "v10_mean",
+    "wind_speed_mean",
+    "rh2m_is_available",
+    "wind_is_available",
+    "lfmc_mean",
+    "dfmc_10hr_mean",
+    "lfmc_is_available",
+    "dfmc_is_available",
+    "truth_covered_mask",
+    "is_day_ratio",
+    "lat_centroid",
+    "lon_centroid",
+    "duration_hours",
+    "hour_of_day",
+    "day_of_year",
+    "sin_hour",
+    "cos_hour",
+    "sin_day_of_year",
+    "cos_day_of_year",
+    "sin_doy",
+    "cos_doy",
+    "biome_slice"
+  ],
+  "paths": {
+    "train": "data/denoiser/snapshots_v2/run_20260303_213307/train.parquet",
+    "eval": "data/denoiser/snapshots_v2/run_20260303_213307/eval.parquet",
+    "full": "data/denoiser/snapshots_v2/run_20260303_213307/full.parquet"
+  }
+}

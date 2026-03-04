@@ -12,11 +12,24 @@ import joblib
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
+from sklearn.cluster import DBSCAN
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.neighbors import BallTree
 
 from api.db import get_engine
 from ml.denoiser.coverage_authority import get_coverage_freshness, require_coverage_freshness
 from ml.parquet_io import read_parquet_with_fallback
+
+
+class ModelPromotionError(RuntimeError):
+    """Raised when strict denoiser promotion gates fail."""
+
+
+_EARTH_RADIUS_M = 6_371_000.0
+_EVENT_MATCH_BUFFER_M = 2315.0
+_INDUSTRIAL_GOLD_BUFFER_M = 375.0
+_INDUSTRIAL_SILVER_BUFFER_M = 750.0
+_FAIL_CLOSED_FRP_MW = 500.0
 
 
 def _load_snapshot(path: str, *, columns: list[str]) -> pd.DataFrame:
@@ -79,6 +92,246 @@ def _metrics(y_true: np.ndarray, p: np.ndarray, threshold: float) -> Dict[str, A
     }
 
 
+def _extract_eval_coordinates(eval_known: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, str]:
+    lat_col = next((c for c in ("lat_centroid", "lat") if c in eval_known.columns), None)
+    lon_col = next((c for c in ("lon_centroid", "lon") if c in eval_known.columns), None)
+    if lat_col is None or lon_col is None:
+        return np.empty((0, 2), dtype=float), np.asarray([], dtype=int), "unavailable"
+
+    lat = pd.to_numeric(eval_known[lat_col], errors="coerce")
+    lon = pd.to_numeric(eval_known[lon_col], errors="coerce")
+    valid = lat.notna() & lon.notna()
+    if not bool(valid.any()):
+        return np.empty((0, 2), dtype=float), np.asarray([], dtype=int), f"{lat_col},{lon_col}"
+
+    coords = np.column_stack(
+        [
+            lat.loc[valid].to_numpy(dtype=float),
+            lon.loc[valid].to_numpy(dtype=float),
+        ]
+    )
+    valid_idx = np.flatnonzero(valid.to_numpy(dtype=bool))
+    return coords, valid_idx.astype(int), f"{lat_col},{lon_col}"
+
+
+def _cluster_event_points(coords_deg: np.ndarray, *, eps_m: float) -> np.ndarray:
+    if coords_deg.size == 0:
+        return np.asarray([], dtype=int)
+    coords_rad = np.radians(coords_deg)
+    eps_rad = float(eps_m) / _EARTH_RADIUS_M
+    labels = DBSCAN(
+        eps=eps_rad,
+        min_samples=1,
+        metric="haversine",
+        algorithm="ball_tree",
+    ).fit_predict(coords_rad)
+    return np.asarray(labels, dtype=int)
+
+
+def _event_level_metrics(
+    *,
+    eval_known: pd.DataFrame,
+    y_true: np.ndarray,
+    probabilities: np.ndarray,
+    threshold: float,
+    match_buffer_m: float = _EVENT_MATCH_BUFFER_M,
+) -> Dict[str, Any]:
+    coords_deg, valid_df_idx, coord_basis = _extract_eval_coordinates(eval_known)
+    if coords_deg.size == 0:
+        return {
+            "threshold": float(threshold),
+            "match_buffer_m": float(match_buffer_m),
+            "coordinate_basis": coord_basis,
+            "event_recall": None,
+            "event_precision": None,
+            "event_f1": None,
+            "ground_truth_events": 0,
+            "predicted_events": 0,
+            "detected_ground_truth_events": 0,
+            "matched_predicted_events": 0,
+            "tp_events": 0,
+            "fp_events": 0,
+            "fn_events": 0,
+            "usable_point_rows": 0,
+            "total_rows": int(len(eval_known)),
+            "unusable_rows_missing_coords": int(len(eval_known)),
+        }
+
+    df_to_coord = np.full(len(eval_known), -1, dtype=int)
+    df_to_coord[valid_df_idx] = np.arange(len(valid_df_idx), dtype=int)
+
+    gt_df_idx = np.flatnonzero(np.asarray(y_true, dtype=int) == 1)
+    pred_df_idx = np.flatnonzero(np.asarray(probabilities, dtype=float) >= float(threshold))
+    gt_coord_idx = df_to_coord[gt_df_idx]
+    pred_coord_idx = df_to_coord[pred_df_idx]
+    gt_coord_idx = gt_coord_idx[gt_coord_idx >= 0]
+    pred_coord_idx = pred_coord_idx[pred_coord_idx >= 0]
+
+    gt_coords = coords_deg[gt_coord_idx] if gt_coord_idx.size > 0 else np.empty((0, 2), dtype=float)
+    pred_coords = coords_deg[pred_coord_idx] if pred_coord_idx.size > 0 else np.empty((0, 2), dtype=float)
+    gt_labels = _cluster_event_points(gt_coords, eps_m=float(match_buffer_m))
+    pred_labels = _cluster_event_points(pred_coords, eps_m=float(match_buffer_m))
+
+    gt_events = int(np.unique(gt_labels).size) if gt_labels.size > 0 else 0
+    pred_events = int(np.unique(pred_labels).size) if pred_labels.size > 0 else 0
+
+    gt_point_matched = np.zeros(len(gt_coords), dtype=bool)
+    pred_point_matched = np.zeros(len(pred_coords), dtype=bool)
+    if len(gt_coords) > 0 and len(pred_coords) > 0:
+        eps_rad = float(match_buffer_m) / _EARTH_RADIUS_M
+        pred_tree = BallTree(np.radians(pred_coords), metric="haversine")
+        gt_tree = BallTree(np.radians(gt_coords), metric="haversine")
+        gt_point_matched = pred_tree.query_radius(np.radians(gt_coords), r=eps_rad, count_only=True) > 0
+        pred_point_matched = gt_tree.query_radius(np.radians(pred_coords), r=eps_rad, count_only=True) > 0
+
+    detected_gt_events = 0
+    if gt_labels.size > 0:
+        for lab in np.unique(gt_labels):
+            if bool(gt_point_matched[gt_labels == lab].any()):
+                detected_gt_events += 1
+
+    matched_pred_events = 0
+    if pred_labels.size > 0:
+        for lab in np.unique(pred_labels):
+            if bool(pred_point_matched[pred_labels == lab].any()):
+                matched_pred_events += 1
+
+    event_recall = (
+        float(detected_gt_events / gt_events)
+        if gt_events > 0
+        else None
+    )
+    if pred_events > 0:
+        event_precision = float(matched_pred_events / pred_events)
+    else:
+        event_precision = 0.0 if gt_events > 0 else None
+
+    if event_recall is None or event_precision is None or (event_recall + event_precision) == 0.0:
+        event_f1 = None if event_recall is None or event_precision is None else 0.0
+    else:
+        event_f1 = float(2.0 * event_precision * event_recall / (event_precision + event_recall))
+
+    tp_events = int(detected_gt_events)
+    fn_events = int(max(0, gt_events - detected_gt_events))
+    fp_events = int(max(0, pred_events - matched_pred_events))
+
+    return {
+        "threshold": float(threshold),
+        "match_buffer_m": float(match_buffer_m),
+        "coordinate_basis": coord_basis,
+        "event_recall": event_recall,
+        "event_precision": event_precision,
+        "event_f1": event_f1,
+        "ground_truth_events": int(gt_events),
+        "predicted_events": int(pred_events),
+        "detected_ground_truth_events": int(detected_gt_events),
+        "matched_predicted_events": int(matched_pred_events),
+        "tp_events": tp_events,
+        "fp_events": fp_events,
+        "fn_events": fn_events,
+        "usable_point_rows": int(coords_deg.shape[0]),
+        "total_rows": int(len(eval_known)),
+        "unusable_rows_missing_coords": int(len(eval_known) - coords_deg.shape[0]),
+    }
+
+
+def _slice_metrics_or_empty(y: np.ndarray, p: np.ndarray, mask: np.ndarray, *, threshold: float) -> Dict[str, Any]:
+    selected = np.asarray(mask, dtype=bool)
+    n = int(selected.sum())
+    if n == 0:
+        return {
+            "n": 0,
+            "threshold": float(threshold),
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "roc_auc": None,
+            "tp": 0,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0,
+            "predicted_positive_rate": None,
+        }
+    return {"n": n, **_metrics(y[selected], p[selected], threshold=threshold)}
+
+
+def _required_slice_metrics(
+    *,
+    eval_known: pd.DataFrame,
+    y: np.ndarray,
+    calibrated: np.ndarray,
+    threshold: float,
+) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+
+    biome_text = (
+        eval_known.get("biome_slice", pd.Series(["unknown"] * len(eval_known)))
+        .astype(str)
+        .str.lower()
+    )
+    lat_col = None
+    for c in ("lat_centroid", "lat"):
+        if c in eval_known.columns:
+            lat_col = c
+            break
+    if lat_col is not None:
+        lat_abs = pd.to_numeric(eval_known[lat_col], errors="coerce").abs()
+        boreal_mask = lat_abs >= 50.0
+        tropical_mask = lat_abs <= 23.5
+        biome_basis = f"latitude:{lat_col}"
+    else:
+        boreal_mask = biome_text.str.contains("boreal", na=False)
+        tropical_mask = biome_text.str.contains("tropical", na=False)
+        biome_basis = "biome_slice_label"
+
+    out["biome_boreal_vs_tropical"] = {
+        "basis": biome_basis,
+        "boreal": _slice_metrics_or_empty(y, calibrated, boreal_mask.to_numpy(), threshold=threshold),
+        "tropical": _slice_metrics_or_empty(y, calibrated, tropical_mask.to_numpy(), threshold=threshold),
+    }
+
+    if "is_day_ratio" in eval_known.columns:
+        day_ratio = pd.to_numeric(eval_known["is_day_ratio"], errors="coerce")
+        day_mask = (day_ratio >= 0.5).fillna(False)
+        night_mask = (day_ratio < 0.5).fillna(False)
+        tod_basis = "is_day_ratio>=0.5"
+    elif "hour_of_day" in eval_known.columns:
+        hour = pd.to_numeric(eval_known["hour_of_day"], errors="coerce")
+        day_mask = ((hour >= 6.0) & (hour < 18.0)).fillna(False)
+        night_mask = ~day_mask
+        tod_basis = "hour_of_day[6,18)"
+    else:
+        day_mask = pd.Series([False] * len(eval_known))
+        night_mask = pd.Series([False] * len(eval_known))
+        tod_basis = "unavailable"
+
+    out["time_of_day_day_vs_night"] = {
+        "basis": tod_basis,
+        "day": _slice_metrics_or_empty(y, calibrated, day_mask.to_numpy(), threshold=threshold),
+        "night": _slice_metrics_or_empty(y, calibrated, night_mask.to_numpy(), threshold=threshold),
+    }
+
+    scan_col = None
+    for c in ("scan_angle_max", "scan_angle_mean", "scan_angle"):
+        if c in eval_known.columns:
+            scan_col = c
+            break
+    if scan_col is not None:
+        scan = pd.to_numeric(eval_known[scan_col], errors="coerce")
+        scan_mask = (scan > 45.0).fillna(False)
+        scan_basis = f"{scan_col}>45"
+    else:
+        scan_mask = pd.Series([False] * len(eval_known))
+        scan_basis = "unavailable"
+
+    out["scan_angle_gt_45"] = {
+        "basis": scan_basis,
+        "gt_45": _slice_metrics_or_empty(y, calibrated, scan_mask.to_numpy(), threshold=threshold),
+    }
+
+    return out
+
+
 def _sweep(y_true: np.ndarray, p: np.ndarray, step: float = 0.01) -> pd.DataFrame:
     rows = [_metrics(y_true, p, t) for t in np.round(np.arange(0.0, 1.0 + 1e-12, step), 10)]
     return pd.DataFrame(rows)
@@ -111,6 +364,144 @@ def _collect_mask_ids(series: pd.Series) -> list[str]:
         if isinstance(value, str):
             out.add(value)
     return sorted(out)
+
+
+def _industrial_suppression_mask(
+    eval_known: pd.DataFrame,
+    *,
+    policy_version: str | None,
+    strict_no_go: bool,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    lat_col = next((c for c in ("lat_centroid", "lat") if c in eval_known.columns), None)
+    lon_col = next((c for c in ("lon_centroid", "lon") if c in eval_known.columns), None)
+    time_col = next((c for c in ("start_time", "acq_time") if c in eval_known.columns), None)
+    n = int(len(eval_known))
+    if lat_col is None or lon_col is None:
+        return np.zeros(n, dtype=bool), {
+            "applied": False,
+            "reason": "missing_coordinates",
+            "masked_rows": 0,
+            "total_rows": n,
+        }
+
+    lat = pd.to_numeric(eval_known[lat_col], errors="coerce")
+    lon = pd.to_numeric(eval_known[lon_col], errors="coerce")
+    valid = lat.notna() & lon.notna()
+    if not bool(valid.any()):
+        return np.zeros(n, dtype=bool), {
+            "applied": False,
+            "reason": "no_valid_coordinates",
+            "masked_rows": 0,
+            "total_rows": n,
+        }
+
+    if time_col is not None:
+        acq = pd.to_datetime(eval_known[time_col], utc=True, errors="coerce")
+    else:
+        acq = pd.Series([pd.NaT] * n, index=eval_known.index)
+
+    payload: list[dict[str, Any]] = []
+    for i in np.flatnonzero(valid.to_numpy(dtype=bool)):
+        ts = acq.iloc[i]
+        payload.append(
+            {
+                "row_idx": int(i),
+                "lon": float(lon.iloc[i]),
+                "lat": float(lat.iloc[i]),
+                "acq_time": ts.to_pydatetime() if pd.notna(ts) else None,
+            }
+        )
+
+    mask = np.zeros(n, dtype=bool)
+    meters_to_deg = 1.0 / 111000.0
+    with get_engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TEMP TABLE tmp_eval_industrial_points (
+                    row_idx integer PRIMARY KEY,
+                    acq_time timestamptz,
+                    geom geometry(Point, 4326)
+                ) ON COMMIT DROP
+                """
+            )
+        )
+        insert_stmt = text(
+            """
+            INSERT INTO tmp_eval_industrial_points (row_idx, acq_time, geom)
+            VALUES (
+                :row_idx,
+                :acq_time,
+                ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)
+            )
+            """
+        )
+        conn.execute(insert_stmt, payload)
+        rows = conn.execute(
+            text(
+                """
+                SELECT DISTINCT p.row_idx
+                FROM tmp_eval_industrial_points p
+                JOIN industrial_sources i
+                  ON COALESCE(i.is_active, TRUE)
+                 AND i.authority_tier IN ('gold', 'silver')
+                 AND (p.acq_time IS NULL OR i.valid_from IS NULL OR i.valid_from <= p.acq_time)
+                 AND (p.acq_time IS NULL OR i.valid_to IS NULL OR i.valid_to >= p.acq_time)
+                 AND i.geom && ST_Expand(
+                        p.geom,
+                        CASE
+                            WHEN i.authority_tier = 'gold' THEN :gold_buffer_deg
+                            ELSE :silver_buffer_deg
+                        END
+                    )
+                 AND ST_DWithin(
+                        p.geom::geography,
+                        i.geom::geography,
+                        CASE
+                            WHEN i.authority_tier = 'gold' THEN :gold_buffer_m
+                            ELSE :silver_buffer_m
+                        END
+                    )
+                WHERE NOT (
+                    :strict_no_go
+                    AND :policy_version IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM industrial_no_go_zones z
+                        WHERE z.is_active
+                          AND z.policy_version = :policy_version
+                          AND z.geom && p.geom
+                          AND ST_Intersects(z.geom, p.geom)
+                    )
+                )
+                """
+            ),
+            {
+                "gold_buffer_m": float(_INDUSTRIAL_GOLD_BUFFER_M),
+                "silver_buffer_m": float(_INDUSTRIAL_SILVER_BUFFER_M),
+                "gold_buffer_deg": float(_INDUSTRIAL_GOLD_BUFFER_M) * meters_to_deg,
+                "silver_buffer_deg": float(_INDUSTRIAL_SILVER_BUFFER_M) * meters_to_deg,
+                "strict_no_go": bool(strict_no_go),
+                "policy_version": policy_version,
+            },
+        ).mappings().all()
+
+    for row in rows:
+        idx = int(row["row_idx"])
+        if 0 <= idx < n:
+            mask[idx] = True
+
+    return mask, {
+        "applied": True,
+        "policy_version": policy_version,
+        "strict_no_go": bool(strict_no_go),
+        "gold_buffer_m": float(_INDUSTRIAL_GOLD_BUFFER_M),
+        "silver_buffer_m": float(_INDUSTRIAL_SILVER_BUFFER_M),
+        "masked_rows": int(mask.sum()),
+        "total_rows": n,
+        "coordinate_columns": f"{lat_col},{lon_col}",
+        "time_column": time_col,
+    }
 
 
 def _load_industrial_policy_provenance(policy_version: str | None = None) -> dict[str, Any] | None:
@@ -205,18 +596,31 @@ def _evaluate_scope(
     strong = _pick_strong_filter(sweep, target_precision=target_precision)
     downweight = _pick_downweight(sweep, target_recall=target_recall)
     default_metrics = _metrics(y, calibrated, threshold=default_threshold)
+    event_level = _event_level_metrics(
+        eval_known=eval_known,
+        y_true=y,
+        probabilities=calibrated,
+        threshold=default_threshold,
+        match_buffer_m=_EVENT_MATCH_BUFFER_M,
+    )
+    event_recall_value = event_level.get("event_recall")
+    event_precision_value = event_level.get("event_precision")
+    if event_recall_value is None:
+        event_recall_value = float(default_metrics["recall"])
+    if event_precision_value is None:
+        event_precision_value = float(default_metrics["precision"])
 
     n_pos = int((y == 1).sum())
     n_neg = int((y == 0).sum())
 
     gate_results = {
         "event_recall": {
-            "value": float(default_metrics["recall"]),
-            "pass": float(default_metrics["recall"]) >= gate_thresholds["event_recall_min"],
+            "value": float(event_recall_value),
+            "pass": float(event_recall_value) >= gate_thresholds["event_recall_min"],
         },
         "event_precision": {
-            "value": float(default_metrics["precision"]),
-            "pass": float(default_metrics["precision"]) >= gate_thresholds["event_precision_min"],
+            "value": float(event_precision_value),
+            "pass": float(event_precision_value) >= gate_thresholds["event_precision_min"],
         },
         "global_f1": {
             "value": float(default_metrics["f1"]),
@@ -255,6 +659,12 @@ def _evaluate_scope(
                 **_metrics(yy, pp, threshold=default_threshold),
             })
         slice_metrics[col] = rows
+    slice_metrics["required_slices"] = _required_slice_metrics(
+        eval_known=eval_known,
+        y=y,
+        calibrated=calibrated,
+        threshold=default_threshold,
+    )
 
     return {
         "scope": scope_name,
@@ -262,6 +672,7 @@ def _evaluate_scope(
         "n_pos": n_pos,
         "n_neg": n_neg,
         "default_metrics": default_metrics,
+        "event_level_metrics": event_level,
         "threshold_recommendations": {
             "strong_filter": strong,
             "downweight": downweight,
@@ -305,7 +716,25 @@ def evaluate_denoiser_v2(
     snapshot_columns = list(
         dict.fromkeys(
             features
-            + ["event_label", "sensor", "biome_slice", "is_day_ratio", "truth_covered_mask", "coverage_mask_ids"]
+            + [
+                "event_label",
+                "sensor",
+                "biome_slice",
+                "is_day_ratio",
+                "hour_of_day",
+                "scan_angle",
+                "scan_angle_mean",
+                "scan_angle_max",
+                "lat",
+                "lat_centroid",
+                "lon",
+                "lon_centroid",
+                "frp_max",
+                "frp_mean",
+                "start_time",
+                "truth_covered_mask",
+                "coverage_mask_ids",
+            ]
             + slice_cols
         )
     )
@@ -331,6 +760,27 @@ def evaluate_denoiser_v2(
         cal = slice_calibrators.get(key, global_calibrator)
         calibrated[idx] = float(_apply_calibrator(cal, np.asarray([raw[idx]]))[0])
 
+    industrial_policy = _load_industrial_policy_provenance(policy_version=industrial_policy_version)
+    policy_version_for_mask = (
+        str(industrial_policy.get("policy_version"))
+        if industrial_policy is not None and industrial_policy.get("policy_version") is not None
+        else industrial_policy_version
+    )
+    industrial_mask, industrial_mask_summary = _industrial_suppression_mask(
+        eval_known,
+        policy_version=policy_version_for_mask,
+        strict_no_go=bool((industrial_policy or {}).get("strict_no_go", False)),
+    )
+    frp_col = next((c for c in ("frp_max", "frp_mean", "frp") if c in eval_known.columns), None)
+    if frp_col is not None:
+        frp_vals = pd.to_numeric(eval_known[frp_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    else:
+        frp_vals = np.zeros(len(eval_known), dtype=float)
+    fail_closed_override_mask = frp_vals > float(_FAIL_CLOSED_FRP_MW)
+    industrial_suppression_mask = industrial_mask & ~fail_closed_override_mask
+    calibrated = np.asarray(calibrated, dtype=float).copy()
+    calibrated[industrial_suppression_mask] = 0.0
+
     default_threshold = float(bundle.get("thresholds", {}).get("decision", 0.5))
     latency_per_10k = float(bundle.get("latency_per_10k_seconds", 0.0))
 
@@ -342,6 +792,8 @@ def evaluate_denoiser_v2(
         "latency_per_10k_max_seconds": 300.0,
         "min_event_positives": 50,
         "min_event_negatives": 50,
+        "promotion_event_recall_min": 0.92,
+        "promotion_global_f1_min": 0.85,
     }
 
     global_eval = _evaluate_scope(
@@ -406,7 +858,24 @@ def evaluate_denoiser_v2(
         primary_name = "covered" if covered_eval is not None else "global"
         primary_eval = covered_eval if covered_eval is not None else global_eval
 
-    gate_pass = bool(primary_eval["gate_pass"])
+    operational_gate_pass = bool(primary_eval["gate_pass"])
+    default_metrics = dict(primary_eval["default_metrics"])
+    promotion_event_recall = primary_eval.get("event_level_metrics", {}).get("event_recall")
+    if promotion_event_recall is None:
+        promotion_event_recall = float(default_metrics["recall"])
+    promotion_gate_results = {
+        "event_recall": {
+            "value": float(promotion_event_recall),
+            "threshold": float(gate_thresholds["promotion_event_recall_min"]),
+            "pass": float(promotion_event_recall) > float(gate_thresholds["promotion_event_recall_min"]),
+        },
+        "global_f1": {
+            "value": float(default_metrics["f1"]),
+            "threshold": float(gate_thresholds["promotion_global_f1_min"]),
+            "pass": float(default_metrics["f1"]) > float(gate_thresholds["promotion_global_f1_min"]),
+        },
+    }
+    gate_pass = all(bool(x["pass"]) for x in promotion_gate_results.values())
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -418,8 +887,6 @@ def evaluate_denoiser_v2(
     coverage_mask_ids = []
     if "coverage_mask_ids" in eval_known.columns:
         coverage_mask_ids = _collect_mask_ids(eval_known["coverage_mask_ids"])
-    industrial_policy = _load_industrial_policy_provenance(policy_version=industrial_policy_version)
-
     summary = {
         "run_id": os.path.basename(model_run_dir.rstrip(os.sep)),
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -431,11 +898,18 @@ def evaluate_denoiser_v2(
         "coverage_run_id": (coverage_freshness or {}).get("run_id"),
         "coverage_mask_ids": coverage_mask_ids,
         "industrial_policy": industrial_policy,
+        "industrial_suppression": {
+            **industrial_mask_summary,
+            "fail_closed_override_frp_mw": float(_FAIL_CLOSED_FRP_MW),
+            "fail_closed_override_rows": int(fail_closed_override_mask.sum()),
+            "suppressed_rows": int(industrial_suppression_mask.sum()),
+        },
         "n_eval": int(primary_eval["n_eval"]),
         "n_pos": int(primary_eval["n_pos"]),
         "n_neg": int(primary_eval["n_neg"]),
         "default_threshold": default_threshold,
         "default_metrics": primary_eval["default_metrics"],
+        "event_level_metrics": primary_eval["event_level_metrics"],
         "threshold_recommendations": {
             "strong_filter": primary_eval["threshold_recommendations"]["strong_filter"],
             "downweight": primary_eval["threshold_recommendations"]["downweight"],
@@ -444,13 +918,42 @@ def evaluate_denoiser_v2(
         },
         "gate_thresholds": gate_thresholds,
         "gate_results": primary_eval["gate_results"],
+        "promotion_gate_results": promotion_gate_results,
         "gate_pass": gate_pass,
+        "operational_gate_pass": operational_gate_pass,
         "global": {
             "n_eval": int(global_eval["n_eval"]),
             "n_pos": int(global_eval["n_pos"]),
             "n_neg": int(global_eval["n_neg"]),
             "default_metrics": global_eval["default_metrics"],
+            "event_level_metrics": global_eval["event_level_metrics"],
             "gate_results": global_eval["gate_results"],
+            "promotion_gate_results": {
+                "event_recall": {
+                    "value": float(
+                        (
+                            global_eval.get("event_level_metrics", {}).get("event_recall")
+                            if global_eval.get("event_level_metrics", {}).get("event_recall") is not None
+                            else global_eval["default_metrics"]["recall"]
+                        )
+                    ),
+                    "threshold": float(gate_thresholds["promotion_event_recall_min"]),
+                    "pass": float(
+                        (
+                            global_eval.get("event_level_metrics", {}).get("event_recall")
+                            if global_eval.get("event_level_metrics", {}).get("event_recall") is not None
+                            else global_eval["default_metrics"]["recall"]
+                        )
+                    )
+                    > float(gate_thresholds["promotion_event_recall_min"]),
+                },
+                "global_f1": {
+                    "value": float(global_eval["default_metrics"]["f1"]),
+                    "threshold": float(gate_thresholds["promotion_global_f1_min"]),
+                    "pass": float(global_eval["default_metrics"]["f1"])
+                    > float(gate_thresholds["promotion_global_f1_min"]),
+                },
+            },
             "gate_pass": bool(global_eval["gate_pass"]),
             "threshold_recommendations": global_eval["threshold_recommendations"],
         },
@@ -462,7 +965,34 @@ def evaluate_denoiser_v2(
             "n_pos": int(covered_eval["n_pos"]),
             "n_neg": int(covered_eval["n_neg"]),
             "default_metrics": covered_eval["default_metrics"],
+            "event_level_metrics": covered_eval["event_level_metrics"],
             "gate_results": covered_eval["gate_results"],
+            "promotion_gate_results": {
+                "event_recall": {
+                    "value": float(
+                        (
+                            covered_eval.get("event_level_metrics", {}).get("event_recall")
+                            if covered_eval.get("event_level_metrics", {}).get("event_recall") is not None
+                            else covered_eval["default_metrics"]["recall"]
+                        )
+                    ),
+                    "threshold": float(gate_thresholds["promotion_event_recall_min"]),
+                    "pass": float(
+                        (
+                            covered_eval.get("event_level_metrics", {}).get("event_recall")
+                            if covered_eval.get("event_level_metrics", {}).get("event_recall") is not None
+                            else covered_eval["default_metrics"]["recall"]
+                        )
+                    )
+                    > float(gate_thresholds["promotion_event_recall_min"]),
+                },
+                "global_f1": {
+                    "value": float(covered_eval["default_metrics"]["f1"]),
+                    "threshold": float(gate_thresholds["promotion_global_f1_min"]),
+                    "pass": float(covered_eval["default_metrics"]["f1"])
+                    > float(gate_thresholds["promotion_global_f1_min"]),
+                },
+            },
             "gate_pass": bool(covered_eval["gate_pass"]),
             "threshold_recommendations": covered_eval["threshold_recommendations"],
         }
@@ -489,10 +1019,15 @@ def evaluate_denoiser_v2(
         "coverage_run_id": (coverage_freshness or {}).get("run_id"),
         "coverage_mask_ids": coverage_mask_ids,
         "industrial_policy": industrial_policy,
+        "industrial_suppression": summary.get("industrial_suppression"),
         "thresholds": gate_thresholds,
         "results": primary_eval["gate_results"],
+        "event_level_metrics": primary_eval.get("event_level_metrics"),
+        "promotion_results": promotion_gate_results,
         "global_results": global_eval["gate_results"],
+        "global_event_level_metrics": global_eval.get("event_level_metrics"),
         "covered_results": covered_eval["gate_results"] if covered_eval is not None else None,
+        "covered_event_level_metrics": covered_eval.get("event_level_metrics") if covered_eval is not None else None,
         "evaluated_at": summary["evaluated_at"],
     }
     with open(os.path.join(out_dir, "gate_report.json"), "w", encoding="utf-8") as f:
@@ -559,6 +1094,15 @@ def evaluate_denoiser_v2(
                     "artifact_uri": model_run_dir,
                 },
             )
+
+    if not gate_pass:
+        raise ModelPromotionError(
+            "Promotion gate failed: "
+            f"event_recall={promotion_gate_results['event_recall']['value']:.6f} "
+            f"(required > {promotion_gate_results['event_recall']['threshold']:.2f}), "
+            f"global_f1={promotion_gate_results['global_f1']['value']:.6f} "
+            f"(required > {promotion_gate_results['global_f1']['threshold']:.2f})."
+        )
 
     return out_dir
 

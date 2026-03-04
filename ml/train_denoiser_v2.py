@@ -17,11 +17,15 @@ import joblib
 import numpy as np
 import pandas as pd
 import yaml
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import brier_score_loss, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+from sklearn.neighbors import NearestNeighbors
 
+from ml.calibration import (
+    apply_binary_probability_calibrator,
+    fit_binary_probability_calibrator,
+    optimize_threshold_for_target_recall,
+)
 from ml.denoiser.coverage_authority import get_coverage_freshness, require_coverage_freshness
 from ml.parquet_io import read_parquet_with_fallback
 
@@ -106,46 +110,36 @@ def _build_model(
     backend_override: str | None = None,
     model_params_override: dict[str, Any] | None = None,
 ) -> Any:
-    backend = str(backend_override or config.get("model_backend", "xgboost")).strip().lower()
+    backend = str(backend_override or config.get("model_backend", "xgboost_pu_bagging")).strip().lower()
     model_params = dict(config.get("model_params", {}))
     if model_params_override:
         model_params.update(model_params_override)
 
-    if backend in {"xgboost", "xgboost_pu_bagging"}:
-        if not _HAS_XGBOOST:
-            raise RuntimeError(
-                "XGBoost backend selected but XGBoost is unavailable. "
-                "Install/fix runtime dependencies (e.g., libomp on macOS)."
-            )
-        defaults = {
-            "n_estimators": 400,
-            "max_depth": 6,
-            "learning_rate": 0.05,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "objective": "binary:logistic",
-            "eval_metric": "auc",
-            "random_state": int(config.get("seed", 42)),
-            "n_jobs": 4,
-        }
-        defaults.update(model_params)
-        return XGBClassifier(**defaults)
+    if backend not in {"xgboost", "xgboost_pu_bagging"}:
+        raise ValueError(
+            f"Unsupported model_backend={backend!r}. "
+            "PU denoiser v2 requires XGBoost backend ('xgboost_pu_bagging')."
+        )
 
-    if backend in {"hist_gradient_boosting", "hgb"}:
-        defaults = {
-            "max_iter": 300,
-            "learning_rate": 0.05,
-            "max_depth": 6,
-            "l2_regularization": 0.01,
-            "random_state": int(config.get("seed", 42)),
-        }
-        defaults.update(model_params)
-        return HistGradientBoostingClassifier(**defaults)
+    if not _HAS_XGBOOST:
+        raise RuntimeError(
+            "XGBoost backend selected but XGBoost is unavailable. "
+            "Install/fix runtime dependencies (e.g., libomp on macOS)."
+        )
 
-    raise ValueError(
-        f"Unsupported model_backend={backend!r}. "
-        "Use 'xgboost', 'xgboost_pu_bagging', or 'hist_gradient_boosting'."
-    )
+    defaults = {
+        "n_estimators": 400,
+        "max_depth": 6,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "random_state": int(config.get("seed", 42)),
+        "n_jobs": 4,
+    }
+    defaults.update(model_params)
+    return XGBClassifier(**defaults)
 
 
 def _predict_raw(model: Any, x: pd.DataFrame) -> np.ndarray:
@@ -153,26 +147,6 @@ def _predict_raw(model: Any, x: pd.DataFrame) -> np.ndarray:
         return np.asarray(model.predict_proba(x)[:, 1], dtype=float)
     pred = np.asarray(model.predict(x), dtype=float)
     return np.clip(pred, 0.0, 1.0)
-
-
-def _fit_calibrator(scores: np.ndarray, y: np.ndarray, method: str) -> Dict[str, Any]:
-    if method == "isotonic":
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(scores, y)
-        return {"type": "isotonic", "model": iso}
-
-    lr = LogisticRegression(max_iter=1000, solver="lbfgs")
-    lr.fit(scores.reshape(-1, 1), y)
-    return {"type": "platt", "model": lr}
-
-
-def _apply_calibrator(cal: Dict[str, Any], scores: np.ndarray) -> np.ndarray:
-    ctype = cal.get("type")
-    if ctype == "isotonic" and cal.get("model") is not None:
-        return np.asarray(cal["model"].predict(scores), dtype=float)
-    if ctype == "platt" and cal.get("model") is not None:
-        return np.asarray(cal["model"].predict_proba(scores.reshape(-1, 1))[:, 1], dtype=float)
-    return np.asarray(scores, dtype=float)
 
 
 def _slice_key(row: pd.Series, slice_cols: list[str]) -> str:
@@ -224,6 +198,287 @@ def _split_calibration_eval_holdout(
     cut = int(n * float(calibration_fraction))
     cut = max(1, min(n - 1, cut))
     return ordered.iloc[:cut].copy(), ordered.iloc[cut:].copy()
+
+
+def _ensure_slice_columns(df: pd.DataFrame, slice_cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in slice_cols:
+        if col not in out.columns:
+            out[col] = "unknown"
+        out[col] = out[col].fillna("unknown").astype(str)
+    return out
+
+
+def _stratified_majority_sample(
+    *,
+    train_df: pd.DataFrame,
+    y_train: np.ndarray,
+    ratio_majority_to_positive: float,
+    slice_cols: list[str],
+    rng: np.random.Generator,
+) -> tuple[pd.DataFrame, np.ndarray, dict[str, Any]]:
+    positive_idx = np.flatnonzero(y_train == 1)
+    majority_idx = np.flatnonzero(y_train != 1)
+    positive_rows = int(positive_idx.size)
+    majority_rows = int(majority_idx.size)
+    ratio = max(0.0, float(ratio_majority_to_positive))
+    if positive_rows == 0 or majority_rows == 0:
+        return train_df.copy(), y_train.copy(), {
+            "enabled": True,
+            "ratio_majority_to_positive": ratio,
+            "positive_rows": positive_rows,
+            "majority_rows_before_sampling": majority_rows,
+            "majority_rows_after_sampling": majority_rows,
+            "target_majority_rows": majority_rows,
+            "sampling_applied": False,
+            "reason": "insufficient_class_rows",
+        }
+
+    target_majority = min(majority_rows, int(np.ceil(ratio * positive_rows)))
+    if target_majority >= majority_rows:
+        return train_df.copy(), y_train.copy(), {
+            "enabled": True,
+            "ratio_majority_to_positive": ratio,
+            "positive_rows": positive_rows,
+            "majority_rows_before_sampling": majority_rows,
+            "majority_rows_after_sampling": majority_rows,
+            "target_majority_rows": target_majority,
+            "sampling_applied": False,
+            "reason": "target_exceeds_majority",
+        }
+
+    majority_positions = np.asarray(majority_idx, dtype=int)
+    majority_df = train_df.iloc[majority_positions].copy().reset_index(drop=True)
+    use_slice_cols = [c for c in slice_cols if c in majority_df.columns]
+    if use_slice_cols:
+        keys = majority_df[use_slice_cols].fillna("unknown").astype(str).agg("|".join, axis=1)
+    else:
+        keys = pd.Series(["__all__"] * len(majority_df), index=majority_df.index)
+    key_counts = keys.value_counts(dropna=False)
+    alloc_float = (key_counts / max(1, int(key_counts.sum()))) * target_majority
+    alloc = np.floor(alloc_float).astype(int)
+    remainder = int(target_majority - int(alloc.sum()))
+    if remainder > 0:
+        frac = (alloc_float - alloc).sort_values(ascending=False)
+        top_groups = list(frac.index[:remainder])
+        for group in top_groups:
+            alloc[group] = int(alloc[group]) + 1
+
+    sampled_majority_idx: list[int] = []
+    for group, count in alloc.items():
+        if int(count) <= 0:
+            continue
+        group_local_idx = keys.index[keys == group].to_numpy(dtype=int)
+        group_idx = majority_positions[group_local_idx]
+        draw = min(int(count), int(group_idx.size))
+        if draw <= 0:
+            continue
+        chosen = rng.choice(group_idx, size=draw, replace=False)
+        sampled_majority_idx.extend(chosen.tolist())
+
+    sampled_majority = np.asarray(sampled_majority_idx, dtype=int)
+    if sampled_majority.size > target_majority:
+        sampled_majority = rng.choice(sampled_majority, size=target_majority, replace=False)
+    elif sampled_majority.size < target_majority:
+        pool = np.setdiff1d(majority_positions, sampled_majority, assume_unique=False)
+        top_up = min(int(target_majority - sampled_majority.size), int(pool.size))
+        if top_up > 0:
+            sampled_majority = np.concatenate(
+                [sampled_majority, rng.choice(pool, size=top_up, replace=False)]
+            )
+
+    sampled_idx = np.concatenate([positive_idx, sampled_majority])
+    sampled_df = train_df.iloc[sampled_idx].copy().reset_index(drop=True)
+    sampled_y = y_train[sampled_idx]
+
+    return sampled_df, sampled_y, {
+        "enabled": True,
+        "ratio_majority_to_positive": ratio,
+        "positive_rows": positive_rows,
+        "majority_rows_before_sampling": majority_rows,
+        "majority_rows_after_sampling": int(sampled_majority.size),
+        "target_majority_rows": int(target_majority),
+        "sampling_applied": True,
+        "stratify_columns_used": use_slice_cols,
+    }
+
+
+def _build_adasyn_samples(
+    *,
+    features_df: pd.DataFrame,
+    minority_mask: np.ndarray,
+    synthetic_rows: int,
+    k_neighbors: int,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    if synthetic_rows <= 0:
+        return pd.DataFrame(columns=features_df.columns)
+    x_all = features_df.to_numpy(dtype=np.float32, copy=True)
+    if np.isnan(x_all).any():
+        col_medians = np.nanmedian(x_all, axis=0)
+        col_medians = np.where(np.isnan(col_medians), 0.0, col_medians)
+        nan_rows, nan_cols = np.where(np.isnan(x_all))
+        x_all[nan_rows, nan_cols] = col_medians[nan_cols]
+    min_idx = np.flatnonzero(minority_mask)
+    maj_idx = np.flatnonzero(~minority_mask)
+    if min_idx.size < 2 or maj_idx.size == 0:
+        return pd.DataFrame(columns=features_df.columns)
+
+    k = max(1, min(int(k_neighbors), int(len(x_all) - 1)))
+    all_nn = NearestNeighbors(n_neighbors=k + 1)
+    all_nn.fit(x_all)
+    all_neighbors = all_nn.kneighbors(x_all[min_idx], return_distance=False)
+
+    r = np.zeros(min_idx.size, dtype=float)
+    for i, neigh in enumerate(all_neighbors):
+        neigh = neigh[neigh != min_idx[i]][:k]
+        if neigh.size == 0:
+            continue
+        r[i] = float(np.isin(neigh, maj_idx).sum()) / float(neigh.size)
+
+    if np.allclose(r.sum(), 0.0):
+        probs = np.full(min_idx.size, 1.0 / float(min_idx.size))
+    else:
+        probs = r / r.sum()
+
+    synth_alloc_float = probs * int(synthetic_rows)
+    synth_alloc = np.floor(synth_alloc_float).astype(int)
+    rem = int(synthetic_rows - int(synth_alloc.sum()))
+    if rem > 0:
+        frac = np.argsort(-(synth_alloc_float - synth_alloc))
+        synth_alloc[frac[:rem]] += 1
+
+    k_min = max(1, min(int(k_neighbors), int(min_idx.size - 1)))
+    min_nn = NearestNeighbors(n_neighbors=k_min + 1)
+    min_nn.fit(x_all[min_idx])
+    min_neighbors = min_nn.kneighbors(x_all[min_idx], return_distance=False)
+
+    generated: list[np.ndarray] = []
+    for local_i, n_synth in enumerate(synth_alloc):
+        if int(n_synth) <= 0:
+            continue
+        base = x_all[min_idx[local_i]]
+        neigh_local = min_neighbors[local_i]
+        neigh_local = neigh_local[neigh_local != local_i][:k_min]
+        if neigh_local.size == 0:
+            continue
+        for _ in range(int(n_synth)):
+            partner_local = int(rng.choice(neigh_local))
+            partner = x_all[min_idx[partner_local]]
+            lam = float(rng.random())
+            generated.append(base + lam * (partner - base))
+
+    if not generated:
+        return pd.DataFrame(columns=features_df.columns)
+    return pd.DataFrame(np.vstack(generated), columns=features_df.columns)
+
+
+def _apply_adasyn_high_intensity(
+    *,
+    config: Dict[str, Any],
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[pd.DataFrame, np.ndarray, dict[str, Any]]:
+    adasyn_cfg = dict(config.get("adasyn", {}))
+    enabled = bool(adasyn_cfg.get("enabled", True))
+    if not enabled:
+        return x_train, y_train, {"enabled": False, "generated_rows": 0, "reason": "disabled"}
+
+    intensity_feature = str(adasyn_cfg.get("intensity_feature", "frp_max"))
+    high_q = float(adasyn_cfg.get("high_intensity_quantile", 0.9))
+    multiplier = max(1.0, float(adasyn_cfg.get("multiplier", 2.0)))
+    min_high_rows = max(2, int(adasyn_cfg.get("min_high_intensity_rows", 10)))
+    k_neighbors = max(1, int(adasyn_cfg.get("k_neighbors", 5)))
+    max_synth_rows = max(0, int(adasyn_cfg.get("max_synthetic_rows", 20000)))
+
+    if intensity_feature not in x_train.columns:
+        return x_train, y_train, {
+            "enabled": True,
+            "generated_rows": 0,
+            "reason": "missing_intensity_feature",
+            "intensity_feature": intensity_feature,
+        }
+
+    pos_mask = y_train == 1
+    if int(pos_mask.sum()) < min_high_rows:
+        return x_train, y_train, {
+            "enabled": True,
+            "generated_rows": 0,
+            "reason": "insufficient_positive_rows",
+            "positive_rows": int(pos_mask.sum()),
+        }
+
+    intensity = pd.to_numeric(x_train.loc[pos_mask, intensity_feature], errors="coerce")
+    valid = intensity.notna()
+    if int(valid.sum()) < min_high_rows:
+        return x_train, y_train, {
+            "enabled": True,
+            "generated_rows": 0,
+            "reason": "insufficient_valid_intensity_rows",
+            "intensity_feature": intensity_feature,
+            "valid_intensity_rows": int(valid.sum()),
+        }
+
+    threshold = float(np.nanquantile(intensity[valid], high_q))
+    pos_positions = np.flatnonzero(pos_mask)
+    high_pos_positions = pos_positions[np.where(intensity.fillna(-np.inf).to_numpy(dtype=float) >= threshold)[0]]
+    high_mask = np.zeros(len(y_train), dtype=bool)
+    high_mask[high_pos_positions] = True
+
+    high_rows = int(high_mask.sum())
+    if high_rows < min_high_rows:
+        return x_train, y_train, {
+            "enabled": True,
+            "generated_rows": 0,
+            "reason": "insufficient_high_intensity_rows",
+            "high_intensity_rows": high_rows,
+            "threshold": threshold,
+            "intensity_feature": intensity_feature,
+        }
+
+    target_high_rows = int(np.ceil(high_rows * multiplier))
+    requested_synth = max(0, target_high_rows - high_rows)
+    requested_synth = min(requested_synth, max_synth_rows)
+    if requested_synth <= 0:
+        return x_train, y_train, {
+            "enabled": True,
+            "generated_rows": 0,
+            "reason": "target_already_met",
+            "high_intensity_rows": high_rows,
+            "target_high_intensity_rows": target_high_rows,
+        }
+
+    synth = _build_adasyn_samples(
+        features_df=x_train,
+        minority_mask=high_mask,
+        synthetic_rows=requested_synth,
+        k_neighbors=k_neighbors,
+        rng=rng,
+    )
+    if synth.empty:
+        return x_train, y_train, {
+            "enabled": True,
+            "generated_rows": 0,
+            "reason": "adasyn_generation_empty",
+            "high_intensity_rows": high_rows,
+            "target_high_intensity_rows": target_high_rows,
+            "requested_synth_rows": requested_synth,
+        }
+
+    x_aug = pd.concat([x_train, synth], ignore_index=True)
+    y_aug = np.concatenate([y_train, np.ones(len(synth), dtype=int)])
+    return x_aug, y_aug, {
+        "enabled": True,
+        "generated_rows": int(len(synth)),
+        "intensity_feature": intensity_feature,
+        "high_intensity_quantile": high_q,
+        "high_intensity_threshold": threshold,
+        "high_intensity_rows_before": high_rows,
+        "target_high_intensity_rows": target_high_rows,
+        "multiplier": multiplier,
+        "k_neighbors": k_neighbors,
+    }
 
 
 def _fit_legacy_two_stage(
@@ -302,12 +557,17 @@ def _fit_teacher_student_pu(
     max_pseudo_negative_rows = int(pu_cfg.get("max_pseudo_negative_rows", 0))
     min_pseudo_positive_rows = int(pu_cfg.get("min_pseudo_positive_rows", 500))
     oob_margin_min = max(0.0, float(pu_cfg.get("oob_margin_min", 0.05)))
+    spy_fraction = min(0.49, max(0.0, float(pu_cfg.get("spy_fraction", 0.15))))
+    spy_min_rows = max(0, int(pu_cfg.get("spy_min_rows", 30)))
+    spy_pos_quantile = min(1.0, max(0.0, float(pu_cfg.get("spy_pos_quantile", 0.65))))
+    spy_neg_quantile = min(1.0, max(0.0, float(pu_cfg.get("spy_neg_quantile", 0.10))))
 
     class_weight_pos = float(config.get("pos_class_weight", 1.0))
 
     unknown_count = len(x_unknown)
     score_sums = np.zeros(unknown_count, dtype=float)
     vote_counts = np.zeros(unknown_count, dtype=np.int32)
+    spy_scores_by_bag: list[np.ndarray] = []
 
     teacher_params = dict(config.get("model_params", {}))
     teacher_params["max_depth"] = int(pu_cfg.get("teacher_max_depth", 4))
@@ -317,6 +577,7 @@ def _fit_teacher_student_pu(
     if unknown_count > 0:
         teacher_sample_size = min(unknown_count, max(1, int(unlabeled_multiplier * len(x_pos))))
 
+    pos_count = len(x_pos)
     for _ in range(num_bags):
         sampled_unknown: np.ndarray
         if unknown_count > 0:
@@ -324,9 +585,24 @@ def _fit_teacher_student_pu(
         else:
             sampled_unknown = np.asarray([], dtype=int)
 
-        x_parts = [x_pos, x_neg]
+        spy_idx = np.asarray([], dtype=int)
+        if pos_count >= 3 and spy_fraction > 0.0:
+            desired_spy = max(1, int(np.floor(pos_count * spy_fraction)))
+            spy_count = min(desired_spy, pos_count - 1)
+            if spy_count > 0:
+                spy_idx = rng.choice(pos_count, size=spy_count, replace=False)
+        if spy_idx.size > 0:
+            keep_mask = np.ones(pos_count, dtype=bool)
+            keep_mask[spy_idx] = False
+            x_pos_teacher = x_pos.iloc[keep_mask]
+            x_spy = x_pos.iloc[spy_idx]
+        else:
+            x_pos_teacher = x_pos
+            x_spy = x_pos.iloc[0:0]
+
+        x_parts = [x_pos_teacher, x_neg]
         y_parts = [
-            np.ones(len(x_pos), dtype=int),
+            np.ones(len(x_pos_teacher), dtype=int),
             np.zeros(len(x_neg), dtype=int),
         ]
         if sampled_unknown.size > 0:
@@ -343,6 +619,8 @@ def _fit_teacher_student_pu(
             model_params_override=teacher_params,
         )
         teacher.fit(x_teacher, y_teacher, sample_weight=w_teacher)
+        if len(x_spy) > 0:
+            spy_scores_by_bag.append(_predict_raw(teacher, x_spy))
 
         if unknown_count == 0:
             continue
@@ -362,6 +640,16 @@ def _fit_teacher_student_pu(
 
     if unknown_count > 0:
         oob_mean, valid_votes = _oob_mean_scores(score_sums, vote_counts, min_oob_votes=min_oob_votes)
+        spy_scores = (
+            np.concatenate(spy_scores_by_bag, axis=0)
+            if spy_scores_by_bag
+            else np.asarray([], dtype=float)
+        )
+        if int(spy_scores.size) >= spy_min_rows:
+            derived_pos = float(np.quantile(spy_scores, spy_pos_quantile))
+            derived_neg = float(np.quantile(spy_scores, spy_neg_quantile))
+            pos_threshold = max(pos_threshold, derived_pos)
+            neg_threshold = min(neg_threshold, derived_neg)
         pseudo_pos_mask, pseudo_neg_mask, ignored_mask, pos_cut, neg_cut = _build_pseudo_label_masks(
             oob_mean=oob_mean,
             valid_votes=valid_votes,
@@ -371,12 +659,21 @@ def _fit_teacher_student_pu(
         )
         pseudo_pos_count = int(pseudo_pos_mask.sum())
         if pseudo_pos_count < min_pseudo_positive_rows:
-            raise ValueError(
-                "xgboost_pu_bagging produced too few pseudo positives: "
-                f"pseudo_positive_rows={pseudo_pos_count}, "
-                f"min_pseudo_positive_rows={min_pseudo_positive_rows}. "
-                "Adjust PU thresholds or improve label/feature coverage."
-            )
+            valid_scores = oob_mean[valid_votes & np.isfinite(oob_mean)]
+            target_rows = min(int(min_pseudo_positive_rows), int(valid_scores.size))
+            if target_rows > 0:
+                rank_cut = int(max(0, valid_scores.size - target_rows))
+                relaxed_pos_cut = float(np.partition(valid_scores, rank_cut)[rank_cut])
+                pseudo_pos_mask = valid_votes & (oob_mean >= relaxed_pos_cut)
+                pos_cut = min(float(pos_cut), relaxed_pos_cut)
+                pseudo_pos_count = int(pseudo_pos_mask.sum())
+            if pseudo_pos_count < min_pseudo_positive_rows:
+                raise ValueError(
+                    "xgboost_pu_bagging produced too few pseudo positives: "
+                    f"pseudo_positive_rows={pseudo_pos_count}, "
+                    f"min_pseudo_positive_rows={min_pseudo_positive_rows}. "
+                    "Adjust PU thresholds or improve label/feature coverage."
+                )
         pseudo_neg_mask, neg_cap = _apply_pseudo_negative_caps(
             pseudo_neg_mask=pseudo_neg_mask,
             pseudo_positive_rows=pseudo_pos_count,
@@ -422,8 +719,14 @@ def _fit_teacher_student_pu(
         x_parts.append(x_unknown.iloc[pseudo_neg_mask])
         y_parts.append(np.zeros(int(pseudo_neg_mask.sum()), dtype=int))
 
-    x_student = pd.concat(x_parts, ignore_index=True)
-    y_student = np.concatenate(y_parts)
+    x_student_raw = pd.concat(x_parts, ignore_index=True)
+    y_student_raw = np.concatenate(y_parts)
+    x_student, y_student, adasyn_stats = _apply_adasyn_high_intensity(
+        config=config,
+        x_train=x_student_raw,
+        y_train=y_student_raw,
+        rng=rng,
+    )
     w_student = np.where(y_student == 1, class_weight_pos, 1.0)
 
     student = _build_model(config, backend_override="xgboost")
@@ -441,15 +744,23 @@ def _fit_teacher_student_pu(
         "pseudo_positive_rows": int(pseudo_pos_mask.sum()) if unknown_count > 0 else 0,
         "pseudo_negative_rows": int(pseudo_neg_mask.sum()) if unknown_count > 0 else 0,
         "ignored_rows": int(ignored_mask.sum()) if unknown_count > 0 else 0,
+        "student_rows_before_adasyn": int(len(y_student_raw)),
+        "student_rows_after_adasyn": int(len(y_student)),
         "pos_threshold": float(pos_threshold),
         "neg_threshold": float(neg_threshold),
         "pos_threshold_effective": float(pos_cut),
         "neg_threshold_effective": float(neg_cut),
+        "spy_fraction": float(spy_fraction),
+        "spy_min_rows": int(spy_min_rows),
+        "spy_score_rows": int(sum(len(s) for s in spy_scores_by_bag)),
+        "spy_pos_quantile": float(spy_pos_quantile),
+        "spy_neg_quantile": float(spy_neg_quantile),
         "oob_margin_min": float(oob_margin_min),
         "pseudo_negative_max_ratio": float(pseudo_negative_max_ratio),
         "max_pseudo_negative_rows": int(max_pseudo_negative_rows),
         "min_pseudo_positive_rows": int(min_pseudo_positive_rows),
         **neg_cap,
+        "adasyn": adasyn_stats,
         "pseudo_label_diagnostics": pseudo_diagnostics,
     }
     return student, stats
@@ -608,7 +919,7 @@ def _calibrate(
         LOGGER.warning("Calibration holdout has a single class; using identity calibration.")
         global_cal = {"type": "identity", "model": None}
     else:
-        global_cal = _fit_calibrator(raw_cal, y_cal, method=global_method)
+        global_cal = fit_binary_probability_calibrator(raw_cal, y_cal, method=global_method)
 
     slice_min_samples = int(config.get("slice_calibration_min_samples", 50))
     slice_cals: dict[str, Dict[str, Any]] = {}
@@ -625,7 +936,7 @@ def _calibrate(
             f"{col}={val}"
             for col, val in zip(slice_cols, key if isinstance(key, tuple) else (key,), strict=False)
         )
-        slice_cals[key_label] = _fit_calibrator(
+        slice_cals[key_label] = fit_binary_probability_calibrator(
             grp["_raw_score"].to_numpy(dtype=float),
             grp["_y"].to_numpy(dtype=int),
             method=method,
@@ -646,16 +957,141 @@ def _apply_slice_calibration(
     for idx, (_, row_series) in enumerate(eval_df.iterrows()):
         key = _slice_key(row_series, slice_cols)
         cal = slice_calibrators.get(key, global_calibrator)
-        out[idx] = float(_apply_calibrator(cal, np.asarray([raw_scores[idx]]))[0])
+        out[idx] = float(apply_binary_probability_calibrator(cal, np.asarray([raw_scores[idx]]))[0])
     return out
+
+
+def _cross_validate_pu_xgboost(
+    *,
+    config: Dict[str, Any],
+    train_df: pd.DataFrame,
+    y_train: np.ndarray,
+    features: list[str],
+    slice_cols: list[str],
+    ratio_majority_to_positive: float,
+    rng: np.random.Generator,
+) -> dict[str, Any]:
+    cv_cfg = dict(config.get("cross_validation", {}))
+    enabled = bool(cv_cfg.get("enabled", True))
+    if not enabled:
+        return {"enabled": False, "fold_metrics": []}
+
+    known_idx = np.flatnonzero(y_train >= 0)
+    if known_idx.size < 4:
+        return {"enabled": True, "fold_metrics": [], "skipped_reason": "insufficient_known_rows"}
+    y_known = y_train[known_idx]
+    if np.unique(y_known).size < 2:
+        return {"enabled": True, "fold_metrics": [], "skipped_reason": "single_known_class"}
+
+    folds = max(2, int(cv_cfg.get("folds", 3)))
+    max_known_rows = max(0, int(cv_cfg.get("max_known_rows", 150000)))
+    if max_known_rows > 0 and known_idx.size > max_known_rows:
+        keep_mask = np.zeros_like(known_idx, dtype=bool)
+        for cls in (0, 1):
+            cls_local_idx = np.flatnonzero(y_known == cls)
+            if cls_local_idx.size == 0:
+                continue
+            cls_keep = max(1, int(round(max_known_rows * (cls_local_idx.size / known_idx.size))))
+            chosen_local = rng.choice(cls_local_idx, size=min(cls_keep, cls_local_idx.size), replace=False)
+            keep_mask[chosen_local] = True
+        known_idx = known_idx[keep_mask]
+        y_known = y_train[known_idx]
+
+    class_counts = np.bincount(y_known.astype(int), minlength=2)
+    max_folds = int(class_counts.min())
+    if max_folds < 2:
+        return {"enabled": True, "fold_metrics": [], "skipped_reason": "insufficient_class_rows"}
+    folds = min(folds, max_folds)
+
+    unknown_idx = np.flatnonzero(y_train == -1)
+    splitter = StratifiedKFold(
+        n_splits=folds,
+        shuffle=True,
+        random_state=int(config.get("seed", 42)),
+    )
+    threshold = float(config.get("decision_threshold", 0.5))
+    fold_metrics: list[dict[str, Any]] = []
+
+    for fold, (train_local, val_local) in enumerate(splitter.split(np.zeros(len(known_idx)), y_known), start=1):
+        fold_known_train_idx = known_idx[train_local]
+        fold_known_val_idx = known_idx[val_local]
+        fold_train_idx = np.concatenate([fold_known_train_idx, unknown_idx])
+        fold_train_df = train_df.iloc[fold_train_idx].copy().reset_index(drop=True)
+        fold_y_train = y_train[fold_train_idx]
+
+        fold_train_df, fold_y_train, _ = _stratified_majority_sample(
+            train_df=fold_train_df,
+            y_train=fold_y_train,
+            ratio_majority_to_positive=ratio_majority_to_positive,
+            slice_cols=slice_cols,
+            rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
+        )
+
+        fold_model, _ = _fit_teacher_student_pu(
+            config=config,
+            train_df=fold_train_df,
+            y_train=fold_y_train,
+            features=features,
+            slice_cols=slice_cols,
+            rng=np.random.default_rng(int(rng.integers(0, 2**31 - 1))),
+        )
+
+        fold_val_df = train_df.iloc[fold_known_val_idx].copy().reset_index(drop=True)
+        fold_cal_df, fold_eval_df = _split_calibration_eval_holdout(
+            fold_val_df,
+            calibration_fraction=float(config.get("calibration_holdout_fraction", 0.5)),
+        )
+        if fold_eval_df.empty:
+            fold_eval_df = fold_cal_df.copy()
+        if fold_cal_df.empty or fold_eval_df.empty:
+            continue
+
+        global_cal, slice_cals, _, _ = _calibrate(
+            config=config,
+            model=fold_model,
+            calibration_df=fold_cal_df,
+            features=features,
+            slice_cols=slice_cols,
+            label_col=str(config.get("label_column", "event_label")),
+        )
+        y_fold_eval = _map_labels(fold_eval_df, str(config.get("label_column", "event_label")))
+        raw_fold_eval = _predict_raw(fold_model, _feature_matrix(fold_eval_df, features))
+        p_fold_eval = _apply_slice_calibration(
+            eval_df=fold_eval_df,
+            raw_scores=raw_fold_eval,
+            slice_cols=slice_cols,
+            global_calibrator=global_cal,
+            slice_calibrators=slice_cals,
+        )
+        metric = _metrics(y_fold_eval, p_fold_eval, threshold=threshold)
+        metric["fold"] = int(fold)
+        metric["calibration_type"] = "slice_then_global"
+        fold_metrics.append(metric)
+
+    if not fold_metrics:
+        return {"enabled": True, "fold_metrics": [], "skipped_reason": "no_valid_folds"}
+
+    keys = ["precision", "recall", "f1", "roc_auc"]
+    mean_metrics = {
+        key: float(np.nanmean([m[key] for m in fold_metrics if m.get(key) is not None]))
+        for key in keys
+    }
+    return {
+        "enabled": True,
+        "fold_count": int(len(fold_metrics)),
+        "fold_metrics": fold_metrics,
+        "mean_metrics": mean_metrics,
+    }
 
 
 def train_denoiser_v2(config: Dict[str, Any]) -> str:
     seed = int(config.get("seed", 42))
     np.random.seed(seed)
     rng = np.random.default_rng(seed)
+    rng_train = np.random.default_rng(seed + 1)
+    rng_cv = np.random.default_rng(seed + 2)
 
-    model_backend = str(config.get("model_backend", "xgboost")).strip().lower()
+    model_backend = str(config.get("model_backend", "xgboost_pu_bagging")).strip().lower()
     coverage_scope = str(config.get("coverage_scope", "covered")).strip().lower()
     coverage_mask_source = str(config.get("coverage_mask_source", "db_mask")).strip()
     coverage_authority_profile = str(config.get("coverage_authority_profile", "wfigs_us")).strip()
@@ -689,6 +1125,8 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
             train_df[col] = np.nan
         if col not in eval_df.columns:
             eval_df[col] = np.nan
+    train_df = _ensure_slice_columns(train_df, slice_cols)
+    eval_df = _ensure_slice_columns(eval_df, slice_cols)
 
     train_scope = _select_scope(train_df, coverage_scope)
     eval_scope = _select_scope(eval_df, coverage_scope)
@@ -698,22 +1136,46 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     if not known_train.any():
         raise ValueError("No known labels (POSITIVE/NEGATIVE) available in train scope.")
 
-    if model_backend == "xgboost_pu_bagging":
-        model, pu_stats = _fit_teacher_student_pu(
-            config,
+    if model_backend not in {"xgboost", "xgboost_pu_bagging"}:
+        raise ValueError(
+            f"Unsupported model_backend={model_backend!r}. "
+            "Use XGBoost PU backend (xgboost_pu_bagging)."
+        )
+
+    sampling_cfg = dict(config.get("sampling", {}))
+    ratio_majority_to_positive = float(sampling_cfg.get("majority_ratio", 10.0))
+    apply_sampling = bool(sampling_cfg.get("enabled", True))
+    if apply_sampling:
+        fit_train_df, fit_y_train, sampling_stats = _stratified_majority_sample(
             train_df=train_scope,
             y_train=y_train,
-            features=features,
+            ratio_majority_to_positive=ratio_majority_to_positive,
             slice_cols=slice_cols,
-            rng=rng,
+            rng=rng_train,
         )
     else:
-        model, pu_stats = _fit_legacy_two_stage(
-            config,
-            train_df=train_scope,
-            y_train=y_train,
-            features=features,
-        )
+        fit_train_df = train_scope.copy()
+        fit_y_train = y_train.copy()
+        sampling_stats = {"enabled": False, "reason": "disabled"}
+
+    cv_stats = _cross_validate_pu_xgboost(
+        config=config,
+        train_df=train_scope,
+        y_train=y_train,
+        features=features,
+        slice_cols=slice_cols,
+        ratio_majority_to_positive=ratio_majority_to_positive,
+        rng=rng_cv,
+    )
+
+    model, pu_stats = _fit_teacher_student_pu(
+        config,
+        train_df=fit_train_df,
+        y_train=fit_y_train,
+        features=features,
+        slice_cols=slice_cols,
+        rng=rng,
+    )
 
     eval_known_mask = _map_labels(eval_scope, label_col) >= 0
     eval_known_df = eval_scope.loc[eval_known_mask].copy()
@@ -753,8 +1215,40 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         slice_calibrators=slice_calibrators,
     )
 
-    threshold = float(config.get("decision_threshold", 0.5))
+    fallback_threshold = float(config.get("decision_threshold", 0.5))
+    target_event_recall = float(config.get("target_event_recall", 0.92))
+    threshold_optimization_enabled = bool(config.get("optimize_threshold_for_recall", True))
+    threshold_optimization = {
+        "enabled": bool(threshold_optimization_enabled),
+        "target_event_recall": float(target_event_recall),
+        "fallback_threshold": float(fallback_threshold),
+        "optimal_threshold": float(fallback_threshold),
+        "achieved_recall": None,
+        "achieved_precision": None,
+        "target_met": False,
+        "selection_strategy": "fallback",
+        "candidate_threshold_count": 0,
+    }
+    if threshold_optimization_enabled:
+        threshold_optimization = optimize_threshold_for_target_recall(
+            calibrated_scores,
+            y_eval_known,
+            target_recall=target_event_recall,
+            fallback_threshold=fallback_threshold,
+        )
+    threshold = float(threshold_optimization.get("optimal_threshold", fallback_threshold))
     metrics = _metrics(y_eval_known, calibrated_scores, threshold=threshold)
+    raw_metrics = _metrics(y_eval_known, raw_eval, threshold=threshold)
+    calibration_active = (global_calibrator.get("type") != "identity") or bool(slice_calibrators)
+    calibration_diagnostics = {
+        "calibration_active": bool(calibration_active),
+        "global_calibrator_type": str(global_calibrator.get("type", "identity")),
+        "slice_calibrator_count": int(len(slice_calibrators)),
+        "mean_abs_shift": float(np.mean(np.abs(calibrated_scores - raw_eval))),
+        "brier_raw": float(brier_score_loss(y_eval_known, np.clip(raw_eval, 0.0, 1.0))),
+        "brier_calibrated": float(brier_score_loss(y_eval_known, np.clip(calibrated_scores, 0.0, 1.0))),
+        "raw_metrics": raw_metrics,
+    }
 
     # Operational latency estimate: extrapolate per 10k events from eval prediction speed.
     latency_eval_df = eval_scope if not eval_scope.empty else eval_known_holdout
@@ -825,14 +1319,18 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "slice_calibrators": slice_calibrators,
         "thresholds": {
             "decision": threshold,
+            "decision_fallback": float(fallback_threshold),
+            "target_event_recall": float(target_event_recall),
             "strong_filter": float(config.get("strong_filter_threshold", 0.5)),
             "downweight": float(config.get("downweight_threshold", 0.7)),
             "uncertainty_band_low": float(config.get("uncertainty_band_low", 0.45)),
             "uncertainty_band_high": float(config.get("uncertainty_band_high", 0.55)),
         },
+        "threshold_optimization": threshold_optimization,
         "latency_per_10k_seconds": latency_per_10k,
         "run_id": run_name,
         "model_backend": model_backend,
+        "calibration_diagnostics": calibration_diagnostics,
         "gate_scope": coverage_scope,
         "coverage_mask_source": coverage_mask_source,
         "coverage_authority_profile": coverage_authority_profile,
@@ -855,6 +1353,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "coverage_data_freshness": coverage_freshness,
         "train_rows": int(len(train_df)),
         "train_scope_rows": int(len(train_scope)),
+        "train_fit_rows": int(len(fit_train_df)),
         "eval_rows": int(len(eval_df)),
         "eval_scope_rows": int(len(eval_scope)),
         "train_known_rows": int(known_train.sum()),
@@ -862,8 +1361,13 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "calibration_known_rows": int(len(y_cal)),
         "eval_known_rows": int(len(y_eval_known)),
         "metrics": metrics,
+        "raw_metrics": raw_metrics,
+        "threshold_optimization": threshold_optimization,
+        "calibration_diagnostics": calibration_diagnostics,
+        "cross_validation": cv_stats,
         "latency_per_10k_seconds": latency_per_10k,
         "sensor_bias_pct": sensor_bias_pct,
+        "sampling_stats": sampling_stats,
         "pu_stats": pu_stats,
     }
     with open(os.path.join(run_dir, "metrics.json"), "w", encoding="utf-8") as f:
@@ -898,6 +1402,32 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     with open(os.path.join(run_dir, "metadata.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
+    cv_mean = cv_stats.get("mean_metrics") if isinstance(cv_stats, dict) else None
+    if cv_mean:
+        LOGGER.info(
+            "Cross-validation metrics: precision=%.4f recall=%.4f f1=%.4f auc=%.4f",
+            float(cv_mean.get("precision", np.nan)),
+            float(cv_mean.get("recall", np.nan)),
+            float(cv_mean.get("f1", np.nan)),
+            float(cv_mean.get("roc_auc", np.nan)),
+        )
+    LOGGER.info(
+        "Eval metrics (calibrated): precision=%.4f recall=%.4f f1=%.4f auc=%.4f",
+        float(metrics["precision"]),
+        float(metrics["recall"]),
+        float(metrics["f1"]),
+        float(metrics["roc_auc"]) if metrics["roc_auc"] is not None else float("nan"),
+    )
+    LOGGER.info(
+        "Calibration: active=%s global=%s slice_models=%d mean_abs_shift=%.6f brier_raw=%.6f brier_calibrated=%.6f",
+        str(calibration_diagnostics["calibration_active"]).lower(),
+        calibration_diagnostics["global_calibrator_type"],
+        int(calibration_diagnostics["slice_calibrator_count"]),
+        float(calibration_diagnostics["mean_abs_shift"]),
+        float(calibration_diagnostics["brier_raw"]),
+        float(calibration_diagnostics["brier_calibrated"]),
+    )
+
     return run_dir
 
 
@@ -908,6 +1438,53 @@ def main() -> None:
 
     config = load_config(args.config)
     run_dir = train_denoiser_v2(config)
+    metrics_path = os.path.join(run_dir, "metrics.json")
+    try:
+        with open(metrics_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+    except Exception:
+        summary = {}
+    cv_mean = ((summary.get("cross_validation") or {}).get("mean_metrics") or {})
+    holdout = summary.get("metrics") or {}
+    cal = summary.get("calibration_diagnostics") or {}
+    if cv_mean:
+        print(
+            "CV_METRICS "
+            f"precision={float(cv_mean.get('precision', float('nan'))):.6f} "
+            f"recall={float(cv_mean.get('recall', float('nan'))):.6f} "
+            f"f1={float(cv_mean.get('f1', float('nan'))):.6f} "
+            f"auc_roc={float(cv_mean.get('roc_auc', float('nan'))):.6f}"
+        )
+    if holdout:
+        auc = holdout.get("roc_auc")
+        auc_val = float(auc) if auc is not None else float("nan")
+        print(
+            "HOLDOUT_METRICS "
+            f"precision={float(holdout.get('precision', float('nan'))):.6f} "
+            f"recall={float(holdout.get('recall', float('nan'))):.6f} "
+            f"f1={float(holdout.get('f1', float('nan'))):.6f} "
+            f"auc_roc={auc_val:.6f}"
+        )
+    threshold_opt = summary.get("threshold_optimization") or {}
+    if threshold_opt:
+        print(
+            "OPTIMAL_THRESHOLD "
+            f"value={float(threshold_opt.get('optimal_threshold', float('nan'))):.6f} "
+            f"target_event_recall={float(threshold_opt.get('target_recall', threshold_opt.get('target_event_recall', float('nan')))):.6f} "
+            f"achieved_recall={float(threshold_opt.get('achieved_recall', float('nan'))):.6f} "
+            f"achieved_precision={float(threshold_opt.get('achieved_precision', float('nan'))):.6f} "
+            f"target_met={str(bool(threshold_opt.get('target_met', False))).lower()}"
+        )
+    if cal:
+        print(
+            "CALIBRATION "
+            f"active={str(bool(cal.get('calibration_active', False))).lower()} "
+            f"global={cal.get('global_calibrator_type', 'identity')} "
+            f"slice_models={int(cal.get('slice_calibrator_count', 0))} "
+            f"mean_abs_shift={float(cal.get('mean_abs_shift', 0.0)):.6f} "
+            f"brier_raw={float(cal.get('brier_raw', float('nan'))):.6f} "
+            f"brier_calibrated={float(cal.get('brier_calibrated', float('nan'))):.6f}"
+        )
     print(run_dir)
 
 
