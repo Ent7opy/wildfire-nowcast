@@ -1,5 +1,6 @@
 """Map view component for wildfire dashboard using PyDeck."""
 
+import json
 import logging
 import math
 from typing import Any, Dict, Optional
@@ -8,7 +9,7 @@ import pydeck as pdk
 import streamlit as st
 
 from state import app_state, isoformat
-from api_client import ApiError, ApiUnavailableError, get_fire_events
+from api_client import ApiError, ApiUnavailableError, get_fire_events, get_fire_fronts
 from runtime_config import api_public_base_url
 from config.theme import (
     FireColors,
@@ -71,6 +72,18 @@ def _event_radius_m(detection_count: Optional[float]) -> float:
     if detection_count >= 5:
         return float(PointSizing.SMALL_SIZE * 1000)
     return float(PointSizing.MIN_SIZE * 1000)
+
+
+def _front_line_width(detection_count: Optional[float]) -> int:
+    if detection_count is None:
+        return 2
+    if detection_count >= 50:
+        return 5
+    if detection_count >= 20:
+        return 4
+    if detection_count >= 5:
+        return 3
+    return 2
 
 
 def _is_active_candidate(event: Dict[str, Any]) -> bool:
@@ -156,6 +169,10 @@ def render_map_view() -> Optional[Dict[str, float]]:
 
     fire_points: list[Dict[str, Any]] = []
     bbox = app_state.viewport_bbox
+    current_zoom = float(
+        getattr(st.session_state.get("map_view_state"), "zoom", MapConfig.DEFAULT_ZOOM)
+    )
+    event_limit = 10000 if current_zoom >= 4.0 else 4000 if current_zoom >= 2.0 else 2000
     try:
         events = get_fire_events(
             bbox=bbox,
@@ -163,7 +180,7 @@ def render_map_view() -> Optional[Dict[str, float]]:
             filters={
                 "min_event_score": min_likelihood,
                 "include_review_required": True,
-                "limit": 10000,
+                "limit": event_limit,
             },
         ).get("events", [])
     except (ApiUnavailableError, ApiError) as exc:
@@ -195,9 +212,79 @@ def render_map_view() -> Optional[Dict[str, float]]:
         point["cluster_event_count"] = 1
         fire_points.append(point)
 
+    front_features: list[Dict[str, Any]] = []
+    if current_zoom >= 2.5:
+        try:
+            fronts = get_fire_fronts(
+                bbox=bbox,
+                time_range=(start_time, end_time),
+                filters={
+                    "min_event_score": min_likelihood,
+                    "include_review_required": True,
+                    "limit": 3000,
+                },
+            ).get("fronts", [])
+        except (ApiUnavailableError, ApiError) as exc:
+            LOGGER.warning("Failed to fetch fire fronts for map layer: %s", exc)
+            fronts = []
+    else:
+        fronts = []
+
+    for front in fronts:
+        if app_state.filters.active_only and not _is_active_candidate(front):
+            continue
+        raw_geom = front.get("geom_geojson")
+        geometry: Dict[str, Any] | None = None
+        if isinstance(raw_geom, dict):
+            geometry = raw_geom
+        elif isinstance(raw_geom, str):
+            try:
+                parsed = json.loads(raw_geom)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                geometry = parsed
+        if not isinstance(geometry, dict):
+            continue
+
+        severity = _event_severity(front)
+        line = _fire_line_rgba(severity)
+        front_features.append(
+            {
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": {
+                    "front_id": front.get("front_id"),
+                    "event_id": front.get("event_id"),
+                    "event_score": front.get("event_score"),
+                    "detection_count": front.get("detection_count"),
+                    "line_r": int(line[0]),
+                    "line_g": int(line[1]),
+                    "line_b": int(line[2]),
+                    "line_a": int(max(120, line[3])),
+                    "line_width": _front_line_width(_safe_float(front.get("detection_count"))),
+                },
+            }
+        )
+
+    if front_features:
+        layers.append(
+            pdk.Layer(
+                "GeoJsonLayer",
+                data={"type": "FeatureCollection", "features": front_features},
+                id=f"fronts-{min_likelihood}-{isoformat(start_time)}",
+                pickable=False,
+                stroked=True,
+                filled=False,
+                get_line_color="[line_r, line_g, line_b, line_a]",
+                get_line_width="line_width",
+                line_width_min_pixels=1,
+                line_width_max_pixels=6,
+            )
+        )
+
     if app_state.filters.cluster_points:
-        zoom = float(getattr(st.session_state.get("map_view_state"), "zoom", 2.0))
-        fire_points = _cluster_event_points(fire_points, zoom)
+        fire_points = _cluster_event_points(fire_points, current_zoom)
 
     # Include filter params in the layer ID so deck.gl fully recreates
     # the layer when filters change.
@@ -329,10 +416,14 @@ def render_map_view() -> Optional[Dict[str, float]]:
 
         if selected_fires:
             feature = selected_fires[0]
+            if not isinstance(feature, dict):
+                LOGGER.debug("Selected feature is not a dict: %r", feature)
+                return None
             LOGGER.debug("Selected feature keys: %s", list(feature.keys()))
 
-            props = feature.get("properties", feature)
-            if "properties" not in feature:
+            raw_props = feature.get("properties")
+            props = raw_props if isinstance(raw_props, dict) else feature
+            if raw_props is None:
                 LOGGER.debug("Feature has no 'properties' key — using feature dict directly")
 
             lat = props.get("lat")

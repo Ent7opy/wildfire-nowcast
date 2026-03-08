@@ -8,6 +8,7 @@ from api.fires.repo import (
     validate_bbox,
     list_fire_detections_bbox_time,
     list_fire_events_bbox_time,
+    list_fire_fronts_bbox_time,
 )
 
 
@@ -188,3 +189,37 @@ async def get_events(
         limit=int(limit or 1000),
     )
     return {"count": len(events), "events": events}
+
+
+@fires_router.get("/fronts", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
+async def get_fronts(
+    min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
+    min_lat: float = Query(..., description="Minimum latitude (south boundary)"),
+    max_lon: float = Query(..., description="Maximum longitude (east boundary)"),
+    max_lat: float = Query(..., description="Maximum latitude (north boundary)"),
+    start_time: datetime = Query(..., description="Start time for the query window (ISO 8601 format)"),
+    end_time: datetime = Query(..., description="End time for the query window (ISO 8601 format)"),
+    min_event_score: Optional[float] = Query(
+        None, ge=0.0, le=1.0, description="Minimum linked event-level denoiser score."
+    ),
+    include_review_required: bool = Query(
+        True,
+        description="Include fronts linked to events currently marked as requiring review.",
+    ),
+    limit: Optional[int] = Query(2000, gt=0, le=10000),
+):
+    """Get fire fronts within a spatio-temporal window."""
+    try:
+        validate_bbox((min_lon, min_lat, max_lon, max_lat))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    fronts = list_fire_fronts_bbox_time(
+        bbox=(min_lon, min_lat, max_lon, max_lat),
+        start_time=start_time,
+        end_time=end_time,
+        min_event_score=min_event_score,
+        include_review_required=include_review_required,
+        limit=int(limit or 2000),
+    )
+    return {"count": len(fronts), "fronts": fronts}

@@ -788,6 +788,94 @@ def list_fire_events_bbox_time(
     return [dict(r) for r in rows]
 
 
+def list_fire_fronts_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    min_event_score: float | None = None,
+    include_review_required: bool = True,
+    limit: int = 2000,
+) -> list[dict]:
+    """List denoiser fire fronts in a bbox/time window."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    if limit <= 0 or limit > 10000:
+        raise ValueError("limit must be between 1 and 10000.")
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    else:
+        start_time = start_time.astimezone(timezone.utc)
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    else:
+        end_time = end_time.astimezone(timezone.utc)
+
+    review_predicate = ""
+    if not include_review_required:
+        review_predicate = "AND COALESCE(fe.review_required, FALSE) IS NOT TRUE"
+
+    score_predicate = ""
+    params: dict[str, object] = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "min_lon": float(min_lon),
+        "min_lat": float(min_lat),
+        "max_lon": float(max_lon),
+        "max_lat": float(max_lat),
+        "limit": int(limit),
+    }
+    if min_event_score is not None:
+        score_predicate = "AND (fe.event_score IS NULL OR fe.event_score >= :min_event_score)"
+        params["min_event_score"] = float(min_event_score)
+
+    stmt = text(
+        f"""
+        SELECT
+            ff.front_id,
+            ff.source,
+            ff.sensor,
+            ff.overpass_start,
+            ff.overpass_end,
+            ff.detection_count,
+            ff.frp_max,
+            ff.frp_mean,
+            ff.confidence_max,
+            fem.event_id,
+            fe.event_score,
+            fe.denoiser_decision,
+            fe.review_required,
+            ST_X(ST_Centroid(ff.geom)) AS lon,
+            ST_Y(ST_Centroid(ff.geom)) AS lat,
+            ST_AsGeoJSON(ff.geom) AS geom_geojson
+        FROM fire_fronts ff
+        LEFT JOIN LATERAL (
+            SELECT fem2.event_id
+            FROM fire_event_memberships fem2
+            WHERE fem2.front_id = ff.front_id
+              AND fem2.event_id IS NOT NULL
+            ORDER BY fem2.linked_at DESC
+            LIMIT 1
+        ) fem ON TRUE
+        LEFT JOIN fire_events fe
+          ON fe.event_id = fem.event_id
+        WHERE COALESCE(ff.overpass_start, ff.overpass_end, ff.created_at) <= :end_time
+          AND COALESCE(ff.overpass_end, ff.overpass_start, ff.created_at) >= :start_time
+          AND ff.geom IS NOT NULL
+          AND ff.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+          AND ST_Intersects(ff.geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
+          {review_predicate}
+          {score_predicate}
+        ORDER BY COALESCE(ff.overpass_start, ff.overpass_end, ff.created_at) DESC, ff.front_id DESC
+        LIMIT :limit
+        """
+    )
+
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, params).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def get_latest_denoiser_gate_report() -> dict | None:
     """Return latest gate report written by v2 evaluation."""
     stmt = text(

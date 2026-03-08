@@ -157,3 +157,32 @@ def test_get_events_endpoint(monkeypatch):
     _, kwargs = mock_events.call_args
     assert kwargs["min_event_score"] == 0.5
     assert kwargs["include_review_required"] is False
+
+
+def test_get_fronts_endpoint(monkeypatch):
+    """Test that /fires/fronts delegates to list_fire_fronts_bbox_time."""
+    mock_fronts = MagicMock(return_value=[{"front_id": "front_1", "event_id": "evt_1"}])
+    monkeypatch.setattr(fires, "list_fire_fronts_bbox_time", mock_fronts)
+
+    response = client.get(
+        "/fires/fronts",
+        params={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 22.0,
+            "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+            "min_event_score": 0.5,
+            "include_review_required": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["fronts"][0]["front_id"] == "front_1"
+
+    _, kwargs = mock_fronts.call_args
+    assert kwargs["min_event_score"] == 0.5
+    assert kwargs["include_review_required"] is False

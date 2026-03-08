@@ -74,3 +74,33 @@ def test_get_fire_events_serializes_bool_filters_as_lowercase_strings(monkeypatc
     assert captured["params"]["include_review_required"] == "true"
     assert captured["params"]["min_event_score"] == 0.35
     assert captured["params"]["limit"] == 5000
+
+
+def test_get_fire_fronts_serializes_bool_filters_as_lowercase_strings(monkeypatch) -> None:
+    captured: dict = {}
+
+    def _fake_get(url, params, timeout):  # noqa: ANN001 - test stub
+        captured["url"] = url
+        captured["params"] = dict(params)
+        captured["timeout"] = timeout
+        return _StubResponse({"count": 0, "fronts": []})
+
+    monkeypatch.setattr(api_client, "api_base_url", lambda: "http://example.test")
+    monkeypatch.setattr(api_client.requests, "get", _fake_get)
+
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    start = now - timedelta(hours=24)
+    api_client.get_fire_fronts(
+        bbox=(-180.0, -85.0, 180.0, 85.0),
+        time_range=(start, now),
+        filters={
+            "include_review_required": False,
+            "min_event_score": 0.2,
+            "limit": 2000,
+        },
+    )
+
+    assert captured["url"] == "http://example.test/fires/fronts"
+    assert captured["params"]["include_review_required"] == "false"
+    assert captured["params"]["min_event_score"] == 0.2
+    assert captured["params"]["limit"] == 2000

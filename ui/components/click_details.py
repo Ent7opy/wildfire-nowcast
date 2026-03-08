@@ -495,14 +495,14 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
     # Use the selected fire from state manager (set by map_view)
     selected_event = app_state.selection.selected_fire
 
-    if not selected_event:
+    if not isinstance(selected_event, dict) or not selected_event:
         # Show aggregate stats when no fire is selected
         st.subheader("Overview")
         if last_click is None:
             _render_aggregate_stats()
-        else:
-            st.info("No event selected. Try clicking exactly on a fire event marker.")
             return
+        st.info("No event selected. Try clicking exactly on a fire event marker.")
+        return
 
     # ── Prominent forecast button at the top ──────────────────────────
     lat = selected_event.get("lat")
