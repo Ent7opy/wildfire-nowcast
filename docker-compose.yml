@@ -9,6 +9,8 @@ services:
       - ./data:/app/data
       - ./ingest:/app/ingest:delegated
       - ./ml:/app/ml:delegated
+      - ./models:/app/models
+      - ./scripts:/app/scripts:delegated
       - /app/api/.venv
     environment:
       APP_ENV: dev
@@ -103,6 +105,8 @@ services:
       - ./data:/app/data
       - ./ingest:/app/ingest:delegated
       - ./ml:/app/ml:delegated
+      - ./models:/app/models
+      - ./scripts:/app/scripts:delegated
       - /app/api/.venv
     environment:
       APP_ENV: dev
@@ -140,6 +144,8 @@ services:
       - ./data:/app/data
       - ./ingest:/app/ingest:delegated
       - ./ml:/app/ml:delegated
+      - ./models:/app/models
+      - ./scripts:/app/scripts:delegated
       - /app/api/.venv
     environment:
       APP_ENV: ${APP_ENV:-prod}
