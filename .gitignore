@@ -111,6 +111,7 @@ data/denoiser/snapshots_v2/
 data/denoiser/eval_v2/
 data/denoiser/*.parquet
 data/lulc/
+data/authority/industrial/eu/eprtr_raw_*.csv
 data/forecasts/
 data/hindcasts/
 data/terrain/bbox_*/
