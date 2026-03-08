@@ -23,6 +23,7 @@ VALID_LAT_RANGE = (-90.0, 90.0)
 VALID_LON_RANGE = (-180.0, 180.0)
 CONFIDENCE_RANGE = (0.0, 100.0)
 BRIGHTNESS_RANGE = (200.0, 500.0)
+REQUIRED_CSV_COLUMNS = {"latitude", "longitude", "acq_date", "acq_time"}
 
 # Rate limit handling constants
 MAX_RETRIES = 3
@@ -134,8 +135,35 @@ def fetch_csv_rows(
             
             response.raise_for_status()
             
-            text_stream = io.StringIO(response.text)
+            body = response.text or ""
+            lowered = body.strip().lower()
+            if "invalid map_key" in lowered:
+                raise FIRMSClientError(
+                    "FIRMS API rejected FIRMS_MAP_KEY (response: Invalid MAP_KEY). "
+                    "Update FIRMS_MAP_KEY in .env."
+                )
+
+            text_stream = io.StringIO(body)
             reader = csv.DictReader(text_stream)
+            normalized_fields = {
+                str(name).strip().lower()
+                for name in (reader.fieldnames or [])
+                if str(name).strip()
+            }
+            if not normalized_fields:
+                snippet = body[:160].replace("\n", " ").strip()
+                raise FIRMSClientError(
+                    "FIRMS API returned an empty/non-CSV payload. "
+                    f"Response prefix: {snippet!r}"
+                )
+            missing = sorted(REQUIRED_CSV_COLUMNS - normalized_fields)
+            if missing:
+                snippet = body[:160].replace("\n", " ").strip()
+                raise FIRMSClientError(
+                    "FIRMS API returned unexpected CSV schema; missing columns "
+                    f"{missing}. Response prefix: {snippet!r}"
+                )
+
             rows = list(reader)
             LOGGER.info(
                 "Fetched %s rows from FIRMS",
@@ -380,4 +408,3 @@ def _bucket_confidence(value: float | None) -> str:
     if value < 70:
         return "nominal"
     return "high"
-
