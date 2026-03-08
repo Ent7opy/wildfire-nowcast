@@ -332,10 +332,11 @@ def download_grib_files(
                         context = getattr(exc, "weather_context", None)
                         if context is None:
                             context = {"url": url, "forecast_hour": forecast_hour}
-                            if isinstance(exc, httpx.HTTPError) and exc.response is not None:
-                                context["status_code"] = exc.response.status_code
+                            response = getattr(exc, "response", None)
+                            if isinstance(exc, httpx.HTTPError) and response is not None:
+                                context["status_code"] = response.status_code
                                 try:
-                                    resp_text = exc.response.text
+                                    resp_text = response.text
                                     if resp_text:
                                         context["response_snippet"] = resp_text[:300]
                                 except Exception:  # pragma: no cover - defensive

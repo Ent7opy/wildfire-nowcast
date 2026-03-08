@@ -28,7 +28,17 @@ REQUIRED_DENOISER_COLUMNS: tuple[str, ...] = (
     "is_noise",
 )
 
-_ALLOWED_COMPLETENESS_COLUMNS: set[str] = set(REQUIRED_SCORING_COLUMNS) | set(REQUIRED_DENOISER_COLUMNS)
+REQUIRED_DENOISER_V2_COLUMNS: tuple[str, ...] = (
+    "front_id",
+    "event_id",
+    "event_score",
+    "denoiser_decision",
+    "review_required",
+)
+
+_ALLOWED_COMPLETENESS_COLUMNS: set[str] = (
+    set(REQUIRED_SCORING_COLUMNS) | set(REQUIRED_DENOISER_COLUMNS) | set(REQUIRED_DENOISER_V2_COLUMNS)
+)
 
 
 def _as_utc(value: datetime | None) -> datetime | None:

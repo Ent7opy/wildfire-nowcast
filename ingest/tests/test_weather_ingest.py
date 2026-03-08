@@ -4,9 +4,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import tempfile
 
+import httpx
 import pytest
 
-from ingest.weather_ingest import ingest_weather_for_bbox, snap_to_gfs_cycle, _validate_grib_file
+from ingest.config import WeatherIngestSettings
+from ingest.weather_ingest import (
+    _validate_grib_file,
+    download_grib_files,
+    ingest_weather_for_bbox,
+    snap_to_gfs_cycle,
+)
 
 
 class TestWeatherIngestLogic(unittest.TestCase):
@@ -102,6 +109,37 @@ def test_validate_grib_file_allows_multilevel_archive_layout():
             side_effect=ValueError("multiple values for unique key"),
         ):
             _validate_grib_file(Path(tmp.name))
+
+
+def test_download_grib_files_preserves_connect_error_without_attribute_error(tmp_path):
+    """Transport-level failures should surface as ConnectError, not AttributeError."""
+
+    class _StreamClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            raise httpx.ConnectError("dns failure")
+
+    settings = WeatherIngestSettings()
+
+    with (
+        patch("ingest.weather_ingest.httpx.Client", return_value=_StreamClient()),
+        patch("ingest.weather_ingest.time.sleep"),
+        pytest.raises(httpx.ConnectError),
+    ):
+        download_grib_files(
+            settings=settings,
+            run_time=datetime(2026, 3, 8, 6, 0, tzinfo=timezone.utc),
+            variables=["UGRD"],
+            levels=["lev_10_m_above_ground"],
+            download_dir=tmp_path,
+            base_urls=["https://example.invalid/cgi-bin/filter_gfs_0p25.pl"],
+            max_attempts_per_url=1,
+        )
 
 
 @pytest.mark.skip(reason="Test mocking needs to be updated for httpx.Client.stream() and xarray operations")

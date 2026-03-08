@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ingest.firms_ingest import _assert_batch_denoiser_complete
+from ingest.repository import REQUIRED_DENOISER_V2_COLUMNS
 
 
 def _cfg(version: str, shadow_mode: bool) -> SimpleNamespace:
@@ -28,3 +29,13 @@ def test_v2_live_mode_checks_v2_and_legacy_columns(mock_count) -> None:
     assert "event_id" in cols
     assert "denoised_score" in cols
     assert "is_noise" in cols
+
+
+def test_repository_exposes_v2_denoiser_completeness_columns() -> None:
+    assert REQUIRED_DENOISER_V2_COLUMNS == (
+        "front_id",
+        "event_id",
+        "event_score",
+        "denoiser_decision",
+        "review_required",
+    )
