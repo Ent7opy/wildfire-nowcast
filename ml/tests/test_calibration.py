@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 from ml.calibration import SpreadProbabilityCalibrator, fit_from_hindcast_run
 
@@ -158,3 +159,50 @@ def test_fit_from_hindcast_run_synthetic():
     finally:
         shutil.rmtree(tmp_root)
 
+
+def test_fit_from_hindcast_run_fallbacks_to_platt_for_sparse_positives():
+    """Isotonic should fallback to Platt when positives are below threshold and classes are present."""
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        hindcast_dir = tmp_root / "hindcast_run"
+        hindcast_dir.mkdir()
+
+        # Create four small cases so both classes exist and split works.
+        for i in range(4):
+            y_pred = np.array([[[0.1, 0.2], [0.3, 0.9]]], dtype=np.float32)
+            y_obs = np.array([[[0, 0], [0, 1 if i % 2 == 0 else 0]]], dtype=np.float32)
+            fire_t0 = np.array([[1, 0], [0, 1]], dtype=np.float32)
+            ds = xr.Dataset(
+                data_vars={
+                    "y_pred": (["time", "lat", "lon"], y_pred),
+                    "y_obs": (["time", "lat", "lon"], y_obs),
+                    "fire_t0": (["lat", "lon"], fire_t0),
+                },
+                coords={
+                    "time": [datetime(2025, 1, 1 + i)],
+                    "lat": [0, 1],
+                    "lon": [0, 1],
+                    "lead_time_hours": ("time", [24]),
+                },
+                attrs={"ref_time": f"2025-01-0{1+i}T00:00:00Z"},
+            )
+            ds.to_netcdf(hindcast_dir / f"case{i}.nc")
+
+        manifest = {
+            "run_id": "test_hindcast_sparse",
+            "cases": [{"path": str(hindcast_dir / f"case{i}.nc")} for i in range(4)],
+        }
+        with open(hindcast_dir / "index.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        calibrator = fit_from_hindcast_run(
+            hindcast_run_dir=hindcast_dir,
+            method="isotonic",
+            split_percentile=0.5,
+            out_root=str(tmp_root / "calibration"),
+            min_positive_for_isotonic=1000,
+        )
+
+        assert isinstance(calibrator.per_horizon_models[24], LogisticRegression)
+    finally:
+        shutil.rmtree(tmp_root)

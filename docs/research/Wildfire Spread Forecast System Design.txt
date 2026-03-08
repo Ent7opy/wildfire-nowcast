@@ -1,0 +1,263 @@
+﻿Production Design for Spatio-Temporal Wildfire Spread Forecasting
+The escalation of catastrophic wildfire events necessitates a transition from empirical, physics-based models to high-fidelity, data-driven systems capable of integrating multimodal environmental telemetry at scale. The current iteration of the wildfire-nowcast repository, centered on a pixel-wise gradient-boosted baseline, provides a foundational entry point for spread prediction but lacks the spatial awareness and uncertainty quantification required for high-stakes operational decision-making.1 The path toward a production-ready 24/48/72-hour forecast system involves a systematic overhaul of the modeling architecture, data ingestion pipelines, and verification protocols, ensuring that predictions are not only accurate but also statistically calibrated and operationally resilient.4
+Section A: Executive Decision Summary
+The following strategic directives define the next evolution of the wildfire forecasting system, prioritizing spatial intelligence, probabilistic rigor, and automated governance.
+* The system shall transition from the current HistGradientBoostingClassifier to a deep convolutional U-Net architecture to capture multi-scale spatial dependencies and fire-front topology.7
+* The modeling framework will adopt a "Balanced" implementation, utilizing a 2D U-Net with temporal channel-stacking to optimize the tradeoff between predictive lift and inference latency.7
+* Fuel moisture dynamics, encompassing both Live Fuel Moisture Content (LFMC) and Dead Fuel Moisture Content (DFMC), are identified as the primary feature gap and will be integrated into all future training cycles.11
+* Near-Real-Time (NRT) satellite telemetry from the VIIRS 375m sensor will be prioritized over MODIS 1km data due to its superior spatial consistency and lower temporal jitter.14
+* A "Global-to-Regional" data strategy will be implemented, utilizing pre-training on global datasets followed by localized fine-tuning for specific fire regimes like the Mediterranean or the Western United States.17
+* Explicit uncertainty quantification will be achieved via a post-processing calibration layer using Isotonic Regression and Platt Scaling to ensure forecast probabilities align with observed frequencies.4
+* The primary evaluation metric for model promotion will be the Brier Skill Score (BSS), which accounts for the inherent uncertainty in the climatological base rate.4
+* Spatial verification will be modernized using the Structure-Amplitude-Location (SAL) metric to evaluate fire-front shape and displacement, mitigating the limitations of pixel-wise accuracy.23
+* A strict MLOps promotion gate will be enforced, requiring the "Challenger" model to demonstrate a statistically significant improvement over the "Champion" model via the Diebold-Mariano test.26
+* The system will maintain a "Fail-Open" reliability policy, where missing weather or fuel moisture inputs trigger a fallback to persistence-based heuristic forecasts.29
+* Shadow deployment will be the mandatory precursor to any production rollout, allowing the challenger to receive live traffic without influencing the primary forecast.5
+* An Area of Interest (AOI) cap of 40,000 cells per forecast will be strictly maintained to ensure inference latency remains within the 2-minute operational Service Level Objective (SLO).6
+* Monitoring systems will alert on "Concept Drift" when the relationship between meteorological drivers (e.g., wind speed) and spread rates deviates from the training manifold.5
+* The training pipeline will implement a strict temporal/spatial split, ensuring that data from individual fire events is never shared across training and validation sets to prevent leakage.5
+* The hindcast_dataset.py logic will be updated to include Fire Radiative Power (FRP) as a proxy for burn intensity, enhancing the signal for fire-front propagation.14
+Section B: Decision Matrix for Model Selection
+The selection of the next-generation model family involves balancing the need for higher spatial fidelity against the operational constraints of the existing service.py infrastructure.
+
+
+Criteria
+	Conservative: Enhanced GBM
+	Balanced: 2D/3D U-Net
+	Ambitious: GNN / Diffusion
+	Expected Skill Lift
+	Low (5-10% over learned_v1)
+	High (15-25% lift)
+	Very High (30%+ potential)
+	Spatial Awareness
+	Poor (Pixel-wise only)
+	Excellent (Convolutional)
+	Superior (Graph/Topological)
+	Implementation Risk
+	Very Low (No architecture change)
+	Moderate (Requires tensor logic)
+	High (Data graph construction)
+	Inference Latency
+	< 10ms (CPU)
+	100-400ms (GPU)
+	> 600ms (GPU/Graph-Parallel)
+	Compute Cost
+	Low
+	Moderate
+	High
+	Explainability
+	High (SHAP/Importance)
+	Moderate (Saliency Maps)
+	Low (Message Passing)
+	Primary Reference
+	33
+	7
+	8
+	Recommendation and Justification: The Balanced (U-Net) approach is recommended for integration into the wildfire-nowcast repository. While the current HistGradientBoostingClassifier is efficient, it treats each cell as an independent sample, ignoring the physical reality that fire spread is a contiguous spatial process.3 U-Nets leverage skip connections to preserve high-resolution spatial details while capturing the broad environmental context, and they have been shown to improve F1 and IoU scores significantly compared to non-spatial baselines.7 Furthermore, U-Nets process an entire AOI in a single forward pass, fitting well within the 40,000-cell cap and existing latency SLOs.6
+Section C: Production Specification
+1. Data Strategy and Integrated Environmental Drivers
+The shift from a heuristic-based system to a deep-learning-based spread forecaster requires a massive expansion of the feature set beyond the current simple weather and slope inputs.11 Wildfire behavior is a complex interaction of fuels, topography, and atmospheric conditions, many of which are dynamic on sub-daily timescales.12
+Required Feature Groups
+The existing feature set in configs/spread_train_v1.yaml (slope, aspect, wind) must be expanded to include the following groups:
+* Fuel Moisture and Loading: Static fuel maps (e.g., World Cover Map) must be augmented with dynamic moisture signals.18 Live Fuel Moisture Content (LFMC) is a critical indicator of the flammability of the vegetation canopy, while Dead Fuel Moisture Content (DFMC) dictates the receptivity of surface fuels to ignition.12
+* Atmospheric Stability and Moisture: Relative humidity, 2-meter temperature, and 24-hour accumulated precipitation are essential for modeling the drying or wetting of fuels.32 Additionally, the inclusion of indices like the Burning Index (BI) or Energy Release Component (ERC) from the National Fire Danger Rating System (NFDRS) provides the model with pre-computed physical proxies for fire intensity.1
+* Topographic Correction: Beyond raw slope and aspect, the model should ingest a "ruggedness" index or Topographic Position Index (TPI) to identify valley bottoms and ridge lines, which act as natural accelerants or barriers to spread.18
+Sensor Handling and Data Quality
+The production system must navigate the tradeoff between Near-Real-Time (NRT) latency and Science-Quality precision.14
+Data Tier
+	Latency
+	Source/Instrument
+	Use Case
+	NRT Satellite
+	< 30 - 60 minutes
+	VIIRS/MODIS LANCE
+	Real-time ignition & front detection
+	Geostationary
+	10 - 15 minutes
+	GOES/MSG/MTG
+	High-frequency growth tracking
+	NRT Weather
+	1 - 3 hours
+	HRRR / ECMWF NRT
+	Operational forecasting inputs
+	Science Quality
+	2 - 3 months
+	NASA/ESA Reanalysis
+	Model training and retrospective tuning
+	For inference, the system shall prioritize VIIRS (375m resolution) over MODIS (1km) because the finer resolution allows for a more detailed representation of the active fire front, reducing the "blob" effect in the input mask.14 During training, the pipeline must utilize Science-Quality data to avoid learning the geolocation errors (sometimes > 1km) inherent in NRT Aqua/Terra products.41
+Labeling and Leakage Prevention
+The hindcast_dataset.py uses a   3-hour window for fire labels, which is an acceptable compromise given the revisit frequency of polar-orbiting satellites.14 However, to prevent data leakage, the temporal split must be strictly enforced: models should be trained on fires from previous years and validated on fires from the most recent season.5 Spatial splitting (e.g., training on California, testing on Oregon) is also required to ensure regional generalization.17
+2. Modeling Architecture: The Spatial U-Net
+The core modeling change involves moving from the pixel-wise HistGradientBoostingClassifier in ml/train_spread_v1.py to a 2D U-Net. The current model ignores the spatial context of neighboring cells, whereas a U-Net extracts hierarchical features that represent the fire's structure and its surrounding environment.7
+Architectural Components
+* Encoder Path: Successive convolutional layers and max-pooling operations reduce spatial dimensions while increasing feature depth, capturing large-scale drivers like synoptic wind patterns or major topographic features.7
+* Decoder Path: Upsampling and transposed convolutions restore the spatial resolution, guided by skip connections that pass fine-grained details (like a narrow fuel break) directly from the encoder.7
+* Temporal Stacking: Instead of a single input image, the model will ingest a    tensor, where    represents the preceding time steps. This allows the model to "learn" the velocity and direction of the fire front as a vector.7
+Loss Function and Imbalance
+Wildfire spread is characterized by extreme class imbalance, where the vast majority of cells in a 40,000-cell AOI are not on fire. To address this, the training script must utilize a weighted loss function:
+  
+
+where BCE handles the probabilistic calibration and Dice Loss (derived from the Intersection over Union) ensures the spatial shape of the predicted fire matches the observation.7
+3. Explicit Uncertainty and Calibration
+In a wildfire context, a raw model score is not decision-usable. An incident commander needs to know the probability of a ridge being breached. The output of the U-Net must be passed through the ml/calibration.py module to produce a well-calibrated probabilistic forecast.4
+Calibration Techniques
+   * Isotonic Regression: This non-parametric approach is ideal when the sample size is large, as it can correct complex non-linear biases in the model's confidence.4
+   * Platt Scaling: If training data for a specific region is sparse, Platt Scaling (logistic regression on model outputs) provides a more stable, albeit less flexible, calibration.4
+Verification Diagnostics
+The system shall generate Reliability Diagrams for every model run. These diagrams plot the predicted probability against the observed frequency of fire.20 A well-calibrated system will track the 45-degree diagonal. Deviations to the right (over-forecasting) or left (under-forecasting) will serve as triggers for model recalibration or rollback.5
+4. Evaluation Metrics and Promotion Gates
+The evaluation framework in ml/eval_spread_champion_challenger.py must transition from simple Accuracy to a suite of probabilistic and spatial metrics that reflect the difficulty of the task.17
+Primary Metrics
+   * Brier Skill Score (BSS): The BSS measures the improvement of the forecast over a baseline climatological average. It is defined as:
+  
+A model must achieve a    over the current champion to be considered for promotion.4
+   * Structure-Amplitude-Location (SAL): This spatial metric evaluates three distinct qualities of the fire prediction:
+      * Structure (S): Compares the size and shape of predicted fire patches to observations.24
+      * Amplitude (A): Measures the total area predicted to be on fire.24
+      * Location (L): Quantifies the displacement between the predicted and observed fire centroids.24
+Statistical Significance
+Promotion decisions must not be based on raw score differences alone. The scores package will be used to implement the Diebold-Mariano test, which determines if the difference in Brier scores between the Champion and Challenger is statistically significant at the    level.26
+Promotion Gate
+	Metric
+	Threshold
+	Performance
+	Brier Skill Score (BSS)
+	  
+ improvement
+	Spatial
+	SAL - Structure (S)
+	$
+	Statistical
+	Diebold-Mariano p-value
+	  
+
+	Operational
+	Inference Latency
+	  
+ms for 40k cells
+	5. Reliability and Operations
+Operational wildfire forecasting is a mission-critical service. The system must be designed for "Fail-Open" reliability, ensuring that some forecast—even if simplified—is always available.5
+Fallback and Fail-Open Policy
+      * Weather Outage: If the HRRR/NWP feed fails, the service.py module will trigger a fallback to persistence-based forecasting, assuming zero wind and constant humidity.29
+      * Staleness Thresholds: Forecasts using satellite data older than 12 hours will be automatically flagged as "Low Confidence" and will not be promoted to the public dashboard.16
+Service Level Objectives (SLOs)
+      * Freshness: The system must ingest new satellite hotspots and issue an updated forecast within 15 minutes of the telemetry arriving at the FIRMS/LANCE ingest.6
+      * Availability: 99.9% uptime for the inference API during the wildfire season.5
+      * Quality: 95% of 24h forecasts must fall within the 10% calibration margin on the Reliability Diagram.20
+Monitoring and Alerting
+The system will monitor for "Silent Failure" where the model continues to output predictions but their skill drops significantly.
+      * Data Drift: Alert if the distribution of input features (e.g., wind speed) deviates from the training distribution by more than 2 standard deviations.5
+      * Calibration Drift: Automated weekly audits of the Reliability Score; any deviation exceeding 0.15 triggers an immediate alert and a potential rollback to the previous champion.5
+Section D: Repo-Specific Implementation Plan
+This section maps the theoretical recommendations to exact file changes and a phased implementation schedule within the /Users/vanyoivanov/Projects/wildfire-nowcast repository.
+Phase 1: Data Infrastructure and Feature Enrichment (Weeks 1-2)
+The primary goal of Phase 1 is to expand the feature set and prepare the hindcast_dataset.py for spatial tensor output.
+      * ml/spread/hindcast_dataset.py:
+      * Update the __getitem__ method to return an image-like tensor    instead of a flattened vector.
+      * Implement a caching mechanism for historical fuel moisture (LFMC/DFMC) retrieved from the EFFIS/Copernicus API.12
+      * Add logic to sample negative points not just randomly, but specifically at the "near-periphery" of the fire to teach the model the boundary of spread.7
+         * configs/spread_train_v1.yaml:
+         * Expand the features list to include ndvi, relative_humidity, lfmc, dfmc, and precip_24h.
+         * Define the spatial_resolution as    to align with VIIRS telemetry.14
+            * Makefile:
+            * Add a target download-fuels to automate the backfilling of the training set with dynamic fuel data.
+Phase 2: Model Evolution and Spatial Training (Weeks 4-6)
+Phase 2 focuses on replacing the GBM with a spatial U-Net and updating the training loop.
+            * ml/spread/learned_v2.py:
+            * Create this new file to define the WildfireUNet class using PyTorch or TensorFlow.7
+            * Implement the skip-connection architecture and ensure compatibility with the 40,000-cell AOI size.
+            * ml/train_spread_v2.py:
+            * Create a new training script that replaces the HistGradientBoostingClassifier with a neural network training loop.
+            * Implement "Temporal Windowing" where the model is fed a sequence of    fire masks as additional channels.7
+            * Integrate early stopping based on the Brier Score of the validation set.5
+               * ml/calibration.py:
+               * Ensure the isotonic and platt methods can handle spatial probability maps and produce calibrated outputs for the 2D grid.4
+Phase 3: Advanced Verification and Gated Rollout (Weeks 8-12)
+The final phase implements the MLOps guardrails and automated promotion logic.
+               * ml/eval_spread_champion_challenger.py:
+               * Import the scores and pysteps libraries to calculate SAL and BSS metrics.25
+               * Implement the Diebold-Mariano test to verify the statistical significance of challenger improvements.26
+               * Automate the export of Reliability Diagrams to the project dashboard.20
+               * ml/spread/service.py:
+               * Implement a "Shadow Mode" flag that allows the system to run the current challenger in parallel with the champion, logging results without serving them to end-users.5
+               * Add a check_staleness() method that blocks forecasts if weather inputs are    hours old.
+                  * tests/:
+                  * Add a new suite of integration tests that verify the "Fail-Open" logic by mocking weather data outages.
+Section E: Risk Register and Mitigations
+
+
+Risk
+	Impact
+	Mitigation Strategy
+	Data Leakage (Spatial/Temporal)
+	Overestimation of model skill; failure in real-world deployment.
+	Strict split by Fire ID and Year; enforce a 100km buffer between training and validation samples.5
+	NRT Geolocation Error
+	Fire-front misalignment in operational forecasts.
+	Use Science-Quality data for training; implement a "jitter-robust" loss function that penalizes small spatial shifts less than total omissions.15
+	Inference Latency Spikes
+	SLO breach; dashboard failure during active incidents.
+	Enforce the 40k cell cap; utilize TensorRT or ONNX model quantization for the production U-Net.6
+	Calibration Decay
+	Probabilities become over-confident during extreme heat events.
+	Implement weekly automated recalibration using a sliding window of the most recent observations.20
+	Model Hallucination
+	Predicting fire spread over water or non-fuel areas.
+	Post-process predictions with a static "mask of non-fuel" to zero out impossible spread areas.37
+	Section F: Open Questions for Product and Operations
+The following questions require consensus before the system moves to Phase 3 of development.
+                  1. Risk Bias Preference: Does the operational team prefer a "Safety First" bias (higher recall, over-predicting the fire area) or an "Efficiency First" bias (higher precision, reducing false alarms)?.5
+                  2. Human-in-the-Loop Thresholds: At what staleness level should the automated forecast be entirely blocked? If VIIRS data is 18 hours old, is a stale forecast better than no forecast?.16
+                  3. Regional vs. Global Model: Should we deploy a single "Global" model with regional features, or maintain 10-15 "Regional" models (e.g., California, Mediterranean, boreal) with separate weights?.17
+                  4. UI/UX Probabilities: How should the explicit uncertainty be visualized? Options include a "Most Likely Extent" line vs. a "Heatmap of Probability" vs. "Conformal Prediction Sets" representing a 90% confidence region.21
+                  5. Compute Budget: Can the inference infrastructure support GPUs, or must the U-Net be optimized for CPU-only execution to meet current cost constraints?.10
+The proposed transition to a spatially-aware, calibrated, and gated forecasting system ensures that the wildfire-nowcast repository evolves from an experimental tool into a mission-critical operational asset. By centering the design on spatial U-Nets and probabilistic verification, the system provides incident commanders with the clarity and statistical rigor required to protect lives and property in an increasingly volatile fire landscape.2
+Цитирани творби
+                  1. THE LARGE-SCALE WILDFIRE SPREAD PREDICTION USING A MULTI-KERNEL CONVOLUTIONAL NEURAL NETWORK, осъществен достъп на февруари 22, 2026, https://d-nb.info/1278557520/34
+                  2. Technosylva: Home, осъществен достъп на февруари 22, 2026, https://technosylva.com/
+                  3. Active Fire Spread Modeling - Distribution - EPRI, осъществен достъп на февруари 22, 2026, https://distribution.epri.com/wildfire/public/wildfire-tech-database/modeling-simulation/active-fire-spread/
+                  4. Brier score - Wikipedia, осъществен достъп на февруари 22, 2026, https://en.wikipedia.org/wiki/Brier_score
+                  5. Deployment Evaluation Strategies In MLOps | by Fraidoon Omarzai ..., осъществен достъп на февруари 22, 2026, https://medium.com/@fraidoonomarzai99/deployment-evaluation-strategies-in-mlops-c208585aa3bd
+                  6. An End-to-End Data and Machine Learning Pipeline for Energy Forecasting: A Systematic Approach Integrating MLOps and Domain Expertise - ResearchGate, осъществен достъп на февруари 22, 2026, https://www.researchgate.net/publication/395592928_An_End-to-End_Data_and_Machine_Learning_Pipeline_for_Energy_Forecasting_A_Systematic_Approach_Integrating_MLOps_and_Domain_Expertise
+                  7. Wildfire spread forecasting with Deep Learning - arXiv.org, осъществен достъп на февруари 22, 2026, https://arxiv.org/html/2505.17556v1
+                  8. Generative AI for Predicting 2D and 3D Wildfire Spread: Beyond Physics-Based Models and Traditional Deep Learning - arXiv.org, осъществен достъп на февруари 22, 2026, https://arxiv.org/html/2506.02485v1
+                  9. Wildfire Spread Prediction Using Attention Mechanisms in U2-NET - MDPI, осъществен достъп на февруари 22, 2026, https://www.mdpi.com/1999-4907/15/10/1711
+                  10. An End-to-End Data and Machine Learning Pipeline for Energy Forecasting: A Systematic Approach Integrating MLOps and Domain Expertise - MDPI, осъществен достъп на февруари 22, 2026, https://www.mdpi.com/2078-2489/16/9/805
+                  11. Wildfire Fuel Data Research, осъществен достъп на февруари 22, 2026, https://ral.ucar.edu/wsap/wildfire-fuel-data-research
+                  12. A global fuel characteristic model and dataset for wildfire prediction - BG, осъществен достъп на февруари 22, 2026, https://bg.copernicus.org/articles/21/279/2024/
+                  13. A global fuel characteristic model and dataset for wildfire prediction - EGUsphere, осъществен достъп на февруари 22, 2026, https://egusphere.copernicus.org/preprints/2023/egusphere-2023-1984/egusphere-2023-1984-ATC1.pdf
+                  14. FIRMS | NASA Earthdata, осъществен достъп на февруари 22, 2026, https://www.earthdata.nasa.gov/data/tools/firms
+                  15. Comparing Satellite Data for Next-Day Wildfire Predictability - arXiv, осъществен достъп на февруари 22, 2026, https://arxiv.org/html/2503.08580v1
+                  16. Wildfires from Space: a synthesis of satellite missions for active fire monitoring, осъществен достъп на февруари 22, 2026, https://publications.gc.ca/collections/collection_2023/rncan-nrcan/Fo122-1-93-2023-eng.pdf
+                  17. Machine Learning and Deep Learning for Wildfire Spread Prediction ..., осъществен достъп на февруари 22, 2026, https://www.mdpi.com/2571-6255/7/12/482
+                  18. Fire Spread – Products - OroraTech, осъществен достъп на февруари 22, 2026, https://ororatech.com/all-products/fire-spread
+                  19. European Forest Fire Information System - Copernicus, осъществен достъп на февруари 22, 2026, https://effis.emergency.copernicus.eu/
+                  20. Reliability - ECMWF | Charts, осъществен достъп на февруари 22, 2026, https://charts.ecmwf.int/products/mofc_multi_verification_probability_family_reliability
+                  21. Brier Score: Calibration, Resolution, and Uncertainty - Emergent Mind, осъществен достъп на февруари 22, 2026, https://www.emergentmind.com/topics/brier-score-term
+                  22. Spatial variation in the Brier score Spatial variation of the mean... - ResearchGate, осъществен достъп на февруари 22, 2026, https://www.researchgate.net/figure/Spatial-variation-in-the-Brier-score-Spatial-variation-of-the-mean-Brier-score-averaged_fig5_349824469
+                  23. Spatial Verification of Ensemble Precipitation: An Ensemble Version of SAL - ResearchGate, осъществен достъп на февруари 22, 2026, https://www.researchgate.net/publication/325241680_Spatial_Verification_of_Ensemble_Precipitation_An_Ensemble_Version_of_SAL
+                  24. SAL Method Applied in Grid Forecasting Product Verification with Three-Source Fusion Product - MDPI, осъществен достъп на февруари 22, 2026, https://www.mdpi.com/2073-4433/15/11/1366
+                  25. pysteps.verification.salscores.sal, осъществен достъп на февруари 22, 2026, https://pysteps.readthedocs.io/en/stable/generated/pysteps.verification.salscores.sal.html
+                  26. Lesson19: Comparing Predictive Accuracy of two Forecasts: The Diebold-Mariano Test, осъществен достъп на февруари 22, 2026, https://www.lem.sssup.it/phd/documents/Lesson19.pdf
+                  27. Diebold-Mariano Test | Real Statistics Using Excel, осъществен достъп на февруари 22, 2026, https://real-statistics.com/time-series-analysis/forecasting-accuracy/diebold-mariano-test/
+                  28. scores: Verification and Evaluation for Forecasts and Models — scores 2.5.0 documentation, осъществен достъп на февруари 22, 2026, https://scores.readthedocs.io/
+                  29. technosylva.com, осъществен достъп на февруари 22, 2026, https://technosylva.com/products/wildfire-analyst/firesim/
+                  30. The MLOps Guide to Transform Model Failures Into Production Success - Galileo AI, осъществен достъп на февруари 22, 2026, https://galileo.ai/blog/mlops-operationalizing-machine-learning
+                  31. Localized Forest Fire Risk Prediction: A Department-Aware Approach for Operational Decision Support - arXiv, осъществен достъп на февруари 22, 2026, https://arxiv.org/html/2506.04254v1
+                  32. Satellite data for fire management | EUMETSAT - User Portal, осъществен достъп на февруари 22, 2026, https://user.eumetsat.int/resources/user-guides/satellite-data-for-fire-management
+                  33. EAEV044 - Machine Learning for Wildfire Prediction - Regeneron ISEF 2025, осъществен достъп на февруари 22, 2026, https://isef.net/project/eaev044-machine-learning-for-wildfire-prediction
+                  34. Machine Learning for Binary Classification of Wildfire Size - Tilburg University, осъществен достъп на февруари 22, 2026, http://arno.uvt.nl/show.cgi?fid=156918
+                  35. A Graph Neural Network Based Approach for Predicting Wildfire ..., осъществен достъп на февруари 22, 2026, https://uwspace.uwaterloo.ca/items/70bea407-594e-4fa7-af82-178d9b8d04d4
+                  36. Spatial-temporal distribution prediction of transmission corridor wildfire risk based on ARIMA-DBN - Frontiers, осъществен достъп на февруари 22, 2026, https://www.frontiersin.org/journals/forests-and-global-change/articles/10.3389/ffgc.2025.1637263/full
+                  37. The Most Advanced Wildfire Fuels Data Available - AEM.eco, осъществен достъп на февруари 22, 2026, https://aem.eco/product/wildfire-fuels-data/
+                  38. Fuel Moisture Landing Page, осъществен достъп на февруари 22, 2026, https://www.fuelmoisture.us/
+                  39. EFFIS - Current Situation - Copernicus, осъществен достъп на февруари 22, 2026, https://forest-fire.emergency.copernicus.eu/apps/effis_current_situation/
+                  40. Spatio-Temporal Wildfire Prediction using Multi-Modal Data - IEEE Xplore, осъществен достъп на февруари 22, 2026, https://ieeexplore.ieee.org/ielaam/8700143/10153947/10130568-aam.pdf
+                  41. FIRMS: What are the key differences between Standard quality and URT/RT/NRT fire data?, осъществен достъп на февруари 22, 2026, https://forum.earthdata.nasa.gov/viewtopic.php?t=5134
+                  42. FIRMS FAQ | NASA Earthdata, осъществен достъп на февруари 22, 2026, https://www.earthdata.nasa.gov/data/tools/firms/faq
+                  43. scores: A Python package for verifying and evaluating models and predictions with xarray and pandas - arXiv.org, осъществен достъп на февруари 22, 2026, https://arxiv.org/html/2406.07817v1
+                  44. Fair Skill Brier Score: Evaluating Probabilistic Forecasts of One-Off Events with Different Numbers of Categorical Outcomes - SSRN, осъществен достъп на февруари 22, 2026, https://papers.ssrn.com/sol3/Delivery.cfm/SSRN_ID4556542_code865831.pdf?abstractid=4556542&mirid=1
+                  45. European Forest Fire Information System (EFFIS) - Climate-ADAPT, осъществен достъп на февруари 22, 2026, https://climate-adapt.eea.europa.eu/en/metadata/portals/effis-european-forest-fire-data-center
+                  46. Technosylva - Wildfire Risk Forecasting Demo - YouTube, осъществен достъп на февруари 22, 2026, https://www.youtube.com/watch?v=iMr8_-inju0
+                  47. Spatio-Temporal Wildfire Prediction Using Multi-Modal Data, осъществен достъп на февруари 22, 2026, https://www.researchgate.net/publication/370957290_Spatio-Temporal_Wildfire_Prediction_using_Multi-Modal_Data
+                  48. CAL FIRE WFA, осъществен достъп на февруари 22, 2026, https://calfire.wildfireanalyst.com/

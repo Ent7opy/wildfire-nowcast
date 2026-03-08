@@ -105,6 +105,10 @@ def test_get_detections_endpoint_with_denoiser_fields(monkeypatch):
     _, kwargs = mock_list.call_args
     assert "denoised_score" in kwargs["columns"]
     assert "is_noise" in kwargs["columns"]
+    assert "event_id" in kwargs["columns"]
+    assert "event_score" in kwargs["columns"]
+    assert "denoiser_decision" in kwargs["columns"]
+    assert "review_required" in kwargs["columns"]
 
 
 def test_get_detections_endpoint_with_include_noise(monkeypatch):
@@ -125,3 +129,31 @@ def test_get_detections_endpoint_with_include_noise(monkeypatch):
     _, kwargs = mock_list.call_args
     assert kwargs["include_noise"] is True
 
+
+def test_get_events_endpoint(monkeypatch):
+    """Test that /fires/events delegates to list_fire_events_bbox_time."""
+    mock_events = MagicMock(return_value=[{"event_id": "evt_1", "event_score": 0.95}])
+    monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
+
+    response = client.get(
+        "/fires/events",
+        params={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 22.0,
+            "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+            "min_event_score": 0.5,
+            "include_review_required": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["events"][0]["event_id"] == "evt_1"
+
+    _, kwargs = mock_events.call_args
+    assert kwargs["min_event_score"] == 0.5
+    assert kwargs["include_review_required"] is False

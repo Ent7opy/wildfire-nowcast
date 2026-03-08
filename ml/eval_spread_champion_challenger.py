@@ -1,6 +1,6 @@
 """Evaluate champion vs challenger spread models on identical reference cases.
 
-Produces per-horizon comparison metrics and a conservative recommendation.
+Produces per-horizon comparison metrics and a promotion recommendation.
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yaml
+from scipy import stats
 from sklearn.metrics import average_precision_score
 
 from api.db import get_engine
@@ -91,20 +93,113 @@ def _safe_pr_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float | None:
     return float(average_precision_score(y_true, y_prob))
 
 
+def _brier_skill_score(y_true: np.ndarray, y_prob: np.ndarray) -> tuple[float, float]:
+    y_true = (np.asarray(y_true) > 0.5).astype(np.float32)
+    y_prob = np.clip(np.asarray(y_prob, dtype=np.float32), 0.0, 1.0)
+    brier = float(np.mean((y_prob - y_true) ** 2))
+    climatology = float(np.mean(y_true))
+    brier_ref = float(np.mean((climatology - y_true) ** 2))
+    if brier_ref <= 1e-12:
+        return brier, 0.0
+    return brier, float(1.0 - (brier / brier_ref))
+
+
+def _sal_from_cases(y_true_cases: list[np.ndarray], y_pred_cases: list[np.ndarray]) -> dict[str, float]:
+    if not y_true_cases:
+        return {"S": float("nan"), "A": float("nan"), "L": float("nan"), "composite": float("nan")}
+
+    # Try pysteps if available. Fallback to a deterministic approximation.
+    try:
+        from pysteps.verification.salscores import sal as sal_score  # type: ignore
+
+        triples = []
+        for obs, pred in zip(y_true_cases, y_pred_cases):
+            s, a, loc = sal_score(np.asarray(pred, dtype=float), np.asarray(obs, dtype=float))
+            triples.append((float(abs(s)), float(abs(a)), float(abs(loc))))
+        arr = np.asarray(triples, dtype=float)
+        return {
+            "S": float(np.nanmean(arr[:, 0])),
+            "A": float(np.nanmean(arr[:, 1])),
+            "L": float(np.nanmean(arr[:, 2])),
+            "composite": float(np.nanmean(np.sum(arr, axis=1) / 3.0)),
+        }
+    except Exception:
+        pass
+
+    def _centroid(grid: np.ndarray) -> tuple[float, float]:
+        g = np.asarray(grid, dtype=float)
+        w = np.clip(g, 0.0, None)
+        if np.sum(w) <= 1e-12:
+            h, w_ = g.shape
+            return (h / 2.0, w_ / 2.0)
+        ys, xs = np.indices(g.shape)
+        return (float(np.sum(ys * w) / np.sum(w)), float(np.sum(xs * w) / np.sum(w)))
+
+    parts = []
+    for obs, pred in zip(y_true_cases, y_pred_cases):
+        obs_f = np.asarray(obs, dtype=float)
+        pred_f = np.asarray(pred, dtype=float)
+        s = abs(np.nanstd(pred_f) - np.nanstd(obs_f)) / (np.nanstd(obs_f) + 1e-6)
+        a = abs(np.nansum(pred_f) - np.nansum(obs_f)) / (np.nansum(obs_f) + 1.0)
+        cy_o, cx_o = _centroid(obs_f)
+        cy_p, cx_p = _centroid(pred_f)
+        norm = math.sqrt(float(obs_f.shape[0] ** 2 + obs_f.shape[1] ** 2)) + 1e-6
+        loc = float(math.sqrt((cy_o - cy_p) ** 2 + (cx_o - cx_p) ** 2) / norm)
+        parts.append((float(s), float(a), float(loc)))
+
+    arr = np.asarray(parts, dtype=float)
+    return {
+        "S": float(np.nanmean(arr[:, 0])),
+        "A": float(np.nanmean(arr[:, 1])),
+        "L": float(np.nanmean(arr[:, 2])),
+        "composite": float(np.nanmean(np.sum(arr, axis=1) / 3.0)),
+    }
+
+
+def _diebold_mariano_pvalue(
+    y_true_cases: list[np.ndarray],
+    champion_cases: list[np.ndarray],
+    challenger_cases: list[np.ndarray],
+) -> dict[str, float | None]:
+    if not y_true_cases:
+        return {"dm_stat": None, "dm_p_value": None}
+
+    diffs = []
+    for obs, champ, chall in zip(y_true_cases, champion_cases, challenger_cases):
+        obs_b = (np.asarray(obs, dtype=np.float32) > 0.5).astype(np.float32)
+        champ_p = np.clip(np.asarray(champ, dtype=np.float32), 0.0, 1.0)
+        chall_p = np.clip(np.asarray(chall, dtype=np.float32), 0.0, 1.0)
+        champ_loss = float(np.mean((champ_p - obs_b) ** 2))
+        chall_loss = float(np.mean((chall_p - obs_b) ** 2))
+        # Positive means challenger lower loss (better).
+        diffs.append(champ_loss - chall_loss)
+
+    d = np.asarray(diffs, dtype=float)
+    if d.size < 2 or np.nanstd(d, ddof=1) < 1e-12:
+        return {"dm_stat": None, "dm_p_value": None}
+
+    dm_stat = float(np.nanmean(d) / (np.nanstd(d, ddof=1) / np.sqrt(d.size)))
+    dm_p = float(2.0 * (1.0 - stats.t.cdf(abs(dm_stat), df=max(1, d.size - 1))))
+    return {"dm_stat": dm_stat, "dm_p_value": dm_p}
+
+
 def summarize_comparison_for_horizon(
     *,
     horizon_hours: int,
     y_true: np.ndarray,
     y_prob_champion: np.ndarray,
     y_prob_challenger: np.ndarray,
+    y_true_cases: list[np.ndarray] | None = None,
+    champion_cases: list[np.ndarray] | None = None,
+    challenger_cases: list[np.ndarray] | None = None,
     ece_bins: int = 10,
 ) -> dict[str, Any]:
     y_true = (np.asarray(y_true) > 0.5).astype(np.float32, copy=False)
     p_champion = np.clip(np.asarray(y_prob_champion, dtype=np.float32), 0.0, 1.0)
     p_challenger = np.clip(np.asarray(y_prob_challenger, dtype=np.float32), 0.0, 1.0)
 
-    champion_brier = float(np.mean((p_champion - y_true) ** 2))
-    challenger_brier = float(np.mean((p_challenger - y_true) ** 2))
+    champion_brier, champion_bss = _brier_skill_score(y_true, p_champion)
+    challenger_brier, challenger_bss = _brier_skill_score(y_true, p_challenger)
 
     champion_ece = expected_calibration_error(y_true, p_champion, n_bins=ece_bins)
     challenger_ece = expected_calibration_error(y_true, p_challenger, n_bins=ece_bins)
@@ -117,12 +212,22 @@ def summarize_comparison_for_horizon(
     champion_iou_05 = _binary_metrics(y_true, p_champion, 0.5)["iou"]
     challenger_iou_05 = _binary_metrics(y_true, p_challenger, 0.5)["iou"]
 
+    true_cases = y_true_cases or []
+    champ_cases = champion_cases or []
+    chall_cases = challenger_cases or []
+    sal_champion = _sal_from_cases(true_cases, champ_cases) if true_cases else {"S": float("nan"), "A": float("nan"), "L": float("nan"), "composite": float("nan")}
+    sal_challenger = _sal_from_cases(true_cases, chall_cases) if true_cases else {"S": float("nan"), "A": float("nan"), "L": float("nan"), "composite": float("nan")}
+    dm = _diebold_mariano_pvalue(true_cases, champ_cases, chall_cases) if true_cases else {"dm_stat": None, "dm_p_value": None}
+
     return {
         "horizon_hours": int(horizon_hours),
         "n": int(y_true.size),
         "champion_brier": champion_brier,
         "challenger_brier": challenger_brier,
         "brier_improvement": champion_brier - challenger_brier,
+        "champion_bss": float(champion_bss),
+        "challenger_bss": float(challenger_bss),
+        "bss_improvement": float(challenger_bss - champion_bss),
         "champion_ece": float(champion_ece),
         "challenger_ece": float(challenger_ece),
         "ece_improvement": float(champion_ece - challenger_ece),
@@ -139,62 +244,123 @@ def summarize_comparison_for_horizon(
         "champion_iou_05": champion_iou_05,
         "challenger_iou_05": challenger_iou_05,
         "iou_05_improvement": float(challenger_iou_05 - champion_iou_05),
+        "champion_sal_S": float(sal_champion.get("S", float("nan"))),
+        "champion_sal_A": float(sal_champion.get("A", float("nan"))),
+        "champion_sal_L": float(sal_champion.get("L", float("nan"))),
+        "champion_sal_composite": float(sal_champion.get("composite", float("nan"))),
+        "challenger_sal_S": float(sal_challenger.get("S", float("nan"))),
+        "challenger_sal_A": float(sal_challenger.get("A", float("nan"))),
+        "challenger_sal_L": float(sal_challenger.get("L", float("nan"))),
+        "challenger_sal_composite": float(sal_challenger.get("composite", float("nan"))),
+        "sal_composite_improvement": float(
+            sal_champion.get("composite", float("nan")) - sal_challenger.get("composite", float("nan"))
+        ),
+        "dm_stat": dm.get("dm_stat"),
+        "dm_p_value": dm.get("dm_p_value"),
     }
 
 
 def compute_recommendation(
     summary_rows: list[dict[str, Any]],
     *,
+    bss_improvement_min: float = 0.03,
+    bss_horizon_floor: float = -0.005,
+    sal_regression_max: float = 0.05,
+    dm_pvalue_max: float = 0.05,
     max_pr_auc_drop: float = 0.01,
     max_iou_drop: float = 0.02,
 ) -> dict[str, Any]:
-    """Conservative gate for champion/challenger recommendation."""
+    """Moderate gate for champion/challenger recommendation."""
     if not summary_rows:
         return {
             "recommend_challenger": False,
+            "pass": False,
             "reasons": ["No summary rows available."],
         }
 
     reasons: list[str] = []
+    weights = np.asarray([max(1, int(r.get("n", 1))) for r in summary_rows], dtype=float)
+    bss_vals = np.asarray([float(r.get("bss_improvement", 0.0)) for r in summary_rows], dtype=float)
+    weighted_bss = float(np.average(bss_vals, weights=weights))
+
     primary_ok = True
     secondary_ok = True
 
+    if weighted_bss < bss_improvement_min:
+        primary_ok = False
+        reasons.append(
+            f"Weighted BSS improvement {weighted_bss:.4f} is below threshold {bss_improvement_min:.4f}."
+        )
+
+    sal_improved_count = 0
     for row in summary_rows:
-        h = int(row["horizon_hours"])
-        if float(row["brier_improvement"]) <= 0:
+        h = int(row.get("horizon_hours", -1))
+        bss_h = float(row.get("bss_improvement", 0.0))
+        if bss_h < bss_horizon_floor:
             primary_ok = False
-            reasons.append(f"T+{h}h: challenger did not improve Brier.")
-        if float(row["ece_improvement"]) <= 0:
+            reasons.append(
+                f"T+{h}h: BSS regression {bss_h:.4f} breaches floor {bss_horizon_floor:.4f}."
+            )
+
+        sal_imp = float(row.get("sal_composite_improvement", float("nan")))
+        if np.isfinite(sal_imp):
+            if sal_imp > 0:
+                sal_improved_count += 1
+            if sal_imp < -abs(sal_regression_max):
+                primary_ok = False
+                reasons.append(
+                    f"T+{h}h: SAL composite regression {sal_imp:.4f} exceeds {sal_regression_max:.4f}."
+                )
+
+        dm_p = row.get("dm_p_value")
+        if dm_p is not None and np.isfinite(float(dm_p)) and float(dm_p) > dm_pvalue_max:
             primary_ok = False
-            reasons.append(f"T+{h}h: challenger did not improve ECE.")
+            reasons.append(
+                f"T+{h}h: Diebold-Mariano p-value {float(dm_p):.4f} exceeds {dm_pvalue_max:.4f}."
+            )
 
         pr_auc_improvement = row.get("pr_auc_improvement")
         if pr_auc_improvement is not None and float(pr_auc_improvement) < -abs(max_pr_auc_drop):
             secondary_ok = False
             reasons.append(
-                f"T+{h}h: PR-AUC regression exceeds threshold ({pr_auc_improvement:.4f})."
+                f"T+{h}h: PR-AUC regression exceeds threshold ({float(pr_auc_improvement):.4f})."
             )
 
         for key in ("iou_03_improvement", "iou_05_improvement"):
-            if float(row[key]) < -abs(max_iou_drop):
+            if float(row.get(key, 0.0)) < -abs(max_iou_drop):
                 secondary_ok = False
-                reasons.append(f"T+{h}h: {key} regression exceeds threshold ({row[key]:.4f}).")
+                reasons.append(
+                    f"T+{h}h: {key} regression exceeds threshold ({float(row[key]):.4f})."
+                )
 
-    recommend = primary_ok and secondary_ok
+    min_sal_improved = max(1, int(math.ceil((2.0 / 3.0) * len(summary_rows))))
+    if sal_improved_count < min_sal_improved:
+        primary_ok = False
+        reasons.append(
+            f"SAL improvement only on {sal_improved_count}/{len(summary_rows)} horizons (requires >= {min_sal_improved})."
+        )
+
+    recommend = bool(primary_ok and secondary_ok)
     if recommend:
-        reasons.append("Challenger improves primary metrics on all horizons with no major secondary regressions.")
+        reasons.append("Challenger passed BSS/SAL/DM primary gates and PR-AUC/IoU guardrails.")
 
     return {
-        "recommend_challenger": bool(recommend),
+        "recommend_challenger": recommend,
+        "pass": recommend,
         "primary_ok": bool(primary_ok),
         "secondary_ok": bool(secondary_ok),
+        "weighted_bss_improvement": weighted_bss,
+        "bss_improvement_min": float(bss_improvement_min),
+        "bss_horizon_floor": float(bss_horizon_floor),
+        "sal_regression_max": float(sal_regression_max),
+        "dm_pvalue_max": float(dm_pvalue_max),
         "max_pr_auc_drop": float(max_pr_auc_drop),
         "max_iou_drop": float(max_iou_drop),
         "reasons": reasons,
     }
 
 
-def _collect_comparison_arrays(config: dict[str, Any]) -> dict[int, dict[str, np.ndarray]]:
+def _collect_comparison_arrays(config: dict[str, Any]) -> dict[int, dict[str, Any]]:
     region_name = str(config["region_name"])
     bbox = tuple(float(v) for v in config["bbox"])
     start_time = datetime.fromisoformat(str(config["start_time"]))
@@ -239,7 +405,15 @@ def _collect_comparison_arrays(config: dict[str, Any]) -> dict[int, dict[str, np
         raise ValueError("No reference times found for the provided config window.")
 
     acc: dict[int, dict[str, list[np.ndarray]]] = {
-        h: {"y_true": [], "champion": [], "challenger": []} for h in horizons
+        h: {
+            "y_true_flat": [],
+            "champion_flat": [],
+            "challenger_flat": [],
+            "y_true_cases": [],
+            "champion_cases": [],
+            "challenger_cases": [],
+        }
+        for h in horizons
     }
 
     for ref_time in ref_times:
@@ -267,22 +441,33 @@ def _collect_comparison_arrays(config: dict[str, Any]) -> dict[int, dict[str, np
                 clip=True,
             ).heatmap
 
-            y_true = (np.asarray(obs).ravel() > 0).astype(np.float32)
-            y_champion = np.asarray(forecast_champion.probabilities.isel(time=i).values).ravel().astype(np.float32)
-            y_challenger = np.asarray(forecast_challenger.probabilities.isel(time=i).values).ravel().astype(np.float32)
+            y_true_case = (np.asarray(obs) > 0).astype(np.float32)
+            y_champion_case = np.asarray(
+                forecast_champion.probabilities.isel(time=i).values, dtype=np.float32
+            )
+            y_challenger_case = np.asarray(
+                forecast_challenger.probabilities.isel(time=i).values, dtype=np.float32
+            )
 
-            acc[h]["y_true"].append(y_true)
-            acc[h]["champion"].append(y_champion)
-            acc[h]["challenger"].append(y_challenger)
+            acc[h]["y_true_cases"].append(y_true_case)
+            acc[h]["champion_cases"].append(y_champion_case)
+            acc[h]["challenger_cases"].append(y_challenger_case)
 
-    combined: dict[int, dict[str, np.ndarray]] = {}
+            acc[h]["y_true_flat"].append(y_true_case.ravel())
+            acc[h]["champion_flat"].append(y_champion_case.ravel())
+            acc[h]["challenger_flat"].append(y_challenger_case.ravel())
+
+    combined: dict[int, dict[str, Any]] = {}
     for h, payload in acc.items():
-        if not payload["y_true"]:
+        if not payload["y_true_flat"]:
             continue
         combined[h] = {
-            "y_true": np.concatenate(payload["y_true"]),
-            "champion": np.concatenate(payload["champion"]),
-            "challenger": np.concatenate(payload["challenger"]),
+            "y_true": np.concatenate(payload["y_true_flat"]),
+            "champion": np.concatenate(payload["champion_flat"]),
+            "challenger": np.concatenate(payload["challenger_flat"]),
+            "y_true_cases": payload["y_true_cases"],
+            "champion_cases": payload["champion_cases"],
+            "challenger_cases": payload["challenger_cases"],
         }
     if not combined:
         raise ValueError("No paired evaluation arrays were collected.")
@@ -345,6 +530,9 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
             y_true=arrays[h]["y_true"],
             y_prob_champion=arrays[h]["champion"],
             y_prob_challenger=arrays[h]["challenger"],
+            y_true_cases=arrays[h]["y_true_cases"],
+            champion_cases=arrays[h]["champion_cases"],
+            challenger_cases=arrays[h]["challenger_cases"],
             ece_bins=int(config.get("ece_bins", 10)),
         )
         rows.append(row)
@@ -352,6 +540,10 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
     gate_cfg = config.get("gate", {}) or {}
     decision = compute_recommendation(
         rows,
+        bss_improvement_min=float(gate_cfg.get("bss_improvement_min", 0.03)),
+        bss_horizon_floor=float(gate_cfg.get("bss_horizon_floor", -0.005)),
+        sal_regression_max=float(gate_cfg.get("sal_regression_max", 0.05)),
+        dm_pvalue_max=float(gate_cfg.get("dm_pvalue_max", 0.05)),
         max_pr_auc_drop=float(gate_cfg.get("max_pr_auc_drop", 0.01)),
         max_iou_drop=float(gate_cfg.get("max_iou_drop", 0.02)),
     )
@@ -365,14 +557,23 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
     }
     (out_dir / "summary.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    gate_report = {
+        "pass": bool(decision.get("pass", False)),
+        "recommend_challenger": bool(decision.get("recommend_challenger", False)),
+        "decision": decision,
+    }
+    (out_dir / "gate_report.json").write_text(
+        json.dumps(gate_report, indent=2) + "\n", encoding="utf-8"
+    )
+
     decision_lines = [
         "# Champion vs Challenger Decision",
         "",
         f"- recommendation: `{'promote_challenger' if decision['recommend_challenger'] else 'keep_champion'}`",
-        f"- primary_ok: `{decision['primary_ok']}`",
-        f"- secondary_ok: `{decision['secondary_ok']}`",
-        f"- max_pr_auc_drop: `{decision['max_pr_auc_drop']}`",
-        f"- max_iou_drop: `{decision['max_iou_drop']}`",
+        f"- pass: `{decision['pass']}`",
+        f"- primary_ok: `{decision.get('primary_ok')}`",
+        f"- secondary_ok: `{decision.get('secondary_ok')}`",
+        f"- weighted_bss_improvement: `{decision.get('weighted_bss_improvement')}`",
         "",
         "## Reasons",
     ]

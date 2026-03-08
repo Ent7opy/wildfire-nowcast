@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 import numpy as np
 
 from ml.spread.service import (
@@ -302,3 +303,199 @@ def test_run_spread_forecast_strict_allows_location_based_terrain_fallback(mock_
         out = run_spread_forecast(request, model=mock_model)
 
     assert out == mock_forecast
+
+
+def test_run_spread_forecast_adds_confidence_and_staleness_attrs(monkeypatch, mock_spread_inputs):
+    import xarray as xr
+
+    monkeypatch.setenv("SPREAD_STALE_WARN_HOURS", "12")
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    mock_spread_inputs.weather_cube.attrs = {"weather_run_time": "2025-12-26T00:00:00+00:00"}
+
+    forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            np.full((1, 2, 2), 0.2, dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="dummy",
+        model_version="x",
+    )
+    model = MagicMock()
+    model.predict.return_value = forecast
+
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+    )
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        out = run_spread_forecast(request, model=model)
+
+    assert out.probabilities.attrs["confidence_level"] == "low"
+    assert float(out.probabilities.attrs["staleness_hours"]) == pytest.approx(12.0)
+    assert out.probabilities.attrs["fallback_used"] is False
+
+
+def test_run_spread_forecast_shadow_mode_sets_shadow_attrs(monkeypatch, mock_spread_inputs):
+    import xarray as xr
+
+    monkeypatch.setenv("SPREAD_SHADOW_ENABLED", "true")
+    monkeypatch.delenv("SPREAD_CALIBRATOR_RUN_DIR", raising=False)
+    monkeypatch.delenv("SPREAD_CALIBRATOR_ROOT", raising=False)
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    base_probs = xr.DataArray(
+        np.full((1, 2, 2), 0.2, dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+    )
+    champion_forecast = SpreadForecast(
+        probabilities=base_probs.copy(deep=True),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="champion",
+        model_version="v1",
+    )
+    challenger_forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            np.full((1, 2, 2), 0.8, dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="challenger",
+        model_version="v2",
+    )
+
+    champion_model = MagicMock()
+    champion_model.predict.return_value = champion_forecast
+    challenger_model = MagicMock()
+    challenger_model.predict.return_value = challenger_forecast
+
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        shadow_model_name="LearnedSpreadModelV2",
+        shadow_model_params={"model_run_dir": "/tmp/not-used"},
+    )
+
+    with (
+        patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs),
+        patch("ml.spread.factory.get_spread_model", return_value=challenger_model),
+    ):
+        out = run_spread_forecast(request, model=champion_model)
+
+    assert out.probabilities.attrs.get("shadow_evaluated") is True
+    summary = out.probabilities.attrs.get("shadow_metrics_summary")
+    assert isinstance(summary, dict)
+    assert "mean_abs_probability_delta" in summary
+
+
+def test_run_spread_forecast_weather_fallback_sets_low_confidence(mock_spread_inputs):
+    import xarray as xr
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    mock_spread_inputs.weather_fallback_used = True
+    mock_spread_inputs.weather_cube.attrs = {"weather_fallback_reason": "no_weather_run_found"}
+
+    forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            np.full((1, 2, 2), 0.2, dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="dummy",
+        model_version="x",
+    )
+    model = MagicMock()
+    model.predict.return_value = forecast
+
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        strict_inputs=False,
+    )
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        out = run_spread_forecast(request, model=model)
+
+    assert out.probabilities.attrs["confidence_level"] == "low"
+    assert out.probabilities.attrs["fallback_used"] is True
+
+
+def test_run_spread_forecast_cpu_latency_p95_40k_cells(monkeypatch):
+    import xarray as xr
+
+    monkeypatch.setenv("SPREAD_SHADOW_ENABLED", "false")
+    monkeypatch.setenv("SPREAD_STALE_WARN_HOURS", "12")
+    monkeypatch.setenv("SPREAD_SERVE_STALE", "true")
+
+    side = 200
+    lat = np.linspace(40.0, 41.99, side)
+    lon = np.linspace(20.0, 21.99, side)
+
+    mock_inputs = MagicMock()
+    mock_inputs.grid = GridSpec(
+        crs="EPSG:4326",
+        cell_size_deg=0.01,
+        origin_lat=40.0,
+        origin_lon=20.0,
+        n_lat=side,
+        n_lon=side,
+    )
+    mock_inputs.window = GridWindow(i0=0, i1=side, j0=0, j1=side, lat=lat, lon=lon)
+    mock_inputs.active_fires = MagicMock()
+    mock_inputs.active_fires.heatmap = np.zeros((side, side), dtype=float)
+    mock_inputs.weather_fallback_used = False
+    mock_inputs.terrain_fallback_used = False
+    mock_inputs.weather_cube = MagicMock()
+    mock_inputs.weather_cube.attrs = {}
+    mock_inputs.to_model_input.return_value = MagicMock(spec=SpreadModelInput)
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 22.0, 42.0),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+    )
+
+    def _build_forecast() -> SpreadForecast:
+        probs = xr.DataArray(
+            np.full((1, side, side), 0.2, dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": lat, "lon": lon, "lead_time_hours": ("time", [24])},
+        )
+        return SpreadForecast(
+            probabilities=probs,
+            forecast_reference_time=ref_time,
+            horizons_hours=[24],
+            model_name="dummy",
+            model_version="x",
+        )
+
+    model = MagicMock()
+    model.predict.side_effect = lambda *_args, **_kwargs: _build_forecast()
+
+    latencies = []
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_inputs):
+        for _ in range(5):
+            start = time.perf_counter()
+            result = run_spread_forecast(request, model=model)
+            latencies.append(time.perf_counter() - start)
+            assert result.probabilities.shape == (1, side, side)
+
+    p95 = float(np.percentile(np.asarray(latencies, dtype=np.float64), 95))
+    assert p95 <= 1.5

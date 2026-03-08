@@ -1,12 +1,14 @@
 """Map view component for wildfire dashboard using PyDeck."""
 
 import logging
-from typing import Dict, Optional
+import math
+from typing import Any, Dict, Optional
 
 import pydeck as pdk
 import streamlit as st
 
 from state import app_state, isoformat
+from api_client import ApiError, ApiUnavailableError, get_fire_events
 from runtime_config import api_public_base_url
 from config.theme import (
     FireColors,
@@ -23,84 +25,219 @@ from config.theme import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _event_severity(event: Dict[str, Any]) -> float:
+    event_score = _safe_float(event.get("event_score"))
+    if event_score is None:
+        return 0.0
+    return max(0.0, min(event_score, 1.0))
+
+
+def _fire_fill_rgba(severity: float) -> list[int]:
+    if severity >= FireThresholds.VERY_HIGH:
+        return FireColors.VERY_HIGH_FILL
+    if severity >= FireThresholds.HIGH:
+        return FireColors.HIGH_FILL
+    if severity >= FireThresholds.MEDIUM:
+        return FireColors.MEDIUM_FILL
+    if severity >= FireThresholds.LOW:
+        return FireColors.LOW_FILL
+    if severity >= 0:
+        return FireColors.VERY_LOW_FILL
+    return FireColors.UNSCORED_FILL
+
+
+def _fire_line_rgba(severity: float) -> list[int]:
+    if severity >= FireThresholds.HIGH:
+        return FireColors.OUTLINE_HIGH
+    return FireColors.OUTLINE_DEFAULT
+
+
+def _event_radius_m(detection_count: Optional[float]) -> float:
+    if detection_count is None:
+        return float(PointSizing.MIN_SIZE * 1000)
+    if detection_count >= 50:
+        return float(PointSizing.LARGE_SIZE * 1000)
+    if detection_count >= 20:
+        return float(PointSizing.MEDIUM_SIZE * 1000)
+    if detection_count >= 5:
+        return float(PointSizing.SMALL_SIZE * 1000)
+    return float(PointSizing.MIN_SIZE * 1000)
+
+
+def _is_active_candidate(event: Dict[str, Any]) -> bool:
+    """Strict event-level activity gate."""
+    severity = _event_severity(event)
+    decision = str(event.get("denoiser_decision") or "").strip().lower()
+    review_required = bool(event.get("review_required"))
+    if review_required:
+        return True
+    if decision in {"pass", "downweight"}:
+        return True
+    return severity >= 0.6
+
+
+def _cluster_event_points(points: list[Dict[str, Any]], zoom: float) -> list[Dict[str, Any]]:
+    """Aggregate nearby points into incident bubbles to declutter low/mid zooms."""
+    if not points:
+        return points
+
+    z = max(1.0, min(float(zoom), 10.0))
+    cell_deg = max(0.08, 8.0 / (2.0 ** z))
+    buckets: dict[tuple[int, int], Dict[str, Any]] = {}
+
+    for p in points:
+        lat = _safe_float(p.get("lat"))
+        lon = _safe_float(p.get("lon"))
+        if lat is None or lon is None:
+            continue
+        key = (int(math.floor(lat / cell_deg)), int(math.floor(lon / cell_deg)))
+        b = buckets.get(key)
+        if b is None:
+            buckets[key] = {
+                "cluster_count": 1,
+                "sum_lat": lat,
+                "sum_lon": lon,
+                "max_severity": float(p.get("_severity", 0.0)),
+                "event_total_detections": int(_safe_float(p.get("detection_count")) or 0),
+                "latest_time": p.get("end_time"),
+                "sample": p,
+            }
+            continue
+
+        b["cluster_count"] += 1
+        b["sum_lat"] += lat
+        b["sum_lon"] += lon
+        b["max_severity"] = max(float(b["max_severity"]), float(p.get("_severity", 0.0)))
+        b["event_total_detections"] += int(_safe_float(p.get("detection_count")) or 0)
+        cur_t = p.get("end_time")
+        prev_t = b.get("latest_time")
+        if isinstance(cur_t, str) and (not isinstance(prev_t, str) or cur_t > prev_t):
+            b["latest_time"] = cur_t
+            b["sample"] = p
+
+    out: list[Dict[str, Any]] = []
+    for cluster_key, b in buckets.items():
+        count = int(b["cluster_count"])
+        sample = dict(b["sample"])
+        sample["lat"] = float(b["sum_lat"]) / count
+        sample["lon"] = float(b["sum_lon"]) / count
+        sample["cluster_event_count"] = count
+        sample["detection_count"] = int(b["event_total_detections"])
+        sample["end_time"] = b.get("latest_time")
+        sample["event_score"] = float(b["max_severity"])
+        sample["event_id"] = f"cluster_{cluster_key[0]}_{cluster_key[1]}"
+        sample["denoiser_decision"] = "pass"
+        sample["review_required"] = False
+        sample["sensor"] = "Cluster"
+        sample["source"] = "Aggregated events"
+        sample["radius_m"] = float(max(sample.get("radius_m", 0.0), 8000.0 * math.sqrt(max(count, 1))))
+        out.append(sample)
+
+    return out
+
+
 def render_map_view() -> Optional[Dict[str, float]]:
     """Render the PyDeck map view and return click coordinates if any."""
 
     layers = []
 
-    # 1. Fires Layer (MVT)
-    if app_state.layers.show_fires:
-        start_time, end_time = app_state.time_range
-        min_likelihood = app_state.filters.min_likelihood
+    # 1. Events Layer (API-backed Scatterplot)
+    start_time, end_time = app_state.time_range
+    min_likelihood = app_state.filters.min_likelihood
 
-        # Build query params for the tile URL
-        params = {
-            "start_time": isoformat(start_time),
-            "end_time": isoformat(end_time),
-            "min_fire_likelihood": min_likelihood,
-            "include_noise": "false",
-        }
-        query_str = "&".join([f"{k}={v}" for k, v in params.items()])
+    fire_points: list[Dict[str, Any]] = []
+    bbox = app_state.viewport_bbox
+    try:
+        events = get_fire_events(
+            bbox=bbox,
+            time_range=(start_time, end_time),
+            filters={
+                "min_event_score": min_likelihood,
+                "include_review_required": True,
+                "limit": 10000,
+            },
+        ).get("events", [])
+    except (ApiUnavailableError, ApiError) as exc:
+        LOGGER.warning("Failed to fetch fire events for map layer: %s", exc)
+        events = []
 
-        tile_url = f"{api_public_base_url()}/tiles/fires/{{z}}/{{x}}/{{y}}.pbf?{query_str}"
+    for event in events:
+        if app_state.filters.active_only and not _is_active_candidate(event):
+            continue
+        lat = _safe_float(event.get("lat"))
+        lon = _safe_float(event.get("lon"))
+        if lat is None or lon is None:
+            continue
+        severity = _event_severity(event)
+        fill = _fire_fill_rgba(severity)
+        line = _fire_line_rgba(severity)
+        detection_count = _safe_float(event.get("detection_count"))
+        point = dict(event)
+        point["fill_r"] = int(fill[0])
+        point["fill_g"] = int(fill[1])
+        point["fill_b"] = int(fill[2])
+        point["fill_a"] = int(fill[3])
+        point["line_r"] = int(line[0])
+        point["line_g"] = int(line[1])
+        point["line_b"] = int(line[2])
+        point["line_a"] = int(line[3])
+        point["radius_m"] = _event_radius_m(detection_count)
+        point["_severity"] = severity
+        point["cluster_event_count"] = 1
+        fire_points.append(point)
 
-        # 5-tier graduated color: deep red → red → ember orange → amber → yellow
-        # The final `>= 0` guard separates real low-likelihood fires (yellow) from
-        # NULL/unscored fires (gray) — JS treats `null >= 0.2` as false but also
-        # `null >= 0` as false, so NULLs fall through to UNSCORED_FILL.
-        fill_color_expr = (
-            f"properties.fire_likelihood >= {FireThresholds.VERY_HIGH} ? {FireColors.VERY_HIGH_FILL} : "
-            f"properties.fire_likelihood >= {FireThresholds.HIGH} ? {FireColors.HIGH_FILL} : "
-            f"properties.fire_likelihood >= {FireThresholds.MEDIUM} ? {FireColors.MEDIUM_FILL} : "
-            f"properties.fire_likelihood >= {FireThresholds.LOW} ? {FireColors.LOW_FILL} : "
-            f"properties.fire_likelihood >= 0 ? {FireColors.VERY_LOW_FILL} : "
-            f"{FireColors.UNSCORED_FILL}"
-        )
+    if app_state.filters.cluster_points:
+        zoom = float(getattr(st.session_state.get("map_view_state"), "zoom", 2.0))
+        fire_points = _cluster_event_points(fire_points, zoom)
 
-        # Conditional outline: ember orange glow for high-confidence, subtle white otherwise
-        # Same NULL guard: unscored fires get the default outline.
-        line_color_expr = (
-            f"properties.fire_likelihood >= {FireThresholds.HIGH} ? "
-            f"{FireColors.OUTLINE_HIGH} : {FireColors.OUTLINE_DEFAULT}"
-        )
+    # Include filter params in the layer ID so deck.gl fully recreates
+    # the layer when filters change.
+    events_layer_id = f"events-{min_likelihood}-{isoformat(start_time)}"
 
-        # Include filter params in the layer ID so deck.gl fully recreates
-        # the layer (and refetches tiles) when filters change.
-        fires_layer_id = f"fires-{min_likelihood}-{isoformat(start_time)}"
-
-        layers.append(pdk.Layer(
-            "MVTLayer",
-            data=tile_url,
-            id=fires_layer_id,
-            pickable=True,
-            auto_highlight=True,
-            get_fill_color=fill_color_expr,
-            get_point_radius=f"properties.frp > {PointSizing.LARGE_FRP} ? {PointSizing.LARGE_SIZE} : properties.frp > {PointSizing.MEDIUM_FRP} ? {PointSizing.MEDIUM_SIZE} : properties.frp > {PointSizing.SMALL_FRP} ? {PointSizing.SMALL_SIZE} : {PointSizing.MIN_SIZE}",
-            point_radius_min_pixels=PointSizing.MIN_PIXELS,
-            point_radius_max_pixels=PointSizing.MAX_PIXELS,
-            stroked=True,
-            get_line_color=line_color_expr,
-            line_width_min_pixels=1,
-        ))
+    layers.append(pdk.Layer(
+        "ScatterplotLayer",
+        data=fire_points,
+        id=events_layer_id,
+        pickable=True,
+        auto_highlight=True,
+        get_position="[lon, lat]",
+        filled=True,
+        get_fill_color="[fill_r, fill_g, fill_b, fill_a]",
+        get_radius="radius_m",
+        radius_units="meters",
+        radius_min_pixels=PointSizing.MIN_PIXELS,
+        radius_max_pixels=PointSizing.MAX_PIXELS,
+        stroked=True,
+        get_line_color="[line_r, line_g, line_b, line_a]",
+        line_width_min_pixels=1,
+    ))
 
     # 2. Forecast Contours (MVT)
-    if app_state.layers.show_forecast:
-        last = app_state.forecast_job.last_forecast
-        run_id = (last or {}).get("run", {}).get("id")
-        contour_url = f"{api_public_base_url()}/tiles/forecast_contours/{{z}}/{{x}}/{{y}}.pbf"
-        if run_id:
-            contour_url += f"?run_id={run_id}"
+    last = app_state.forecast_job.last_forecast
+    run_id = (last or {}).get("run", {}).get("id")
+    contour_url = f"{api_public_base_url()}/tiles/forecast_contours/{{z}}/{{x}}/{{y}}.pbf"
+    if run_id:
+        contour_url += f"?run_id={run_id}"
 
-        layers.append(pdk.Layer(
-            "MVTLayer",
-            data=contour_url,
-            id="forecast_contours",
-            pickable=False,
-            get_fill_color=ForecastColors.FILL,
-            get_line_color=ForecastColors.STROKE,
-            get_line_width=2,
-            line_width_min_pixels=1,
-        ))
+    layers.append(pdk.Layer(
+        "MVTLayer",
+        data=contour_url,
+        id="forecast_contours",
+        pickable=False,
+        get_fill_color=ForecastColors.FILL,
+        get_line_color=ForecastColors.STROKE,
+        get_line_width=2,
+        line_width_min_pixels=1,
+    ))
 
     # 3. Risk Index Layer (GeoJSON)
     if app_state.layers.show_risk:
@@ -144,13 +281,16 @@ def render_map_view() -> Optional[Dict[str, float]]:
             "html": (
                 '<div style="font-family:Inter,sans-serif;padding:2px;">'
                 '<div style="font-size:13px;font-weight:600;color:#ff6b35;margin-bottom:4px;">'
-                'Fire Detection</div>'
+                'Fire Event</div>'
                 '<div style="font-size:12px;color:#e0e0e0;">'
-                '<b>Time:</b> {acq_time}<br/>'
+                '<b>Event ID:</b> {event_id}<br/>'
+                '<b>Cluster events:</b> {cluster_event_count}<br/>'
+                '<b>Window:</b> {start_time} → {end_time}<br/>'
                 '<b>Sensor:</b> {sensor}<br/>'
-                '<b>FRP:</b> {frp} MW<br/>'
-                '<b>Likelihood:</b> {fire_likelihood}<br/>'
-                '<b>Confidence:</b> {confidence_score}'
+                '<b>Detections:</b> {detection_count}<br/>'
+                '<b>Event score:</b> {event_score}<br/>'
+                '<b>Decision:</b> {denoiser_decision}<br/>'
+                '<b>Review required:</b> {review_required}'
                 '</div></div>'
             ),
             "style": {
@@ -180,22 +320,12 @@ def render_map_view() -> Optional[Dict[str, float]]:
         all_keys = list(event.selection.objects.keys())
         LOGGER.debug("Selection event objects keys: %s", all_keys)
 
-        # Find selected fire objects by matching layer ID prefix, then fall back
+        # Find selected fire-event objects by matching layer ID prefix.
         selected_fires = []
         for key, objects in event.selection.objects.items():
-            if objects and key.startswith("fires"):
+            if objects and key.startswith("events"):
                 selected_fires = objects
                 break
-        if not selected_fires:
-            for key, objects in event.selection.objects.items():
-                if objects:
-                    LOGGER.debug(
-                        "No objects under 'fires*'; using key '%s' (%d objects)",
-                        key,
-                        len(objects),
-                    )
-                    selected_fires = objects
-                    break
 
         if selected_fires:
             feature = selected_fires[0]
@@ -208,19 +338,13 @@ def render_map_view() -> Optional[Dict[str, float]]:
             lat = props.get("lat")
             lon = props.get("lon")
 
-            if (lat is None or lon is None) and "geometry" in feature:
-                geom = feature["geometry"]
-                if geom.get("type") == "Point" and "coordinates" in geom:
-                    coords = geom["coordinates"]
-                    if len(coords) >= 2:
-                        lon, lat = coords[0], coords[1]
-
             if lat is None or lon is None:
                 LOGGER.warning(
-                    "Failed to extract coordinates from MVT feature. "
+                    "Selected event is missing required lat/lon fields. "
                     "Feature structure: %s",
                     feature,
                 )
+                return None
 
             normalized_feature = dict(props)
             if lat is not None and lon is not None:

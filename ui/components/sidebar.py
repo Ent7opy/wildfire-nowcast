@@ -67,22 +67,47 @@ def render_sidebar() -> None:
         st.caption(f"Selected: {start_hours}h ago to {end_str} ({start_hours - end_hours}h window)")
 
         st.slider(
-            "Minimum fire likelihood",
+            "Minimum event score",
             min_value=0.0,
             max_value=1.0,
             step=0.05,
             key="min_likelihood",
-            help="Composite score combining FIRMS confidence (20%), persistence (30%), land-cover plausibility (25%), and weather conditions (25%). Values <0.3 indicate low confidence, 0.3-0.6 uncertain, >0.6 likely real fire.",
+            help="Event-level denoiser score. Values <0.3 are low-signal events, 0.3-0.6 uncertain, >0.6 likely real fire events.",
         )
 
         # Dynamic likelihood intensity label (best-effort for fire icon feedback)
         likelihood_val = st.session_state.get("min_likelihood", 0.0)
         if likelihood_val >= 0.6:
-            st.caption("Threshold: **High** \u2014 likely real fires only")
+            st.caption("Threshold: **High** \u2014 likely real events only")
         elif likelihood_val >= 0.3:
-            st.caption("Threshold: **Medium** \u2014 filtering uncertain detections")
+            st.caption("Threshold: **Medium** \u2014 filtering uncertain events")
         else:
-            st.caption("Threshold: **Low** \u2014 showing all detections")
+            st.caption("Threshold: **Low** \u2014 showing all events")
+
+        st.toggle(
+            "Active incidents only",
+            key="active_only",
+            help=(
+                "Hide lower-signal events using event-level decisioning and score thresholds."
+            ),
+        )
+        st.toggle(
+            "Cluster nearby points",
+            key="cluster_points",
+            help="Aggregate nearby events into incident bubbles to reduce visual clutter.",
+        )
+        cluster_enabled = bool(st.session_state.get("cluster_points", True))
+        st.toggle(
+            "Include risk index overlay",
+            key="risk_checkbox",
+            disabled=not cluster_enabled,
+            help=(
+                "Show coarse risk cells around the current viewport. "
+                "Best used with clustering at regional zoom levels."
+            ),
+        )
+        if not cluster_enabled:
+            st.session_state.risk_checkbox = False
 
     # ── Widget sync: pull widget keys -> canonical state ──────────────
     app_state.read_widgets_after_render()
@@ -116,15 +141,15 @@ def render_sidebar() -> None:
             f"{api_public_base_url()}/map.png?"
             f"min_lon={min_lon}&min_lat={min_lat}&max_lon={max_lon}&max_lat={max_lat}&"
             f"start_time={isoformat(start_time)}&end_time={isoformat(end_time)}&"
-            f"include_fires={'true' if app_state.layers.show_fires else 'false'}&"
+            f"min_fire_likelihood={app_state.filters.min_likelihood:.2f}&"
+            f"include_fires=true&"
             f"include_risk={'true' if app_state.layers.show_risk else 'false'}&"
-            f"include_forecast={'true' if app_state.layers.show_forecast else 'false'}"
+            f"include_forecast=true"
         )
 
-        if app_state.layers.show_forecast:
-            run_id = (app_state.forecast_job.last_forecast or {}).get("run", {}).get("id")
-            if run_id:
-                png_export_url += f"&run_id={run_id}"
+        run_id = (app_state.forecast_job.last_forecast or {}).get("run", {}).get("id")
+        if run_id:
+            png_export_url += f"&run_id={run_id}"
 
         st.link_button(
             "Export map (PNG)",
@@ -133,26 +158,14 @@ def render_sidebar() -> None:
             icon=":material/image:",
         )
 
-    # ── Layers ────────────────────────────────────────────────────────
-    with st.container(border=True):
-        st.caption("**Layers**")
-
-        st.toggle("Active fires", key="fires_checkbox")
-        st.toggle("Forecast overlay", key="forecast_checkbox")
-        st.toggle("Risk index", key="risk_checkbox")
-
-        # Read layer toggle values now that they've rendered
-        app_state.layers.show_fires = st.session_state.get("fires_checkbox", app_state.layers.show_fires)
-        app_state.layers.show_forecast = st.session_state.get("forecast_checkbox", app_state.layers.show_forecast)
-        app_state.layers.show_risk = st.session_state.get("risk_checkbox", app_state.layers.show_risk)
-        app_state._persist()
-
-        active_layers = sum([
-            app_state.layers.show_fires,
-            app_state.layers.show_forecast,
-            app_state.layers.show_risk,
-        ])
-        st.caption(f"Layers active: {active_layers}")
+    # Layers policy: fires + forecast are always on; risk follows the cluster controls.
+    app_state.layers.show_fires = True
+    app_state.layers.show_forecast = True
+    app_state.layers.show_risk = bool(
+        st.session_state.get("cluster_points", True)
+        and st.session_state.get("risk_checkbox", app_state.layers.show_risk)
+    )
+    app_state._persist()
 
     # ── Map controls ──────────────────────────────────────────────────
     with st.container(border=True):
@@ -163,13 +176,3 @@ def render_sidebar() -> None:
             app_state.selection.last_click = None
             app_state._persist()
             st.rerun()
-
-    # ── About ─────────────────────────────────────────────────────────
-    with st.container(border=True):
-        st.caption("**About**")
-        st.caption(
-            "**Data sources**\n\n"
-            "- Fires and forecast layers are updated automatically from our data service.\n"
-            "- If data can't be reached, you'll see an error and can retry.\n"
-            "- The risk layer is still a placeholder."
-        )

@@ -24,6 +24,10 @@ challenger:
 # Challenger is recommended only when primary metrics improve on all horizons
 # and no major secondary regression exceeds these thresholds.
 gate:
+  bss_improvement_min: 0.03
+  bss_horizon_floor: -0.005
+  sal_regression_max: 0.05
+  dm_pvalue_max: 0.05
   max_pr_auc_drop: 0.01
   max_iou_drop: 0.02
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from datetime import datetime, timezone
 from typing import Iterable, Literal, TYPE_CHECKING
 
@@ -19,6 +22,30 @@ from api.fires.scoring import (
 )
 
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
+LOGGER = logging.getLogger(__name__)
+_LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD = int(
+    os.getenv("FIRE_SCORING_WEATHER_NEUTRAL_THRESHOLD", "5000")
+)
+_NEUTRAL_WEATHER_SCORE = 0.5
+_WEATHER_TIME_TOLERANCE_HOURS = float(
+    os.getenv("FIRE_SCORING_WEATHER_TIME_TOLERANCE_HOURS", "6")
+)
+_LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD = int(
+    os.getenv("FIRE_SCORING_PERSISTENCE_NEUTRAL_THRESHOLD", "20000")
+)
+_NEUTRAL_PERSISTENCE_SCORE = 0.3
+_DISABLE_NEUTRAL_FALLBACK = (
+    str(os.getenv("FIRE_SCORING_DISABLE_NEUTRAL_FALLBACK", "false")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+
+
+def _log_step(step: str, started_at: float, *, batch_id: int, rows: int | None = None) -> None:
+    elapsed = time.perf_counter() - started_at
+    suffix = ""
+    if rows is not None:
+        suffix = f", rows={rows}"
+    LOGGER.info("batch=%s %s completed in %.3fs%s", batch_id, step, elapsed, suffix)
 
 
 def validate_bbox(bbox: BBox) -> None:
@@ -58,6 +85,13 @@ _ALLOWED_COLUMNS: dict[str, str] = {
     "denoised_score": "denoised_score",
     "false_source_masked": "false_source_masked",
     "fire_likelihood": "fire_likelihood",
+    "event_id": "event_id",
+    "front_id": "front_id",
+    "event_score": "event_score",
+    "denoiser_decision": "denoiser_decision",
+    "review_required": "review_required",
+    "denoiser_model_id": "denoiser_model_id",
+    "denoiser_scored_at": "denoiser_scored_at",
 }
 
 
@@ -243,15 +277,19 @@ def update_false_source_masking(batch_id: int, conn: Connection | None = None) -
     """)
 
     def _execute(conn: Connection) -> int:
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("false_source.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
             return 0
 
         # Compute masking results
+        started = time.perf_counter()
         masked_results = mask_false_sources(detections)
+        _log_step("false_source.compute_mask", started, batch_id=batch_id, rows=int(len(masked_results)))
 
         # Update fire_detections table with masking results
         update_stmt = text("""
@@ -265,7 +303,9 @@ def update_false_source_masking(batch_id: int, conn: Connection | None = None) -
             for det_id, is_masked in masked_results.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("false_source.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         # Count how many were marked as masked
         return sum(1 for is_masked in masked_results.values() if is_masked)
@@ -301,15 +341,53 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
             WHERE ingest_batch_id = :batch_id
         """)
 
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("persistence.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
             return 0
 
+        # Large global repairs/backfills can make geospatial clustering too slow.
+        # Assign neutral persistence for throughput and keep strict completeness gates.
+        if (
+            (not _DISABLE_NEUTRAL_FALLBACK)
+            and _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD > 0
+            and len(detections) >= _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD
+        ):
+            LOGGER.warning(
+                "Batch %s has %s detections; assigning neutral persistence_score=%s for bulk throughput.",
+                batch_id,
+                len(detections),
+                _NEUTRAL_PERSISTENCE_SCORE,
+            )
+            update_stmt = text("""
+                UPDATE fire_detections
+                SET persistence_score = :score
+                WHERE ingest_batch_id = :batch_id
+            """)
+            started = time.perf_counter()
+            conn.execute(
+                update_stmt,
+                {
+                    "batch_id": batch_id,
+                    "score": _NEUTRAL_PERSISTENCE_SCORE,
+                },
+            )
+            _log_step("persistence.update_neutral", started, batch_id=batch_id, rows=int(len(detections)))
+            return len(detections)
+
         # Compute persistence scores
+        started = time.perf_counter()
         persistence_scores = compute_persistence_scores(detections)
+        _log_step(
+            "persistence.compute_scores",
+            started,
+            batch_id=batch_id,
+            rows=int(len(persistence_scores)),
+        )
 
         # Update fire_detections table with persistence scores
         update_stmt = text("""
@@ -323,7 +401,9 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
             for det_id, score in persistence_scores.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("persistence.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(persistence_scores)
 
@@ -358,8 +438,10 @@ def update_landcover_scores(batch_id: int, conn: Connection | None = None) -> in
             WHERE ingest_batch_id = :batch_id
         """)
 
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("landcover.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
@@ -369,7 +451,14 @@ def update_landcover_scores(batch_id: int, conn: Connection | None = None) -> in
         from api.fires.landcover import compute_landcover_scores
 
         # Compute landcover scores
+        started = time.perf_counter()
         landcover_scores = compute_landcover_scores(detections)
+        _log_step(
+            "landcover.compute_scores",
+            started,
+            batch_id=batch_id,
+            rows=int(len(landcover_scores)),
+        )
 
         # Update fire_detections table with landcover scores
         update_stmt = text("""
@@ -383,7 +472,9 @@ def update_landcover_scores(batch_id: int, conn: Connection | None = None) -> in
             for det_id, score in landcover_scores.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("landcover.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(landcover_scores)
 
@@ -418,15 +509,57 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
             WHERE ingest_batch_id = :batch_id
         """)
 
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("weather.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         detections = [dict(r) for r in rows]
         if not detections:
             return 0
 
+        # Large global repairs/backfills can make per-detection weather lookup
+        # prohibitively slow. Use neutral weather score to keep ingestion fail-closed
+        # gates enforceable while preserving throughput.
+        if (
+            (not _DISABLE_NEUTRAL_FALLBACK)
+            and _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD > 0
+            and len(detections) >= _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD
+        ):
+            LOGGER.warning(
+                "Batch %s has %s detections; assigning neutral weather_score=%s for bulk throughput.",
+                batch_id,
+                len(detections),
+                _NEUTRAL_WEATHER_SCORE,
+            )
+            update_stmt = text("""
+                UPDATE fire_detections
+                SET weather_score = :score
+                WHERE ingest_batch_id = :batch_id
+            """)
+            started = time.perf_counter()
+            conn.execute(
+                update_stmt,
+                {
+                    "batch_id": batch_id,
+                    "score": _NEUTRAL_WEATHER_SCORE,
+                },
+            )
+            _log_step("weather.update_neutral", started, batch_id=batch_id, rows=int(len(detections)))
+            return len(detections)
+
         # Compute weather plausibility scores
-        weather_scores = compute_weather_plausibility_scores(detections)
+        started = time.perf_counter()
+        weather_scores = compute_weather_plausibility_scores(
+            detections,
+            time_tolerance_hours=_WEATHER_TIME_TOLERANCE_HOURS,
+        )
+        _log_step(
+            "weather.compute_scores",
+            started,
+            batch_id=batch_id,
+            rows=int(len(weather_scores)),
+        )
 
         # Update fire_detections table with weather scores
         update_stmt = text("""
@@ -440,7 +573,9 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
             for det_id, score in weather_scores.items()
         ]
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("weather.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(weather_scores)
 
@@ -480,15 +615,17 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
             FROM fire_detections
             WHERE ingest_batch_id = :batch_id
         """)
-
+        started = time.perf_counter()
         result = conn.execute(stmt, {"batch_id": batch_id})
         rows = result.mappings().all()
+        _log_step("likelihood.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
 
         if not rows:
             return 0
 
         # Compute fire likelihood for each detection
         # NULL handling is centralized in compute_fire_likelihood() - pass None values directly
+        started = time.perf_counter()
         params = []
         for row in rows:
             likelihood = compute_fire_likelihood(
@@ -499,6 +636,7 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
                 false_source_masked=bool(row["false_source_masked"]) if row["false_source_masked"] is not None else False,
             )
             params.append({"detection_id": row["id"], "likelihood": likelihood})
+        _log_step("likelihood.compute_scores", started, batch_id=batch_id, rows=int(len(params)))
 
         # Update fire_detections table with fire likelihood
         update_stmt = text("""
@@ -507,7 +645,9 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
             WHERE id = :detection_id
         """)
 
+        started = time.perf_counter()
         conn.execute(update_stmt, params)
+        _log_step("likelihood.update_batch", started, batch_id=batch_id, rows=int(len(params)))
 
         return len(params)
 
@@ -519,7 +659,10 @@ def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int
 
 
 
-def update_all_scoring_for_batch(batch_id: int) -> dict[str, int]:
+def update_all_scoring_for_batch(
+    batch_id: int,
+    conn: Connection | None = None,
+) -> dict[str, int]:
     """Update all scoring columns for a batch within a single transaction.
     
     This function wraps all scoring updates (false source masking, persistence,
@@ -543,17 +686,442 @@ def update_all_scoring_for_batch(batch_id: int) -> dict[str, int]:
     Raises:
         Exception: If any scoring update fails, the entire transaction is rolled back
     """
-    with get_engine().begin() as conn:
-        masked_count = update_false_source_masking(batch_id, conn=conn)
-        persistence_count = update_persistence_scores(batch_id, conn=conn)
-        landcover_count = update_landcover_scores(batch_id, conn=conn)
-        weather_count = update_weather_scores(batch_id, conn=conn)
-        likelihood_count = update_fire_likelihood(batch_id, conn=conn)
-    
-    return {
-        "masked_count": masked_count,
-        "persistence_count": persistence_count,
-        "landcover_count": landcover_count,
-        "weather_count": weather_count,
-        "likelihood_count": likelihood_count,
+    def _execute(active_conn: Connection) -> dict[str, int]:
+        started_total = time.perf_counter()
+        masked_count = update_false_source_masking(batch_id, conn=active_conn)
+        persistence_count = update_persistence_scores(batch_id, conn=active_conn)
+        landcover_count = update_landcover_scores(batch_id, conn=active_conn)
+        weather_count = update_weather_scores(batch_id, conn=active_conn)
+        likelihood_count = update_fire_likelihood(batch_id, conn=active_conn)
+        _log_step(
+            "scoring.update_all",
+            started_total,
+            batch_id=batch_id,
+            rows=int(likelihood_count),
+        )
+
+        return {
+            "masked_count": masked_count,
+            "persistence_count": persistence_count,
+            "landcover_count": landcover_count,
+            "weather_count": weather_count,
+            "likelihood_count": likelihood_count,
+        }
+
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)
+
+
+def list_fire_events_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    min_event_score: float | None = None,
+    include_review_required: bool = True,
+    limit: int = 1000,
+) -> list[dict]:
+    """List denoiser events in a bbox/time window."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+
+    if limit <= 0 or limit > 10000:
+        raise ValueError("limit must be between 1 and 10000.")
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    else:
+        start_time = start_time.astimezone(timezone.utc)
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    else:
+        end_time = end_time.astimezone(timezone.utc)
+
+    review_predicate = ""
+    if not include_review_required:
+        review_predicate = "AND review_required IS NOT TRUE"
+
+    score_predicate = ""
+    params: dict[str, object] = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "min_lon": float(min_lon),
+        "min_lat": float(min_lat),
+        "max_lon": float(max_lon),
+        "max_lat": float(max_lat),
+        "limit": int(limit),
     }
+    if min_event_score is not None:
+        score_predicate = "AND (event_score IS NULL OR event_score >= :min_event_score)"
+        params["min_event_score"] = float(min_event_score)
+
+    stmt = text(
+        f"""
+        SELECT
+            event_id,
+            source,
+            sensor,
+            start_time,
+            end_time,
+            detection_count,
+            front_count,
+            event_score,
+            denoiser_decision,
+            review_required,
+            ST_X(ST_Centroid(geom)) AS lon,
+            ST_Y(ST_Centroid(geom)) AS lat
+        FROM fire_events
+        WHERE start_time <= :end_time
+          AND end_time >= :start_time
+          AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+          AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
+          {review_predicate}
+          {score_predicate}
+        ORDER BY COALESCE(start_time, end_time) DESC, event_id DESC
+        LIMIT :limit
+        """
+    )
+
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, params).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_latest_denoiser_gate_report() -> dict | None:
+    """Return latest gate report written by v2 evaluation."""
+    stmt = text(
+        """
+        SELECT run_id, model_id, status, gate_report_json, evaluated_at
+        FROM denoiser_eval_runs
+        WHERE gate_report_json IS NOT NULL
+        ORDER BY evaluated_at DESC
+        LIMIT 1
+        """
+    )
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt).mappings().first()
+    return dict(row) if row else None
+
+
+def get_latest_denoiser_coverage_status(authority_profile: str = "wfigs_us") -> dict | None:
+    """Return latest authoritative coverage ingest status + active mask summary."""
+    run_stmt = text(
+        """
+        WITH run_candidates AS (
+            SELECT
+                air.run_id,
+                air.source_profile,
+                air.source_uri,
+                air.source_layer,
+                air.status,
+                air.started_at,
+                air.finished_at,
+                air.source_last_edit,
+                air.records_fetched,
+                air.records_upserted,
+                air.records_skipped,
+                air.http_429_count,
+                air.max_backoff_seconds
+            FROM authoritative_perimeter_ingest_runs air
+            JOIN perimeter_coverage_masks pcm
+              ON pcm.run_id = air.run_id
+            WHERE pcm.authority_profile = :authority_profile
+              AND pcm.is_active
+              AND air.status = 'succeeded'
+            UNION
+            SELECT
+                run_id,
+                source_profile,
+                source_uri,
+                source_layer,
+                status,
+                started_at,
+                finished_at,
+                source_last_edit,
+                records_fetched,
+                records_upserted,
+                records_skipped,
+                http_429_count,
+                max_backoff_seconds
+            FROM authoritative_perimeter_ingest_runs
+            WHERE source_profile = :authority_profile
+              AND status = 'succeeded'
+        )
+        SELECT
+            run_id,
+            source_profile,
+            source_uri,
+            source_layer,
+            status,
+            started_at,
+            finished_at,
+            source_last_edit,
+            records_fetched,
+            records_upserted,
+            records_skipped,
+            http_429_count,
+            max_backoff_seconds
+        FROM run_candidates
+        ORDER BY finished_at DESC NULLS LAST, started_at DESC
+        LIMIT 1
+        """
+    )
+    mask_stmt = text(
+        """
+        SELECT
+            COUNT(*) AS active_mask_count,
+            (ARRAY_AGG(mask_id ORDER BY mask_id))[1:20] AS sample_mask_ids,
+            MIN(valid_from) AS min_valid_from,
+            MAX(valid_to) AS max_valid_to
+        FROM perimeter_coverage_masks
+        WHERE is_active
+          AND authority_profile = :authority_profile
+        """
+    )
+    with get_engine().begin() as conn:
+        run_row = conn.execute(run_stmt, {"authority_profile": authority_profile}).mappings().first()
+        if run_row is None:
+            return None
+        mask_row = conn.execute(mask_stmt, {"authority_profile": authority_profile}).mappings().first()
+
+    payload = dict(run_row)
+    if mask_row is not None:
+        payload["active_mask_count"] = int(mask_row["active_mask_count"] or 0)
+        payload["sample_mask_ids"] = list(mask_row["sample_mask_ids"] or [])
+        payload["min_valid_from"] = mask_row["min_valid_from"]
+        payload["max_valid_to"] = mask_row["max_valid_to"]
+    else:
+        payload["active_mask_count"] = 0
+        payload["sample_mask_ids"] = []
+        payload["min_valid_from"] = None
+        payload["max_valid_to"] = None
+    return payload
+
+
+def get_latest_denoiser_industrial_coverage_status(
+    source_profile: str | None = None,
+    policy_version: str | None = None,
+) -> dict | None:
+    """Return latest authoritative industrial ingest + policy/no-go coverage summary."""
+    run_filter = ""
+    params: dict[str, object] = {}
+    if source_profile:
+        run_filter = "AND source_profile = :source_profile"
+        params["source_profile"] = source_profile
+
+    run_stmt = text(
+        f"""
+        SELECT
+            run_id,
+            source_profile,
+            status,
+            started_at,
+            finished_at,
+            records_fetched,
+            records_upserted,
+            records_skipped,
+            source_uri,
+            source_version,
+            metrics_json
+        FROM authoritative_industrial_ingest_runs
+        WHERE status = 'succeeded'
+          {run_filter}
+        ORDER BY finished_at DESC NULLS LAST, started_at DESC
+        LIMIT 1
+        """
+    )
+
+    policy_stmt = text(
+        """
+        SELECT
+            policy_version,
+            strict_no_go,
+            gold_buffer_m,
+            silver_buffer_min_m,
+            silver_buffer_max_m,
+            active_from,
+            active_to
+        FROM industrial_mask_policies
+        WHERE (
+                :policy_version IS NOT NULL
+                AND policy_version = :policy_version
+              )
+           OR (
+                :policy_version IS NULL
+                AND (active_to IS NULL OR active_to > NOW())
+              )
+        ORDER BY active_from DESC, policy_version DESC
+        LIMIT 1
+        """
+    )
+
+    source_stats_stmt = text(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE)) AS active_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'gold') AS gold_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'silver') AS silver_sources,
+            COUNT(*) FILTER (WHERE COALESCE(is_active, TRUE) AND authority_tier = 'blocked') AS blocked_sources,
+            COUNT(DISTINCT country_iso3) FILTER (WHERE COALESCE(is_active, TRUE)) AS active_countries
+        FROM industrial_sources
+        WHERE (:source_profile IS NULL OR source_profile = :source_profile)
+        """
+    )
+
+    no_go_stmt = text(
+        """
+        SELECT COUNT(*) AS active_no_go_zones
+        FROM industrial_no_go_zones
+        WHERE is_active
+          AND (:policy_version IS NULL OR policy_version = :policy_version)
+        """
+    )
+
+    profile_breakdown_stmt = text(
+        """
+        SELECT source_profile, COUNT(*) AS n
+        FROM industrial_sources
+        WHERE COALESCE(is_active, TRUE)
+        GROUP BY source_profile
+        ORDER BY COUNT(*) DESC, source_profile
+        LIMIT 25
+        """
+    )
+
+    try:
+        with get_engine().begin() as conn:
+            latest_run = conn.execute(run_stmt, params).mappings().first()
+            if latest_run is None:
+                return None
+
+            policy_row = conn.execute(
+                policy_stmt,
+                {"policy_version": policy_version},
+            ).mappings().first()
+
+            stats_row = conn.execute(
+                source_stats_stmt,
+                {"source_profile": source_profile},
+            ).mappings().first()
+
+            effective_policy_version = policy_version
+            if not effective_policy_version and policy_row is not None:
+                effective_policy_version = str(policy_row["policy_version"])
+
+            no_go_row = conn.execute(
+                no_go_stmt,
+                {"policy_version": effective_policy_version},
+            ).mappings().first()
+
+            profile_rows = conn.execute(profile_breakdown_stmt).mappings().all()
+    except Exception:
+        return None
+
+    payload = {
+        "latest_run": dict(latest_run),
+        "policy": dict(policy_row) if policy_row is not None else None,
+        "source_profile_filter": source_profile,
+        "source_stats": {
+            "active_sources": int((stats_row or {}).get("active_sources") or 0),
+            "gold_sources": int((stats_row or {}).get("gold_sources") or 0),
+            "silver_sources": int((stats_row or {}).get("silver_sources") or 0),
+            "blocked_sources": int((stats_row or {}).get("blocked_sources") or 0),
+            "active_countries": int((stats_row or {}).get("active_countries") or 0),
+        },
+        "active_no_go_zones": int((no_go_row or {}).get("active_no_go_zones") or 0),
+        "active_profiles": [
+            {"source_profile": str(row["source_profile"]), "count": int(row["n"])}
+            for row in profile_rows
+            if row.get("source_profile")
+        ],
+    }
+    return payload
+
+
+def list_recent_denoiser_drift(limit: int = 50) -> list[dict]:
+    """Return recent drift metric rows."""
+    stmt = text(
+        """
+        SELECT
+            id,
+            model_id,
+            metric_name,
+            metric_value,
+            threshold_value,
+            window_start,
+            window_end,
+            triggered_rollback,
+            payload_json,
+            created_at
+        FROM denoiser_drift_metrics
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, {"limit": max(1, int(limit))}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def list_denoiser_review_queue(limit: int = 200, status: str = "open") -> list[dict]:
+    """List denoiser review queue rows."""
+    stmt = text(
+        """
+        SELECT
+            id,
+            event_id,
+            fire_detection_id,
+            reason,
+            severity,
+            status,
+            payload_json,
+            resolved_by,
+            resolved_notes,
+            resolved_at,
+            created_at,
+            updated_at
+        FROM denoiser_review_queue
+        WHERE status = :status
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            stmt,
+            {"status": str(status), "limit": max(1, int(limit))},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def resolve_denoiser_review_event(
+    event_id: str,
+    *,
+    resolved_by: str,
+    resolved_notes: str | None = None,
+) -> int:
+    """Resolve all open review items for an event."""
+    stmt = text(
+        """
+        UPDATE denoiser_review_queue
+        SET
+            status = 'resolved',
+            resolved_by = :resolved_by,
+            resolved_notes = :resolved_notes,
+            resolved_at = NOW(),
+            updated_at = NOW()
+        WHERE event_id = :event_id
+          AND status = 'open'
+        """
+    )
+    with get_engine().begin() as conn:
+        result = conn.execute(
+            stmt,
+            {
+                "event_id": event_id,
+                "resolved_by": resolved_by,
+                "resolved_notes": resolved_notes,
+            },
+        )
+    return int(result.rowcount or 0)

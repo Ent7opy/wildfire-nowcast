@@ -1,41 +1,35 @@
-"""Contract test for fire details panel property access."""
+"""Contract test for fire event details panel property access."""
 
 
 
-# FireMapFeature Contract (synced with api/tests/test_fire_map_contract.py)
+# FireEventFeature Contract
 # This defines the minimal set of properties that MUST be available
 # for the UI to function correctly. Any change to these property names
 # or their removal will break the UI and must be caught by these tests.
 FIRE_MAP_FEATURE_CONTRACT = {
     "required": {
         # Core identification and temporal properties
-        "id": "Unique identifier for the detection",
-        "acq_time": "Acquisition timestamp (ISO 8601 format)",
+        "event_id": "Unique identifier for the event",
+        "start_time": "Event start timestamp (ISO 8601 format)",
+        "end_time": "Event end timestamp (ISO 8601 format)",
         
         # Sensor and source metadata
         "sensor": "Satellite sensor name (e.g., VIIRS, MODIS)",
         "source": "Data source (e.g., FIRMS)",
         
-        # Fire detection measurements
-        "confidence": "Detection confidence score",
-        "frp": "Fire Radiative Power",
+        # Event-level summary fields
+        "detection_count": "Number of detections in the event",
+        "front_count": "Number of fronts linked to the event",
+        "event_score": "Event-level denoiser score",
+        "denoiser_decision": "pass|downweight|drop|review",
+        "review_required": "Boolean review-required flag",
         
         # Geospatial properties
         "lat": "Latitude coordinate",
         "lon": "Longitude coordinate",
     },
     "optional": {
-        # Denoiser-specific properties (may not be present for all detections)
-        "denoised_score": "ML denoiser confidence score (0-1)",
-        "is_noise": "Boolean flag indicating if detection is classified as noise",
-
-        # Fire likelihood composite scoring properties
-        "fire_likelihood": "Composite fire likelihood score (0-1)",
-        "confidence_score": "Normalized FIRMS confidence (0-1)",
-        "persistence_score": "Spatial-temporal clustering score (0-1)",
-        "landcover_score": "Land-cover plausibility score (0-1)",
-        "weather_score": "Weather plausibility score (0-1)",
-        "false_source_masked": "Industrial false-positive mask flag",
+        "cluster_event_count": "Number of events represented when map clustering is enabled",
     }
 }
 
@@ -46,16 +40,18 @@ def test_click_details_handles_all_mvt_properties():
     # Mock session state with realistic MVT properties from contract
     mock_session_state = {
         "selected_fire": {
-            "id": 12345,
-            "acq_time": "2026-01-19T12:00:00Z",
+            "event_id": "evt_12345",
+            "start_time": "2026-01-19T11:00:00Z",
+            "end_time": "2026-01-19T12:00:00Z",
             "sensor": "VIIRS",
-            "confidence": 85.0,
-            "frp": 12.5,
             "source": "FIRMS",
+            "detection_count": 14,
+            "front_count": 2,
+            "event_score": 0.91,
+            "denoiser_decision": "pass",
+            "review_required": False,
             "lat": 42.5,
             "lon": 21.3,
-            "is_noise": False,
-            "denoised_score": 0.95,
         }
     }
     
@@ -81,15 +77,19 @@ def test_click_details_handles_missing_optional_properties():
     # Mock session state with minimal required properties (only those from contract)
     mock_session_state = {
         "selected_fire": {
-            "id": 12345,
-            "acq_time": "2026-01-19T12:00:00Z",
+            "event_id": "evt_12345",
+            "start_time": "2026-01-19T11:00:00Z",
+            "end_time": "2026-01-19T12:00:00Z",
             "sensor": "VIIRS",
-            "confidence": 85.0,
-            "frp": 12.5,
             "source": "FIRMS",
+            "detection_count": 6,
+            "front_count": 1,
+            "event_score": 0.72,
+            "denoiser_decision": "downweight",
+            "review_required": False,
             "lat": 42.5,
             "lon": 21.3,
-            # Missing optional properties: is_noise, denoised_score
+            # Missing optional properties: cluster_event_count
         }
     }
     
@@ -113,11 +113,16 @@ def test_click_details_coordinate_validation():
         "selected_fire": {
             "lat": 42.5,
             "lon": 21.3,
-            "acq_time": "2026-01-19T12:00:00Z",
+            "end_time": "2026-01-19T12:00:00Z",
             "sensor": "VIIRS",
-            "confidence": 85.0,
-            "frp": 12.5,
             "source": "FIRMS",
+            "event_id": "evt_1",
+            "start_time": "2026-01-19T11:00:00Z",
+            "detection_count": 3,
+            "front_count": 1,
+            "event_score": 0.55,
+            "denoiser_decision": "review",
+            "review_required": True,
         }
     }
     
@@ -152,16 +157,18 @@ def test_map_view_property_key_consistency():
     
     # Simulate MVT layer properties as returned by PyDeck
     mvt_props = {
-        "id": 12345,
-        "acq_time": "2026-01-19T12:00:00Z",
+        "event_id": "evt_12345",
+        "start_time": "2026-01-19T11:00:00Z",
+        "end_time": "2026-01-19T12:00:00Z",
         "sensor": "VIIRS",
-        "confidence": 85.0,
-        "frp": 12.5,
         "source": "FIRMS",
+        "detection_count": 22,
+        "front_count": 4,
+        "event_score": 0.88,
+        "denoiser_decision": "pass",
+        "review_required": False,
         "lat": 42.5,
         "lon": 21.3,
-        "is_noise": False,
-        "denoised_score": 0.95,
     }
     
     # Simulate line 195 in map_view.py: st.session_state.selected_fire = feature
@@ -179,22 +186,22 @@ def test_map_view_property_key_consistency():
     assert lon_value is not None, "lon coordinate must be present"
 
 
-def test_aggregate_stats_handles_none_fire_likelihood():
-    """Test that aggregate stats handles fire_likelihood=None without TypeError.
+def test_aggregate_stats_handles_none_event_score():
+    """Test that aggregate stats handles event_score=None without TypeError.
 
     Regression test: float(None) raises TypeError. The code must handle
-    detections where fire_likelihood key exists but its value is None.
+    events where event_score key exists but its value is None.
     """
-    detections = [
-        {"fire_likelihood": None, "acq_time": "2026-01-19T12:00:00Z"},
-        {"fire_likelihood": 0.8, "acq_time": "2026-01-19T13:00:00Z"},
-        {"fire_likelihood": "0.5", "acq_time": "2026-01-19T14:00:00Z"},
-        {"acq_time": "2026-01-19T15:00:00Z"},  # key missing entirely
+    events = [
+        {"event_score": None, "end_time": "2026-01-19T12:00:00Z"},
+        {"event_score": 0.8, "end_time": "2026-01-19T13:00:00Z"},
+        {"event_score": "0.5", "end_time": "2026-01-19T14:00:00Z"},
+        {"end_time": "2026-01-19T15:00:00Z"},  # key missing entirely
     ]
 
-    # Replicate the fixed expression from click_details.py _render_aggregate_stats
+    # Replicate strict event score handling from click_details.py _render_aggregate_stats
     max_lh = max(
-        (float(d.get("fire_likelihood") or 0) for d in detections),
+        (float(event.get("event_score") or 0) for event in events),
         default=0,
     )
     assert max_lh == 0.8
@@ -203,7 +210,16 @@ def test_aggregate_stats_handles_none_fire_likelihood():
 def test_tooltip_properties_in_contract():
     """Test that all properties used in map tooltip are in the contract."""
     # Properties referenced in map_view.py tooltip template
-    tooltip_properties = ["acq_time", "sensor", "frp", "fire_likelihood", "confidence"]
+    tooltip_properties = [
+        "event_id",
+        "start_time",
+        "end_time",
+        "sensor",
+        "detection_count",
+        "event_score",
+        "denoiser_decision",
+        "review_required",
+    ]
 
     all_contract_props = (
         set(FIRE_MAP_FEATURE_CONTRACT["required"].keys())

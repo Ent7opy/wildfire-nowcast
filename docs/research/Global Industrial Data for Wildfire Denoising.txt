@@ -1,0 +1,216 @@
+﻿Global Industrial Thermal Attribution: Authoritative Geolocation Protocols for Wildfire Denoising
+The persistence of stationary thermal anomalies in satellite-based radiometric datasets presents a fundamental challenge for near-real-time wildfire monitoring. In the context of the Visible Infrared Imaging Radiometer Suite (VIIRS) and the Moderate Resolution Imaging Spectroradiometer (MODIS), industrial heat signatures—primarily from smelting operations, cement kilns, and petrochemical flaring—frequently manifest as false-positive fire detections. For the lead geospatial data scientist and regulatory auditor, the imperative is to extend current domestic masking frameworks beyond the United States into a global "No-Placeholder" stack. This necessitates the identification and documentation of industrial datasets that possess verifiable government provenance, facility-level coordinate precision, and sectoral granularity capable of isolating high-heat emitters.
+The shift toward a globalized authoritative industrial layer requires a rigorous evaluation of jurisdictional registers and pollutant release and transfer registers (PRTRs). These systems provide the necessary ground truth for industrial masking, provided they meet the criteria for facility-level latitudinal and longitudinal accuracy. The following analysis defines the technical requirements for a tiered source matrix, maps high-confidence international repositories, and establishes the "No-Go" zones where industrial masking must be disabled to maintain the integrity of wildfire detection in data-sparse regions.
+Global Tiered Source Matrix
+The classification of industrial data sources into Gold and Silver tiers is governed by the proximity of the data provider to the physical facility and the rigor of the coordinate verification process. Gold-standard sources are characterized by direct, mandatory government reporting at the facility level, where coordinates are provided by the operator and validated by a central environmental authority. Silver-standard sources represent aggregations that, while comprehensive, often rely on modeled geolocations or cross-platform database matching, introducing a degree of uncertainty in the exact stack-level placement.
+For the purposes of industrial thermal denoising, Gold sources are prioritized for "hard masking" protocols, whereas Silver sources are utilized for auxiliary validation or in regions where Gold-tier infrastructure is absent. The following matrix identifies the primary jurisdictional sources that meet these criteria.
+
+
+Jurisdiction
+	Data Source
+	Principal Authority
+	Tier
+	Sectoral Taxonomy
+	Coordinate Precision
+	European Union
+	E-PRTR / Industrial Emissions Portal
+	European Environment Agency (EEA)
+	Gold
+	NACE Rev. 2
+	1-100m (Reported) 1
+	Canada
+	NPRI
+	Environment and Climate Change Canada
+	Gold
+	NAICS
+	Sub-10m (GPS/GIS) 3
+	Australia
+	NPI
+	Dept. of Climate Change, Energy, Environment, and Water
+	Gold
+	ANZSIC (4-digit)
+	Survey-grade Lat/Long 5
+	China
+	CIED / MEE Permit Platform
+	Ministry of Ecology and Environment (MEE)
+	Gold
+	GB/T 4754–2017
+	Stack-level (CEMS) 7
+	Brazil
+	SIGEL / IBAMA
+	IBAMA / SIGEL
+	Gold
+	IBGE / Municipal Codes
+	Address/Facility-level 8
+	Global
+	Global Power Plant Database
+	World Resources Institute (WRI)
+	Silver
+	Fuel-Type Based
+	Variable (Derived/GEO) 9
+	Global
+	World Energy Balances
+	International Energy Agency (IEA)
+	Silver
+	ISIC / Energy Flows
+	Admin-level (National) 11
+	The tiering logic is rooted in the "No-Placeholder" philosophy. A source like the IEA's World Energy Balances, while authoritative for national-level policy and energy flow analysis, is categorized as Silver or even excluded from masking layers because it generally lacks facility-level geodata.11 Conversely, the Australian NPI is considered Gold because it provides raw, machine-readable CSV files with specific latitude and longitude fields for over 4,000 industrial facilities.5
+Jurisdictional Analysis: The European Union (E-PRTR)
+The European Pollutant Release and Transfer Register (E-PRTR) represents one of the most robust industrial datasets globally, encompassing 33 countries, including the EU-27 member states, Iceland, Liechtenstein, Norway, Serbia, and Switzerland.1 Established under Regulation (EC) No 166/2006, the E-PRTR succeeded the European Pollutant Emission Register (EPER) and shifted the reporting requirement from every three years to an annual cycle starting in 2007.13
+The registry captures data from more than 30,000 facilities across nine industrial sectors: energy, production and processing of metals, mineral industry, chemical industry, waste and waste water management, paper and wood production and processing, intensive livestock production and aquaculture, animal and vegetable products from the food and beverage sector, and other activities.1 For wildfire denoising, the most critical sectors are those with high thermal intensities, specifically the metal and mineral industries.
+Sectoral Granularity and Thermal Potential
+E-PRTR uses the Statistical Classification of Economic Activities in the European Community (NACE Rev. 2) to categorize facilities.13 This allows for the precise isolation of high-heat emitters. For instance, NACE code 24.1 (Manufacture of basic iron and steel and of ferro-alloys) and NACE code 23.51 (Manufacture of cement) are prioritized for industrial masking due to the high operating temperatures of blast furnaces and rotary kilns, which frequently exceed 1,700 K.
+The reporting thresholds for these facilities are defined in Annex I of the E-PRTR Regulation.1 For example, thermal power plants must report if they have a heat input exceeding 50 MW.1 This threshold-based reporting is a critical detail for geospatial auditors; while it ensures that the largest thermal anomalies are captured, it implies that smaller "orphan" industrial heat sources (below the 50 MW threshold) may still trigger fire detections and require secondary validation via WRI datasets or local land-use maps.
+Coordinate Precision and Spatial Representation
+Facilities are required to submit coordinates as part of their administrative data.2 The spatial representation is vector-based, often provided in the ETRS89 geographical coordinate system (EPSG:4258) or localized grids such as the Irish Grid (EPSG:29902).13 In the Industrial Emissions Portal, data is available for direct download in SQLite or CSV formats, providing high-fidelity access to latitudinal and longitudinal fields.2 The reported coordinates typically correspond to the facility's main administrative address or primary emission point. However, in large industrial complexes like refineries (NACE 19.2), the thermal anomaly detected by VIIRS may be displaced from the administrative coordinate by several hundred meters, necessitating a "buffer-of-interest" approach in the denoising algorithm.
+Jurisdictional Analysis: Canada (NPRI)
+The National Pollutant Release Inventory (NPRI) is Canada's legislated, publicly accessible inventory of pollutant releases to air, water, and land. Environment and Climate Change Canada (ECCC) manages the dataset, which tracks over 300 substances at approximately 7,000 facilities.3 The NPRI is particularly valuable for its consistency; it has tracked industrial sources since 1993, allowing for long-term "persistence filtering" of stationary thermal signatures.3
+Technical Data Pillars of the NPRI
+The NPRI provides a granular view of industrial activity through the following data pillars:
+* Point-Source Accuracy: The NPRI provides exact latitude and longitude for each reporting facility.4 Data is available in virtual globe formats (KMZ), ESRI REST, and WMS, facilitating direct ingestion into geospatial pipelines.15
+* Sector Granularity: Facilities are classified using the North American Industry Classification System (NAICS).3 High-heat sectors such as Aluminum production (NAICS 3313), Conventional Oil and Gas Extraction (NAICS 2111), and Iron and Steel mills (NAICS 3311) are easily filterable.3
+* Temporal Metadata: The data is current as of October 2025, with annual updates that include a "last modified" timestamp for geolocation files.3
+In the 2024 reporting year, the NPRI documented significant thermal activity in the Prairie region, primarily driven by conventional oil and gas extraction, and the Quebec and Ontario regions, dominated by manufacturing and chemicals.3 For a regulatory auditor, the regional overview provided by the NPRI allows for the tuning of mask sensitivity based on regional industrial density. The "Northern region," while containing fewer facilities (88 in 2024), represents a high-risk area where industrial heat could be mistaken for boreal wildfires, making the NPRI's precise geolocations indispensable for northern territory denoising.3
+Jurisdictional Analysis: Australia (NPI)
+The Australian National Pollutant Inventory (NPI) serves as the primary repository for industrial emissions across the Australian continent. Overseen by the Department of Climate Change, Energy, the Environment and Water (DCCEEW), the NPI provides facility-level data for over 90 substances from approximately 4,000 facilities.5
+ANZSIC Hierarchy and High-Heat Filtering
+Australia utilizes the Australian and New Zealand Standard Industrial Classification (ANZSIC) to categorize industrial activity. The NPI mandates reporting for facilities that trip specific thresholds within a subset of ANZSIC codes.6
+ANZSIC Code
+	Sector Description
+	Thermal Significance
+	2110
+	Iron Smelting and Steel Manufacturing
+	Extremely High (Blast Furnaces)
+	1811
+	Industrial Gas Manufacturing
+	High (Cryogenic/Thermal processes)
+	2231
+	Boiler and Heavy Metal Container Mfg
+	Moderate to High
+	0600
+	Coal Mining
+	High (Associated processing and flaring)
+	The ANZSIC system’s four-digit hierarchy provides the level of specificity required for a "No-Placeholder" stack.6 For example, a geospatial filter can isolate "Meat Processing" (ANZSIC 1111) from "Iron Smelting" (ANZSIC 2110) to ensure that only the most thermally intense sectors are masked during wildfire analysis.18
+Coordinate Integrity in the Australian NPI
+The NPI dataset is published on the Australian Government Open Data Portal (Data.gov.au) in CSV, TSV, and XML formats.5 The "Facilities" resource includes dedicated fields for latitude and longitude.5 Metadata indicates that the dataset is updated frequently, with a "last updated" timestamp of September 18, 2025.5 This level of temporal precision is vital for auditors to confirm that masked facilities were indeed operational during the fire season in question.
+Jurisdictional Analysis: China (MEE and CEMS)
+China represents the most challenging jurisdiction for industrial thermal attribution due to its high density of energy-intensive industries and the evolving nature of its environmental transparency. However, the emergence of the Chinese Industrial Emissions Database (CIED) and the national Pollutant Discharge Permit system has enabled facility-level geolocation.7
+The CEMS Network and CIED
+A transformative development in China's industrial monitoring is the National Continuous Emission Monitoring System (CEMS) network.7 This network provides hourly, source-level data from smokestacks for critical sectors.7
+* Thermal Power: The CEMS network covers between 95.9% and 97.4% of China's total national thermal power capacity.7
+* Iron and Steel: It encompasses 74.2% to 88.3% of national crude steel production.7
+* Cement: It tracks between 78.9% and 87.6% of total clinker production.7
+The CIED dataset, which incorporates CEMS-monitoring data, provides specific information for 17,134 emission sources across 7,708 plants.7 Critically for wildfire denoising, the database includes "geographic allocations" (latitude and longitude) and "physical parameters" such as stack diameter, height, and exhaust temperature.7 This allows the lead geospatial scientist not only to mask the facility but also to estimate the thermal signature potential based on actual stack temperature and height, which are the primary drivers of false-positive detections in mid-infrared sensors.
+Regulation on Pollutant Discharge Permits
+China's Ministry of Ecology and Environment (MEE) has institutionalized the Pollutant Discharge Permit system as the core of its fixed-source regulatory framework.19 Enterprises are mandated to disclose information on the national pollutant discharge permit platform (permit.mee.gov.cn).19 This system clarifies compliance obligations for air emissions and solid waste, requiring self-monitoring and periodic reporting.19 For the geospatial pipeline, the MEE permit ID serves as the source_id in the ingestion schema, linking the thermal mask to a legally binding environmental permit.19
+Jurisdictional Analysis: Brazil (IBAMA and SIGEL)
+Industrial masking in Brazil is facilitated by the integration of the Brazilian Institute of Environment and Renewable Natural Resources (IBAMA) data and the Georeferenced Information System (SIGEL). A major breakthrough for geospatial precision occurred in 2022, when the Brazilian Institute of Geography and Statistics (IBGE) released geographic coordinates for all addresses in Brazil as part of the Population Census.8 These coordinates were collected via mobile data collection devices (DMCs) and verified by more than 180,000 enumerators, providing a high-resolution base for facility-level identification.8
+For industrial masking, IBAMA’s oversight of high-impact activities ensures that facilities are geolocated during the licensing process. The IBGE releases include municipality and FU (Federative Unit) codes, which, when coupled with the SIGEL system, provide the "Gold" tier provenance required for the "No-Placeholder" stack.8 This is particularly relevant for the Amazon and Cerrado biomes, where the distinction between agricultural clearing fires and stationary industrial processing heat is a primary concern for regulatory auditors.
+Global Aggregators: Evaluating the WRI and IEA
+In regions where jurisdictional PRTRs are absent, researchers often turn to global aggregators. However, the suitability of these sources for industrial masking depends on their coordinate provenance.
+WRI Global Power Plant Database (GPPD)
+The Global Power Plant Database, produced by the World Resources Institute and its partners, covers approximately 35,000 power plants across 167 countries.9 It centralizes information on capacity, generation, fuel type, and, crucially, geolocation.9
+The WRI GPPD is evaluated as an "authoritative" source but remains in the Silver tier for production masking. This is because the geolocation methodology is a multi-step process that varies in precision.10 In cases where machine-readable national data is available, WRI ingests it directly.10 However, for many countries, WRI must manually gather data or use "elastic search" techniques to match facility names with geocoded databases like the Global Energy Observatory (GEO) or CARMA.10 This "matching" process introduces the risk of coordinate drift. For wildfire denoising, the WRI GPPD is used as a secondary validator, or as a primary mask in regions where Gold-tier jurisdictional data (like E-PRTR or NPRI) is unavailable.
+IEA World Energy Balances
+The International Energy Agency (IEA) provides the most comprehensive statistical coverage of global energy flows, encompassing 156 countries.11 However, the IEA database structure is designed for national and regional energy accounting rather than geospatial facility mapping.11 It provides "summary energy balances" and "extended energy balances" in matrix form, expressed in ktoe (kilotonnes of oil equivalent) or TJ (terajoules).11 Because the IEA datasets generally lack facility-level latitude and longitude, they do not meet the "No-Placeholder" requirements for industrial thermal masking and are strictly excluded from the global_authoritative_industrial_v1 ingest layer.
+Technical Ingestion Mapping: Schema Definitions
+To facilitate the integration of these international sources into the industrial_sources_ingest.py schema, the following field mapping is established for the top 5 global sources.
+Ingestion Mapping Table
+
+
+Jurisdiction
+	source_id (Authority Unique ID)
+	coordinate_precision (Reported vs Derived)
+	thermal_signature_potential
+	provenance_url (Direct Endpoint)
+	EU
+	Facility_ID (EEA-Portal)
+	Reported (100m)
+	High (NACE 19, 23, 24)
+	industry.eea.europa.eu 2
+	Canada
+	NPRI_ID
+	Reported (GPS-Verified)
+	High (NAICS 331, 211)
+	data-donnees.az.ec.gc.ca 15
+	Australia
+	facility_id
+	Reported (Survey-Grade)
+	High (ANZSIC 2110)
+	data.gov.au/dataset/npi 5
+	China
+	Permit_ID (MEE)
+	Reported (CEMS Stack)
+	Maximal (Power/Steel)
+	permit.mee.gov.cn 7
+	WRI (Global)
+	gppd_idnr
+	Derived (Match-Matched)
+	Sector-Specific
+	github.com/wri/gppd 10
+	The mapping of thermal_signature_potential is a key requirement for regulatory auditors. This field is not merely a qualitative label but a quantitative weighting factor based on the sector's operational heat characteristics. For instance, a facility with NACE 24.1 (Iron/Steel) is assigned a potential value of 1.0, whereas NACE 35.1 (Electricity) might be assigned 0.7, reflecting the higher radiant intensity of open-furnace smelting compared to enclosed steam-cycle power production.
+Gap Analysis and "No-Go" Zone Definitions
+Adherence to the "No-Placeholder" philosophy requires the explicit identification of regions where authoritative ground truth is missing. In these zones, the application of an industrial mask based on modeling or low-confidence data is prohibited, as it risks concealing legitimate wildfire activity.
+Identified "No-Go" Zones
+Industrial masking must be disabled or relegated to manual review in the following territories:
+1. Russia and the CIS: While industrial production is significant, there is a lack of a unified, publicly accessible, facility-level geospatial PRTR that meets the transparency standards of E-PRTR or NPRI.
+2. India (Sub-National Gaps): Although the CPCB is centralizing OCEMS data, the public availability of geotagged facility data is inconsistent across State Pollution Control Boards (SPCBs).28 As of 2021, only the Telangana portal provided reliable geo-coordinates.28 Until the national OCEMS/ODAMS portal is fully operational and geotagged, India remains a "caution zone" where masking should only be applied to validated units.29
+3. Sub-Saharan Africa (Excluding South Africa): High-confidence facility-level geodata for industrial stacks is largely unavailable. While hydropower datasets like GloHydroRes provide location data for dams, they often lack the thermal emission data necessary for denoising.30
+4. Southeast Asia (Emerging): Countries like Indonesia are centralizing data via the SIINAS (Indonesian National Industrial Information System), but the dataset is primarily administrative and the release of facility-level coordinates to the public domain for research remains limited.31
+Risks of Model-Based Masking in Data Gaps
+In regions like the Russian Boreal or the Indonesian Peatlands, the thermal signatures of wildfires are the primary signal of interest. Using "Silver" or modeled industrial data in these zones introduces the risk of "thermal shadowing," where a real forest fire near an industrial park is incorrectly filtered out because the mask was placed based on a city-center centroid or an administrative boundary rather than the actual stack location. The "Hard Stop" protocol dictates that if a facility lacks a coordinate verified by a government authority, it cannot be included in the automated masking layer.
+Integration Protocol: global_authoritative_industrial_v1
+The implementation of the global_authoritative_industrial_v1 policy involves a structured update to the current us_epa_eia_v1 logic. This protocol ensures that the geospatial pipeline handles the diversity of international data formats while maintaining a rigorous audit trail.
+1. Coordinate Normalization and Buffering
+All ingested coordinates must be normalized to WGS84. A tiered buffering strategy is recommended to account for the variance in precision between Gold and Silver sources.
+* Gold Sources (NPRI, NPI, CIED): Apply a static 375m buffer (matching the VIIRS I-band resolution) around the stack/facility coordinate.
+* Silver Sources (WRI GPPD): Apply a dynamic 750m-1km buffer to account for potential coordinate drift during the cross-platform matching process.
+2. Sectoral Cross-Walk and TPC Weighting
+The policy must implement a sectoral cross-walk that maps international taxonomies (NACE, NAICS, ANZSIC, GB/T) to a unified Thermal Potential Class (TPC).
+  
+
+Where    is the emissivity of the industrial source,    is the Stefan-Boltzmann constant, and    is the operational temperature. High TPC values are assigned to sectors where   , such as smelting and clinker production.7 This TPC weighting is used to determine the priority of the mask in multi-source conflicts.
+3. Dynamic Temporal Filtering
+The integration protocol must respect the update frequency of each jurisdiction. A facility should be marked as "Active" for masking only if it has reported to its respective PRTR within the last two reporting cycles. In the E-PRTR and NPRI, this corresponds to a 24-month lookback period.1 Facilities that fail to report within this timeframe are flagged for manual review, preventing the masking of fires on abandoned or decommissioned industrial land.
+4. Regulatory Audit Log
+For every pixel masked as industrial, the system must generate an audit log entry containing:
+* authority_name: (e.g., Environment and Climate Change Canada)
+* source_id: (e.g., NPRI ID 12345)
+* timestamp_verification: (e.g., 2025-10-09)
+* precision_type: (Reported Coordinate)
+This audit log provides the "No-Placeholder" provenance required for environmental compliance reporting and ensures that the denoising process is transparent to international regulatory bodies.
+Conclusion and Future Outlook
+The expansion of the industrial thermal attribution stack into international territories is a prerequisite for accurate global wildfire monitoring. By leveraging jurisdictional PRTRs like the E-PRTR, NPRI, and NPI, and integrating high-resolution Chinese and Brazilian facility data, the geospatial community can move away from modeled "placeholders" and toward a verifiable ground-truth framework. The evaluation of the WRI Global Power Plant Database as an authoritative but secondary source provides a viable path forward for global coverage, while the identification of "No-Go" zones protects the integrity of wildfire detection in data-sparse regions. The implementation of the global_authoritative_industrial_v1 policy will provide a robust, scientifically-grounded layer for industrial thermal denoising, ensuring that the signals detected by orbital sensors are attributed to their true sources with unparalleled precision.
+Цитирани творби
+1. Scope of the PRTR | Environmental Protection Agency, осъществен достъп на февруари 28, 2026, https://www.epa.ie/our-services/compliance--enforcement/whats-happening/pollutant-release-and-transfer-register/scope-of-the-prtr/
+2. Industrial Reporting under the Industrial Emissions Directive 2010 ..., осъществен достъп на февруари 28, 2026, https://www.eea.europa.eu/data-and-maps/data/member-states-reporting-art-7-under-the-european-pollutant-release-and-transfer-register-e-prtr-regulation-23
+3. Canada's National Pollutant Release Inventory: 2024 data highlights, осъществен достъп на февруари 28, 2026, https://www.canada.ca/en/environment-climate-change/services/national-pollutant-release-inventory/tools-resources-data/fact-sheet.html
+4. Maps of reporting facilities – facility location - ECCC Data Catalogue, осъществен достъп на февруари 28, 2026, https://data-donnees.az.ec.gc.ca/data/substances/plansreports/map-of-reporting-facilities-geodatabase/maps-of-reporting-facilities-facility-location/?lang=en
+5. National Pollutant Inventory - Facilities - Data.gov.au, осъществен достъп на февруари 28, 2026, https://www.data.gov.au/data/dataset/npi/resource/f83cdee9-ebcb-4f24-941b-34bb2f0996cf?inner_span=True
+6. ANZSIC code list - DCCEEW, осъществен достъп на февруари 28, 2026, https://www.dcceew.gov.au/environment/protection/npi/reporting/industry-reporting-materials/anzsic-code-list
+7. Chinese industrial air pollution emissions based on the continuous emission monitoring systems network - PMC, осъществен достъп на февруари 28, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC10030638/
+8. For the first time ever, IBGE releases geographic coordinates of addresses in Brazil, осъществен достъп на февруари 28, 2026, https://agenciadenoticias.ibge.gov.br/en/agencia-news/2184-news-agency/news/39074-for-the-first-time-ever-ibge-releases-geographic-coordinates-of-addresses-in-brazil
+9. A Global Database of Power Plants | World Resources Institute, осъществен достъп на февруари 28, 2026, https://www.wri.org/research/global-database-power-plants
+10. wri/global-power-plant-database - GitHub, осъществен достъп на февруари 28, 2026, https://github.com/wri/global-power-plant-database
+11. Database documentation, осъществен достъп на февруари 28, 2026, https://iea.blob.core.windows.net/assets/25266100-859c-4b9c-bd46-cc4069bd4412/WORLDBAL_Documentation.pdf
+12. World Energy Balances, осъществен достъп на февруари 28, 2026, https://iea.blob.core.windows.net/assets/2144706e-a521-4353-a9c0-2ff3b170669f/WORLDBAL_Documentation_July2025.pdf
+13. INSPIRE E-PRTR Sites and Facilities - INSPIRE Geoportal, осъществен достъп на февруари 28, 2026, https://inspire-geoportal.ec.europa.eu/srv/api/records/9a823801-b5f7-4346-8ae5-3193cd56ea1c
+14. European Pollutant Release and Transfer Register (E-PRTR) - Concawe, осъществен достъп на февруари 28, 2026, https://www.concawe.eu/wp-content/uploads/cr191-e-prtr-2010-03008-01-e.pdf
+15. Maps of reporting facilities – facility location - app.geo.ca, осъществен достъп на февруари 28, 2026, https://app.geo.ca/en-ca/map-browser/record/3b7dd693-52dc-4e55-828f-37c8172f009b
+16. Maps of reporting facilities – virtual globe format - app.geo.ca, осъществен достъп на февруари 28, 2026, https://app.geo.ca/en-ca/map-browser/record/004f6b03-ac84-4c7c-90cb-35949e6260bc
+17. National Pollutant Release Inventory data search - Canada.ca, осъществен достъп на февруари 28, 2026, https://pollution-waste.canada.ca/national-release-inventory/
+18. List of ANZSIC codes for NPI reporting by hierarchy - DCCEEW, осъществен достъп на февруари 28, 2026, https://www.dcceew.gov.au/sites/default/files/documents/anzsic-code-hierarchy.rtf
+19. China State Council Promulgates Long-Awaited Pollutant Discharge Permit Regulation, осъществен достъп на февруари 28, 2026, https://www.bdlaw.com/publications/china-state-council-promulgates-long-awaited-pollutant-discharge-permit-regulation/
+20. Chinese industrial air pollution emissions based on the continuous emission monitoring systems network - ResearchGate, осъществен достъп на февруари 28, 2026, https://www.researchgate.net/publication/369439562_Chinese_industrial_air_pollution_emissions_based_on_the_continuous_emission_monitoring_systems_network
+21. The reform of China's pollutant discharge permit system: current situation and prospects, осъществен достъп на февруари 28, 2026, https://zenodo.org/records/15615809
+22. China's Regulatory Framework on Pollutant Discharge Permits - ClientEarth, осъществен достъп на февруари 28, 2026, https://www.clientearth.org/media/eyhjspy5/06-permitreport_1_nov2024.pdf
+23. Mandates - Ministry of Ecology and Environment, осъществен достъп на февруари 28, 2026, http://english.mee.gov.cn/About_MEE/Mandates/
+24. Global Power Plants | illustreets, осъществен достъп на февруари 28, 2026, https://illustreets.com/showcase/global-power-plants/
+25. Global Power Plant Database - Datasets - Data - World Resources Institute, осъществен достъп на февруари 28, 2026, https://old-datasets.wri.org/dataset/globalpowerplantdatabase
+26. Global Power Plant Database | Earth Engine Data Catalog - Google for Developers, осъществен достъп на февруари 28, 2026, https://developers.google.com/earth-engine/datasets/catalog/WRI_GPPD_power_plants
+27. IEA World Energy Statistics and Balances. Extended world energy balances, 1960-2022, осъществен достъп на февруари 28, 2026, https://borealisdata.ca/dataset.xhtml?persistentId=doi:10.5683/SP3/X62LYX
+28. How Effective are India's Emission Monitoring Systems (OCEMS)? - CEEW, осъществен достъп на февруари 28, 2026, https://www.ceew.in/publications/assessing-effectiveness-india%E2%80%99s-industrial-emission-monitoring-systems
+29. September 23, 2025 | CPCB Issues OCEMS Directive on Real-Time Emission Data, осъществен достъп на февруари 28, 2026, https://www.thesustainabilitycloud.com/blog/cpcb-ocems-directive-real-time-emission-data/
+30. Global dataset combining open-source hydropower plant and reservoir data - PMC, осъществен достъп на февруари 28, 2026, https://pmc.ncbi.nlm.nih.gov/articles/PMC12006347/
+31. SIINAS: Revolutionizing Indonesia's Industrial Sector with a Centralized Data Integration, осъществен достъп на февруари 28, 2026, https://indonesien.ahk.de/en/infohub_news/siinas-revolutionizing-indonesia-s-industrial-sector-with-a-centralized-data-integration
+32. SIINAS: Revolutionizing Indonesia's Industrial Sector with a Centralized Data Integration, осъществен достъп на февруари 28, 2026, https://business-indonesia.org/legal_insights/siinas-revolutionizing-indonesia-s-industrial-sector-with-a-centralized-data-integration

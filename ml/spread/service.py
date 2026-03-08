@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -33,6 +33,9 @@ SPREAD_CALIBRATOR_ROOT_ENV = "SPREAD_CALIBRATOR_ROOT"
 WEATHER_BIAS_CORRECTOR_PATH_ENV = "WEATHER_BIAS_CORRECTOR_PATH"
 WEATHER_BIAS_CORRECTOR_ROOT_ENV = "WEATHER_BIAS_CORRECTOR_ROOT"
 STRICT_FORECAST_INPUTS_ENV = "STRICT_FORECAST_INPUTS"
+SPREAD_STALE_WARN_HOURS_ENV = "SPREAD_STALE_WARN_HOURS"
+SPREAD_SERVE_STALE_ENV = "SPREAD_SERVE_STALE"
+SPREAD_SHADOW_ENABLED_ENV = "SPREAD_SHADOW_ENABLED"
 
 # Performance limit: avoid OOM/high latency for very large areas in synchronous calls.
 # 200x200 = 40,000 cells. At 0.01 degree, this is roughly 220km x 220km.
@@ -56,6 +59,8 @@ class SpreadForecastRequest:
     strict_inputs: bool | None = None
     model_name: str | None = None
     model_params: dict[str, Any] | None = None
+    shadow_model_name: str | None = None
+    shadow_model_params: dict[str, Any] | None = None
 
 
 def run_spread_forecast(
@@ -176,8 +181,59 @@ def run_spread_forecast(
     model_name = model.__class__.__name__
     LOGGER.info(f"Using spread model: {model_name}")
 
-    # 3. Predict
-    forecast = model.predict(inputs_package.to_model_input())
+    # 3. Predict (champion)
+    model_input = inputs_package.to_model_input()
+    champion_start = time.perf_counter()
+    forecast = model.predict(model_input)
+    champion_latency_ms = (time.perf_counter() - champion_start) * 1000.0
+
+    # Optional shadow inference: run challenger in parallel path but never serve it.
+    shadow_summary: dict[str, Any] | None = None
+    shadow_enabled = _env_bool(SPREAD_SHADOW_ENABLED_ENV, default=False)
+    if shadow_enabled and request.shadow_model_name:
+        try:
+            from ml.spread.factory import get_spread_model
+
+            challenger = get_spread_model(
+                request.shadow_model_name,
+                request.shadow_model_params,
+            )
+            shadow_start = time.perf_counter()
+            challenger_fc = challenger.predict(model_input)
+            shadow_latency_ms = (time.perf_counter() - shadow_start) * 1000.0
+
+            champion_probs = np.asarray(forecast.probabilities.values, dtype=np.float32)
+            challenger_probs = np.asarray(challenger_fc.probabilities.values, dtype=np.float32)
+            if challenger_probs.shape[:1] != champion_probs.shape[:1]:
+                n_t = min(challenger_probs.shape[0], champion_probs.shape[0])
+                challenger_probs = challenger_probs[:n_t]
+                champion_probs = champion_probs[:n_t]
+            abs_delta = np.abs(challenger_probs - champion_probs)
+            shadow_summary = {
+                "shadow_model_name": request.shadow_model_name,
+                "shadow_model_version": getattr(challenger_fc, "model_version", "") or "",
+                "mean_abs_probability_delta": float(np.mean(abs_delta)),
+                "max_abs_probability_delta": float(np.max(abs_delta)),
+                "champion_latency_ms": float(champion_latency_ms),
+                "shadow_latency_ms": float(shadow_latency_ms),
+                "latency_delta_ms": float(shadow_latency_ms - champion_latency_ms),
+                # These require observed outcomes and are computed offline by gate jobs.
+                "brier_delta": None,
+                "ece_delta": None,
+            }
+            LOGGER.info(
+                "Shadow spread inference completed",
+                extra={
+                    "shadow_model_name": request.shadow_model_name,
+                    "latency_delta_ms": shadow_summary["latency_delta_ms"],
+                    "mean_abs_probability_delta": shadow_summary["mean_abs_probability_delta"],
+                },
+            )
+        except Exception:
+            LOGGER.exception(
+                "Shadow spread inference failed; serving champion output only.",
+                extra={"shadow_model_name": request.shadow_model_name},
+            )
     if forecast.model_name == "unknown" or not forecast.model_name:
         forecast = SpreadForecast(
             probabilities=forecast.probabilities,
@@ -212,6 +268,17 @@ def run_spread_forecast(
         weather_fallback_used=inputs_package.weather_fallback_used,
         weather_fallback_reason=getattr(inputs_package.weather_cube, "attrs", {}).get("weather_fallback_reason"),
         terrain_fallback_used=inputs_package.terrain_fallback_used,
+    )
+    forecast = _annotate_confidence_info(
+        forecast,
+        weather_cube=inputs_package.weather_cube,
+        forecast_reference_time=request.forecast_reference_time,
+        weather_fallback_used=inputs_package.weather_fallback_used,
+        terrain_fallback_used=inputs_package.terrain_fallback_used,
+    )
+    forecast = _annotate_shadow_info(
+        forecast,
+        shadow_summary=shadow_summary,
     )
 
     # 4b. Calibrate probabilities (default behavior).
@@ -299,10 +366,41 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
 def _resolve_strict_inputs(strict_inputs: bool | None) -> bool:
     if strict_inputs is not None:
         return bool(strict_inputs)
     return _env_bool(STRICT_FORECAST_INPUTS_ENV, default=False)
+
+
+def _staleness_hours_from_weather(
+    weather_cube: Any,
+    *,
+    forecast_reference_time: datetime,
+) -> float | None:
+    attrs = dict(getattr(weather_cube, "attrs", {}) or {})
+    run_time_raw = attrs.get("weather_run_time")
+    if not run_time_raw:
+        return None
+    try:
+        run_time = datetime.fromisoformat(str(run_time_raw).replace("Z", "+00:00"))
+        if run_time.tzinfo is None:
+            run_time = run_time.replace(tzinfo=timezone.utc)
+        run_time = run_time.astimezone(timezone.utc)
+        ref_time = forecast_reference_time.astimezone(timezone.utc)
+        delta = ref_time - run_time
+        return max(0.0, delta.total_seconds() / 3600.0)
+    except Exception:
+        return None
 
 
 def _enforce_no_fallback_if_strict(
@@ -482,6 +580,56 @@ def _annotate_fallback_info(
             extra={"terrain_fallback_used": True},
         )
 
+    return forecast
+
+
+def _annotate_confidence_info(
+    forecast: SpreadForecast,
+    *,
+    weather_cube: Any,
+    forecast_reference_time: datetime,
+    weather_fallback_used: bool,
+    terrain_fallback_used: bool,
+) -> SpreadForecast:
+    stale_warn_h = _env_float(SPREAD_STALE_WARN_HOURS_ENV, default=12.0)
+    staleness_h = _staleness_hours_from_weather(
+        weather_cube, forecast_reference_time=forecast_reference_time
+    )
+    fallback_used = bool(weather_fallback_used or terrain_fallback_used)
+    confidence_level = "normal"
+    if fallback_used or (staleness_h is not None and staleness_h >= stale_warn_h):
+        confidence_level = "low"
+
+    try:
+        attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+        attrs.update(
+            {
+                "confidence_level": confidence_level,
+                "staleness_hours": staleness_h,
+                "fallback_used": fallback_used,
+                "stale_warn_hours": stale_warn_h,
+                "serve_stale": _env_bool(SPREAD_SERVE_STALE_ENV, default=True),
+            }
+        )
+        forecast.probabilities.attrs = attrs
+    except Exception:  # pragma: no cover
+        pass
+
+    return forecast
+
+
+def _annotate_shadow_info(
+    forecast: SpreadForecast,
+    *,
+    shadow_summary: dict[str, Any] | None,
+) -> SpreadForecast:
+    try:
+        attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+        attrs["shadow_evaluated"] = bool(shadow_summary is not None)
+        attrs["shadow_metrics_summary"] = shadow_summary or {}
+        forecast.probabilities.attrs = attrs
+    except Exception:  # pragma: no cover
+        pass
     return forecast
 
 

@@ -40,6 +40,7 @@ def clear_spread_model_catalog_cache():
     get_spread_model_catalog.cache_clear()
 
 
+
 def pytest_configure(config):
     """Register custom pytest marks."""
     config.addinivalue_line(

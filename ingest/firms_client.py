@@ -265,7 +265,12 @@ def parse_detection_rows(
             )
             confidence = None
 
+        # Thermal aliases:
+        # - MODIS feeds usually provide `brightness` and `bright_t31`
+        # - VIIRS feeds usually provide `bright_ti4` and `bright_ti5`
         brightness = _optional_float(row.get("brightness"))
+        if brightness is None:
+            brightness = _optional_float(row.get("bright_ti4"))
         if brightness is None:
             summary.brightness_missing += 1
         elif not (BRIGHTNESS_RANGE[0] <= brightness <= BRIGHTNESS_RANGE[1]):
@@ -283,6 +288,10 @@ def parse_detection_rows(
         sensor = _pick_sensor(row)
         confidence_score = normalize_firms_confidence(confidence, sensor)
 
+        bright_t31 = _optional_float(row.get("bright_t31"))
+        if bright_t31 is None:
+            bright_t31 = _optional_float(row.get("bright_ti5"))
+
         detection = DetectionRecord(
             lat=lat,
             lon=lon,
@@ -292,7 +301,7 @@ def parse_detection_rows(
             confidence=confidence,
             confidence_score=confidence_score,
             brightness=brightness,
-            bright_t31=_optional_float(row.get("bright_t31")),
+            bright_t31=bright_t31,
             frp=_optional_float(row.get("frp")),
             scan=_optional_float(row.get("scan")),
             track=_optional_float(row.get("track")),
@@ -371,5 +380,4 @@ def _bucket_confidence(value: float | None) -> str:
     if value < 70:
         return "nominal"
     return "high"
-
 

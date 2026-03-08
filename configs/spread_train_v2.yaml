@@ -1,0 +1,63 @@
+# Spread Model v2 (U-Net) Training Config
+seed: 42
+model_output_root: "models/spread_v2"
+
+# Data selection
+region_name: "smoke_grid"
+bbox: [22.0, 40.0, 24.0, 42.0]
+start_time: "2025-07-01"
+end_time: "2025-08-31"
+horizons_hours: [24, 48, 72]
+interval_hours: 24
+min_detections: 10
+negative_ratio: 3.0
+output_mode: "tensor"
+
+# Leakage-safe split policy
+split:
+  holdout_year: 2025
+  validation_region_buckets: [0]
+
+# Fixed input channel schema for v2
+channels:
+  - "fire_t0"
+  - "fire_t-6h"
+  - "fire_t-12h"
+  - "u10"
+  - "v10"
+  - "t2m"
+  - "rh2m"
+  - "precip_24h"
+  - "slope_deg"
+  - "aspect_sin"
+  - "aspect_cos"
+  - "elevation_m"
+  - "ruggedness"
+  - "tpi"
+  - "ndvi"
+  - "lfmc"
+  - "dfmc"
+  - "region_id_embedding_input"
+
+# Model architecture
+model:
+  depth: 4
+  base_channels: 32
+  dropout: 0.1
+
+# Optimization
+training:
+  epochs: 60
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  early_stopping_patience: 10
+  pos_weight: 8.0
+  horizon_weights: [0.5, 0.3, 0.2]
+  bce_weight: 0.6
+  dice_weight: 0.4
+
+# Export
+export:
+  onnx_opset: 17
+  quantize_int8: true

@@ -18,6 +18,11 @@ try:
     from ml.spread.learned_v1 import LearnedSpreadModelV1
 except Exception:  # pragma: no cover
     LearnedSpreadModelV1 = None  # type: ignore[assignment]
+try:
+    # Optional dependency: v2 model uses ONNX Runtime.
+    from ml.spread.learned_v2 import LearnedSpreadModelV2
+except Exception:  # pragma: no cover
+    LearnedSpreadModelV2 = None  # type: ignore[assignment]
 
 __all__ = [
     "DEFAULT_HORIZONS_HOURS",
@@ -33,4 +38,5 @@ if HeuristicSpreadV0Config is not None:  # pragma: no cover
 
 if LearnedSpreadModelV1 is not None:  # pragma: no cover
     __all__.append("LearnedSpreadModelV1")
-
+if LearnedSpreadModelV2 is not None:  # pragma: no cover
+    __all__.append("LearnedSpreadModelV2")

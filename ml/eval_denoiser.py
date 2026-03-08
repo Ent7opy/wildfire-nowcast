@@ -1,8 +1,8 @@
 """
-Evaluate a trained denoiser_v1 model on a labeled snapshot dataset and choose default thresholds.
+Evaluate a trained denoiser model on a labeled snapshot dataset and choose default thresholds.
 
 Usage:
-  python -m ml.eval_denoiser --model_run models/denoiser_v1/<run_id>/ --snapshot <snapshot.parquet|snapshot_dir> [--out reports/denoiser_v1/<run_id>/]
+  python -m ml.eval_denoiser --model_run models/denoiser/<run_id>/ --snapshot <snapshot.parquet|snapshot_dir> [--out reports/denoiser/<run_id>/]
 """
 
 from __future__ import annotations
@@ -407,7 +407,7 @@ def _write_thresholds_md(
     p_strong = float(strong["threshold"])
     p_dw = float(downweight["threshold"])
     lines: List[str] = []
-    lines.append(f"# denoiser_v1 thresholds ({run_id})")
+    lines.append(f"# denoiser thresholds ({run_id})")
     lines.append("")
     lines.append("## Dataset / split context")
     lines.append(f"- eval_n: `{metrics_summary.get('n_eval')}`")
@@ -543,7 +543,7 @@ def evaluate(
     run_id = os.path.basename(model_run_dir.rstrip(os.sep))
 
     if out_dir is None:
-        out_dir = os.path.join("reports", "denoiser_v1", run_id)
+        out_dir = os.path.join("reports", "denoiser", run_id)
     _ensure_dir(out_dir)
 
     metadata = _load_metadata(model_run_dir)
@@ -782,10 +782,10 @@ def evaluate(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate denoiser_v1 and choose default thresholds.")
+    parser = argparse.ArgumentParser(description="Evaluate denoiser and choose default thresholds.")
     parser.add_argument("--model_run", type=str, required=True, help="Path to model run directory (contains model.pkl, metadata.json, feature_list.json).")
     parser.add_argument("--snapshot", type=str, required=True, help="Path to labeled snapshot Parquet or snapshot dir containing train.parquet/eval.parquet.")
-    parser.add_argument("--out", type=str, default=None, help="Output directory (default: reports/denoiser_v1/<run_id>/)")
+    parser.add_argument("--out", type=str, default=None, help="Output directory (default: reports/denoiser/<run_id>/)")
     parser.add_argument("--threshold_step", type=float, default=0.01, help="Step size for threshold sweep (default: 0.01)")
     parser.add_argument("--target_precision", type=float, default=0.90, help="Target precision for strong_filter_threshold (default: 0.90)")
     parser.add_argument("--target_recall", type=float, default=0.90, help="Target recall for downweight_threshold (default: 0.90)")
@@ -808,5 +808,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

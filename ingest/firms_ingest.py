@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import subprocess
 import sys
-from typing import List, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, List, Optional
+
+from sqlalchemy.engine import Connection
 
 from ingest import repository
 from ingest.config import FIRMSIngestSettings, settings as ingest_settings
@@ -31,6 +36,241 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 MAX_FIRMS_DAY_RANGE = 10
 NRT_RETENTION_DAYS_HINT = 7
+_DENOISER_V2_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "front_id",
+    "event_id",
+    "event_score",
+    "denoiser_decision",
+    "review_required",
+)
+_DENOISER_V2_RUNTIME_THRESHOLD_KEYS: tuple[str, ...] = (
+    "strong_filter_threshold",
+    "downweight_threshold",
+    "uncertainty_band_low",
+    "uncertainty_band_high",
+    "event_front_radius_m",
+    "event_front_max_gap_minutes",
+    "event_link_radius_m",
+    "event_link_max_gap_days",
+    "event_static_persistence_threshold",
+    "event_strict_static_split",
+)
+
+
+@dataclass(frozen=True)
+class DenoiserRuntimePolicy:
+    model_run_dir: str
+    model_id: str | None
+    pipeline_version: str
+    threshold_profile: str
+    threshold_source: str
+    thresholds: dict[str, Any]
+    using_promoted_model: bool
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _area_key_from_bbox(bbox: str) -> str:
+    """Build deterministic area key from normalized FIRMS bbox string."""
+    parts = [float(part.strip()) for part in bbox.split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"Invalid FIRMS bbox: {bbox!r}. Expected 'w,s,e,n'.")
+    return ",".join(f"{value:.6f}" for value in parts)
+
+
+def _filter_detections_by_watermark(
+    detections: list,
+    *,
+    watermark_time_utc: datetime | None,
+    grace_minutes: int,
+) -> tuple[list, datetime | None]:
+    """Filter detections to incremental window with late-arrival grace."""
+    if not detections:
+        return [], None
+
+    max_acq_time = max((_as_utc(d.acq_time) for d in detections), default=None)
+    if watermark_time_utc is None:
+        return detections, max_acq_time
+
+    threshold = _as_utc(watermark_time_utc) - timedelta(minutes=max(0, int(grace_minutes)))
+    filtered = [d for d in detections if (_as_utc(d.acq_time) or datetime.min.replace(tzinfo=timezone.utc)) > threshold]
+    max_filtered = max((_as_utc(d.acq_time) for d in filtered), default=None)
+    return filtered, max_filtered
+
+
+def _resolve_active_denoiser_model() -> dict[str, Any] | None:
+    """Resolve promoted denoiser metadata from model registry."""
+    try:
+        from api.model_registry import resolve_active_model
+
+        return resolve_active_model("denoiser")
+    except Exception:
+        LOGGER.warning("Failed to resolve active promoted denoiser model; using env fallback if provided.")
+        return None
+
+
+def _resolve_denoiser_pipeline_version(config: "FIRMSIngestSettings") -> str:
+    return str(getattr(config, "denoiser_pipeline_version", "v2") or "v2").strip().lower()
+
+
+def _resolve_denoiser_threshold_profile(config: "FIRMSIngestSettings") -> str:
+    return str(getattr(config, "denoiser_threshold_profile", "strict_v1") or "strict_v1").strip().lower()
+
+
+def _resolve_v2_thresholds_from_config(config: "FIRMSIngestSettings") -> dict[str, Any]:
+    return {
+        "strong_filter_threshold": float(getattr(config, "denoiser_strong_filter_threshold", 0.5)),
+        "downweight_threshold": float(getattr(config, "denoiser_downweight_threshold", 0.7)),
+        "uncertainty_band_low": float(getattr(config, "denoiser_uncertainty_band_low", 0.45)),
+        "uncertainty_band_high": float(getattr(config, "denoiser_uncertainty_band_high", 0.55)),
+        "event_front_radius_m": float(getattr(config, "denoiser_event_front_radius_m", 2500.0)),
+        "event_front_max_gap_minutes": int(getattr(config, "denoiser_event_front_max_gap_minutes", 45)),
+        "event_link_radius_m": float(getattr(config, "denoiser_event_link_radius_m", 10000.0)),
+        "event_link_max_gap_days": int(getattr(config, "denoiser_event_link_max_gap_days", 11)),
+        "event_static_persistence_threshold": float(
+            getattr(config, "denoiser_event_static_persistence_threshold", 0.85)
+        ),
+        "event_strict_static_split": bool(getattr(config, "denoiser_event_strict_static_split", True)),
+    }
+
+
+def _parse_v2_thresholds_from_runtime_contract(runtime_contract: dict[str, Any]) -> dict[str, Any]:
+    thresholds = runtime_contract.get("thresholds")
+    if not isinstance(thresholds, dict):
+        raise RuntimeError("runtime_contract.thresholds must be an object")
+
+    missing = [key for key in _DENOISER_V2_RUNTIME_THRESHOLD_KEYS if key not in thresholds]
+    if missing:
+        raise RuntimeError(
+            "runtime_contract.thresholds is missing required keys: " + ", ".join(sorted(missing))
+        )
+
+    return {
+        "strong_filter_threshold": float(thresholds["strong_filter_threshold"]),
+        "downweight_threshold": float(thresholds["downweight_threshold"]),
+        "uncertainty_band_low": float(thresholds["uncertainty_band_low"]),
+        "uncertainty_band_high": float(thresholds["uncertainty_band_high"]),
+        "event_front_radius_m": float(thresholds["event_front_radius_m"]),
+        "event_front_max_gap_minutes": int(thresholds["event_front_max_gap_minutes"]),
+        "event_link_radius_m": float(thresholds["event_link_radius_m"]),
+        "event_link_max_gap_days": int(thresholds["event_link_max_gap_days"]),
+        "event_static_persistence_threshold": float(thresholds["event_static_persistence_threshold"]),
+        "event_strict_static_split": bool(thresholds["event_strict_static_split"]),
+    }
+
+
+def _resolve_denoiser_runtime_policy(config: "FIRMSIngestSettings") -> DenoiserRuntimePolicy | None:
+    """Resolve denoiser runtime policy from registry contract with controlled fallback."""
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    threshold_profile = _resolve_denoiser_threshold_profile(config)
+    allow_unsafe_override = bool(getattr(config, "denoiser_allow_unsafe_threshold_override", False))
+
+    active = _resolve_active_denoiser_model()
+    model_id = str(active.get("model_id")) if active and active.get("model_id") else None
+    model_run_dir = (
+        str(active.get("artifact_uri"))
+        if active and active.get("artifact_uri")
+        else config.denoiser_model_run_dir
+    )
+    if not model_run_dir:
+        return None
+
+    runtime_contract: dict[str, Any] | None = None
+    if active:
+        metrics_json = active.get("metrics_json") or {}
+        if isinstance(metrics_json, dict):
+            runtime_contract = metrics_json.get("runtime_contract")
+
+    if isinstance(runtime_contract, dict):
+        contract_pipeline = str(runtime_contract.get("pipeline_version") or "").strip().lower()
+        if contract_pipeline and contract_pipeline != pipeline_version:
+            if not allow_unsafe_override:
+                raise RuntimeError(
+                    "Promoted denoiser pipeline mismatch: "
+                    f"registry={contract_pipeline}, runtime={pipeline_version}"
+                )
+            LOGGER.warning(
+                "Unsafe denoiser override enabled: accepting pipeline mismatch "
+                "(registry=%s, runtime=%s)",
+                contract_pipeline,
+                pipeline_version,
+            )
+
+    if threshold_profile == "strict_v1":
+        if not isinstance(runtime_contract, dict):
+            if not allow_unsafe_override:
+                raise RuntimeError(
+                    "DENOISER_THRESHOLD_PROFILE=strict_v1 requires metrics_json.runtime_contract "
+                    "on the promoted denoiser model."
+                )
+            LOGGER.warning(
+                "Unsafe denoiser override enabled: using environment thresholds because "
+                "runtime_contract is missing."
+            )
+        else:
+            contract_profile = str(runtime_contract.get("threshold_profile") or "").strip().lower()
+            if contract_profile != "strict_v1":
+                if not allow_unsafe_override:
+                    raise RuntimeError(
+                        "Promoted denoiser runtime_contract.threshold_profile must be strict_v1 "
+                        f"(got: {contract_profile or 'missing'})"
+                    )
+                LOGGER.warning(
+                    "Unsafe denoiser override enabled: accepting threshold profile mismatch "
+                    "(registry=%s, runtime=%s)",
+                    contract_profile or "missing",
+                    threshold_profile,
+                )
+            else:
+                thresholds = _parse_v2_thresholds_from_runtime_contract(runtime_contract)
+                return DenoiserRuntimePolicy(
+                    model_run_dir=model_run_dir,
+                    model_id=model_id,
+                    pipeline_version=pipeline_version,
+                    threshold_profile=threshold_profile,
+                    threshold_source="registry_contract",
+                    thresholds=thresholds,
+                    using_promoted_model=bool(active and active.get("artifact_uri")),
+                )
+
+    if threshold_profile == "strict_v1" and not allow_unsafe_override:
+        raise RuntimeError(
+            "Denoiser strict profile is enabled but runtime contract thresholds could not be resolved."
+        )
+
+    if threshold_profile == "strict_v1" and allow_unsafe_override:
+        LOGGER.warning(
+            "Unsafe denoiser override is active: using environment-configured thresholds instead "
+            "of promoted runtime contract."
+        )
+
+    return DenoiserRuntimePolicy(
+        model_run_dir=model_run_dir,
+        model_id=model_id,
+        pipeline_version=pipeline_version,
+        threshold_profile=threshold_profile,
+        threshold_source="env_config",
+        thresholds=_resolve_v2_thresholds_from_config(config),
+        using_promoted_model=bool(active and active.get("artifact_uri")),
+    )
+
+
+def _resolve_denoiser_model_run_dir(config: "FIRMSIngestSettings") -> str | None:
+    """Backward-compatible helper for tests and fallback call sites."""
+    policy = _resolve_denoiser_runtime_policy(config)
+    return policy.model_run_dir if policy else None
+
+
+def _resolve_denoiser_module_name(config: "FIRMSIngestSettings") -> str:
+    if _resolve_denoiser_pipeline_version(config) == "v2":
+        return "ml.denoiser_inference_v2"
+    return "ml.denoiser_inference"
 
 
 def run_firms_ingest(
@@ -51,6 +291,7 @@ def run_firms_ingest(
         )
         return 2
     bbox = _resolve_area(area) if area else config.resolved_area
+    area_key = _area_key_from_bbox(bbox)
     effective_day_range = day_range if day_range is not None else config.day_range
     source_list = _resolve_sources(sources) or config.sources
 
@@ -83,19 +324,57 @@ def run_firms_ingest(
         },
     )
 
+    denoiser_requested = bool(config.denoiser_enabled or config.denoiser_required)
+    denoiser_policy: DenoiserRuntimePolicy | None = None
+    if denoiser_requested:
+        try:
+            denoiser_policy = _resolve_denoiser_runtime_policy(config)
+        except RuntimeError as exc:
+            LOGGER.error("Denoiser runtime policy error: %s", exc)
+            return 2
+
+        if config.denoiser_required and (not denoiser_policy or not denoiser_policy.using_promoted_model):
+            LOGGER.error(
+                "Denoiser is required but no promoted denoiser model is active in model_registry."
+            )
+            return 2
+
+        if denoiser_policy:
+            LOGGER.info(
+                "Resolved denoiser policy: model_id=%s pipeline=%s profile=%s source=%s thresholds=%s",
+                denoiser_policy.model_id or "none",
+                denoiser_policy.pipeline_version,
+                denoiser_policy.threshold_profile,
+                denoiser_policy.threshold_source,
+                denoiser_policy.thresholds,
+            )
+        elif config.denoiser_enabled:
+            LOGGER.warning("Denoiser is enabled but no model run directory is configured; inference will be skipped.")
+
     for source in source_list:
+        watermark = repository.get_ingest_watermark(source, area_key)
+        watermark_time_utc = _as_utc((watermark or {}).get("last_acq_time_utc"))
+        grace_minutes = int(config.firms_watermark_grace_minutes)
+
         source_uri = build_firms_url(config.map_key, source, bbox, effective_day_range)
         batch_id = repository.create_ingest_batch(
             source,
             redact_firms_url(source_uri, config.map_key),
             bbox,
             effective_day_range,
+            metadata_extra={
+                "area_key": area_key,
+                "watermark_before": watermark_time_utc.isoformat() if watermark_time_utc else None,
+                "watermark_grace_minutes": grace_minutes,
+            },
         )
         LOGGER.info("Created ingest batch %s for %s", batch_id, source)
 
         fetched_count = 0
         inserted = 0
         skipped_duplicates = 0
+        rows_after_watermark_filter = 0
+        watermark_advanced_to: datetime | None = None
         try:
             csv_rows = fetch_csv_rows(
                 map_key=config.map_key,
@@ -107,15 +386,47 @@ def run_firms_ingest(
             fetched_count = len(csv_rows)
             detections, validation = parse_detection_rows(csv_rows, source, batch_id)
             parsed_count = len(detections)
+            filtered_detections, watermark_advanced_to = _filter_detections_by_watermark(
+                detections,
+                watermark_time_utc=watermark_time_utc,
+                grace_minutes=grace_minutes,
+            )
+            rows_after_watermark_filter = len(filtered_detections)
             _log_firms_validation(source, batch_id, validation)
-            inserted = repository.insert_detections(detections)
-            skipped_duplicates = parsed_count - inserted
+            if filtered_detections:
+                # Keep insert+scoring in one DB transaction so partially scored rows
+                # cannot be committed if the process is interrupted mid-run.
+                with repository.get_engine().begin() as conn:
+                    inserted = repository.insert_detections(filtered_detections, conn=conn)
+                    skipped_duplicates = rows_after_watermark_filter - inserted
 
-            if inserted > 0:
-                _update_all_scoring_atomic(batch_id)
+                    if inserted > 0:
+                        _update_all_scoring_atomic(batch_id, conn=conn)
+                        _assert_batch_scoring_complete(batch_id, conn=conn)
+            else:
+                inserted = 0
+                skipped_duplicates = 0
 
-            if config.denoiser_enabled and inserted > 0:
-                _run_denoiser_inference(batch_id, config)
+            should_run_denoiser = inserted > 0 and denoiser_requested
+            denoiser_ran = False
+            if should_run_denoiser:
+                denoiser_model_run_dir = denoiser_policy.model_run_dir if denoiser_policy else None
+                if not denoiser_model_run_dir:
+                    if config.denoiser_required:
+                        raise RuntimeError(
+                            "Denoiser is required but no model run directory could be resolved."
+                        )
+                    LOGGER.warning("Denoiser is enabled but no model run directory is configured; skipping inference.")
+                else:
+                    _run_denoiser_inference(
+                        batch_id,
+                        config,
+                        model_run_dir=denoiser_model_run_dir,
+                        runtime_policy=denoiser_policy,
+                    )
+                    denoiser_ran = True
+            if denoiser_ran or config.denoiser_required:
+                _assert_batch_denoiser_complete(batch_id, config=config)
 
             repository.finalize_ingest_batch(
                 batch_id,
@@ -124,25 +435,60 @@ def run_firms_ingest(
                 inserted=inserted,
                 skipped=max(skipped_duplicates, 0),
             )
+            if watermark_advanced_to is not None:
+                repository.advance_ingest_watermark(
+                    source=source,
+                    area_key=area_key,
+                    last_acq_time_utc=watermark_advanced_to,
+                    last_batch_id=batch_id,
+                )
+            log_event(
+                LOGGER,
+                "firms.watermark",
+                "Applied FIRMS incremental watermark filter",
+                source=source,
+                batch_id=batch_id,
+                area_key=area_key,
+                watermark_before=watermark_time_utc.isoformat() if watermark_time_utc else None,
+                rows_after_watermark_filter=rows_after_watermark_filter,
+                watermark_advanced_to=watermark_advanced_to.isoformat() if watermark_advanced_to else None,
+            )
             LOGGER.info(
-                "Ingested source=%s batch=%s fetched=%s parsed=%s inserted=%s duplicates=%s",
+                "Ingested source=%s batch=%s fetched=%s parsed=%s post_watermark=%s inserted=%s duplicates=%s",
                 source,
                 batch_id,
                 fetched_count,
                 parsed_count,
+                rows_after_watermark_filter,
                 inserted,
                 skipped_duplicates,
             )
         except Exception:  # pragma: no cover - defensive logging
             LOGGER.exception("Ingest failed for source=%s batch=%s", source, batch_id)
+            persisted_after_cleanup = 0
+            try:
+                persisted_before_cleanup = repository.count_detections_for_batch(batch_id)
+                if persisted_before_cleanup > 0:
+                    deleted = repository.delete_detections_for_batch(batch_id)
+                    LOGGER.warning(
+                        "Removed %s persisted detections for failed batch %s",
+                        deleted,
+                        batch_id,
+                    )
+                persisted_after_cleanup = repository.count_detections_for_batch(batch_id)
+            except Exception:
+                LOGGER.exception("Failed to cleanup detections for failed batch %s", batch_id)
             repository.finalize_ingest_batch(
                 batch_id,
                 status="failed",
                 fetched=fetched_count,
-                inserted=inserted,
-                skipped=max(skipped_duplicates, 0),
+                inserted=persisted_after_cleanup,
+                skipped=max(rows_after_watermark_filter - persisted_after_cleanup, 0),
             )
             return 1
+
+    if config.firms_reconcile_unscored_batches:
+        _reconcile_unscored_batches(max_batches=int(config.firms_reconcile_max_batches))
 
     return 0
 
@@ -160,7 +506,11 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     return [segment.strip() for segment in value.split(",") if segment.strip()]
 
 
-def _update_all_scoring_atomic(batch_id: int) -> None:
+def _update_all_scoring_atomic(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> None:
     """Update all scoring columns for detections in the batch atomically.
     
     This function wraps all scoring updates (false source masking, persistence,
@@ -177,7 +527,7 @@ def _update_all_scoring_atomic(batch_id: int) -> None:
         from api.fires.repo import update_all_scoring_for_batch
 
         LOGGER.info("Updating all scoring for batch %s (atomic transaction)", batch_id)
-        counts = update_all_scoring_for_batch(batch_id)
+        counts = update_all_scoring_for_batch(batch_id, conn=conn)
         LOGGER.info(
             "Batch %s scoring complete: masked=%s, persistence=%s, landcover=%s, weather=%s, likelihood=%s",
             batch_id,
@@ -192,32 +542,139 @@ def _update_all_scoring_atomic(batch_id: int) -> None:
         raise  # Re-raise to ensure batch failure is recorded
 
 
-def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> None:
+def _assert_batch_scoring_complete(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> None:
+    """Fail the batch if any required scoring column is still NULL."""
+    remaining_incomplete = repository.count_rows_with_null_columns_for_batch(
+        batch_id,
+        columns=repository.REQUIRED_SCORING_COLUMNS,
+        exclude_source_like="mvt_%",
+        conn=conn,
+    )
+    if remaining_incomplete > 0:
+        raise RuntimeError(
+            f"Batch {batch_id} still has {remaining_incomplete} production rows with NULL scoring fields"
+        )
+
+
+def _assert_batch_denoiser_complete(
+    batch_id: int,
+    *,
+    config: "FIRMSIngestSettings",
+) -> None:
+    """Fail the batch if denoiser inference left production rows unscored."""
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    shadow_mode = bool(getattr(config, "denoiser_shadow_mode", False))
+    if pipeline_version == "v2":
+        required_columns = _DENOISER_V2_REQUIRED_COLUMNS
+        # In shadow mode, keep legacy fields untouched while ensuring v2 writes are complete.
+        if not shadow_mode:
+            required_columns = required_columns + repository.REQUIRED_DENOISER_COLUMNS
+    else:
+        required_columns = repository.REQUIRED_DENOISER_COLUMNS
+
+    remaining_incomplete = repository.count_rows_with_null_columns_for_batch(
+        batch_id,
+        columns=required_columns,
+        exclude_source_like="mvt_%",
+    )
+    if remaining_incomplete > 0:
+        raise RuntimeError(
+            f"Batch {batch_id} still has {remaining_incomplete} production rows with NULL denoiser fields"
+        )
+
+
+def _reconcile_unscored_batches(max_batches: int = 5) -> None:
+    """Best-effort repair for historical rows that still have NULL fire_likelihood."""
+    candidate_batch_ids = repository.list_batches_with_unscored_likelihood(limit=max(1, max_batches))
+    if not candidate_batch_ids:
+        return
+
+    LOGGER.info(
+        "Reconciling %s batch(es) with NULL fire_likelihood: %s",
+        len(candidate_batch_ids),
+        candidate_batch_ids,
+    )
+    for batch_id in candidate_batch_ids:
+        try:
+            _update_all_scoring_atomic(batch_id)
+        except Exception:
+            LOGGER.exception("Failed to reconcile unscored batch %s", batch_id)
+
+
+def _effective_denoiser_thresholds(
+    config: "FIRMSIngestSettings",
+    runtime_policy: DenoiserRuntimePolicy | None,
+) -> dict[str, Any]:
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    if pipeline_version == "v2":
+        if runtime_policy is not None:
+            return dict(runtime_policy.thresholds)
+        return _resolve_v2_thresholds_from_config(config)
+    return {
+        "threshold": float(getattr(config, "denoiser_threshold", 0.5)),
+        "batch_size": int(getattr(config, "denoiser_batch_size", 500)),
+    }
+
+
+def _run_denoiser_inference(
+    batch_id: int,
+    config: "FIRMSIngestSettings",
+    *,
+    model_run_dir: str | None = None,
+    runtime_policy: DenoiserRuntimePolicy | None = None,
+) -> None:
     """Trigger denoiser inference via subprocess or direct module call."""
-    if not config.denoiser_model_run_dir:
+    model_run_dir = model_run_dir or (runtime_policy.model_run_dir if runtime_policy else None) or config.denoiser_model_run_dir
+    if not model_run_dir:
         LOGGER.warning(
             "Denoiser is enabled but DENOISER_MODEL_RUN_DIR is not set. Skipping inference."
         )
         return
 
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    if runtime_policy and runtime_policy.pipeline_version != pipeline_version:
+        raise RuntimeError(
+            "Denoiser runtime policy pipeline mismatch: "
+            f"policy={runtime_policy.pipeline_version}, runtime={pipeline_version}"
+        )
+    invoke_method = str(getattr(config, "denoiser_invoke_method", "uv") or "uv").strip().lower()
+    module_name = _resolve_denoiser_module_name(config)
+    threshold_profile = runtime_policy.threshold_profile if runtime_policy else _resolve_denoiser_threshold_profile(config)
+    threshold_source = runtime_policy.threshold_source if runtime_policy else "env_config"
+    effective_thresholds = _effective_denoiser_thresholds(config, runtime_policy)
+
     LOGGER.info(
-        "Starting denoiser inference for batch %s (method=%s)",
+        "Starting denoiser inference for batch %s (model_id=%s, pipeline=%s, method=%s, profile=%s, threshold_source=%s, thresholds=%s)",
         batch_id,
-        config.denoiser_invoke_method,
+        (runtime_policy.model_id if runtime_policy else None) or "none",
+        pipeline_version,
+        invoke_method,
+        threshold_profile,
+        threshold_source,
+        effective_thresholds,
     )
 
     # Use direct module import if configured
-    if config.denoiser_invoke_method == "module":
-        _run_denoiser_module_direct(batch_id, config)
+    if invoke_method == "module":
+        _run_denoiser_module_direct(
+            batch_id,
+            config,
+            model_run_dir=model_run_dir,
+            runtime_policy=runtime_policy,
+        )
         return
 
     # Build command based on invocation method
-    if config.denoiser_invoke_method == "python":
+    if invoke_method == "python":
         # Use Python directly - works in containerized environments without uv
         cmd = [
             sys.executable,
             "-m",
-            "ml.denoiser_inference",
+            module_name,
         ]
     else:
         # Default: uv run (original behavior)
@@ -227,24 +684,17 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
             "--project",
             "ml",
             "-m",
-            "ml.denoiser_inference",
+            module_name,
         ]
 
-    cmd.extend([
-        "--batch-id",
-        str(batch_id),
-        "--model-run",
-        config.denoiser_model_run_dir,
-        "--threshold",
-        str(config.denoiser_threshold),
-        "--batch-size",
-        str(config.denoiser_batch_size),
-    ])
-
-    if config.denoiser_region:
-        cmd.extend(["--region", config.denoiser_region])
-    if getattr(config, "denoiser_strict_features", False) is True:
-        cmd.append("--strict-features")
+    cmd.extend(
+        _build_denoiser_argv(
+            batch_id=batch_id,
+            model_run_dir=model_run_dir,
+            config=config,
+            runtime_policy=runtime_policy,
+        )
+    )
 
     try:
         # We capture output to get the JSON summary
@@ -260,6 +710,11 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
         last_line = output.splitlines()[-1] if output else ""
         if last_line.startswith("{") and last_line.endswith("}"):
             stats = json.loads(last_line)
+            stats["model_id"] = (runtime_policy.model_id if runtime_policy else None)
+            stats["pipeline_version"] = pipeline_version
+            stats["threshold_profile"] = threshold_profile
+            stats["threshold_source"] = threshold_source
+            stats["effective_thresholds"] = effective_thresholds
             log_event(
                 LOGGER,
                 "firms.denoiser_inference",
@@ -280,28 +735,32 @@ def _run_denoiser_inference(batch_id: int, config: "FIRMSIngestSettings") -> Non
         raise RuntimeError(f"Denoiser inference failed for batch {batch_id}") from e
 
 
-def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") -> None:
+def _run_denoiser_module_direct(
+    batch_id: int,
+    config: "FIRMSIngestSettings",
+    *,
+    model_run_dir: str,
+    runtime_policy: DenoiserRuntimePolicy | None = None,
+) -> None:
     """Run denoiser inference by directly importing the module (no subprocess).
     
     This avoids subprocess overhead and works in environments where uv/python
     command-line invocation is problematic.
     """
     try:
-        # Import the denoiser inference module
-        from ml.denoiser_inference import main as denoiser_main
-        
-        # Build arguments as if they came from command line
-        argv = [
-            "--batch-id", str(batch_id),
-            "--model-run", config.denoiser_model_run_dir,
-            "--threshold", str(config.denoiser_threshold),
-            "--batch-size", str(config.denoiser_batch_size),
-        ]
-        if config.denoiser_region:
-            argv.extend(["--region", config.denoiser_region])
-        if getattr(config, "denoiser_strict_features", False) is True:
-            argv.append("--strict-features")
-        
+        # Import the denoiser inference module dynamically for v1/v2.
+        module_name = _resolve_denoiser_module_name(config)
+        module = importlib.import_module(module_name)
+        denoiser_main = getattr(module, "main")
+
+        # Build arguments as if they came from command line.
+        argv = _build_denoiser_argv(
+            batch_id=batch_id,
+            model_run_dir=model_run_dir,
+            config=config,
+            runtime_policy=runtime_policy,
+        )
+
         # Capture the result - the module should return stats or print JSON
         # We need to capture stdout to get the JSON output
         import io
@@ -315,6 +774,13 @@ def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") ->
         last_line = output.splitlines()[-1] if output else ""
         if last_line.startswith("{") and last_line.endswith("}"):
             stats = json.loads(last_line)
+            stats["model_id"] = (runtime_policy.model_id if runtime_policy else None)
+            stats["pipeline_version"] = _resolve_denoiser_pipeline_version(config)
+            stats["threshold_profile"] = (
+                runtime_policy.threshold_profile if runtime_policy else _resolve_denoiser_threshold_profile(config)
+            )
+            stats["threshold_source"] = runtime_policy.threshold_source if runtime_policy else "env_config"
+            stats["effective_thresholds"] = _effective_denoiser_thresholds(config, runtime_policy)
             log_event(
                 LOGGER,
                 "firms.denoiser_inference",
@@ -323,10 +789,10 @@ def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") ->
             )
         else:
             LOGGER.warning("Denoiser inference finished but no JSON summary found in output.")
-            
+
     except ImportError as e:
         LOGGER.error(
-            "Failed to import ml.denoiser_inference for direct module invocation: %s",
+            "Failed to import denoiser inference module for direct invocation: %s",
             e
         )
         raise RuntimeError(
@@ -335,6 +801,70 @@ def _run_denoiser_module_direct(batch_id: int, config: "FIRMSIngestSettings") ->
     except Exception as e:
         LOGGER.error("Denoiser inference failed for batch %s: %s", batch_id, e)
         raise RuntimeError(f"Denoiser inference failed for batch {batch_id}") from e
+
+
+def _build_denoiser_argv(
+    *,
+    batch_id: int,
+    model_run_dir: str,
+    config: "FIRMSIngestSettings",
+    runtime_policy: DenoiserRuntimePolicy | None = None,
+) -> list[str]:
+    argv = [
+        "--batch-id",
+        str(batch_id),
+        "--model-run",
+        model_run_dir,
+    ]
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    if runtime_policy and runtime_policy.pipeline_version != pipeline_version:
+        raise RuntimeError(
+            "Denoiser runtime policy pipeline mismatch while building argv: "
+            f"policy={runtime_policy.pipeline_version}, runtime={pipeline_version}"
+        )
+    if pipeline_version == "v2":
+        thresholds = runtime_policy.thresholds if runtime_policy else _resolve_v2_thresholds_from_config(config)
+        argv.extend(
+            [
+                "--strong-filter-threshold",
+                str(thresholds["strong_filter_threshold"]),
+                "--downweight-threshold",
+                str(thresholds["downweight_threshold"]),
+                "--uncertainty-band-low",
+                str(thresholds["uncertainty_band_low"]),
+                "--uncertainty-band-high",
+                str(thresholds["uncertainty_band_high"]),
+                "--event-front-radius-m",
+                str(thresholds["event_front_radius_m"]),
+                "--event-front-max-gap-minutes",
+                str(thresholds["event_front_max_gap_minutes"]),
+                "--event-link-radius-m",
+                str(thresholds["event_link_radius_m"]),
+                "--event-link-max-gap-days",
+                str(thresholds["event_link_max_gap_days"]),
+                "--event-static-persistence-threshold",
+                str(thresholds["event_static_persistence_threshold"]),
+            ]
+        )
+        if bool(thresholds.get("event_strict_static_split", getattr(config, "denoiser_event_strict_static_split", True))):
+            argv.append("--event-strict-static-split")
+        if bool(getattr(config, "denoiser_shadow_mode", False)):
+            argv.append("--shadow-mode")
+        return argv
+
+    argv.extend(
+        [
+            "--threshold",
+            str(config.denoiser_threshold),
+            "--batch-size",
+            str(config.denoiser_batch_size),
+        ]
+    )
+    if config.denoiser_region:
+        argv.extend(["--region", config.denoiser_region])
+    if bool(getattr(config, "denoiser_strict_features", False)):
+        argv.append("--strict-features")
+    return argv
 
 
 def _log_firms_validation(

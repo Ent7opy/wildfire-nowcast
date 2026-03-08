@@ -1,0 +1,60 @@
+{
+  "run_id": "20260224_135306",
+  "exported_at": "2026-02-24T13:55:37.700129Z",
+  "rule_version": "v2_default",
+  "aoi_bbox": [
+    -180.0,
+    -90.0,
+    180.0,
+    90.0
+  ],
+  "time_range": [
+    "2025-02-01T00:00:00",
+    "2025-02-28T00:00:00"
+  ],
+  "counts": {
+    "event_total": 388032,
+    "event_train": 310398,
+    "event_eval": 77634,
+    "event_positive": 121,
+    "event_negative": 118946,
+    "event_unknown": 268965
+  },
+  "split": {
+    "strategy": "time_percentile",
+    "percentile": 0.8,
+    "split_dt": "2025-02-23T04:53:00+00:00"
+  },
+  "features": [
+    "detection_count",
+    "positive_count",
+    "negative_count",
+    "probable_positive_count",
+    "weak_supervision_count",
+    "sensor",
+    "source",
+    "confidence_mean",
+    "confidence_max",
+    "frp_mean",
+    "frp_max",
+    "brightness_mean",
+    "bright_t31_mean",
+    "scan_mean",
+    "track_mean",
+    "landcover_mean",
+    "persistence_mean",
+    "weather_mean",
+    "is_day_ratio",
+    "lat_centroid",
+    "lon_centroid",
+    "duration_hours",
+    "sin_doy",
+    "cos_doy",
+    "biome_slice"
+  ],
+  "paths": {
+    "train": "data/denoiser/snapshots_v2/run_20260224_135306/train.parquet",
+    "eval": "data/denoiser/snapshots_v2/run_20260224_135306/eval.parquet",
+    "full": "data/denoiser/snapshots_v2/run_20260224_135306/full.parquet"
+  }
+}

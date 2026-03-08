@@ -9,6 +9,7 @@ from components.sidebar import render_sidebar
 from components.map_view import render_map_view
 from components.click_details import render_click_details
 from components.forecast_status import render_forecast_status_polling
+from components.data_freshness_banner import render_data_freshness_banner
 
 
 def main() -> None:
@@ -195,6 +196,64 @@ def main() -> None:
           [data-testid="stToggle"] label span {
             color: var(--text-primary) !important;
           }
+
+          /* ── Data freshness badges ─────────────────────────────────── */
+          .wf-data-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 6px 0 12px 0;
+          }
+
+          .wf-source-card {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(16, 24, 40, 0.72);
+            border: 1px solid var(--border-subtle);
+            border-radius: 999px;
+            padding: 6px 12px;
+          }
+
+          .wf-source-name {
+            color: var(--text-primary);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+          }
+
+          .wf-source-status {
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+          }
+
+          .wf-status-fresh {
+            color: #8ff3b3;
+            background: rgba(34, 197, 94, 0.2);
+            border: 1px solid rgba(34, 197, 94, 0.35);
+          }
+
+          .wf-status-stale {
+            color: #ffd27d;
+            background: rgba(245, 158, 11, 0.18);
+            border: 1px solid rgba(245, 158, 11, 0.35);
+          }
+
+          .wf-status-missing, .wf-status-unknown {
+            color: #ff9ca2;
+            background: rgba(239, 68, 68, 0.18);
+            border: 1px solid rgba(239, 68, 68, 0.35);
+          }
+
+          .wf-source-meta {
+            color: var(--text-secondary);
+            font-size: 11px;
+            white-space: nowrap;
+          }
         </style>
         """,
         unsafe_allow_html=True,
@@ -206,13 +265,14 @@ def main() -> None:
     # App identity
     st.title("Wildfire Nowcast & Forecast")
     st.caption(
-        "Live satellite fire detections with optional spread overlays."
+        "Live satellite fire events with spread overlays."
     )
     st.info(
         "Forecast overlays are **experimental** and **probabilistic** (not deterministic). "
         "Use them as situational awareness, not as operational guidance.",
         icon="ℹ️",
     )
+    render_data_freshness_banner()
 
     # Sidebar controls
     with st.sidebar:
@@ -228,8 +288,11 @@ def main() -> None:
 
     # Active filters summary
     st.caption(
-        f"**Fires filters:** {app_state.time_window}, "
-        f"likelihood at least {app_state.filters.min_likelihood:.2f}"
+        f"**Events filters:** {app_state.time_window}, "
+        f"event score at least {app_state.filters.min_likelihood:.2f}, "
+        f"active-only={'on' if app_state.filters.active_only else 'off'}, "
+        f"cluster={'on' if app_state.filters.cluster_points else 'off'}, "
+        f"risk={'on' if app_state.layers.show_risk else 'off'}"
     )
 
     # Render map + details side-by-side

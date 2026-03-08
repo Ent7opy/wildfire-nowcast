@@ -27,6 +27,8 @@ venv/
 env/
 ENV/
 .venv
+.venv*/
+*/.venv*/
 .venv-win/
 env.bak/
 venv.bak/
@@ -102,9 +104,14 @@ logs/
 # checkpoints/
 
 # Local outputs / downloaded datasets (keep repo clean)
+*.parquet
 data/ingest/
 data/denoiser/snapshots/
+data/denoiser/snapshots_v2/
+data/denoiser/eval_v2/
 data/denoiser/*.parquet
+data/lulc/
+data/authority/industrial/eu/eprtr_raw_*.csv
 data/forecasts/
 data/hindcasts/
 data/terrain/bbox_*/

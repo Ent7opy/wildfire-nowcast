@@ -51,7 +51,7 @@ services:
     shm_size: 256mb
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-wildfire}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wildfire}
@@ -120,16 +120,59 @@ services:
     healthcheck:
       disable: true
 
+  ingest_scheduler:
+    build:
+      context: ./api
+    command: >
+      uv run --project ingest -m ingest.orchestrator
+      --loop
+      --jobs firms,perimeters
+      --enforce-freshness
+      --max-retries 3
+      --retry-backoff-seconds 20
+      --firms-interval-minutes 30
+      --weather-interval-minutes 180
+      --perimeters-interval-minutes 1440
+      --dashboard-path /app/data/ingest/orchestrator_dashboard.json
+    restart: unless-stopped
+    volumes:
+      - ./api:/app/api:delegated
+      - ./data:/app/data
+      - ./ingest:/app/ingest:delegated
+      - ./ml:/app/ml:delegated
+      - /app/api/.venv
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      DENOISER_REQUIRED: "true"
+      DENOISER_PIPELINE_VERSION: ${DENOISER_PIPELINE_VERSION:-v2}
+      DENOISER_THRESHOLD_PROFILE: ${DENOISER_THRESHOLD_PROFILE:-strict_v1}
+      DENOISER_ALLOW_UNSAFE_THRESHOLD_OVERRIDE: ${DENOISER_ALLOW_UNSAFE_THRESHOLD_OVERRIDE:-false}
+      DENOISER_BATCH_SIZE: ${DENOISER_BATCH_SIZE:-5000}
+      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-wildfire}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wildfire}
+      POSTGRES_DB: ${POSTGRES_DB:-wildfire}
+    depends_on:
+      - db
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/data/ingest/orchestrator_dashboard.json"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   tiles:
     image: pramsey/pg_tileserv:latest
+    restart: unless-stopped
     ports:
       - "7800:7800"
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER:-wildfire}:${POSTGRES_PASSWORD:-wildfire}@db:5432/${POSTGRES_DB:-wildfire}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
 volumes:
   db_data:
   redis_data:
-

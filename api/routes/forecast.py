@@ -759,6 +759,11 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                 "weather_fallback_used",
                 "weather_fallback_reason",
                 "terrain_fallback_used",
+                "confidence_level",
+                "staleness_hours",
+                "fallback_used",
+                "shadow_evaluated",
+                "shadow_metrics_summary",
                 "model_name",
                 "model_version",
             ):

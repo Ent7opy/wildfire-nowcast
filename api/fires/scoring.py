@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -14,12 +15,263 @@ from sqlalchemy import text
 from api.db import get_engine
 
 LOGGER = logging.getLogger(__name__)
+_DEFAULT_POLICY_VERSION = os.getenv("INDUSTRIAL_MASK_POLICY_VERSION", "").strip()
+
+
+def _active_industrial_policy(policy_version: str | None = None) -> dict | None:
+    where = "active_to IS NULL OR active_to > NOW()"
+    params: dict[str, object] = {}
+    if policy_version:
+        where = "policy_version = :policy_version"
+        params["policy_version"] = str(policy_version).strip()
+    stmt = text(
+        f"""
+        SELECT
+            policy_version,
+            strict_no_go,
+            gold_buffer_m,
+            silver_buffer_min_m,
+            silver_buffer_max_m
+        FROM industrial_mask_policies
+        WHERE {where}
+        ORDER BY active_from DESC, policy_version DESC
+        LIMIT 1
+        """
+    )
+    try:
+        with get_engine().begin() as conn:
+            row = conn.execute(stmt, params).mappings().first()
+    except Exception:  # pragma: no cover - safe fallback for pre-migration state
+        return None
+    if row is None:
+        return None
+    payload = dict(row)
+    required = {
+        "policy_version",
+        "strict_no_go",
+        "gold_buffer_m",
+        "silver_buffer_min_m",
+        "silver_buffer_max_m",
+    }
+    if not required.issubset(payload.keys()):
+        return None
+    return payload
+
+
+def _legacy_mask_false_sources(
+    detection_ids: list[int],
+    *,
+    radius_m: float,
+) -> dict[int, bool]:
+    stmt = text("""
+        SELECT DISTINCT fd.id AS detection_id
+        FROM fire_detections fd
+        JOIN industrial_sources ind ON (
+            ST_DWithin(fd.geom::geography, ind.geom::geography, :radius_m)
+        )
+        WHERE fd.id = ANY(:detection_ids)
+    """)
+
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            stmt,
+            {
+                "detection_ids": detection_ids,
+                "radius_m": float(radius_m),
+            },
+        ).mappings().all()
+    masked = {int(row["detection_id"]): True for row in rows}
+    for det_id in detection_ids:
+        masked.setdefault(det_id, False)
+    return masked
+
+
+def _policy_mask_false_sources(
+    detection_ids: list[int],
+    *,
+    policy: dict,
+    write_audit: bool,
+) -> dict[int, bool]:
+    stmt = text(
+        """
+        WITH input_detections AS (
+            SELECT id, geom
+            FROM fire_detections
+            WHERE id = ANY(:detection_ids)
+        ),
+        no_go AS (
+            SELECT DISTINCT d.id AS detection_id
+            FROM input_detections d
+            JOIN industrial_no_go_zones z
+              ON z.is_active
+             AND z.policy_version = :policy_version
+             AND z.geom && d.geom
+             AND ST_Intersects(z.geom, d.geom)
+        ),
+        candidates AS (
+            SELECT
+                d.id AS detection_id,
+                i.id AS industrial_source_id,
+                i.authority_tier,
+                ST_Distance(d.geom::geography, i.geom::geography) AS distance_m,
+                CASE
+                    WHEN i.authority_tier = 'gold' THEN :gold_buffer_m
+                    WHEN i.authority_tier = 'silver' THEN LEAST(
+                        :silver_buffer_max_m,
+                        GREATEST(
+                            :silver_buffer_min_m,
+                            COALESCE(i.coordinate_precision_m::double precision, :silver_buffer_min_m)
+                        )
+                    )
+                    ELSE 0.0
+                END AS applied_buffer_m
+            FROM input_detections d
+            JOIN industrial_sources i
+              ON COALESCE(i.is_active, TRUE)
+             AND i.authority_tier IN ('gold', 'silver')
+             AND (i.valid_from IS NULL OR i.valid_from <= NOW())
+             AND (i.valid_to IS NULL OR i.valid_to >= NOW())
+             AND ST_DWithin(
+                d.geom::geography,
+                i.geom::geography,
+                CASE
+                    WHEN i.authority_tier = 'gold' THEN :gold_buffer_m
+                    WHEN i.authority_tier = 'silver' THEN LEAST(
+                        :silver_buffer_max_m,
+                        GREATEST(
+                            :silver_buffer_min_m,
+                            COALESCE(i.coordinate_precision_m::double precision, :silver_buffer_min_m)
+                        )
+                    )
+                    ELSE 0.0
+                END
+             )
+        ),
+        ranked AS (
+            SELECT
+                c.*,
+                BOOL_OR(c.authority_tier = 'gold') OVER (PARTITION BY c.detection_id) AS has_gold_candidate,
+                ROW_NUMBER() OVER (
+                    PARTITION BY c.detection_id
+                    ORDER BY
+                        CASE c.authority_tier WHEN 'gold' THEN 0 ELSE 1 END,
+                        c.distance_m ASC,
+                        c.industrial_source_id ASC
+                ) AS rn
+            FROM candidates c
+        ),
+        best AS (
+            SELECT
+                detection_id,
+                industrial_source_id,
+                authority_tier,
+                distance_m,
+                applied_buffer_m,
+                has_gold_candidate
+            FROM ranked
+            WHERE rn = 1
+        ),
+        decisions AS (
+            SELECT
+                d.id AS detection_id,
+                b.industrial_source_id,
+                b.authority_tier,
+                b.distance_m,
+                b.applied_buffer_m,
+                CASE
+                    WHEN :strict_no_go AND ng.detection_id IS NOT NULL THEN FALSE
+                    WHEN b.detection_id IS NULL THEN FALSE
+                    WHEN b.authority_tier = 'gold' THEN TRUE
+                    WHEN b.authority_tier = 'silver' AND COALESCE(b.has_gold_candidate, FALSE) THEN FALSE
+                    WHEN b.authority_tier = 'silver' THEN TRUE
+                    ELSE FALSE
+                END AS masked,
+                CASE
+                    WHEN :strict_no_go AND ng.detection_id IS NOT NULL THEN 'no_go_zone'
+                    WHEN b.detection_id IS NULL THEN 'no_nearby_source'
+                    WHEN b.authority_tier = 'gold' THEN 'gold_match'
+                    WHEN b.authority_tier = 'silver' AND COALESCE(b.has_gold_candidate, FALSE) THEN 'silver_suppressed_gold_overlap'
+                    WHEN b.authority_tier = 'silver' THEN 'silver_fallback_match'
+                    ELSE 'unmasked'
+                END AS mask_reason
+            FROM input_detections d
+            LEFT JOIN no_go ng ON ng.detection_id = d.id
+            LEFT JOIN best b ON b.detection_id = d.id
+        )
+        SELECT
+            detection_id,
+            industrial_source_id,
+            authority_tier,
+            distance_m,
+            applied_buffer_m,
+            masked,
+            mask_reason
+        FROM decisions
+        """
+    )
+
+    params = {
+        "detection_ids": detection_ids,
+        "policy_version": str(policy["policy_version"]),
+        "strict_no_go": bool(policy["strict_no_go"]),
+        "gold_buffer_m": float(policy["gold_buffer_m"]),
+        "silver_buffer_min_m": float(policy["silver_buffer_min_m"]),
+        "silver_buffer_max_m": float(policy["silver_buffer_max_m"]),
+    }
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, params).mappings().all()
+        if write_audit and rows:
+            audit_stmt = text(
+                """
+                INSERT INTO industrial_mask_audit (
+                    fire_detection_id,
+                    industrial_source_id,
+                    policy_version,
+                    masked,
+                    mask_reason,
+                    matched_distance_m,
+                    applied_buffer_m,
+                    created_at
+                ) VALUES (
+                    :fire_detection_id,
+                    :industrial_source_id,
+                    :policy_version,
+                    :masked,
+                    :mask_reason,
+                    :matched_distance_m,
+                    :applied_buffer_m,
+                    NOW()
+                )
+                """
+            )
+            conn.execute(
+                audit_stmt,
+                [
+                    {
+                        "fire_detection_id": int(row["detection_id"]),
+                        "industrial_source_id": row["industrial_source_id"],
+                        "policy_version": str(policy["policy_version"]),
+                        "masked": bool(row["masked"]),
+                        "mask_reason": str(row["mask_reason"]),
+                        "matched_distance_m": row["distance_m"],
+                        "applied_buffer_m": row["applied_buffer_m"],
+                    }
+                    for row in rows
+                ],
+            )
+
+    masked = {int(row["detection_id"]): bool(row["masked"]) for row in rows}
+    for det_id in detection_ids:
+        masked.setdefault(det_id, False)
+    return masked
 
 
 def mask_false_sources(
     detections: Iterable[dict],
     *,
     radius_m: float = 500.0,
+    policy_version: str | None = None,
+    write_audit: bool = True,
 ) -> dict[int, bool]:
     """Identify fire detections near known industrial false-positive sources.
 
@@ -79,38 +331,22 @@ def mask_false_sources(
         )
         return {det_id: False for det_id in detection_ids}
 
-    # Query detections within radius_m of any industrial source
-    stmt = text("""
-        SELECT DISTINCT fd.id AS detection_id
-        FROM fire_detections fd
-        JOIN industrial_sources ind ON (
-            ST_DWithin(fd.geom::geography, ind.geom::geography, :radius_m)
+    effective_policy = _active_industrial_policy(policy_version or _DEFAULT_POLICY_VERSION)
+    if effective_policy is None:
+        return _legacy_mask_false_sources(detection_ids, radius_m=radius_m)
+
+    try:
+        return _policy_mask_false_sources(
+            detection_ids,
+            policy=effective_policy,
+            write_audit=bool(write_audit),
         )
-        WHERE fd.id = ANY(:detection_ids)
-    """)
-
-    with get_engine().begin() as conn:
-        result = conn.execute(
-            stmt,
-            {
-                "detection_ids": detection_ids,
-                "radius_m": float(radius_m),
-            },
+    except Exception as exc:  # pragma: no cover - safe fallback when policy tables are unavailable
+        LOGGER.warning(
+            "Policy masking failed; falling back to legacy industrial masking. Error: %s",
+            exc,
         )
-        rows = result.mappings().all()
-
-    # Map masked detections to True
-    masked: dict[int, bool] = {}
-    for row in rows:
-        detection_id = int(row["detection_id"])
-        masked[detection_id] = True
-
-    # For detections not near industrial sources, explicitly mark as not masked
-    for det_id in detection_ids:
-        if det_id not in masked:
-            masked[det_id] = False
-
-    return masked
+        return _legacy_mask_false_sources(detection_ids, radius_m=radius_m)
 
 
 def compute_persistence_scores(

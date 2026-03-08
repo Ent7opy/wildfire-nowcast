@@ -23,7 +23,7 @@ import yaml
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss
+from sklearn.metrics import brier_score_loss, precision_recall_curve
 
 # Add project root to sys.path if needed
 REPO_ROOT = Path(__file__).parent.parent
@@ -31,6 +31,135 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 LOGGER = logging.getLogger(__name__)
+
+
+def fit_binary_probability_calibrator(
+    raw_scores: np.ndarray,
+    labels: np.ndarray,
+    *,
+    method: str = "isotonic",
+) -> Dict[str, Any]:
+    """Fit a binary score calibrator for raw model outputs.
+
+    The returned mapping is compatible with denoiser bundle artifacts and
+    can be applied with ``apply_binary_probability_calibrator``.
+    """
+    y = np.asarray(labels, dtype=int)
+    scores = np.asarray(raw_scores, dtype=float)
+
+    if len(scores) != len(y):
+        raise ValueError("raw_scores and labels must have identical length.")
+    if len(scores) == 0 or np.unique(y).size < 2:
+        return {"type": "identity", "model": None}
+
+    method_norm = str(method).strip().lower()
+    if method_norm == "isotonic":
+        model = IsotonicRegression(out_of_bounds="clip")
+        model.fit(scores, y)
+        return {"type": "isotonic", "model": model}
+    if method_norm in {"platt", "logistic"}:
+        model = LogisticRegression(max_iter=1000, solver="lbfgs")
+        model.fit(scores.reshape(-1, 1), y)
+        return {"type": "platt", "model": model}
+
+    raise ValueError(f"Unsupported calibration method: {method!r}")
+
+
+def apply_binary_probability_calibrator(calibrator: Dict[str, Any], raw_scores: np.ndarray) -> np.ndarray:
+    """Map raw scores to calibrated probabilities in [0, 1]."""
+    ctype = str(calibrator.get("type", "identity")).strip().lower()
+    model = calibrator.get("model")
+    scores = np.asarray(raw_scores, dtype=float)
+
+    if ctype == "isotonic" and model is not None:
+        out = np.asarray(model.predict(scores), dtype=float)
+        return np.clip(out, 0.0, 1.0)
+    if ctype == "platt" and model is not None:
+        out = np.asarray(model.predict_proba(scores.reshape(-1, 1))[:, 1], dtype=float)
+        return np.clip(out, 0.0, 1.0)
+    return np.clip(scores, 0.0, 1.0)
+
+
+def optimize_threshold_for_target_recall(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    *,
+    target_recall: float = 0.92,
+    fallback_threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """Choose a probability threshold that prioritizes recall under class imbalance.
+
+    Selection rule:
+    - If any threshold meets ``recall >= target_recall``, pick the highest such threshold
+      (most conservative threshold that still satisfies recall target).
+    - Otherwise, pick the threshold with maximum recall (and best precision tie-break).
+    """
+    probs = np.asarray(probabilities, dtype=float)
+    y = np.asarray(labels, dtype=int)
+
+    if probs.shape[0] != y.shape[0]:
+        raise ValueError("probabilities and labels must have identical length.")
+
+    valid_mask = np.isfinite(probs) & np.isfinite(y.astype(float))
+    probs = np.clip(probs[valid_mask], 0.0, 1.0)
+    y = y[valid_mask]
+
+    result: Dict[str, Any] = {
+        "target_recall": float(target_recall),
+        "fallback_threshold": float(fallback_threshold),
+        "optimal_threshold": float(fallback_threshold),
+        "achieved_recall": None,
+        "achieved_precision": None,
+        "target_met": False,
+        "selection_strategy": "fallback",
+        "candidate_threshold_count": 0,
+    }
+
+    if probs.size == 0 or np.unique(y).size < 2:
+        return result
+
+    precision, recall, thresholds = precision_recall_curve(y, probs)
+    if thresholds.size == 0:
+        return result
+
+    # precision/recall have len(thresholds) + 1; align threshold-indexed values.
+    precision_t = np.asarray(precision[:-1], dtype=float)
+    recall_t = np.asarray(recall[:-1], dtype=float)
+    thresholds_t = np.asarray(thresholds, dtype=float)
+
+    meets_target = recall_t >= float(target_recall)
+    result["candidate_threshold_count"] = int(thresholds_t.size)
+
+    if np.any(meets_target):
+        candidate_idx = np.flatnonzero(meets_target)
+        max_thr = float(np.max(thresholds_t[candidate_idx]))
+        tied_idx = candidate_idx[np.isclose(thresholds_t[candidate_idx], max_thr)]
+        best_idx = int(tied_idx[np.argmax(precision_t[tied_idx])])
+        result.update(
+            {
+                "optimal_threshold": float(thresholds_t[best_idx]),
+                "achieved_recall": float(recall_t[best_idx]),
+                "achieved_precision": float(precision_t[best_idx]),
+                "target_met": True,
+                "selection_strategy": "max_threshold_meeting_target_recall",
+            }
+        )
+        return result
+
+    # Target recall cannot be met; choose best achievable recall with precision tie-break.
+    best_recall = float(np.max(recall_t))
+    best_recall_idx = np.flatnonzero(np.isclose(recall_t, best_recall))
+    best_idx = int(best_recall_idx[np.argmax(precision_t[best_recall_idx])])
+    result.update(
+        {
+            "optimal_threshold": float(thresholds_t[best_idx]),
+            "achieved_recall": float(recall_t[best_idx]),
+            "achieved_precision": float(precision_t[best_idx]),
+            "target_met": False,
+            "selection_strategy": "max_recall_fallback",
+        }
+    )
+    return result
 
 
 class SpreadProbabilityCalibrator:
@@ -161,6 +290,7 @@ def fit_from_hindcast_run(
     p_min: float = 1e-4,
     split_percentile: float = 0.8,
     out_root: str = "models/spread_calibration",
+    min_positive_for_isotonic: int = 5000,
 ) -> SpreadProbabilityCalibrator:
     """Train a calibrator from a hindcast run directory.
 
@@ -265,17 +395,27 @@ def fit_from_hindcast_run(
         y_train = np.concatenate(train_cases["y_obs"].values)
         
         # 2a. Fit
-        # Check if we have both classes
+        # Isotonic remains the default. For sparse positives, fallback to Platt for stability.
         effective_method = method
+        pos_count = int(np.sum(y_train > 0.5))
+        if method == "isotonic" and pos_count < int(min_positive_for_isotonic):
+            effective_method = "platt"
+            LOGGER.info(
+                "Positive support is sparse for T+%sh (pos=%s < %s). "
+                "Falling back to Platt scaling.",
+                h,
+                pos_count,
+                min_positive_for_isotonic,
+            )
+
         if len(np.unique(y_train)) < 2:
-            if method == "platt":
+            if effective_method == "platt":
                 LOGGER.warning(
                     f"Only one class in training data for T+{h}h; "
                     "falling back to Isotonic (constant) predictor as Platt scaling requires 2 classes."
                 )
-                effective_method = "isotonic"
-            else:
-                LOGGER.info(f"Only one class in training data for T+{h}h; Isotonic will predict constant value.")
+            effective_method = "isotonic"
+            LOGGER.info(f"Only one class in training data for T+{h}h; Isotonic will predict constant value.")
 
         LOGGER.info(f"Fitting {effective_method} calibrator for T+{h}h on {len(X_train)} samples...")
         
@@ -311,6 +451,10 @@ def fit_from_hindcast_run(
             prob_true_cal, prob_pred_cal = calibration_curve(y_eval, y_cal, n_bins=10)
             
             metrics[h] = {
+                "method": effective_method,
+                "n_train": int(X_train.size),
+                "n_eval": int(X_eval.size),
+                "n_train_positive": int(np.sum(y_train > 0.5)),
                 "brier_raw": float(brier_raw),
                 "brier_cal": float(brier_cal),
                 "improvement": float(brier_raw - brier_cal),
@@ -337,6 +481,7 @@ def fit_from_hindcast_run(
         "p_min": p_min,
         "hindcast_run_dir": str(hindcast_run_dir),
         "split_percentile": split_percentile,
+        "min_positive_for_isotonic": int(min_positive_for_isotonic),
         "horizons": list(per_horizon_models.keys()),
         "package_versions": {
             "sklearn": sys.modules["sklearn"].__version__,
@@ -373,6 +518,12 @@ def main():
     parser.add_argument("--method", type=str, choices=["isotonic", "platt"], default="isotonic", help="Calibration method.")
     parser.add_argument("--p_min", type=float, default=1e-4, help="Min probability for candidate mask.")
     parser.add_argument("--split", type=float, default=0.8, help="Train/eval split percentile.")
+    parser.add_argument(
+        "--min_positive_for_isotonic",
+        type=int,
+        default=5000,
+        help="Fallback to Platt when positives are below this threshold.",
+    )
     parser.add_argument("--out_root", type=str, default="models/spread_calibration", help="Root for artifacts.")
     
     args = parser.parse_args()
@@ -384,6 +535,7 @@ def main():
             p_min=args.p_min,
             split_percentile=args.split,
             out_root=args.out_root,
+            min_positive_for_isotonic=args.min_positive_for_isotonic,
         )
     except Exception as e:
         LOGGER.exception(f"Calibration training failed: {e}")
@@ -392,4 +544,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

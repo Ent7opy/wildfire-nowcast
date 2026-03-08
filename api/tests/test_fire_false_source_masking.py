@@ -184,6 +184,70 @@ def test_mask_false_sources_missing_table():
     assert masked[9] is False, "Detection should be unmasked when table is missing"
 
 
+def test_mask_false_sources_policy_path(monkeypatch):
+    detections = [{"id": 10, "lat": 42.0, "lon": 21.0}]
+
+    monkeypatch.setattr(
+        "api.fires.scoring._active_industrial_policy",
+        lambda *_args, **_kwargs: {
+            "policy_version": "global_authoritative_industrial_v1",
+            "strict_no_go": True,
+            "gold_buffer_m": 375.0,
+            "silver_buffer_min_m": 750.0,
+            "silver_buffer_max_m": 1000.0,
+        },
+    )
+    monkeypatch.setattr(
+        "api.fires.scoring._policy_mask_false_sources",
+        lambda detection_ids, policy, write_audit: {det_id: True for det_id in detection_ids},
+    )
+
+    # Avoid touching the DB in this unit test by forcing a positive source count.
+    mock_count_result = MagicMock()
+    mock_count_result.mappings.return_value.first.return_value = {"count": 1}
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value.execute.return_value = mock_count_result
+    with patch("api.fires.scoring.get_engine") as mock_engine:
+        mock_engine.return_value.connect.return_value = mock_conn
+        masked = mask_false_sources(detections)
+
+    assert masked[10] is True
+
+
+def test_mask_false_sources_policy_failure_fallbacks_to_legacy(monkeypatch):
+    detections = [{"id": 11, "lat": 42.0, "lon": 21.0}]
+
+    monkeypatch.setattr(
+        "api.fires.scoring._active_industrial_policy",
+        lambda *_args, **_kwargs: {
+            "policy_version": "global_authoritative_industrial_v1",
+            "strict_no_go": True,
+            "gold_buffer_m": 375.0,
+            "silver_buffer_min_m": 750.0,
+            "silver_buffer_max_m": 1000.0,
+        },
+    )
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("policy path unavailable")
+
+    monkeypatch.setattr("api.fires.scoring._policy_mask_false_sources", _raise)
+    monkeypatch.setattr(
+        "api.fires.scoring._legacy_mask_false_sources",
+        lambda detection_ids, radius_m: {det_id: False for det_id in detection_ids},
+    )
+
+    mock_count_result = MagicMock()
+    mock_count_result.mappings.return_value.first.return_value = {"count": 1}
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value.execute.return_value = mock_count_result
+    with patch("api.fires.scoring.get_engine") as mock_engine:
+        mock_engine.return_value.connect.return_value = mock_conn
+        masked = mask_false_sources(detections)
+
+    assert masked[11] is False
+
+
 @pytest.mark.integration
 def test_mask_false_sources_integration(check_likelihood_schema):
     """Integration test that validates spatial query against real database."""

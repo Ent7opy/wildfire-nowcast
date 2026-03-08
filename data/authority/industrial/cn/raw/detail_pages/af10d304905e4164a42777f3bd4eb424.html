@@ -1,0 +1,476 @@
+
+
+
+
+
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+
+<meta http-equiv="Pragma" content="no-cache" /> 
+<meta http-equiv="Cache-Control" content="no-cache" /> 
+<meta http-equiv="Expires" content="0" />
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<meta http-equiv="X-UA-Compatible" content="IE=EmulateIE8"/>
+ 
+ 
+ 
+
+
+
+
+
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/thscommon/style/artDialog/aero.css" />
+
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/jquery.min.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/baiduStatistics.js"></script>
+
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/json2.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/jquery.artDialog.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/My97DatePicker/WdatePicker.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/jquery.media.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/upload.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/exportWord.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/util/xzxk/swfupload/swfupload.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/util/xzxk/swfupload/handlers.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/util/xzxk/swfupload/fileprogress.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/js/content.js"></script>
+<!--validate start  -->
+<link rel="stylesheet" href="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/css/validationEngine.jquery.css" type="text/css" />
+<link rel="stylesheet" href="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/css/template.css" type="text/css" />
+ <script src="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/js/languages/jquery.validationEngine-zh_CN.js" type="text/javascript" charset="utf-8"></script>
+<script src="/perxxgkinfo/thscommon/javascript/jQuery-Validation-Engine-master/js/jquery.validationEngine.js" type="text/javascript" charset="utf-8"></script>
+<!--validate end  -->
+
+
+<!-- base64  -->
+<script type="text/javascript" src="/perxxgkinfo/thscommon/javascript/jquery.base64.js"></script>
+
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/util/xzxk/css/xzxk_button.css" />
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/util/xzxk/css/xzxk_style.css" />
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/util/xzxk/swfupload/default.css" />
+<link rel=stylesheet type=text/css href="/perxxgkinfo/thscommon/style/page-base.css"/>
+
+<script type="text/javascript" src="/perxxgkinfo/js/urlhanzi.js"></script>
+
+<!-- èªå®ä¹éç¨æ ·å¼ -->
+<link rel="stylesheet" type="text/css" href="/perxxgkinfo/util/css/common/custom.css" />
+<!-- æºè½å®¡æ ¸js -->
+<script type="text/javascript" src="/perxxgkinfo/report/common/layer/layer.js"></script>
+<script type="text/javascript" src="/perxxgkinfo/js/intelligent_checking.js"></script>
+<script>
+    var ctx = "/perxxgkinfo";
+</script>
+
+<title>许可信息公开内容</title>
+<link rel="shortcut icon" type="image/x-icon" href="/perxxgkinfo/gis/img/favicon.ico"/>
+<link rel="stylesheet" href="/perxxgkinfo/gis/css/default.css"/>
+<link rel="stylesheet" href="/perxxgkinfo/gis/css/app.css"/>
+<script src="/perxxgkinfo/gis/css/aes.js"></script>
+<script src="/perxxgkinfo/gis/css/mode-ecb-min.js"></script>
+<script type="text/javascript">
+var listJosn  = "" ;
+var pwd = '9e53d056f6ca1f56' ;
+var ctx='/perxxgkinfo'
+/**
+function Decrypt(word){
+	pwd = CryptoJS.enc.Utf8.parse(pwd); 
+	var decrypt = CryptoJS.AES.decrypt(word, pwd, {mode:CryptoJS.mode.ECB,padding: CryptoJS.pad.Pkcs7});  
+    return CryptoJS.enc.Utf8.stringify(decrypt).toString();  
+	//return CryptoJS.AES.decrypt(word,pwd).toString(CryptoJS.enc.Utf-8);
+}
+*/
+function Decrypt(word){  
+    var key = CryptoJS.enc.Utf8.parse(pwd);   
+    var decrypt = CryptoJS.AES.decrypt(word, key, {mode:CryptoJS.mode.ECB,padding: CryptoJS.pad.Pkcs7});  
+    return CryptoJS.enc.Utf8.stringify(decrypt).toString();  
+}  
+$(document).ready(function() {
+	var word = 'bxulHsHPgVkVixCIzlIWblVyrCXHH+AvOaE8t208QIA9fcIWqtkQyAyUfCnVqbg2u8z/Pvmlif5DglPVnaJMRKN5ijSAQx2RiN8zTNPdfQcWPIMqCex1SGyoGg3j23vwvfbLMNttpwlBT4Io+A/4mIK+4dhuzb8GobtpmjGb5qHzK0hOyywbtfHnnJP9dNsNDMmVEWUWszkT0p3eaiZkPUXl/aDopX/H4RnsZJ0njaiEH5cumkWTu3hsIK4sjAsQVE2o1AcHUGfvhQunRPyvV7UTwRxiUQyhO356X7ZdlQwOWZSuh0ephQjYKI7vlB963gTI95pGLj7E/kyRLBjyh+k894s9ekWxqG0214olFKbI5IVomHDob/DGWZhz6d8MfdSBg8QsjWX8sbxYA9IqIrkKGCsnZkEirNzSEH7/oBZdAHmGsSPnW+hQF26geCPzipJFYig+HZARMF40YULAog==' ;
+
+	listJosn = Decrypt(word);
+	
+	var spdataMap_zywrwlbid="fq,fs";
+	var zywrwlb = "";
+	if(spdataMap_zywrwlbid.length>0){
+		var arr = spdataMap_zywrwlbid.split(",");
+		for (var k = 0; k < arr.length; k++) {
+			if("fq"==arr[k]){
+				arr[k]=","+"废气";
+				zywrwlb+=arr[k];
+			}else if("fs"==arr[k]){
+				arr[k]=","+"废水";
+				zywrwlb+=arr[k];
+			}else if(" fs"==arr[k]){
+				arr[k]=","+"废水";
+				zywrwlb+=arr[k];
+			}
+		}
+	}
+    if(zywrwlb!=""){
+    	zywrwlb=zywrwlb.substring(1);
+    }
+    $("#zywrwlbid").html(zywrwlb);
+    
+    var spdataMap_airemissionid="PFXS_2";
+	var airemission = "" ;
+	if(spdataMap_airemissionid.length>0){
+		var arr1 = spdataMap_airemissionid.split(",");
+		for (var k = 0; k < arr1.length; k++) {
+			if("PFXS_1"==arr1[k]){
+				arr1[k]=","+"有组织";
+				airemission+=arr1[k];
+			}else if("PFXS_2"==arr1[k]){
+				arr1[k]=","+"无组织";
+				airemission+=arr1[k];
+			}else if(" PFXS_2"==arr1[k]){
+				arr1[k]=","+"无组织";
+				airemission+=arr1[k];
+			}
+		}
+	}
+    if(airemission!=""){
+    	airemission=airemission.substring(1);
+    }
+    $("#airemissionid").html(airemission);
+    
+    var spdataMap_wateremissionname="间断排放，排放期间流量不稳定且无规律，但不属于冲击型排放@连续排放，流量不稳定且无规律，但不属于冲击型排放";
+	var wateremissionname = "";
+	if(spdataMap_wateremissionname.length>0){
+		var arr1 = spdataMap_wateremissionname.split("@");
+		for (var k = 0; k < arr1.length; k++) {
+			wateremissionname+="; "+arr1[k];
+		}
+	}
+    if(wateremissionname!=""){
+    	wateremissionname=wateremissionname.substring(1);
+    }
+    $("#wateremissionname").html(wateremissionname);
+    
+});
+
+//点击查看的方法
+function showItemCard(dataid,state,cardtype){ 
+	$("#dataid").val(dataid);//项目唯一id
+	$("#operate").val("readonly");//request：页面必填 editable：可编辑   readonly：只读
+	$("#state").val("查看");//当前节点
+	$("#cardtype").val(cardtype);//项目卡对应的xml名称
+	document.all.jumpform.action="/perxxgkinfo/common/itemcard/item-card!itemcardmain.action";
+	document.all.jumpform.submit();
+}
+
+
+// 监督执法信息-详情查看
+function showSupervision(pkid){
+    $.dialog.openhanzi('/perxxgkinfo/syssb/wysb/hpsp/hpsp-company-sewage!showSupervision.action?pkid='+pkid,{
+        lock: true,
+        background: '#333', // 背景色
+        opacity: 0.30,  // 透明度
+        title:'监督执法信息',
+        lock:'ture',
+        width:'1250px',
+        height:'500px',
+        fixed: true,
+        close:function(){
+            
+        }
+    }); 
+ }
+function setIframeHeight(iframe) {
+	if (iframe) {
+	var iframeWin = iframe.contentWindow || iframe.contentDocument.parentWindow;
+	if (iframeWin.document.body) {
+	iframe.height = iframeWin.document.documentElement.scrollHeight || iframeWin.document.body.scrollHeight;
+	}
+	}
+	};
+
+	window.onload = function () {
+	setIframeHeight(document.getElementById('external-frame'));
+	};
+	
+	
+function openLjfs(url,typeid){
+	// 自带加密
+	var enc = window.btoa(''); 
+	// 拼接标记参数
+	url = url + '&sign='+enc;
+	window.open(url);
+}
+
+</script>
+<style media=print>
+.Noprint{display:none;}
+.Noborder{border-width:0;}
+.PageNext{page-break-after: always;}
+body{font-family:"Microsoft YaHei";}
+</style>
+</head>
+
+<body style="font-family:Microsoft YaHei;overflow-x:hidden;"  >
+<div style="width: 100%;">
+	<table style="width:99%;">
+		<colgroup>
+	    	<col width="77%" ></col>
+	    	<col width="14%" ></col>
+	    	<col width="9%" ></col>
+	    </colgroup>
+		<tr>
+			<td>
+				<p style="font-size:36px;">寿光环保科技有限公司羊口镇城镇污水处理厂</p>
+				<input type="hidden" id="longitude" value="118.89500"/>
+				<input type="hidden" id="latitude" value="37.26381"/>
+				<input type="hidden" id="opelngd" value="118"/>
+				<input type="hidden" id="opelngf" value="53"/>
+				<input type="hidden" id="opelngm" value="42.00"/>
+				<input type="hidden" id="opelatd" value="37"/>
+				<input type="hidden" id="opelatf" value="15"/>
+				<input type="hidden" id="opelatm" value="49.72"/>
+				<input type="hidden" id="isout" value="true"/>
+				
+			</td>
+			<td>&nbsp;</td>
+			
+			<td rowspan="3" >
+				<img style="float: right;" height="110px;" width="110px;" alt="" id="erweima" 
+				src="/perxxgkinfo/syssb/xkgg/xkgg!downloadFile.action?method=download&fileType=ewmfile&datafileid=dd593b7c21304788b7ed4330c0a8c6da&dataid=af10d304905e4164a42777f3bd4eb424" />
+			</td>
+		</tr>
+		<tr>
+			<td>
+	            <p style="font-weight: bold;color: green;font-size: 14px;">
+				          生产经营场所地址：山东省潍坊市寿光市羊口镇太平路与船舶路交叉口50米路南&nbsp;&nbsp;&nbsp;&nbsp;
+				          行业类别：污水处理及其再生利用&nbsp;&nbsp;&nbsp;&nbsp;
+				          所在地区：山东省-潍坊市-寿光市&nbsp;&nbsp;&nbsp;
+				          发证机关：潍坊市生态环境局
+	                
+				</p>
+			</td>
+			<td align="left" style="padding-bottom: 9px;">
+                   
+				
+				
+				
+                       
+				    <a style="color: green;font-weight: bold;font-size: 14px;text-decoration: underline;" 
+				       href="/perxxgkinfo/syssb/xkgg/xkgg!downloadFile.action?method=download&fileType=fbfile&datafileid=36e0798c48494610bf331a22f19947fe&dataid=af10d304905e4164a42777f3bd4eb424">排污许可证正本</a>
+				    <br/>
+				    
+                    
+                    
+                    
+                        <a style="color: green;font-weight: bold;font-size: 14px;text-decoration: underline;" target="view_window" 
+                           href="/perxxgkinfo/syssb/wysb/hpsp/hpsp-company-sewage!showImage.action?dataid=af10d304905e4164a42777f3bd4eb424">排污许可证副本</a>
+                    
+				
+			</td>
+		</tr>
+	</table>
+</div>
+
+<br />
+<div style="width: 100%;">
+	<div style="width:96%;float: left;">
+				<table style="line-height: 32px;table-layout: fixed;" class="tab0" >
+					<!-- <colgroup>
+				    	<col width="28%" ></col>
+				    	<col width="15%" ></col>
+				    	<col width="8%" ></col>
+				    	<col width="16%" ></col>
+				    	<col width="30%" ></col>
+				    </colgroup> -->
+					<tr style="width: 100%;table-layout: fixed;" align="center">
+						<th style="width: 35%;" >许可证编号</th>
+						<th style="width: 10%;" >业务类型</th>
+						<th style="width: 10%;" >版本</th>
+						<th style="width: 15%;" >办结日期</th>
+						<th style="width: 30%;" >有效期限</th>
+					</tr>
+					
+						
+							
+								<tr align="center">
+									<td style="word-break: break-all;">91370783681712643J002U</td>
+									<td >
+										
+											申领
+										
+										
+										
+										
+										
+										
+                                        
+                                        
+										
+									</td>
+									<td>
+										
+											1
+										
+										
+									</td>
+									<td>
+										
+											2025-05-16
+										
+									</td>
+									<td>2025-05-16&nbsp;至&nbsp;2030-05-15</td>
+								</tr>
+							
+						
+							
+								<tr align="center">
+									<td style="word-break: break-all;">91370783681712643J002U</td>
+									<td >
+										
+										
+										
+										
+										
+										
+                                        
+                                        
+                                                                                                              审批部门变更
+                                        
+										
+									</td>
+									<td>
+										
+											2
+										
+										
+									</td>
+									<td>
+										
+											2025-09-10
+										
+									</td>
+									<td>2025-05-16&nbsp;至&nbsp;2030-05-15</td>
+								</tr>
+							
+						
+							
+								<tr align="center">
+									<td style="word-break: break-all;">91370783681712643J002U</td>
+									<td >
+										
+										
+										
+										
+										
+										
+                                        
+                                        
+                                                                                                              审批部门变更
+                                        
+										
+									</td>
+									<td>
+										
+											3
+										
+										
+									</td>
+									<td>
+										
+											2026-02-28
+										
+									</td>
+									<td>2025-05-16&nbsp;至&nbsp;2030-05-15</td>
+								</tr>
+							
+						
+					
+				</table>
+				<br/>
+				<hr width="99%" color='green' size=1 />
+				<table style="height: 100px;">
+					
+						
+						
+							<tr align="center">
+								<td><a  href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=approveAtmosphere_xkzgk&dataid=af10d304905e4164a42777f3bd4eb424&isVersion=&operate=readonly" target="_blank" ><img style="display:block;width:100%;" src='/perxxgkinfo/outside/img/btn_0301.png' /></a></td>
+								<td><a  href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=approveWater_xkzgk&dataid=af10d304905e4164a42777f3bd4eb424&isVersion=&operate=readonly" target="_blank" ><img style="display:block;width:100%;" src='/perxxgkinfo/outside/img/btn_0501.png' /></a></td>
+								<td><a  href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=waterFqwrw_xzkgk&dataid=af10d304905e4164a42777f3bd4eb424&isVersion=&operate=readonly&isAdmin=basetrue" target="_blank" ><img style="display:block;width:100%;" src='/perxxgkinfo/outside/img/btn_0701.png' /></a></td>
+								<td><a  href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=approvespreport_xkzgk&dataid=af10d304905e4164a42777f3bd4eb424&operate=readonly" target="_blank" ><img style="display:block;width:100%;" src='/perxxgkinfo/outside/img/btn_0901.png' /></a></td>
+								<td><a  href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=approvespinfoopen_xkzgk&dataid=af10d304905e4164a42777f3bd4eb424&operate=readonly" target="_blank" ><img style="display:block;width:100%;" src='/perxxgkinfo/outside/img/btn_1601.png' /></a></td>
+								<td><a  href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=accountxk_xkzgk&dataid=af10d304905e4164a42777f3bd4eb424&operate=readonly" target="_blank" ><img style="display:block;width:100%;" src='/perxxgkinfo/outside/img/btn_1501.png' /></a></td>
+							</tr>
+							<tr align="center">
+								<td><a  href="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=approveothercon_xkzgk&dataid=af10d304905e4164a42777f3bd4eb424&operate=readonly" target="_blank" ><img style="display:block;width:100%;" src='/perxxgkinfo/outside/img/btn_1701.png' /></a></td>
+								<td>&nbsp;</td>
+								<td>&nbsp;</td>
+							</tr>
+						
+					
+					
+				</table>
+				<br />
+				<table id="apply_table"  class="edit-grid" style="width:100%;border: 1px;"  >
+			    	<colgroup>
+				    	<col width="30%" ></col>
+				    	<col width="70%" ></col>
+				    </colgroup>	
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">主要污染物类别：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left"><span id="zywrwlbid" ></span></td>
+					</tr>
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">大气主要污染物种类：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left">臭气浓度,氨（氨气）,硫化氢,甲烷</td>
+					</tr>
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">大气污染物排放规律：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left"><span id="airemissionid" ></span></td>
+					</tr>
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">大气污染物排放执行标准：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left">/,城镇污水处理厂污染物排放标准GB 18918-2002</td>
+					</tr>
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">废水主要污染物种类：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left">pH值,悬浮物,色度,化学需氧量,总氮（以N计）,氨氮（NH3-N）,总磷（以P计）,五日生化需氧量,动植物油,石油类,阴离子表面活性剂,粪大肠菌群,烷基汞,六价铬,总汞,总镉,总铬,总砷,总铅,总锌,氟化物（以F-计）,水温,流量</td>
+					</tr>
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">废水污染物排放规律：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left"><span id="wateremissionname" ></span></td>
+					</tr>
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">废水污染物排放执行标准：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left">城镇污水处理厂污染物排放标准GB 18918-2002,流域水污染物综合排放标准 第3部分：小清河流域DB37 3416.3-2025</td>
+					</tr>
+					<tr>
+						<th style="border-left:#CCCCCC 1px solid;">排污权使用和交易信息：</th>
+						<td style="padding-left: 10px;word-break: break-all;" align="left">/</td>
+					</tr>
+				</table>
+			</div>
+			
+</div>
+<br />
+<div style="width: 100%;float: none;">
+<br />
+	<!-- <hr width="98%" color='green' size=1 /> -->
+<br />
+	<iframe src="/perxxgkinfo/xkgkAction!xkgk.action?xkgk=getxxgkContentzxbg&dataid=af10d304905e4164a42777f3bd4eb424" frameborder="0" scrolling = "no"  style="width:99%;border: 0px" onload="setIframeHeight(this)"></iframe>
+	<br/><br/><br/>
+	<iframe src="https://wryjc.mee.gov.cn/gkpt/detail/?id=izVBcexvdepqGtCmCy9o%2FLq1YxOtDELxbuwBCmmrfUlGfHG7PUUVET3nYzedW3om" frameborder="0" scrolling="yes"  style="width:99%;border: 0px;height: 660px;"></iframe>
+	<br/><br/><br/>
+	
+	
+	
+</div>
+<form action="" target="_blank" method="post" id="jumpform" name="jumpform">
+	<input name="dataid" id="dataid" type="hidden" value="" /> 
+	<input name="nid" id="nid" type="hidden" value="" /> 
+	<input name="actionType" id="actionType" type="hidden" value="" /> 
+	<input name="operate" id="operate" type="hidden" value="" /> 
+	<input name="state" id="state" type="hidden" value="" /> 
+	<input name="cardtype" id="cardtype" type="hidden" value="" /> 
+	<input name="cursel" id="cursel" type="hidden" value="" />
+	<input name="csrfRandom" type="hidden" value="" />
+</form>
+</body>
+</html>

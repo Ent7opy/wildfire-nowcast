@@ -146,7 +146,7 @@ class MapConfig:
     """
     HEIGHT = 600                    # Map height in pixels
     DEFAULT_CENTER = [20.0, 0.0]   # [lat, lon] - Center of world map
-    DEFAULT_ZOOM = 2               # Initial zoom level (world view)
+    DEFAULT_ZOOM = 1               # Initial zoom level (full world view)
     BASEMAP_DARK = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
     BASEMAP_LIGHT = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 

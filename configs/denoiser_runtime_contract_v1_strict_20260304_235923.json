@@ -1,0 +1,18 @@
+{
+  "pipeline_version": "v2",
+  "threshold_profile": "strict_v1",
+  "source_run_id": "20260304_235923_94a9940fee24ef9a8e4914cc8e9b66e3404cb054",
+  "source_git_sha": "94a9940fee24ef9a8e4914cc8e9b66e3404cb054",
+  "thresholds": {
+    "strong_filter_threshold": 0.5,
+    "downweight_threshold": 0.7,
+    "uncertainty_band_low": 0.45,
+    "uncertainty_band_high": 0.55,
+    "event_front_radius_m": 2500.0,
+    "event_front_max_gap_minutes": 45,
+    "event_link_radius_m": 10000.0,
+    "event_link_max_gap_days": 11,
+    "event_static_persistence_threshold": 0.85,
+    "event_strict_static_split": true
+  }
+}
