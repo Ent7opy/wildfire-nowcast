@@ -28,6 +28,7 @@ DEFAULT_PARAMS = {
     "positive_buffer_m": 2315.0,
     "positive_time_pad_hours": 48,
     "positive_confidence_floor": 30.0,
+    "positive_low_confidence_max": 30.0,
     "negative_industrial_radius_m": 1000.0,
     "negative_far_dist_m": 10000.0,
     "negative_time_pad_days": 30,
@@ -35,6 +36,9 @@ DEFAULT_PARAMS = {
     "chronic_static_days_threshold": 200,
     "chronic_static_window_days": 365,
     "biophysical_landcover_max": 0.1,
+    "agricultural_landcover_score": 0.7,
+    "agricultural_landcover_score_tolerance": 0.05,
+    "agricultural_lulc_classes": [40],
     "probable_positive_frp_mw": 100.0,
     "probable_positive_confidence": 70.0,
     "probable_positive_landcover_min": 0.5,
@@ -93,7 +97,10 @@ def _build_perimeter_sql(*, perimeter_source: str) -> tuple[TextClause, TextClau
                     ap.poly_polygondatetime,
                     c.acq_time
                   ) + make_interval(hours => :positive_time_pad_hours)
+              AND COALESCE(c.frp, 0) >= :negative_frp_floor_mw
               AND COALESCE(c.confidence, 0) >= :positive_confidence_floor
+              AND NOT c.is_low_confidence
+              AND NOT c.is_agri_lulc
             """
         )
 
@@ -142,7 +149,10 @@ def _build_perimeter_sql(*, perimeter_source: str) -> tuple[TextClause, TextClau
                 fp.fire_end IS NULL
                 OR c.acq_time <= fp.fire_end + make_interval(hours => :positive_time_pad_hours)
               )
+              AND COALESCE(c.frp, 0) >= :negative_frp_floor_mw
               AND COALESCE(c.confidence, 0) >= :positive_confidence_floor
+              AND NOT c.is_low_confidence
+              AND NOT c.is_agri_lulc
             """
         )
 
@@ -314,6 +324,7 @@ def _label_single_window(
         "positive_buffer_deg": float(p["positive_buffer_m"]) * meters_to_deg,
         "positive_time_pad_hours": int(p["positive_time_pad_hours"]),
         "positive_confidence_floor": float(p["positive_confidence_floor"]),
+        "positive_low_confidence_max": float(p["positive_low_confidence_max"]),
         "negative_industrial_radius_m": float(p["negative_industrial_radius_m"]),
         "negative_industrial_radius_deg": float(p["negative_industrial_radius_m"]) * meters_to_deg,
         "negative_far_dist_m": float(p["negative_far_dist_m"]),
@@ -324,6 +335,9 @@ def _label_single_window(
         "chronic_static_window_days": int(p["chronic_static_window_days"]),
         "grid_size": float(DEFAULT_CELL_SIZE_DEG),
         "biophysical_landcover_max": float(p["biophysical_landcover_max"]),
+        "agricultural_landcover_score": float(p["agricultural_landcover_score"]),
+        "agricultural_landcover_score_tolerance": float(p["agricultural_landcover_score_tolerance"]),
+        "agricultural_lulc_classes": [int(code) for code in p["agricultural_lulc_classes"]],
         "probable_positive_frp_mw": float(p["probable_positive_frp_mw"]),
         "probable_positive_confidence": float(p["probable_positive_confidence"]),
         "probable_positive_landcover_min": float(p["probable_positive_landcover_min"]),
@@ -368,6 +382,44 @@ def _label_single_window(
             d.confidence,
             d.frp,
             d.landcover_score,
+            d.landcover_class,
+            d.landcover_label,
+            (
+                COALESCE(d.confidence, 50.0) < :positive_low_confidence_max
+                OR lower(trim(COALESCE(d.raw_properties->>'confidence', ''))) IN ('l', 'low')
+                OR lower(trim(COALESCE(d.raw_properties->>'confidence_text', ''))) IN ('l', 'low')
+                OR lower(trim(COALESCE(d.raw_properties->>'confidence_label', ''))) IN ('l', 'low')
+                OR lower(trim(COALESCE(d.raw_properties->>'firms_confidence', ''))) IN ('l', 'low')
+            ) AS is_low_confidence,
+            (COALESCE(d.landcover_score, 0.5) <= :biophysical_landcover_max) AS is_zero_fuel_lulc,
+            (
+                (
+                    d.landcover_class = ANY(:agricultural_lulc_classes)
+                )
+                OR (
+                    COALESCE(d.raw_properties->>'landcover_class', '') ~ '^[0-9]+$'
+                    AND (d.raw_properties->>'landcover_class')::integer = ANY(:agricultural_lulc_classes)
+                )
+                OR (
+                    COALESCE(d.raw_properties->>'landcover_code', '') ~ '^[0-9]+$'
+                    AND (d.raw_properties->>'landcover_code')::integer = ANY(:agricultural_lulc_classes)
+                )
+                OR lower(trim(COALESCE(d.landcover_label, ''))) LIKE ANY (
+                    ARRAY['%crop%', '%cropland%', '%agri%', '%agriculture%', '%farmland%']
+                )
+                OR lower(trim(COALESCE(d.raw_properties->>'landcover_label', ''))) LIKE ANY (
+                    ARRAY['%crop%', '%cropland%', '%agri%', '%agriculture%', '%farmland%']
+                )
+                OR lower(trim(COALESCE(d.raw_properties->>'landcover_type', ''))) LIKE ANY (
+                    ARRAY['%crop%', '%cropland%', '%agri%', '%agriculture%', '%farmland%']
+                )
+                OR lower(trim(COALESCE(d.raw_properties->>'lulc_label', ''))) LIKE ANY (
+                    ARRAY['%crop%', '%cropland%', '%agri%', '%agriculture%', '%farmland%']
+                )
+                OR abs(
+                    COALESCE(d.landcover_score, -999.0) - :agricultural_landcover_score
+                ) <= :agricultural_landcover_score_tolerance
+            ) AS is_agri_lulc,
             COALESCE(d.false_source_masked, FALSE) AS false_source_masked,
             COALESCE(d.persistence_score, 0.0) AS persistence_score,
             d.geom,
@@ -547,7 +599,12 @@ def _label_single_window(
         SELECT c.id
         FROM tmp_label_candidates c
         WHERE c.in_coverage
-          AND COALESCE(c.landcover_score, 0.5) <= :biophysical_landcover_max
+          AND c.is_zero_fuel_lulc
+        UNION
+        SELECT c.id
+        FROM tmp_label_candidates c
+        WHERE c.in_coverage
+          AND c.is_agri_lulc
         """
     )
 
@@ -560,6 +617,7 @@ def _label_single_window(
           AND COALESCE(c.frp, 0) >= :probable_positive_frp_mw
           AND COALESCE(c.confidence, 0) >= :probable_positive_confidence
           AND COALESCE(c.landcover_score, 0.5) >= :probable_positive_landcover_min
+          AND NOT c.is_agri_lulc
         """
     )
 

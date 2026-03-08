@@ -58,6 +58,16 @@ def _mode_or_unknown(series: pd.Series) -> str:
     return str(mode.iloc[0]) if not mode.empty else "unknown"
 
 
+def _mode_or_nan(series: pd.Series) -> float:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if numeric.empty:
+        return float("nan")
+    mode = numeric.mode()
+    if mode.empty:
+        return float(numeric.iloc[0])
+    return float(mode.iloc[0])
+
+
 def _normalize_static_score(series: pd.Series, neutral_values: tuple[float, ...]) -> tuple[pd.Series, pd.Series]:
     numeric = pd.to_numeric(series, errors="coerce")
     available = numeric.notna()
@@ -144,6 +154,7 @@ def export_training_snapshot_v2(
                 ELSE NULL
             END AS scan_angle,
             d.track,
+            d.landcover_class,
             d.landcover_score,
             d.persistence_score,
             d.weather_score,
@@ -210,7 +221,16 @@ def export_training_snapshot_v2(
     )
     rows["sensor_id_code"] = rows["sensor_id"].astype("category").cat.codes.astype(np.int16)
     rows["scan_angle"] = pd.to_numeric(rows["scan_angle"], errors="coerce")
+    rows["scan"] = pd.to_numeric(rows["scan"], errors="coerce")
+    rows["track"] = pd.to_numeric(rows["track"], errors="coerce")
+    rows["frp"] = pd.to_numeric(rows["frp"], errors="coerce")
     rows["scan_angle_is_available"] = rows["scan_angle"].notna().astype(bool)
+    pixel_area = rows["track"] * rows["scan"]
+    rows["frp_density_obs"] = np.where(
+        (pixel_area > 0.0) & rows["frp"].notna(),
+        rows["frp"] / pixel_area,
+        np.nan,
+    )
 
     scan_angle_drop_mask = rows["scan_angle"] > _SCAN_ANGLE_MAX_DEG
     dropped_high_scan = int(scan_angle_drop_mask.sum())
@@ -265,12 +285,14 @@ def export_training_snapshot_v2(
             confidence_max=("confidence", "max"),
             frp_mean=("frp", "mean"),
             frp_max=("frp", "max"),
+            frp_density_mean=("frp_density_obs", "mean"),
             brightness_mean=("brightness", "mean"),
             bright_t31_mean=("bright_t31", "mean"),
             scan_mean=("scan", "mean"),
             scan_angle_mean=("scan_angle", "mean"),
             scan_angle_max=("scan_angle", "max"),
             track_mean=("track", "mean"),
+            landcover_class_mode=("landcover_class", _mode_or_nan),
             landcover_mean=("landcover_score_clean", "mean"),
             persistence_mean=("persistence_score_clean", "mean"),
             weather_mean=("weather_score_clean", "mean"),
@@ -303,6 +325,13 @@ def export_training_snapshot_v2(
     event_df["duration_hours"] = (
         (event_df["end_time"] - event_df["start_time"]).dt.total_seconds() / 3600.0
     )
+    # Explicit first-class model features requested for feature-driven rollbacks.
+    event_df["confidence"] = pd.to_numeric(event_df["confidence_mean"], errors="coerce")
+    event_df["frp"] = pd.to_numeric(event_df["frp_mean"], errors="coerce")
+    event_df["frp_density"] = pd.to_numeric(event_df["frp_density_mean"], errors="coerce")
+    event_df["landcover_class"] = pd.to_numeric(
+        event_df["landcover_class_mode"], errors="coerce"
+    ).astype(np.float32)
     event_df["hour_of_day"] = (
         event_df["start_time"].dt.hour
         + event_df["start_time"].dt.minute / 60.0

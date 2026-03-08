@@ -30,10 +30,11 @@ from ml.denoiser.coverage_authority import get_coverage_freshness, require_cover
 from ml.parquet_io import read_parquet_with_fallback
 
 try:
-    from xgboost import XGBClassifier
+    from xgboost import DMatrix, XGBClassifier
 
     _HAS_XGBOOST = True
 except Exception:  # pragma: no cover - optional fallback
+    DMatrix = None
     XGBClassifier = None
     _HAS_XGBOOST = False
 
@@ -102,6 +103,175 @@ def _map_labels(df: pd.DataFrame, label_col: str = "event_label") -> np.ndarray:
 
 def _feature_matrix(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return df[features].astype(np.float32)
+
+
+def _stratified_downsample(
+    df: pd.DataFrame,
+    *,
+    max_rows: int,
+    strat_cols: list[str],
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    if max_rows <= 0 or len(df) <= max_rows:
+        return df.copy()
+
+    work = df.copy()
+    use_cols = [c for c in strat_cols if c in work.columns]
+    if not use_cols:
+        chosen_idx = rng.choice(work.index.to_numpy(dtype=int), size=max_rows, replace=False)
+        return work.loc[chosen_idx].copy()
+
+    keys = work[use_cols].fillna("unknown").astype(str).agg("|".join, axis=1)
+    key_counts = keys.value_counts(dropna=False)
+    alloc_float = (key_counts / float(key_counts.sum())) * int(max_rows)
+    alloc = np.floor(alloc_float).astype(int)
+    remainder = int(max_rows - int(alloc.sum()))
+    if remainder > 0:
+        frac = (alloc_float - alloc).sort_values(ascending=False)
+        for group in frac.index[:remainder]:
+            alloc[group] = int(alloc[group]) + 1
+
+    sampled_idx: list[int] = []
+    for group, count in alloc.items():
+        draw = int(count)
+        if draw <= 0:
+            continue
+        group_idx = keys.index[keys == group].to_numpy(dtype=int)
+        take = min(draw, int(group_idx.size))
+        if take <= 0:
+            continue
+        sampled_idx.extend(rng.choice(group_idx, size=take, replace=False).tolist())
+
+    sampled_unique = np.asarray(sorted(set(sampled_idx)), dtype=int)
+    if sampled_unique.size > max_rows:
+        sampled_unique = rng.choice(sampled_unique, size=max_rows, replace=False)
+    elif sampled_unique.size < max_rows:
+        pool = np.setdiff1d(work.index.to_numpy(dtype=int), sampled_unique, assume_unique=False)
+        top_up = min(int(max_rows - sampled_unique.size), int(pool.size))
+        if top_up > 0:
+            sampled_unique = np.concatenate(
+                [sampled_unique, rng.choice(pool, size=top_up, replace=False)]
+            )
+    return work.loc[sampled_unique].copy()
+
+
+def _apply_micro_batch(
+    *,
+    train_df: pd.DataFrame,
+    eval_df: pd.DataFrame,
+    config: Dict[str, Any],
+    label_col: str,
+    default_strat_cols: list[str],
+    rng: np.random.Generator,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    micro_cfg = dict(config.get("micro_batch", {}))
+    if not bool(micro_cfg.get("enabled", False)):
+        return train_df, eval_df, {"enabled": False}
+
+    if "start_time" not in train_df.columns or "start_time" not in eval_df.columns:
+        raise ValueError("micro_batch requires start_time in snapshot.")
+
+    start_raw = micro_cfg.get("start")
+    end_raw = micro_cfg.get("end")
+    if not start_raw or not end_raw:
+        raise ValueError("micro_batch requires both 'start' and 'end' dates.")
+    start = pd.Timestamp(str(start_raw), tz="UTC")
+    end = pd.Timestamp(str(end_raw), tz="UTC")
+    if end <= start:
+        raise ValueError(f"Invalid micro_batch window: start={start} end={end}")
+
+    combined = pd.concat([train_df.copy(), eval_df.copy()], ignore_index=True, sort=False)
+    combined["start_time"] = pd.to_datetime(combined["start_time"], utc=True, errors="coerce")
+    micro = combined[(combined["start_time"] >= start) & (combined["start_time"] < end)].copy()
+    if micro.empty:
+        raise ValueError(
+            f"micro_batch slice produced zero rows for window [{start.isoformat()}, {end.isoformat()})."
+        )
+
+    strat_cols = list(micro_cfg.get("stratify_columns", default_strat_cols))
+    if label_col not in strat_cols:
+        strat_cols = [label_col] + strat_cols
+    max_rows = int(micro_cfg.get("max_rows", 30000))
+    micro = _stratified_downsample(micro, max_rows=max_rows, strat_cols=strat_cols, rng=rng)
+    micro = micro.sort_values("start_time").reset_index(drop=True)
+
+    if label_col not in micro.columns:
+        raise ValueError(f"micro_batch requires label column '{label_col}' in snapshot.")
+    pos_count = int((micro[label_col] == "POSITIVE").sum())
+    min_pos = int(micro_cfg.get("min_positive_rows", 100))
+    if pos_count < min_pos:
+        raise ValueError(
+            "micro_batch has insufficient positives: "
+            f"positive_rows={pos_count}, min_positive_rows={min_pos}."
+        )
+
+    split_dt = micro["start_time"].quantile(0.8)
+    micro_train = micro[micro["start_time"] < split_dt].copy()
+    micro_eval = micro[micro["start_time"] >= split_dt].copy()
+    if micro_train.empty or micro_eval.empty:
+        cut = max(1, int(np.floor(len(micro) * 0.8)))
+        micro_train = micro.iloc[:cut].copy()
+        micro_eval = micro.iloc[cut:].copy()
+        if micro_eval.empty:
+            micro_eval = micro_train.tail(min(1000, len(micro_train))).copy()
+
+    stats = {
+        "enabled": True,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "rows_total": int(len(micro)),
+        "rows_train": int(len(micro_train)),
+        "rows_eval": int(len(micro_eval)),
+        "positive_rows_total": int((micro[label_col] == "POSITIVE").sum()),
+        "negative_rows_total": int((micro[label_col] == "NEGATIVE").sum()),
+        "unknown_rows_total": int((micro[label_col] == "UNKNOWN").sum()),
+        "max_rows": int(max_rows),
+        "stratify_columns": strat_cols,
+    }
+    return micro_train, micro_eval, stats
+
+
+def _compute_shap_top_features(
+    *,
+    model: Any,
+    x: pd.DataFrame,
+    top_k: int,
+    sample_rows: int,
+    rng: np.random.Generator,
+) -> list[dict[str, int | float | str]]:
+    if int(top_k) <= 0 or x.empty:
+        return []
+    if DMatrix is None or not hasattr(model, "get_booster"):
+        return []
+
+    x_use = x.copy()
+    if int(sample_rows) > 0 and len(x_use) > int(sample_rows):
+        take_idx = rng.choice(np.arange(len(x_use)), size=int(sample_rows), replace=False)
+        x_use = x_use.iloc[np.asarray(take_idx, dtype=int)].copy()
+    x_use = x_use.astype(np.float32)
+
+    booster = model.get_booster()
+    contrib = booster.predict(
+        DMatrix(x_use.to_numpy(dtype=np.float32), feature_names=list(x_use.columns)),
+        pred_contribs=True,
+    )
+    if contrib.ndim != 2 or contrib.shape[0] == 0:
+        return []
+
+    # Last column is the bias term for XGBoost pred_contribs.
+    feature_contrib = contrib[:, : x_use.shape[1]]
+    mean_abs = np.mean(np.abs(feature_contrib), axis=0)
+    order = np.argsort(-mean_abs)[: int(top_k)]
+    out: list[dict[str, int | float | str]] = []
+    for rank, idx in enumerate(order, start=1):
+        out.append(
+            {
+                "rank": int(rank),
+                "feature": str(x_use.columns[int(idx)]),
+                "mean_abs_shap": float(mean_abs[int(idx)]),
+            }
+        )
+    return out
 
 
 def _build_model(
@@ -1119,6 +1289,16 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     if coverage_scope == "covered":
         required_columns.append("truth_covered_mask")
     train_df, eval_df = _load_snapshot(config["snapshot_path"], columns=required_columns)
+    train_df = _ensure_slice_columns(train_df, slice_cols)
+    eval_df = _ensure_slice_columns(eval_df, slice_cols)
+    train_df, eval_df, micro_batch_stats = _apply_micro_batch(
+        train_df=train_df,
+        eval_df=eval_df,
+        config=config,
+        label_col=label_col,
+        default_strat_cols=slice_cols,
+        rng=np.random.default_rng(seed + 101),
+    )
 
     for col in features:
         if col not in train_df.columns:
@@ -1249,6 +1429,17 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "brier_calibrated": float(brier_score_loss(y_eval_known, np.clip(calibrated_scores, 0.0, 1.0))),
         "raw_metrics": raw_metrics,
     }
+    shap_cfg = dict(config.get("shap", {}))
+    shap_enabled = bool(shap_cfg.get("enabled", False))
+    shap_top_features: list[dict[str, float | str]] = []
+    if shap_enabled:
+        shap_top_features = _compute_shap_top_features(
+            model=model,
+            x=_feature_matrix(eval_known_holdout, features),
+            top_k=int(shap_cfg.get("top_k", 5)),
+            sample_rows=int(shap_cfg.get("sample_rows", 5000)),
+            rng=np.random.default_rng(seed + 303),
+        )
 
     # Operational latency estimate: extrapolate per 10k events from eval prediction speed.
     latency_eval_df = eval_scope if not eval_scope.empty else eval_known_holdout
@@ -1331,6 +1522,7 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "run_id": run_name,
         "model_backend": model_backend,
         "calibration_diagnostics": calibration_diagnostics,
+        "shap_top_features": shap_top_features,
         "gate_scope": coverage_scope,
         "coverage_mask_source": coverage_mask_source,
         "coverage_authority_profile": coverage_authority_profile,
@@ -1369,6 +1561,8 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "sensor_bias_pct": sensor_bias_pct,
         "sampling_stats": sampling_stats,
         "pu_stats": pu_stats,
+        "micro_batch_stats": micro_batch_stats,
+        "shap_top_features": shap_top_features,
     }
     with open(os.path.join(run_dir, "metrics.json"), "w", encoding="utf-8") as f:
         json.dump(training_summary, f, indent=2)
@@ -1434,9 +1628,33 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train denoiser v2 (event-level PU + calibration).")
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--micro-batch-start", type=str, default=None, help="YYYY-MM-DD (UTC)")
+    parser.add_argument("--micro-batch-end", type=str, default=None, help="YYYY-MM-DD (UTC, exclusive)")
+    parser.add_argument("--micro-batch-max-rows", type=int, default=30000)
+    parser.add_argument("--micro-batch-min-positive", type=int, default=100)
+    parser.add_argument("--micro-batch-shap-top-k", type=int, default=5)
+    parser.add_argument("--micro-batch-shap-sample-rows", type=int, default=5000)
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if bool(args.micro_batch_start) ^ bool(args.micro_batch_end):
+        raise SystemExit("Both --micro-batch-start and --micro-batch-end are required together.")
+    if args.micro_batch_start and args.micro_batch_end:
+        label_col = str(config.get("label_column", "event_label"))
+        slice_cols = list(config.get("slice_columns", ["sensor", "biome_slice"]))
+        config["micro_batch"] = {
+            "enabled": True,
+            "start": args.micro_batch_start,
+            "end": args.micro_batch_end,
+            "max_rows": int(args.micro_batch_max_rows),
+            "min_positive_rows": int(args.micro_batch_min_positive),
+            "stratify_columns": list(dict.fromkeys([label_col] + slice_cols)),
+        }
+        config["shap"] = {
+            "enabled": True,
+            "top_k": int(args.micro_batch_shap_top_k),
+            "sample_rows": int(args.micro_batch_shap_sample_rows),
+        }
     run_dir = train_denoiser_v2(config)
     metrics_path = os.path.join(run_dir, "metrics.json")
     try:
@@ -1484,6 +1702,14 @@ def main() -> None:
             f"mean_abs_shift={float(cal.get('mean_abs_shift', 0.0)):.6f} "
             f"brier_raw={float(cal.get('brier_raw', float('nan'))):.6f} "
             f"brier_calibrated={float(cal.get('brier_calibrated', float('nan'))):.6f}"
+        )
+    shap_top = summary.get("shap_top_features") or []
+    for item in shap_top:
+        print(
+            "SHAP_IMPORTANCE "
+            f"rank={int(float(item.get('rank', 0)))} "
+            f"feature={item.get('feature', 'unknown')} "
+            f"mean_abs_shap={float(item.get('mean_abs_shap', float('nan'))):.6f}"
         )
     print(run_dir)
 

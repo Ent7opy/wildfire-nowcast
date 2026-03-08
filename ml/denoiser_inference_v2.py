@@ -40,6 +40,12 @@ _MOISTURE_TIME_TOLERANCE_HOURS = float(
 _INDUSTRIAL_GOLD_BUFFER_M = 375.0
 _INDUSTRIAL_SILVER_BUFFER_M = 750.0
 _DEFAULT_INDUSTRIAL_POLICY_VERSION = "global_authoritative_industrial_v1"
+_FRP_NOISE_FLOOR_MW = 5.0
+_BIOPHYSICAL_ZERO_FUEL_MAX = 0.1
+_AGRICULTURE_SCORE = 0.7
+_AGRICULTURE_SCORE_TOL = 0.05
+_AGRICULTURE_LULC_CODES = {40}
+_AGRICULTURE_LABEL_TOKENS = ("crop", "cropland", "agri", "agriculture", "farmland")
 
 
 def _confidence_is_high(
@@ -76,16 +82,73 @@ def _build_minimal_event_rollup(detections: pd.DataFrame) -> pd.DataFrame:
     det["frp"] = pd.to_numeric(det["frp"], errors="coerce")
     det["confidence"] = pd.to_numeric(det["confidence"], errors="coerce")
     _, det["landcover_clean"] = _normalize_static_score(det["landcover_score"], _NEUTRAL_LANDCOVER)
+    det["agriculture_lulc"] = det.apply(
+        lambda row: _is_agriculture_lulc(
+            landcover_score=row.get("landcover_score"),
+            landcover_class=row.get("landcover_class"),
+            landcover_label=row.get("landcover_label"),
+            raw_properties=row.get("raw_properties"),
+        ),
+        axis=1,
+    )
     out = (
         det.groupby("event_id", dropna=False)
         .agg(
             frp_max=("frp", "max"),
             confidence_max=("confidence", "max"),
             landcover_mean=("landcover_clean", "mean"),
+            agriculture_lulc=("agriculture_lulc", "max"),
         )
         .reset_index()
     )
     return out
+
+
+def _is_agriculture_lulc(
+    *,
+    landcover_score: object,
+    landcover_class: object = None,
+    landcover_label: object = None,
+    raw_properties: object,
+) -> bool:
+    score = pd.to_numeric(pd.Series([landcover_score]), errors="coerce").iloc[0]
+    if pd.notna(score) and abs(float(score) - _AGRICULTURE_SCORE) <= _AGRICULTURE_SCORE_TOL:
+        return True
+
+    if landcover_class is not None:
+        try:
+            if int(landcover_class) in _AGRICULTURE_LULC_CODES:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    if landcover_label is not None:
+        label = str(landcover_label).strip().lower()
+        if any(token in label for token in _AGRICULTURE_LABEL_TOKENS):
+            return True
+
+    if not isinstance(raw_properties, dict):
+        return False
+
+    for key in ("landcover_class", "landcover_code", "lulc_class", "lc_class"):
+        raw_code = raw_properties.get(key)
+        if raw_code is None:
+            continue
+        try:
+            if int(raw_code) in _AGRICULTURE_LULC_CODES:
+                return True
+        except (TypeError, ValueError):
+            continue
+
+    for key in ("landcover_label", "landcover_type", "lulc_label", "land_use", "landcover"):
+        raw_label = raw_properties.get(key)
+        if raw_label is None:
+            continue
+        label = str(raw_label).strip().lower()
+        if any(token in label for token in _AGRICULTURE_LABEL_TOKENS):
+            return True
+
+    return False
 
 
 def _active_industrial_policy(
@@ -275,6 +338,8 @@ def _get_batch_detections(engine: Engine, batch_id: int) -> pd.DataFrame:
             bright_t31,
             scan,
             track,
+            landcover_class,
+            landcover_label,
             raw_properties->>'satellite' AS satellite_name,
             CASE
                 WHEN COALESCE(raw_properties->>'scan_angle', '') ~ '^[+-]?[0-9]+(\.[0-9]+)?$'
@@ -335,6 +400,15 @@ def _build_event_features(batch_df: pd.DataFrame, *, engine: Engine) -> pd.DataF
     df["is_day"] = df["raw_properties"].apply(
         lambda x: 1 if isinstance(x, dict) and x.get("daynight") == "D" else 0
     )
+    df["agriculture_lulc"] = df.apply(
+        lambda row: _is_agriculture_lulc(
+            landcover_score=row.get("landcover_score"),
+            landcover_class=row.get("landcover_class"),
+            landcover_label=row.get("landcover_label"),
+            raw_properties=row.get("raw_properties"),
+        ),
+        axis=1,
+    )
     df["landcover_is_available"], df["landcover_score_clean"] = _normalize_static_score(
         df["landcover_score"], _NEUTRAL_LANDCOVER
     )
@@ -372,6 +446,7 @@ def _build_event_features(batch_df: pd.DataFrame, *, engine: Engine) -> pd.DataF
             persistence_is_available=("persistence_is_available", "max"),
             weather_is_available=("weather_is_available", "max"),
             scan_angle_is_available=("scan_angle_is_available", "max"),
+            agriculture_lulc=("agriculture_lulc", "max"),
             rh2m_mean=("rh2m", "mean"),
             u10_mean=("u10", "mean"),
             v10_mean=("v10", "mean"),
@@ -543,6 +618,23 @@ def run_inference_v2(
     events_df["event_score"] = np.nan
     events_df["fail_closed_hard_bypass"] = events_df["event_id"].astype(str).isin(hard_bypass_event_ids)
     events_df["industrial_masked"] = events_df["event_id"].astype(str).isin(industrial_mask_event_ids)
+    events_df["low_frp_noise"] = (
+        pd.to_numeric(events_df.get("frp_max"), errors="coerce").fillna(0.0) < _FRP_NOISE_FLOOR_MW
+    )
+    events_df["biophysical_zero_fuel"] = (
+        pd.to_numeric(events_df.get("landcover_mean"), errors="coerce").fillna(1.0)
+        <= _BIOPHYSICAL_ZERO_FUEL_MAX
+    )
+    if "agriculture_lulc" in events_df.columns:
+        agriculture_col = events_df["agriculture_lulc"]
+    else:
+        agriculture_col = pd.Series(False, index=events_df.index, dtype=bool)
+    events_df["agriculture_masked"] = agriculture_col.fillna(False).astype(bool)
+    events_df["physical_noise_masked"] = (
+        events_df["low_frp_noise"].fillna(False).astype(bool)
+        | events_df["biophysical_zero_fuel"].fillna(False).astype(bool)
+        | events_df["agriculture_masked"].fillna(False).astype(bool)
+    )
     score_mask = ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
     if bool(score_mask.any()):
         score_df = events_df.loc[score_mask].copy().reset_index()
@@ -558,13 +650,28 @@ def run_inference_v2(
         events_df["industrial_masked"].fillna(False).astype(bool)
         & ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
     )
-    events_df.loc[industrial_suppress_mask, "event_score"] = 0.0
+    agriculture_suppress_mask = (
+        events_df["agriculture_masked"].fillna(False).astype(bool)
+        & ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
+    )
+    physical_suppress_mask = (
+        events_df["physical_noise_masked"].fillna(False).astype(bool)
+        & ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
+    )
+    events_df.loc[
+        industrial_suppress_mask | agriculture_suppress_mask | physical_suppress_mask,
+        "event_score",
+    ] = 0.0
 
     decisions: list[str] = []
     review_flags: list[bool] = []
     for _, row in events_df.iterrows():
         if bool(row.get("fail_closed_hard_bypass")):
             decision, review_required = "review", True
+        elif bool(row.get("agriculture_masked")):
+            decision, review_required = "drop", False
+        elif bool(row.get("physical_noise_masked")):
+            decision, review_required = "drop", False
         elif bool(row.get("industrial_masked")):
             decision, review_required = "drop", False
         else:
@@ -758,6 +865,12 @@ def run_inference_v2(
         "decision_counts": decision_counts,
         "review_count": int(events_df["review_required"].sum()),
         "hard_bypass_event_count": int(events_df["fail_closed_hard_bypass"].sum()),
+        "physical_noise_masked_event_count": int(events_df["physical_noise_masked"].sum()),
+        "biophysical_zero_fuel_event_count": int(events_df["biophysical_zero_fuel"].sum()),
+        "agriculture_masked_event_count": int(events_df["agriculture_masked"].sum()),
+        "frp_noise_floor_event_count": int(events_df["low_frp_noise"].sum()),
+        "agriculture_suppressed_event_count": int(agriculture_suppress_mask.sum()),
+        "physical_suppressed_event_count": int(physical_suppress_mask.sum()),
         "industrial_masked_event_count": int(events_df["industrial_masked"].sum()),
         "industrial_suppressed_event_count": int(industrial_suppress_mask.sum()),
         "shadow_mode": bool(shadow_mode),

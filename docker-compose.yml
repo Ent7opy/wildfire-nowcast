@@ -51,7 +51,7 @@ services:
     shm_size: 256mb
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-wildfire}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wildfire}
