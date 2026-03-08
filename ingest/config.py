@@ -58,8 +58,16 @@ class FIRMSIngestSettings(BaseSettings):
     denoiser_batch_size: int = Field(default=500, validation_alias="DENOISER_BATCH_SIZE")
     denoiser_region: Optional[str] = Field(default=None, validation_alias="DENOISER_REGION")
     denoiser_pipeline_version: str = Field(
-        default="v1",
+        default="v2",
         validation_alias="DENOISER_PIPELINE_VERSION",
+    )
+    denoiser_threshold_profile: str = Field(
+        default="strict_v1",
+        validation_alias="DENOISER_THRESHOLD_PROFILE",
+    )
+    denoiser_allow_unsafe_threshold_override: bool = Field(
+        default=False,
+        validation_alias="DENOISER_ALLOW_UNSAFE_THRESHOLD_OVERRIDE",
     )
     denoiser_shadow_mode: bool = Field(
         default=False,
@@ -160,6 +168,14 @@ class FIRMSIngestSettings(BaseSettings):
         normalized = str(value or "").strip().lower()
         if normalized not in {"v1", "v2"}:
             raise ValueError("DENOISER_PIPELINE_VERSION must be one of: v1, v2")
+        return normalized
+
+    @field_validator("denoiser_threshold_profile")
+    @classmethod
+    def _validate_denoiser_threshold_profile(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"strict_v1", "env"}:
+            raise ValueError("DENOISER_THRESHOLD_PROFILE must be one of: strict_v1, env")
         return normalized
 
     @field_validator(

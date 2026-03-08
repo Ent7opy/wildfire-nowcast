@@ -18,6 +18,7 @@ from api.model_registry import (  # noqa: E402
     promote_model,
     register_model,
     rollback_model,
+    update_model_metrics_json,
 )
 
 
@@ -58,6 +59,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     register.add_argument("--status", default="registered", help="Registry status")
     register.add_argument("--model-id", default=None, help="Optional explicit model_id")
     register.add_argument(
+        "--runtime-contract",
+        default=None,
+        help="Runtime contract JSON string or path (or @path). Stored as metrics_json.runtime_contract.",
+    )
+    register.add_argument(
         "--id-only",
         action="store_true",
         help="Print only model_id to stdout.",
@@ -74,6 +80,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     rollback.add_argument("--by", default=None, help="Operator identifier")
     rollback.add_argument("--notes", default="rollback", help="Rollback notes")
 
+    contract = sub.add_parser("update-contract", help="Update runtime contract metadata for a model")
+    contract.add_argument("--family", required=True, help="Model family: denoiser|spread")
+    contract.add_argument("--model-id", required=True, help="Registered model_id")
+    contract.add_argument(
+        "--runtime-contract",
+        required=True,
+        help="Runtime contract JSON string or path (or @path).",
+    )
+    contract.add_argument(
+        "--replace",
+        action="store_true",
+        help="Replace metrics_json entirely instead of merging.",
+    )
+
     sub.add_parser("active", help="Show active promoted models")
 
     return parser.parse_args(argv)
@@ -84,6 +104,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "register":
         metrics_json = _load_metrics(args.metrics)
+        runtime_contract = _load_metrics(args.runtime_contract) if args.runtime_contract else None
+        if runtime_contract is not None:
+            metrics_json = dict(metrics_json)
+            metrics_json["runtime_contract"] = runtime_contract
         model_id = register_model(
             family=args.family,
             artifact_uri=args.artifact,
@@ -121,6 +145,17 @@ def main(argv: list[str] | None = None) -> None:
             notes=args.notes,
         )
         _print_json({"action": "rollback", "active": active})
+        return
+
+    if args.command == "update-contract":
+        runtime_contract = _load_metrics(args.runtime_contract)
+        updated = update_model_metrics_json(
+            family=args.family,
+            model_id=args.model_id,
+            metrics_json={"runtime_contract": runtime_contract},
+            merge=not args.replace,
+        )
+        _print_json({"action": "update-contract", "model": updated})
         return
 
     if args.command == "active":

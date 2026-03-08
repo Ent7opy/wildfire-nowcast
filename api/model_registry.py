@@ -104,6 +104,57 @@ def register_model(
     return resolved_model_id
 
 
+def update_model_metrics_json(
+    *,
+    family: str,
+    model_id: str,
+    metrics_json: dict[str, Any],
+    merge: bool = True,
+    engine: Engine | None = None,
+) -> dict[str, Any]:
+    """Update metrics_json for a registered model and return the updated registry row."""
+    family_norm = _normalize_family(family)
+    if not isinstance(metrics_json, dict):
+        raise ValueError("metrics_json must be a JSON object")
+
+    db = engine or get_engine()
+    current = _get_registry_row(family=family_norm, model_id=model_id, engine=db)
+    if current is None:
+        raise ValueError(f"Model not found for family={family_norm}: {model_id}")
+
+    current_metrics = current.get("metrics_json") if isinstance(current.get("metrics_json"), dict) else {}
+    if merge:
+        updated_metrics = dict(current_metrics)
+        updated_metrics.update(metrics_json)
+    else:
+        updated_metrics = dict(metrics_json)
+
+    stmt = text(
+        """
+        UPDATE model_registry
+        SET metrics_json = :metrics_json,
+            updated_at = NOW()
+        WHERE family = :family
+          AND model_id = :model_id
+        """
+    ).bindparams(bindparam("metrics_json", type_=JSONB))
+
+    with db.begin() as conn:
+        conn.execute(
+            stmt,
+            {
+                "family": family_norm,
+                "model_id": model_id,
+                "metrics_json": updated_metrics,
+            },
+        )
+
+    refreshed = _get_registry_row(family=family_norm, model_id=model_id, engine=db)
+    if refreshed is None:
+        raise RuntimeError(f"Failed to refresh model row after metrics update: {model_id}")
+    return refreshed
+
+
 def _get_registry_row(
     *,
     family: str,

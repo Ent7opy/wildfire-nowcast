@@ -141,7 +141,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         self.assertEqual("failed", mock_finalize.call_args.kwargs["status"])
         mock_advance.assert_not_called()
 
-    @patch("ingest.firms_ingest._resolve_denoiser_model_run_dir", return_value=None)
+    @patch("ingest.firms_ingest._resolve_denoiser_runtime_policy", return_value=None)
     @patch("ingest.firms_ingest._update_all_scoring_atomic")
     @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
     @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
@@ -170,7 +170,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_finalize,
         mock_advance,
         _mock_update_scoring,
-        _mock_resolve_model,
+        _mock_resolve_policy,
     ):
         mock_settings.map_key = "test-key"
         mock_settings.resolved_area = "20,40,21,41"
@@ -194,9 +194,9 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
 
         code = run_firms_ingest(day_range=None, area=None, sources=None)
 
-        self.assertEqual(1, code)
-        mock_finalize.assert_called_once()
-        self.assertEqual("failed", mock_finalize.call_args.kwargs["status"])
+        self.assertEqual(2, code)
+        mock_finalize.assert_not_called()
+        mock_create_batch.assert_not_called()
         mock_advance.assert_not_called()
 
     @patch("ingest.firms_ingest._update_all_scoring_atomic")
@@ -255,7 +255,18 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_advance.assert_not_called()
 
     @patch("ingest.firms_ingest._run_denoiser_inference")
-    @patch("ingest.firms_ingest._resolve_denoiser_model_run_dir", return_value="/models/denoiser/run")
+    @patch(
+        "ingest.firms_ingest._resolve_denoiser_runtime_policy",
+        return_value=SimpleNamespace(
+            model_run_dir="/models/denoiser/run",
+            using_promoted_model=True,
+            model_id="denoiser-123",
+            pipeline_version="v2",
+            threshold_profile="strict_v1",
+            threshold_source="registry_contract",
+            thresholds={"strong_filter_threshold": 0.5},
+        ),
+    )
     @patch("ingest.firms_ingest._update_all_scoring_atomic")
     @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
     @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
@@ -284,7 +295,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_finalize,
         mock_advance,
         _mock_update_scoring,
-        _mock_resolve_model,
+        _mock_resolve_policy,
         mock_run_denoiser,
     ):
         mock_settings.map_key = "test-key"

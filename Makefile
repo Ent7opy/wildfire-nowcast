@@ -1,4 +1,4 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-industrial-authoritative industrial-build-policy industrial-load-no-go-zones industrial-coverage-report br-build-hybrid-curated ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-build-coverage-from-authoritative denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-authoritative-perimeters-ca ingest-authoritative-perimeters-eu ingest-orchestrator download-fuels model-register model-promote model-rollback train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-industrial-authoritative industrial-build-policy industrial-load-no-go-zones industrial-coverage-report br-build-hybrid-curated ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-build-coverage-from-authoritative denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-authoritative-perimeters-ca ingest-authoritative-perimeters-eu ingest-orchestrator download-fuels model-register model-promote model-rollback model-update-contract train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
 
 PYTHON ?= python3
 UV ?= uv
@@ -337,10 +337,10 @@ ingest-orchestrator: ## Run unified FIRMS/weather/terrain/perimeters orchestrato
 download-fuels: ## Build/cache fuel-moisture feature cube (pass ARGS="--bbox ... --run-time ...")
 	$(UV) run --project ingest -m ingest.fuels_ingest $(ARGS)
 
-model-register: ## Register model artifact (usage: make model-register FAMILY=denoiser ARTIFACT=... METRICS=@path/or-json)
+model-register: ## Register model artifact (usage: make model-register FAMILY=denoiser ARTIFACT=... METRICS=@path/or-json RUNTIME_CONTRACT=@path/or-json)
 	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
 	$(if $(ARTIFACT),,$(error Please provide ARTIFACT=<artifact path or URI>))
-	$(UV) run --project api scripts/model_registry.py register --family "$(FAMILY)" --artifact "$(ARTIFACT)" $(if $(METRICS),--metrics '$(METRICS)',)
+	$(UV) run --project api scripts/model_registry.py register --family "$(FAMILY)" --artifact "$(ARTIFACT)" $(if $(METRICS),--metrics '$(METRICS)',) $(if $(RUNTIME_CONTRACT),--runtime-contract '$(RUNTIME_CONTRACT)',)
 
 model-promote: ## Promote model champion (usage: make model-promote FAMILY=denoiser MODEL_ID=...)
 	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
@@ -350,6 +350,12 @@ model-promote: ## Promote model champion (usage: make model-promote FAMILY=denoi
 model-rollback: ## Rollback champion to previous promoted model (usage: make model-rollback FAMILY=denoiser)
 	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
 	$(UV) run --project api scripts/model_registry.py rollback --family "$(FAMILY)" $(if $(PROMOTED_BY),--by "$(PROMOTED_BY)",) $(if $(NOTES),--notes "$(NOTES)",)
+
+model-update-contract: ## Update runtime contract on a registered model (usage: make model-update-contract FAMILY=denoiser MODEL_ID=... RUNTIME_CONTRACT=@path/or-json)
+	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
+	$(if $(MODEL_ID),,$(error Please provide MODEL_ID=<registered model id>))
+	$(if $(RUNTIME_CONTRACT),,$(error Please provide RUNTIME_CONTRACT=@path/or-json))
+	$(UV) run --project api scripts/model_registry.py update-contract --family "$(FAMILY)" --model-id "$(MODEL_ID)" --runtime-contract '$(RUNTIME_CONTRACT)' $(if $(REPLACE),--replace,)
 
 TRAIN_DENOISER_PIPELINE ?= v1
 TRAIN_DENOISER_CONFIG_V1 ?= configs/denoiser_train.yaml

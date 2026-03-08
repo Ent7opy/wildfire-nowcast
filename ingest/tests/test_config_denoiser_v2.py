@@ -8,7 +8,9 @@ def test_denoiser_v2_pipeline_fields_defaults() -> None:
         FIRMS_MAP_KEY="dummy",
     )
 
-    assert cfg.denoiser_pipeline_version == "v1"
+    assert cfg.denoiser_pipeline_version == "v2"
+    assert cfg.denoiser_threshold_profile == "strict_v1"
+    assert cfg.denoiser_allow_unsafe_threshold_override is False
     assert cfg.denoiser_shadow_mode is False
     assert 0.0 <= cfg.denoiser_strong_filter_threshold <= 1.0
     assert 0.0 <= cfg.denoiser_downweight_threshold <= 1.0
@@ -26,6 +28,22 @@ def test_denoiser_pipeline_version_validation() -> None:
         DENOISER_PIPELINE_VERSION="v2",
     )
     assert cfg.denoiser_pipeline_version == "v2"
+
+
+def test_denoiser_threshold_profile_validation() -> None:
+    cfg = FIRMSIngestSettings(
+        FIRMS_MAP_KEY="dummy",
+        DENOISER_THRESHOLD_PROFILE="env",
+    )
+    assert cfg.denoiser_threshold_profile == "env"
+
+
+def test_denoiser_threshold_profile_rejects_unknown() -> None:
+    with pytest.raises(ValueError):
+        FIRMSIngestSettings(
+            FIRMS_MAP_KEY="dummy",
+            DENOISER_THRESHOLD_PROFILE="strict_v2",
+        )
 
 
 def test_denoiser_pipeline_version_rejects_unknown() -> None:

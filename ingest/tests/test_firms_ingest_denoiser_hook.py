@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch, ANY
+from unittest.mock import MagicMock, patch
 
 from ingest.firms_ingest import _run_denoiser_inference
 
@@ -49,13 +49,14 @@ class TestFirmsIngestDenoiserHook(unittest.TestCase):
         self.assertIn("balkans", cmd)
 
         # Verify logging
-        mock_log.assert_called_once_with(
-            ANY,
-            "firms.denoiser_inference",
-            "Denoiser inference complete",
-            batch_id=1,
-            noise_percent=12.5
-        )
+        mock_log.assert_called_once()
+        log_args, log_kwargs = mock_log.call_args
+        self.assertEqual(log_args[1], "firms.denoiser_inference")
+        self.assertEqual(log_args[2], "Denoiser inference complete")
+        self.assertEqual(log_kwargs["batch_id"], 1)
+        self.assertEqual(log_kwargs["noise_percent"], 12.5)
+        self.assertIn("pipeline_version", log_kwargs)
+        self.assertIn("effective_thresholds", log_kwargs)
 
     @patch("subprocess.run")
     def test_run_denoiser_inference_error(self, mock_run):

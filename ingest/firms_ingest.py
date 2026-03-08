@@ -8,8 +8,9 @@ import json
 import logging
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from sqlalchemy.engine import Connection
 
@@ -42,6 +43,29 @@ _DENOISER_V2_REQUIRED_COLUMNS: tuple[str, ...] = (
     "denoiser_decision",
     "review_required",
 )
+_DENOISER_V2_RUNTIME_THRESHOLD_KEYS: tuple[str, ...] = (
+    "strong_filter_threshold",
+    "downweight_threshold",
+    "uncertainty_band_low",
+    "uncertainty_band_high",
+    "event_front_radius_m",
+    "event_front_max_gap_minutes",
+    "event_link_radius_m",
+    "event_link_max_gap_days",
+    "event_static_persistence_threshold",
+    "event_strict_static_split",
+)
+
+
+@dataclass(frozen=True)
+class DenoiserRuntimePolicy:
+    model_run_dir: str
+    model_id: str | None
+    pipeline_version: str
+    threshold_profile: str
+    threshold_source: str
+    thresholds: dict[str, Any]
+    using_promoted_model: bool
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -80,22 +104,167 @@ def _filter_detections_by_watermark(
     return filtered, max_filtered
 
 
-def _resolve_denoiser_model_run_dir(config: "FIRMSIngestSettings") -> str | None:
-    """Resolve denoiser model path from promoted registry model with env fallback."""
+def _resolve_active_denoiser_model() -> dict[str, Any] | None:
+    """Resolve promoted denoiser metadata from model registry."""
     try:
         from api.model_registry import resolve_active_model
 
-        active = resolve_active_model("denoiser")
-        if active and active.get("artifact_uri"):
-            return str(active["artifact_uri"])
+        return resolve_active_model("denoiser")
     except Exception:
         LOGGER.warning("Failed to resolve active promoted denoiser model; using env fallback if provided.")
-
-    return config.denoiser_model_run_dir
+        return None
 
 
 def _resolve_denoiser_pipeline_version(config: "FIRMSIngestSettings") -> str:
-    return str(getattr(config, "denoiser_pipeline_version", "v1") or "v1").strip().lower()
+    return str(getattr(config, "denoiser_pipeline_version", "v2") or "v2").strip().lower()
+
+
+def _resolve_denoiser_threshold_profile(config: "FIRMSIngestSettings") -> str:
+    return str(getattr(config, "denoiser_threshold_profile", "strict_v1") or "strict_v1").strip().lower()
+
+
+def _resolve_v2_thresholds_from_config(config: "FIRMSIngestSettings") -> dict[str, Any]:
+    return {
+        "strong_filter_threshold": float(getattr(config, "denoiser_strong_filter_threshold", 0.5)),
+        "downweight_threshold": float(getattr(config, "denoiser_downweight_threshold", 0.7)),
+        "uncertainty_band_low": float(getattr(config, "denoiser_uncertainty_band_low", 0.45)),
+        "uncertainty_band_high": float(getattr(config, "denoiser_uncertainty_band_high", 0.55)),
+        "event_front_radius_m": float(getattr(config, "denoiser_event_front_radius_m", 2500.0)),
+        "event_front_max_gap_minutes": int(getattr(config, "denoiser_event_front_max_gap_minutes", 45)),
+        "event_link_radius_m": float(getattr(config, "denoiser_event_link_radius_m", 10000.0)),
+        "event_link_max_gap_days": int(getattr(config, "denoiser_event_link_max_gap_days", 11)),
+        "event_static_persistence_threshold": float(
+            getattr(config, "denoiser_event_static_persistence_threshold", 0.85)
+        ),
+        "event_strict_static_split": bool(getattr(config, "denoiser_event_strict_static_split", True)),
+    }
+
+
+def _parse_v2_thresholds_from_runtime_contract(runtime_contract: dict[str, Any]) -> dict[str, Any]:
+    thresholds = runtime_contract.get("thresholds")
+    if not isinstance(thresholds, dict):
+        raise RuntimeError("runtime_contract.thresholds must be an object")
+
+    missing = [key for key in _DENOISER_V2_RUNTIME_THRESHOLD_KEYS if key not in thresholds]
+    if missing:
+        raise RuntimeError(
+            "runtime_contract.thresholds is missing required keys: " + ", ".join(sorted(missing))
+        )
+
+    return {
+        "strong_filter_threshold": float(thresholds["strong_filter_threshold"]),
+        "downweight_threshold": float(thresholds["downweight_threshold"]),
+        "uncertainty_band_low": float(thresholds["uncertainty_band_low"]),
+        "uncertainty_band_high": float(thresholds["uncertainty_band_high"]),
+        "event_front_radius_m": float(thresholds["event_front_radius_m"]),
+        "event_front_max_gap_minutes": int(thresholds["event_front_max_gap_minutes"]),
+        "event_link_radius_m": float(thresholds["event_link_radius_m"]),
+        "event_link_max_gap_days": int(thresholds["event_link_max_gap_days"]),
+        "event_static_persistence_threshold": float(thresholds["event_static_persistence_threshold"]),
+        "event_strict_static_split": bool(thresholds["event_strict_static_split"]),
+    }
+
+
+def _resolve_denoiser_runtime_policy(config: "FIRMSIngestSettings") -> DenoiserRuntimePolicy | None:
+    """Resolve denoiser runtime policy from registry contract with controlled fallback."""
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    threshold_profile = _resolve_denoiser_threshold_profile(config)
+    allow_unsafe_override = bool(getattr(config, "denoiser_allow_unsafe_threshold_override", False))
+
+    active = _resolve_active_denoiser_model()
+    model_id = str(active.get("model_id")) if active and active.get("model_id") else None
+    model_run_dir = (
+        str(active.get("artifact_uri"))
+        if active and active.get("artifact_uri")
+        else config.denoiser_model_run_dir
+    )
+    if not model_run_dir:
+        return None
+
+    runtime_contract: dict[str, Any] | None = None
+    if active:
+        metrics_json = active.get("metrics_json") or {}
+        if isinstance(metrics_json, dict):
+            runtime_contract = metrics_json.get("runtime_contract")
+
+    if isinstance(runtime_contract, dict):
+        contract_pipeline = str(runtime_contract.get("pipeline_version") or "").strip().lower()
+        if contract_pipeline and contract_pipeline != pipeline_version:
+            if not allow_unsafe_override:
+                raise RuntimeError(
+                    "Promoted denoiser pipeline mismatch: "
+                    f"registry={contract_pipeline}, runtime={pipeline_version}"
+                )
+            LOGGER.warning(
+                "Unsafe denoiser override enabled: accepting pipeline mismatch "
+                "(registry=%s, runtime=%s)",
+                contract_pipeline,
+                pipeline_version,
+            )
+
+    if threshold_profile == "strict_v1":
+        if not isinstance(runtime_contract, dict):
+            if not allow_unsafe_override:
+                raise RuntimeError(
+                    "DENOISER_THRESHOLD_PROFILE=strict_v1 requires metrics_json.runtime_contract "
+                    "on the promoted denoiser model."
+                )
+            LOGGER.warning(
+                "Unsafe denoiser override enabled: using environment thresholds because "
+                "runtime_contract is missing."
+            )
+        else:
+            contract_profile = str(runtime_contract.get("threshold_profile") or "").strip().lower()
+            if contract_profile != "strict_v1":
+                if not allow_unsafe_override:
+                    raise RuntimeError(
+                        "Promoted denoiser runtime_contract.threshold_profile must be strict_v1 "
+                        f"(got: {contract_profile or 'missing'})"
+                    )
+                LOGGER.warning(
+                    "Unsafe denoiser override enabled: accepting threshold profile mismatch "
+                    "(registry=%s, runtime=%s)",
+                    contract_profile or "missing",
+                    threshold_profile,
+                )
+            else:
+                thresholds = _parse_v2_thresholds_from_runtime_contract(runtime_contract)
+                return DenoiserRuntimePolicy(
+                    model_run_dir=model_run_dir,
+                    model_id=model_id,
+                    pipeline_version=pipeline_version,
+                    threshold_profile=threshold_profile,
+                    threshold_source="registry_contract",
+                    thresholds=thresholds,
+                    using_promoted_model=bool(active and active.get("artifact_uri")),
+                )
+
+    if threshold_profile == "strict_v1" and not allow_unsafe_override:
+        raise RuntimeError(
+            "Denoiser strict profile is enabled but runtime contract thresholds could not be resolved."
+        )
+
+    if threshold_profile == "strict_v1" and allow_unsafe_override:
+        LOGGER.warning(
+            "Unsafe denoiser override is active: using environment-configured thresholds instead "
+            "of promoted runtime contract."
+        )
+
+    return DenoiserRuntimePolicy(
+        model_run_dir=model_run_dir,
+        model_id=model_id,
+        pipeline_version=pipeline_version,
+        threshold_profile=threshold_profile,
+        threshold_source="env_config",
+        thresholds=_resolve_v2_thresholds_from_config(config),
+        using_promoted_model=bool(active and active.get("artifact_uri")),
+    )
+
+
+def _resolve_denoiser_model_run_dir(config: "FIRMSIngestSettings") -> str | None:
+    """Backward-compatible helper for tests and fallback call sites."""
+    policy = _resolve_denoiser_runtime_policy(config)
+    return policy.model_run_dir if policy else None
 
 
 def _resolve_denoiser_module_name(config: "FIRMSIngestSettings") -> str:
@@ -155,6 +324,33 @@ def run_firms_ingest(
         },
     )
 
+    denoiser_requested = bool(config.denoiser_enabled or config.denoiser_required)
+    denoiser_policy: DenoiserRuntimePolicy | None = None
+    if denoiser_requested:
+        try:
+            denoiser_policy = _resolve_denoiser_runtime_policy(config)
+        except RuntimeError as exc:
+            LOGGER.error("Denoiser runtime policy error: %s", exc)
+            return 2
+
+        if config.denoiser_required and (not denoiser_policy or not denoiser_policy.using_promoted_model):
+            LOGGER.error(
+                "Denoiser is required but no promoted denoiser model is active in model_registry."
+            )
+            return 2
+
+        if denoiser_policy:
+            LOGGER.info(
+                "Resolved denoiser policy: model_id=%s pipeline=%s profile=%s source=%s thresholds=%s",
+                denoiser_policy.model_id or "none",
+                denoiser_policy.pipeline_version,
+                denoiser_policy.threshold_profile,
+                denoiser_policy.threshold_source,
+                denoiser_policy.thresholds,
+            )
+        elif config.denoiser_enabled:
+            LOGGER.warning("Denoiser is enabled but no model run directory is configured; inference will be skipped.")
+
     for source in source_list:
         watermark = repository.get_ingest_watermark(source, area_key)
         watermark_time_utc = _as_utc((watermark or {}).get("last_acq_time_utc"))
@@ -211,19 +407,23 @@ def run_firms_ingest(
                 inserted = 0
                 skipped_duplicates = 0
 
-            should_run_denoiser = inserted > 0 and (config.denoiser_enabled or config.denoiser_required)
+            should_run_denoiser = inserted > 0 and denoiser_requested
             denoiser_ran = False
             if should_run_denoiser:
-                denoiser_model_run_dir = _resolve_denoiser_model_run_dir(config)
+                denoiser_model_run_dir = denoiser_policy.model_run_dir if denoiser_policy else None
                 if not denoiser_model_run_dir:
                     if config.denoiser_required:
                         raise RuntimeError(
-                            "Denoiser is required but no promoted denoiser model or "
-                            "DENOISER_MODEL_RUN_DIR fallback is configured."
+                            "Denoiser is required but no model run directory could be resolved."
                         )
                     LOGGER.warning("Denoiser is enabled but no model run directory is configured; skipping inference.")
                 else:
-                    _run_denoiser_inference(batch_id, config, model_run_dir=denoiser_model_run_dir)
+                    _run_denoiser_inference(
+                        batch_id,
+                        config,
+                        model_run_dir=denoiser_model_run_dir,
+                        runtime_policy=denoiser_policy,
+                    )
                     denoiser_ran = True
             if denoiser_ran or config.denoiser_required:
                 _assert_batch_denoiser_complete(batch_id, config=config)
@@ -405,14 +605,30 @@ def _reconcile_unscored_batches(max_batches: int = 5) -> None:
             LOGGER.exception("Failed to reconcile unscored batch %s", batch_id)
 
 
+def _effective_denoiser_thresholds(
+    config: "FIRMSIngestSettings",
+    runtime_policy: DenoiserRuntimePolicy | None,
+) -> dict[str, Any]:
+    pipeline_version = _resolve_denoiser_pipeline_version(config)
+    if pipeline_version == "v2":
+        if runtime_policy is not None:
+            return dict(runtime_policy.thresholds)
+        return _resolve_v2_thresholds_from_config(config)
+    return {
+        "threshold": float(getattr(config, "denoiser_threshold", 0.5)),
+        "batch_size": int(getattr(config, "denoiser_batch_size", 500)),
+    }
+
+
 def _run_denoiser_inference(
     batch_id: int,
     config: "FIRMSIngestSettings",
     *,
     model_run_dir: str | None = None,
-    ) -> None:
+    runtime_policy: DenoiserRuntimePolicy | None = None,
+) -> None:
     """Trigger denoiser inference via subprocess or direct module call."""
-    model_run_dir = model_run_dir or config.denoiser_model_run_dir
+    model_run_dir = model_run_dir or (runtime_policy.model_run_dir if runtime_policy else None) or config.denoiser_model_run_dir
     if not model_run_dir:
         LOGGER.warning(
             "Denoiser is enabled but DENOISER_MODEL_RUN_DIR is not set. Skipping inference."
@@ -420,19 +636,36 @@ def _run_denoiser_inference(
         return
 
     pipeline_version = _resolve_denoiser_pipeline_version(config)
+    if runtime_policy and runtime_policy.pipeline_version != pipeline_version:
+        raise RuntimeError(
+            "Denoiser runtime policy pipeline mismatch: "
+            f"policy={runtime_policy.pipeline_version}, runtime={pipeline_version}"
+        )
     invoke_method = str(getattr(config, "denoiser_invoke_method", "uv") or "uv").strip().lower()
     module_name = _resolve_denoiser_module_name(config)
+    threshold_profile = runtime_policy.threshold_profile if runtime_policy else _resolve_denoiser_threshold_profile(config)
+    threshold_source = runtime_policy.threshold_source if runtime_policy else "env_config"
+    effective_thresholds = _effective_denoiser_thresholds(config, runtime_policy)
 
     LOGGER.info(
-        "Starting denoiser inference for batch %s (pipeline=%s, method=%s)",
+        "Starting denoiser inference for batch %s (model_id=%s, pipeline=%s, method=%s, profile=%s, threshold_source=%s, thresholds=%s)",
         batch_id,
+        (runtime_policy.model_id if runtime_policy else None) or "none",
         pipeline_version,
         invoke_method,
+        threshold_profile,
+        threshold_source,
+        effective_thresholds,
     )
 
     # Use direct module import if configured
     if invoke_method == "module":
-        _run_denoiser_module_direct(batch_id, config, model_run_dir=model_run_dir)
+        _run_denoiser_module_direct(
+            batch_id,
+            config,
+            model_run_dir=model_run_dir,
+            runtime_policy=runtime_policy,
+        )
         return
 
     # Build command based on invocation method
@@ -454,7 +687,14 @@ def _run_denoiser_inference(
             module_name,
         ]
 
-    cmd.extend(_build_denoiser_argv(batch_id=batch_id, model_run_dir=model_run_dir, config=config))
+    cmd.extend(
+        _build_denoiser_argv(
+            batch_id=batch_id,
+            model_run_dir=model_run_dir,
+            config=config,
+            runtime_policy=runtime_policy,
+        )
+    )
 
     try:
         # We capture output to get the JSON summary
@@ -470,6 +710,11 @@ def _run_denoiser_inference(
         last_line = output.splitlines()[-1] if output else ""
         if last_line.startswith("{") and last_line.endswith("}"):
             stats = json.loads(last_line)
+            stats["model_id"] = (runtime_policy.model_id if runtime_policy else None)
+            stats["pipeline_version"] = pipeline_version
+            stats["threshold_profile"] = threshold_profile
+            stats["threshold_source"] = threshold_source
+            stats["effective_thresholds"] = effective_thresholds
             log_event(
                 LOGGER,
                 "firms.denoiser_inference",
@@ -495,6 +740,7 @@ def _run_denoiser_module_direct(
     config: "FIRMSIngestSettings",
     *,
     model_run_dir: str,
+    runtime_policy: DenoiserRuntimePolicy | None = None,
 ) -> None:
     """Run denoiser inference by directly importing the module (no subprocess).
     
@@ -508,7 +754,12 @@ def _run_denoiser_module_direct(
         denoiser_main = getattr(module, "main")
 
         # Build arguments as if they came from command line.
-        argv = _build_denoiser_argv(batch_id=batch_id, model_run_dir=model_run_dir, config=config)
+        argv = _build_denoiser_argv(
+            batch_id=batch_id,
+            model_run_dir=model_run_dir,
+            config=config,
+            runtime_policy=runtime_policy,
+        )
 
         # Capture the result - the module should return stats or print JSON
         # We need to capture stdout to get the JSON output
@@ -523,6 +774,13 @@ def _run_denoiser_module_direct(
         last_line = output.splitlines()[-1] if output else ""
         if last_line.startswith("{") and last_line.endswith("}"):
             stats = json.loads(last_line)
+            stats["model_id"] = (runtime_policy.model_id if runtime_policy else None)
+            stats["pipeline_version"] = _resolve_denoiser_pipeline_version(config)
+            stats["threshold_profile"] = (
+                runtime_policy.threshold_profile if runtime_policy else _resolve_denoiser_threshold_profile(config)
+            )
+            stats["threshold_source"] = runtime_policy.threshold_source if runtime_policy else "env_config"
+            stats["effective_thresholds"] = _effective_denoiser_thresholds(config, runtime_policy)
             log_event(
                 LOGGER,
                 "firms.denoiser_inference",
@@ -550,6 +808,7 @@ def _build_denoiser_argv(
     batch_id: int,
     model_run_dir: str,
     config: "FIRMSIngestSettings",
+    runtime_policy: DenoiserRuntimePolicy | None = None,
 ) -> list[str]:
     argv = [
         "--batch-id",
@@ -558,30 +817,36 @@ def _build_denoiser_argv(
         model_run_dir,
     ]
     pipeline_version = _resolve_denoiser_pipeline_version(config)
+    if runtime_policy and runtime_policy.pipeline_version != pipeline_version:
+        raise RuntimeError(
+            "Denoiser runtime policy pipeline mismatch while building argv: "
+            f"policy={runtime_policy.pipeline_version}, runtime={pipeline_version}"
+        )
     if pipeline_version == "v2":
+        thresholds = runtime_policy.thresholds if runtime_policy else _resolve_v2_thresholds_from_config(config)
         argv.extend(
             [
                 "--strong-filter-threshold",
-                str(getattr(config, "denoiser_strong_filter_threshold", 0.5)),
+                str(thresholds["strong_filter_threshold"]),
                 "--downweight-threshold",
-                str(getattr(config, "denoiser_downweight_threshold", 0.7)),
+                str(thresholds["downweight_threshold"]),
                 "--uncertainty-band-low",
-                str(getattr(config, "denoiser_uncertainty_band_low", 0.45)),
+                str(thresholds["uncertainty_band_low"]),
                 "--uncertainty-band-high",
-                str(getattr(config, "denoiser_uncertainty_band_high", 0.55)),
+                str(thresholds["uncertainty_band_high"]),
                 "--event-front-radius-m",
-                str(getattr(config, "denoiser_event_front_radius_m", 2500.0)),
+                str(thresholds["event_front_radius_m"]),
                 "--event-front-max-gap-minutes",
-                str(getattr(config, "denoiser_event_front_max_gap_minutes", 45)),
+                str(thresholds["event_front_max_gap_minutes"]),
                 "--event-link-radius-m",
-                str(getattr(config, "denoiser_event_link_radius_m", 10000.0)),
+                str(thresholds["event_link_radius_m"]),
                 "--event-link-max-gap-days",
-                str(getattr(config, "denoiser_event_link_max_gap_days", 11)),
+                str(thresholds["event_link_max_gap_days"]),
                 "--event-static-persistence-threshold",
-                str(getattr(config, "denoiser_event_static_persistence_threshold", 0.85)),
+                str(thresholds["event_static_persistence_threshold"]),
             ]
         )
-        if bool(getattr(config, "denoiser_event_strict_static_split", True)):
+        if bool(thresholds.get("event_strict_static_split", getattr(config, "denoiser_event_strict_static_split", True))):
             argv.append("--event-strict-static-split")
         if bool(getattr(config, "denoiser_shadow_mode", False)):
             argv.append("--shadow-mode")

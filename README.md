@@ -67,7 +67,8 @@ make prepare PREPARE_JOBS="weather,terrain,perimeters" PREPARE_MAX_RETRIES=3
 
 ML application during prepare:
 - FIRMS denoiser inference is applied for new detections when enabled, and can be enforced via `DENOISER_REQUIRED=true`.
-- Active promoted models are resolved from the model registry (`/internal/models/active`) with env fallback compatibility.
+- v1 production defaults are `DENOISER_PIPELINE_VERSION=v2` + `DENOISER_THRESHOLD_PROFILE=strict_v1`.
+- Strict mode reads thresholds from `metrics_json.runtime_contract` on the promoted model and fails closed on mismatches.
 
 ## Ingestion Orchestrator
 
@@ -113,7 +114,9 @@ curl http://localhost:8000/internal/models/active
 Model lifecycle commands:
 
 ```bash
-make model-register FAMILY=denoiser ARTIFACT=models/denoiser/<run_id> METRICS=@models/denoiser/<run_id>/metrics.json
+make model-register FAMILY=denoiser ARTIFACT=models/denoiser_v2/<run_id> \
+  METRICS=@models/denoiser_v2/<run_id>/metrics.json \
+  RUNTIME_CONTRACT=@configs/denoiser_runtime_contract_v1_strict_20260304_235923.json
 make model-promote FAMILY=denoiser MODEL_ID=<model_id>
 make model-rollback FAMILY=denoiser
 ```

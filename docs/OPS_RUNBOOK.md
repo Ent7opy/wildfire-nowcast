@@ -39,16 +39,32 @@ Expected runtime profile:
 
 ## 3) Model lifecycle (register/promote/rollback)
 
-Register artifact:
+Register artifact with strict runtime contract:
 
 ```bash
-make model-register FAMILY=denoiser ARTIFACT=models/denoiser/<run_id> METRICS=@models/denoiser/<run_id>/metrics.json
+make model-register FAMILY=denoiser ARTIFACT=models/denoiser_v2/<run_id> \
+  METRICS=@models/denoiser_v2/<run_id>/metrics.json \
+  RUNTIME_CONTRACT=@configs/denoiser_runtime_contract_v1_strict_20260304_235923.json
 ```
 
 Promote champion:
 
 ```bash
 make model-promote FAMILY=denoiser MODEL_ID=<model_id>
+```
+
+Verify active runtime contract:
+
+```bash
+uv run --project api scripts/model_registry.py active
+curl http://localhost:8000/internal/models/active
+```
+
+Patch contract on an already-registered model (if needed):
+
+```bash
+make model-update-contract FAMILY=denoiser MODEL_ID=<model_id> \
+  RUNTIME_CONTRACT=@configs/denoiser_runtime_contract_v1_strict_20260304_235923.json
 ```
 
 Rollback to previously promoted model:
@@ -82,7 +98,8 @@ curl http://localhost:8000/internal/health/data-freshness
 Actions:
 - If FIRMS latest run has zero fetched rows, run a manual FIRMS ingest for the intended area/day window.
 - If weather/terrain is missing for frequent forecast AOIs, prewarm those inputs (optional) to reduce click-to-forecast latency.
-- If FIRMS ingest fails due denoiser policy, ensure promoted denoiser exists or set `DENOISER_REQUIRED=false` only for controlled local/dev fallback.
+- If FIRMS ingest fails due denoiser policy, verify the promoted denoiser has `metrics_json.runtime_contract` and runtime env uses `DENOISER_PIPELINE_VERSION=v2` + `DENOISER_THRESHOLD_PROFILE=strict_v1`.
+- Set `DENOISER_ALLOW_UNSAFE_THRESHOLD_OVERRIDE=true` only as an emergency local/dev override.
 
 Recovery verification:
 - `/health/data-freshness` reports recent `sources.*.last_seen_at` values.
