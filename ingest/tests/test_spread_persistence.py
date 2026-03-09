@@ -47,8 +47,8 @@ def test_generate_contours_simple_square():
     
     assert isinstance(geom, MultiPolygon)
     assert not geom.is_empty
-    # Area of one 10x10 pixel is 100
-    assert abs(geom.area - 100.0) < 1e-6
+    # Area of one 10x10 pixel is 100 (allow tiny topology-preserving smoothing drift).
+    assert abs(geom.area - 100.0) < 1e-2
     
     # Check bounds
     minx, miny, maxx, maxy = geom.bounds
@@ -253,4 +253,3 @@ def test_build_contour_records_uses_forecast_horizons_only():
     assert len(records) == 1
     assert records[0]["horizon_hours"] == 24
     assert records[0]["threshold"] == 0.5
-

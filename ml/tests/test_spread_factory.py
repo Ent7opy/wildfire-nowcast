@@ -12,6 +12,7 @@ from ml.spread.factory import get_spread_model, normalize_model_selection
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0
 from ml.spread.learned_v1 import LearnedSpreadModelV1
 from ml.spread.learned_v2 import LearnedSpreadModelV2
+from ml.spread.learned_v3 import LearnedSpreadModelV3
 
 
 def test_get_spread_model_learned_v1_success():
@@ -64,6 +65,34 @@ def test_get_spread_model_success():
     assert model.config.base_spread_km_h == 0.05
 
 
+def test_get_spread_model_learned_v3_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify that v3 model can be instantiated via factory."""
+    run_dir = tmp_path / "spread_v3_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "model.onnx").write_bytes(b"dummy")
+    (run_dir / "feature_schema.json").write_text('{"channels": ["fire_t0"]}', encoding="utf-8")
+
+    class _DummySession:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get_inputs(self):
+            return [types.SimpleNamespace(name="x")]
+
+        def run(self, *_args, **_kwargs):
+            raise RuntimeError("not used")
+
+    fake_ort = types.SimpleNamespace(
+        SessionOptions=lambda: types.SimpleNamespace(intra_op_num_threads=1),
+        InferenceSession=lambda *_args, **_kwargs: _DummySession(),
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+
+    model = get_spread_model("LearnedSpreadModelV3", params={"model_run_dir": str(run_dir)})
+    assert isinstance(model, LearnedSpreadModelV3)
+    assert model.model_run_dir == str(run_dir)
+
+
 def test_get_spread_model_with_params():
     """Verify that parameters are passed to the model config."""
     params = {"base_spread_km_h": 0.5, "wind_influence_km_h_per_ms": 1.0}
@@ -87,6 +116,11 @@ def test_normalize_model_selection_requires_learned_run_dir():
 def test_normalize_model_selection_requires_v2_run_dir():
     with pytest.raises(ValueError, match="model_params.model_run_dir is required"):
         normalize_model_selection("LearnedSpreadModelV2", {})
+
+
+def test_normalize_model_selection_requires_v3_run_dir():
+    with pytest.raises(ValueError, match="model_params.model_run_dir is required"):
+        normalize_model_selection("LearnedSpreadModelV3", {})
 
 
 def test_get_spread_model_filters_unknown_params(caplog: pytest.LogCaptureFixture):

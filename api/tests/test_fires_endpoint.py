@@ -159,6 +159,38 @@ def test_get_events_endpoint(monkeypatch):
     assert kwargs["include_review_required"] is False
 
 
+def test_get_events_endpoint_passthrough_geom_geojson(monkeypatch):
+    """Test that /fires/events returns event geometry payload when provided by repo."""
+    mock_events = MagicMock(
+        return_value=[
+            {
+                "event_id": "evt_geom_1",
+                "event_score": 0.93,
+                "geom_geojson": '{"type":"MultiPolygon","coordinates":[]}',
+            }
+        ]
+    )
+    monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
+
+    response = client.get(
+        "/fires/events",
+        params={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 22.0,
+            "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["events"][0]["event_id"] == "evt_geom_1"
+    assert payload["events"][0]["geom_geojson"] == '{"type":"MultiPolygon","coordinates":[]}'
+
+
 def test_get_fronts_endpoint(monkeypatch):
     """Test that /fires/fronts delegates to list_fire_fronts_bbox_time."""
     mock_fronts = MagicMock(return_value=[{"front_id": "front_1", "event_id": "evt_1"}])

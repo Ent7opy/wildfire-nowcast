@@ -44,7 +44,7 @@ def get_legend_html() -> str:
         legend_items.append(_color_swatch([255, 165, 0], "Spread outlook"))
         legend_items.append(
             '<div style="color:rgba(255,255,255,0.5);font-size:11px;">'
-            'T+24h, T+48h, T+72h contours</div>'
+            "T+24h | threshold 0.7</div>"
         )
 
     if app_state.layers.show_risk:

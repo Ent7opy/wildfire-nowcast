@@ -360,6 +360,114 @@ def compute_recommendation(
     }
 
 
+def _calibrator_artifact_present(model_params: dict[str, Any] | None) -> bool:
+    params = dict(model_params or {})
+    raw = params.get("calibrator_run_dir")
+    if raw is None:
+        return False
+    path = Path(str(raw))
+    if path.is_file():
+        return path.name == "calibrator.pkl"
+    if path.is_dir():
+        return (path / "calibrator.pkl").exists()
+    return False
+
+
+def _build_stage_governance(
+    *,
+    config: dict[str, Any],
+    decision: dict[str, Any],
+    summary_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    gate_cfg = dict(config.get("gate", {}) or {})
+    maturity_stage = str(gate_cfg.get("maturity_stage", "mvp_operational"))
+    valid_stages = {"mvp_operational", "science_grade"}
+
+    hard_stops: list[dict[str, Any]] = []
+    stage_warnings: list[dict[str, Any]] = []
+    science_debt_register: list[dict[str, Any]] = []
+
+    if maturity_stage not in valid_stages:
+        hard_stops.append(
+            {
+                "id": "STOP-STAGE-001",
+                "message": f"Unsupported maturity_stage={maturity_stage!r}.",
+                "mitigation": "Use one of: mvp_operational, science_grade.",
+                "target_stage": "mvp_operational",
+            }
+        )
+
+    challenger_cfg = dict(config.get("challenger", {}) or {})
+    challenger_name = challenger_cfg.get("model_name")
+    challenger_params = challenger_cfg.get("model_params")
+    if challenger_name == "LearnedSpreadModelV3" and not _calibrator_artifact_present(challenger_params):
+        hard_stops.append(
+            {
+                "id": "STOP-CAL-001",
+                "message": "missing calibrator artifact for LearnedSpreadModelV3 promotion.",
+                "mitigation": "Provide challenger.model_params.calibrator_run_dir containing calibrator.pkl.",
+                "target_stage": maturity_stage,
+            }
+        )
+
+    weighted_bss = float(decision.get("weighted_bss_improvement", 0.0) or 0.0)
+    if weighted_bss <= 0.0:
+        stage_warnings.append(
+            {
+                "id": "WARN-MVP-BSS-001",
+                "tracking_id": "spread-science-debt-bss-positive-skill",
+                "warning": f"Weighted BSS improvement must be > 0 for MVP; observed {weighted_bss:.4f}.",
+                "mitigation": "Re-train challenger or refine inputs until aggregated BSS improvement is positive.",
+                "target_stage": "mvp_operational",
+            }
+        )
+
+    if not bool(decision.get("pass", False)):
+        stage_warnings.append(
+            {
+                "id": "WARN-GATE-001",
+                "tracking_id": "spread-science-debt-gate-regression",
+                "warning": "Primary/secondary challenger gate did not pass.",
+                "mitigation": "Address gate regressions listed in decision.reasons before promotion.",
+                "target_stage": maturity_stage,
+            }
+        )
+
+    if maturity_stage == "mvp_operational":
+        science_debt_register.extend(
+            [
+                {
+                    "debt_id": "SCI-DEBT-EXT-GT",
+                    "description": "External ground-truth verification is not yet enforced in MVP gate.",
+                    "target_stage": "science_grade",
+                    "exit_criteria": "Validated against authoritative external ground-truth dataset.",
+                },
+                {
+                    "debt_id": "SCI-DEBT-DM-SAL",
+                    "description": "Science-grade DM significance and SAL threshold governance is deferred.",
+                    "target_stage": "science_grade",
+                    "exit_criteria": "DM significance and SAL thresholds enforced in promotion policy.",
+                },
+                {
+                    "debt_id": "SCI-DEBT-DRIFT",
+                    "description": "Reliability/calibration drift monitoring controls are not yet mandatory.",
+                    "target_stage": "science_grade",
+                    "exit_criteria": "Drift monitors and alert thresholds are operational in production.",
+                },
+            ]
+        )
+
+    allow_promotion = bool(decision.get("pass", False)) and weighted_bss > 0.0 and not hard_stops
+    promotion_decision = "promote_challenger" if allow_promotion else "hold_challenger"
+    return {
+        "maturity_stage": maturity_stage,
+        "hard_stops": hard_stops,
+        "stage_warnings": stage_warnings,
+        "promotion_decision": promotion_decision,
+        "science_debt_register": science_debt_register,
+    }
+
+
 def _collect_comparison_arrays(config: dict[str, Any]) -> dict[int, dict[str, Any]]:
     region_name = str(config["region_name"])
     bbox = tuple(float(v) for v in config["bbox"])
@@ -547,6 +655,7 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
         max_pr_auc_drop=float(gate_cfg.get("max_pr_auc_drop", 0.01)),
         max_iou_drop=float(gate_cfg.get("max_iou_drop", 0.02)),
     )
+    stage_governance = _build_stage_governance(config=config, decision=decision, summary_rows=rows)
 
     pd.DataFrame(rows).sort_values("horizon_hours").to_csv(out_dir / "summary.csv", index=False)
     payload = {
@@ -554,13 +663,26 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
         "config": config,
         "summary": rows,
         "decision": decision,
+        "maturity_stage": stage_governance["maturity_stage"],
+        "hard_stops": stage_governance["hard_stops"],
+        "stage_warnings": stage_governance["stage_warnings"],
+        "promotion_decision": stage_governance["promotion_decision"],
+        "science_debt_register": stage_governance["science_debt_register"],
     }
     (out_dir / "summary.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+    weighted_bss = float(decision.get("weighted_bss_improvement", 0.0) or 0.0)
+    report_pass = bool(decision.get("pass", False)) and weighted_bss > 0.0
+    report_pass = report_pass and len(stage_governance["hard_stops"]) == 0
     gate_report = {
-        "pass": bool(decision.get("pass", False)),
+        "pass": report_pass,
         "recommend_challenger": bool(decision.get("recommend_challenger", False)),
         "decision": decision,
+        "maturity_stage": stage_governance["maturity_stage"],
+        "hard_stops": stage_governance["hard_stops"],
+        "stage_warnings": stage_governance["stage_warnings"],
+        "promotion_decision": stage_governance["promotion_decision"],
+        "science_debt_register": stage_governance["science_debt_register"],
     }
     (out_dir / "gate_report.json").write_text(
         json.dumps(gate_report, indent=2) + "\n", encoding="utf-8"
@@ -570,6 +692,8 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
         "# Champion vs Challenger Decision",
         "",
         f"- recommendation: `{'promote_challenger' if decision['recommend_challenger'] else 'keep_champion'}`",
+        f"- maturity_stage: `{stage_governance['maturity_stage']}`",
+        f"- promotion_decision: `{stage_governance['promotion_decision']}`",
         f"- pass: `{decision['pass']}`",
         f"- primary_ok: `{decision.get('primary_ok')}`",
         f"- secondary_ok: `{decision.get('secondary_ok')}`",
@@ -579,6 +703,16 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
     ]
     for reason in decision["reasons"]:
         decision_lines.append(f"- {reason}")
+    if stage_governance["hard_stops"]:
+        decision_lines.append("")
+        decision_lines.append("## Hard Stops")
+        for item in stage_governance["hard_stops"]:
+            decision_lines.append(f"- {item['id']}: {item['message']}")
+    if stage_governance["stage_warnings"]:
+        decision_lines.append("")
+        decision_lines.append("## Stage Warnings")
+        for item in stage_governance["stage_warnings"]:
+            decision_lines.append(f"- {item['id']}: {item['warning']}")
     (out_dir / "decision.md").write_text("\n".join(decision_lines) + "\n", encoding="utf-8")
 
     plots_cfg = config.get("plots", {}) or {}

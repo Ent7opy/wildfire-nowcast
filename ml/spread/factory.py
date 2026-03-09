@@ -10,6 +10,7 @@ from ml.spread.contract import SpreadModel
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0, HeuristicSpreadV0Config
 from ml.spread.learned_v1 import LearnedSpreadModelV1
 from ml.spread.learned_v2 import LearnedSpreadModelV2
+from ml.spread.learned_v3 import LearnedSpreadModelV3
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,11 +31,21 @@ class LearnedSpreadV2Config:
     onnx_filename: str = "model.int8.onnx"
 
 
+@dataclass(frozen=True, slots=True)
+class LearnedSpreadV3Config:
+    """Configuration for LearnedSpreadModelV3."""
+
+    model_run_dir: str
+    calibrator_run_dir: str | None = None
+    onnx_filename: str = "model.int8.onnx"
+
+
 # Registry mapping model names to (ModelClass, ConfigClass)
 MODEL_REGISTRY: dict[str, tuple[Type[SpreadModel], Type[Any]]] = {
     "HeuristicSpreadModelV0": (HeuristicSpreadModelV0, HeuristicSpreadV0Config),
     "LearnedSpreadModelV1": (LearnedSpreadModelV1, LearnedSpreadV1Config),
     "LearnedSpreadModelV2": (LearnedSpreadModelV2, LearnedSpreadV2Config),
+    "LearnedSpreadModelV3": (LearnedSpreadModelV3, LearnedSpreadV3Config),
 }
 
 MODEL_DEFAULT_NAME = "HeuristicSpreadModelV0"
@@ -42,6 +53,7 @@ MODEL_VERSION_HINTS: dict[str, str] = {
     "HeuristicSpreadModelV0": "v0",
     "LearnedSpreadModelV1": "v1",
     "LearnedSpreadModelV2": "v2",
+    "LearnedSpreadModelV3": "v3",
 }
 
 
@@ -68,7 +80,7 @@ def normalize_model_selection(
         raise ValueError("model_params must be an object/dict when provided.")
 
     # Learned model requires an explicit artifacts directory.
-    if selected_name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2"} and not normalized_params.get(
+    if selected_name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2", "LearnedSpreadModelV3"} and not normalized_params.get(
         "model_run_dir"
     ):
         raise ValueError(
@@ -129,6 +141,12 @@ def get_spread_model(name: str, params: dict[str, Any] | None = None) -> SpreadM
             calibrator_run_dir=model_config.calibrator_run_dir,  # type: ignore
         )
     if name == "LearnedSpreadModelV2":
+        return model_cls(
+            model_run_dir=model_config.model_run_dir,  # type: ignore
+            calibrator_run_dir=model_config.calibrator_run_dir,  # type: ignore
+            onnx_filename=model_config.onnx_filename,  # type: ignore
+        )
+    if name == "LearnedSpreadModelV3":
         return model_cls(
             model_run_dir=model_config.model_run_dir,  # type: ignore
             calibrator_run_dir=model_config.calibrator_run_dir,  # type: ignore

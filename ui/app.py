@@ -9,6 +9,7 @@ from components.sidebar import render_sidebar
 from components.map_view import render_map_view
 from components.click_details import render_click_details
 from components.forecast_status import render_forecast_status_polling
+from components.forecast_notifications import render_forecast_notification
 from components.data_freshness_banner import render_data_freshness_banner
 
 
@@ -165,6 +166,19 @@ def main() -> None:
             transform: translateY(-1px) !important;
           }
 
+          .stButton > button:disabled,
+          button[data-testid="stBaseButton-primary"]:disabled,
+          button[data-testid="stBaseButton-secondary"]:disabled {
+            opacity: 0.45 !important;
+            filter: grayscale(0.45) !important;
+            cursor: not-allowed !important;
+            box-shadow: none !important;
+            transform: none !important;
+            background: rgba(127, 127, 127, 0.35) !important;
+            border: 1px solid rgba(180, 180, 180, 0.4) !important;
+            color: rgba(235, 235, 235, 0.65) !important;
+          }
+
           /* ── Floating Legend (dark) ──────────────────────────────────── */
           #floating-legend {
             position: fixed;
@@ -278,6 +292,7 @@ def main() -> None:
     with st.sidebar:
         render_sidebar()
 
+    render_forecast_notification()
     # Check for ongoing JIT forecast polling - display as status banner
     if app_state.forecast_job.job_id:
         with st.container():

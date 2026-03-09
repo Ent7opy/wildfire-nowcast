@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routes.forecast import forecast_router
+from ml.spread.region_key import bbox_region_name
 
 # Create a test app
 app = FastAPI()
@@ -257,6 +258,57 @@ def test_create_jit_forecast_invalid_horizons_rejected():
     )
     assert response.status_code == 422
     assert "horizons_hours must not contain duplicates" in response.json()["detail"]
+
+
+def test_create_jit_forecast_from_front_resolves_bbox_and_enforces_strict_inputs():
+    from uuid import uuid4
+
+    front_id = "front_abc_123"
+    bbox = (20.01, 40.01, 20.99, 40.99)
+    mock_job_id = uuid4()
+    mock_job = {"id": mock_job_id, "status": "queued", "created_at": "2025-01-19T00:00:00"}
+
+    with (
+        patch(
+            "api.routes.forecast.get_fire_front_by_id",
+            return_value={
+                "front_id": front_id,
+                "bbox_min_lon": bbox[0],
+                "bbox_min_lat": bbox[1],
+                "bbox_max_lon": bbox[2],
+                "bbox_max_lat": bbox[3],
+            },
+        ),
+        patch("api.forecast.repo.create_jit_job", return_value=mock_job) as mock_create,
+        patch("api.forecast.worker.queue.enqueue"),
+    ):
+        response = client.post(
+            "/forecast/jit/from-front",
+            json={"front_id": front_id, "horizons_hours": [24, 48]},
+        )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["job_id"] == str(mock_job_id)
+    assert body["status"] == "queued"
+    assert body["front_id"] == front_id
+    assert body["bbox"] == [bbox[0], bbox[1], bbox[2], bbox[3]]
+
+    persisted_request = mock_create.call_args.args[1]
+    assert persisted_request["front_id"] == front_id
+    assert persisted_request["strict_inputs"] is True
+    assert persisted_request["region_name"] == bbox_region_name(bbox)
+
+
+def test_create_jit_forecast_from_front_not_found():
+    with patch("api.routes.forecast.get_fire_front_by_id", return_value=None):
+        response = client.post(
+            "/forecast/jit/from-front",
+            json={"front_id": "missing_front"},
+        )
+
+    assert response.status_code == 404
+    assert "front_id not found" in response.json()["detail"]
 
 
 def test_create_jit_forecast_invalid_reference_time_rejected():

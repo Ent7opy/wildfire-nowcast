@@ -1,6 +1,7 @@
 import numpy as np
 
 from ml.eval_spread_champion_challenger import (
+    _build_stage_governance,
     compute_recommendation,
     summarize_comparison_for_horizon,
 )
@@ -97,3 +98,39 @@ def test_compute_recommendation_accepts_when_primary_and_secondary_gates_pass():
     assert decision["recommend_challenger"] is True
     assert decision["primary_ok"] is True
     assert decision["secondary_ok"] is True
+
+
+def test_stage_governance_requires_calibrator_for_v3_promotion(tmp_path):
+    decision = {
+        "pass": True,
+        "weighted_bss_improvement": 0.02,
+        "recommend_challenger": True,
+        "reasons": [],
+    }
+    config_missing_cal = {
+        "gate": {"maturity_stage": "mvp_operational"},
+        "challenger": {
+            "model_name": "LearnedSpreadModelV3",
+            "model_params": {"model_run_dir": str(tmp_path / "run")},
+        },
+    }
+
+    out_missing = _build_stage_governance(config=config_missing_cal, decision=decision, summary_rows=[])
+    assert out_missing["hard_stops"]
+    assert any(s["id"] == "STOP-CAL-001" for s in out_missing["hard_stops"])
+
+    cal_dir = tmp_path / "cal"
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "calibrator.pkl").write_bytes(b"ok")
+    config_with_cal = {
+        "gate": {"maturity_stage": "mvp_operational"},
+        "challenger": {
+            "model_name": "LearnedSpreadModelV3",
+            "model_params": {
+                "model_run_dir": str(tmp_path / "run"),
+                "calibrator_run_dir": str(cal_dir),
+            },
+        },
+    }
+    out_with_cal = _build_stage_governance(config=config_with_cal, decision=decision, summary_rows=[])
+    assert not any(s["id"] == "STOP-CAL-001" for s in out_with_cal["hard_stops"])

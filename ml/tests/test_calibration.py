@@ -206,3 +206,49 @@ def test_fit_from_hindcast_run_fallbacks_to_platt_for_sparse_positives():
         assert isinstance(calibrator.per_horizon_models[24], LogisticRegression)
     finally:
         shutil.rmtree(tmp_root)
+
+
+def test_fit_from_hindcast_run_resolves_legacy_repo_relative_case_paths(monkeypatch):
+    """Calibration loader should accept manifest paths relative to repo/cwd."""
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        hindcast_dir = tmp_root / "hindcast_run"
+        hindcast_dir.mkdir()
+        monkeypatch.chdir(tmp_root)
+
+        for i in range(2):
+            ds = xr.Dataset(
+                data_vars={
+                    "y_pred": (["time", "lat", "lon"], np.array([[[0.2, 0.8], [0.1, 0.9]]], dtype=np.float32)),
+                    "y_obs": (["time", "lat", "lon"], np.array([[[0, 1], [0, 1]]], dtype=np.float32)),
+                    "fire_t0": (["lat", "lon"], np.array([[1, 0], [0, 1]], dtype=np.float32)),
+                },
+                coords={
+                    "time": [datetime(2025, 1, 1 + i)],
+                    "lat": [0, 1],
+                    "lon": [0, 1],
+                    "lead_time_hours": ("time", [24]),
+                },
+                attrs={"ref_time": f"2025-01-0{1+i}T00:00:00Z"},
+            )
+            ds.to_netcdf(hindcast_dir / f"case{i}.nc")
+
+        manifest = {
+            "run_id": "test_hindcast_legacy_paths",
+            # Legacy style: path relative to cwd/repo root (not to hindcast_run_dir).
+            "cases": [{"path": f"hindcast_run/case{i}.nc"} for i in range(2)],
+        }
+        with open(hindcast_dir / "index.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        calibrator = fit_from_hindcast_run(
+            hindcast_run_dir=hindcast_dir,
+            method="isotonic",
+            split_percentile=0.5,
+            out_root=str(tmp_root / "calibration"),
+            min_positive_for_isotonic=1,
+        )
+
+        assert 24 in calibrator.per_horizon_models
+    finally:
+        shutil.rmtree(tmp_root)

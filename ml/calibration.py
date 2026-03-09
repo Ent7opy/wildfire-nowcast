@@ -33,6 +33,26 @@ if str(REPO_ROOT) not in sys.path:
 LOGGER = logging.getLogger(__name__)
 
 
+def _resolve_hindcast_case_path(hindcast_run_dir: Path, raw_path: str) -> Path:
+    """Resolve case path across legacy and new manifest path styles."""
+    case_path = Path(raw_path)
+    if case_path.is_absolute():
+        return case_path
+
+    # Preferred: path relative to hindcast run directory.
+    run_relative = hindcast_run_dir / case_path
+    if run_relative.exists():
+        return run_relative
+
+    # Legacy manifests may store repo-root-relative paths.
+    cwd_relative = Path.cwd() / case_path
+    if cwd_relative.exists():
+        return cwd_relative
+
+    # Fallback for warning output.
+    return run_relative
+
+
 def fit_binary_probability_calibrator(
     raw_scores: np.ndarray,
     labels: np.ndarray,
@@ -331,10 +351,10 @@ def fit_from_hindcast_run(
 
     LOGGER.info(f"Loading {len(cases)} cases from {hindcast_run_dir}...")
     for case_meta in cases:
-        case_path = Path(case_meta["path"])
-        # Handle relative paths in manifest if needed
-        if not case_path.is_absolute():
-            case_path = hindcast_run_dir / case_path
+        case_path = _resolve_hindcast_case_path(
+            hindcast_run_dir=hindcast_run_dir,
+            raw_path=str(case_meta["path"]),
+        )
 
         if not case_path.exists():
             LOGGER.warning(f"Case file not found: {case_path}; skipping.")

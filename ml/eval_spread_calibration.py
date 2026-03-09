@@ -32,6 +32,23 @@ from ml.calibration import SpreadProbabilityCalibrator  # noqa: E402
 LOGGER = logging.getLogger(__name__)
 
 
+def _resolve_hindcast_case_path(hindcast_run_dir: Path, raw_path: str) -> Path:
+    """Resolve case path across legacy and new manifest path styles."""
+    p = Path(raw_path)
+    if p.is_absolute():
+        return p
+
+    run_relative = hindcast_run_dir / p
+    if run_relative.exists():
+        return run_relative
+
+    cwd_relative = Path.cwd() / p
+    if cwd_relative.exists():
+        return cwd_relative
+
+    return run_relative
+
+
 def expected_calibration_error(
     y_true: np.ndarray, y_prob: np.ndarray, *, n_bins: int = 10
 ) -> float:
@@ -74,10 +91,7 @@ def _load_hindcast_manifest(hindcast_run_dir: Path) -> dict[str, Any]:
 def _iter_case_paths(hindcast_run_dir: Path) -> Iterable[Path]:
     manifest = _load_hindcast_manifest(hindcast_run_dir)
     for c in manifest.get("cases", []):
-        p = Path(c["path"])
-        if not p.is_absolute():
-            p = hindcast_run_dir / p
-        yield p
+        yield _resolve_hindcast_case_path(hindcast_run_dir, str(c["path"]))
 
 
 def _collect_horizon_arrays(
@@ -314,4 +328,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

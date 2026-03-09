@@ -31,6 +31,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from shapely.geometry.base import BaseGeometry
 
 BBox: TypeAlias = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,18 @@ def _read_window_as_analysis_array(
     return data, valid
 
 
+def _resolve_artifact_path(path: Path) -> Path:
+    """Resolve runtime artifact paths across local and containerized layouts."""
+    if path.exists():
+        return path
+    raw = str(path)
+    if raw.startswith("/app/"):
+        candidate = _REPO_ROOT / raw.removeprefix("/app/")
+        if candidate.exists():
+            return candidate
+    return path
+
+
 def _load_terrain_window_from_features_md(
     region_name: str,
     features_md: features_repo.TerrainFeaturesMetadata,
@@ -116,8 +129,8 @@ def _load_terrain_window_from_features_md(
     grid = _grid_spec_from_features_metadata(features_md)
     win = get_grid_window_for_bbox(grid, bbox, clip=clip)
 
-    slope_path = Path(features_md.slope_path)
-    aspect_path = Path(features_md.aspect_path)
+    slope_path = _resolve_artifact_path(Path(features_md.slope_path))
+    aspect_path = _resolve_artifact_path(Path(features_md.aspect_path))
     if not slope_path.exists():
         raise FileNotFoundError(f"Slope raster not found at {slope_path}")
     if not aspect_path.exists():
@@ -129,7 +142,7 @@ def _load_terrain_window_from_features_md(
         dem_md = repo.get_latest_dem_metadata_for_region(region_name)
         if dem_md is None:
             raise ValueError(f"No DEM metadata found for region '{region_name}'.")
-        dem_path = Path(dem_md.raster_path)
+        dem_path = _resolve_artifact_path(Path(dem_md.raster_path))
         if not dem_path.exists():
             raise FileNotFoundError(f"DEM raster not found at {dem_path}")
     validate_terrain_stack(dem_path, slope_path, aspect_path, grid, strict=True)
@@ -253,4 +266,3 @@ def load_terrain_for_aoi(
         valid_data_mask=tw.valid_data_mask,
         aoi_mask=aoi_mask,
     )
-

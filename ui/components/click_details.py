@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -16,6 +17,8 @@ from api_client import (
     ApiError,
     ApiUnavailableError,
     create_jit_forecast,
+    create_jit_forecast_from_front,
+    get_active_spread_model_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,6 +192,25 @@ def _nearest_open_wildfire_event(lat: float, lon: float) -> Optional[Dict[str, A
 
 def _clamp_01(value: float) -> float:
     return max(0.0, min(value, 1.0))
+
+
+def _build_event_key(event: Dict[str, Any], lat: float, lon: float) -> str:
+    event_id = event.get("event_id")
+    if event_id is not None and str(event_id).strip():
+        return f"event_id:{event_id}"
+    end_time = str(event.get("end_time") or "")
+    return f"point:{lat:.4f}:{lon:.4f}:{end_time}"
+
+
+def _location_label_for_event(event: Dict[str, Any], lat: float, lon: float) -> str:
+    for key in ("country", "admin0_name", "admin1_name", "region_name", "location_name"):
+        val = event.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    country = _lookup_country_for_coordinates(lat, lon)
+    if country:
+        return country
+    return f"{lat:.2f}, {lon:.2f}"
 
 
 def _compute_event_severity(event: Dict[str, Any]) -> float:
@@ -373,13 +395,20 @@ def _render_aggregate_stats() -> None:
         min_likelihood=app_state.filters.min_likelihood,
     )
 
-    if not result.get("ok"):
+    if result.get("ok"):
+        st.session_state.aggregate_stats_last_success = result["data"]
+        data = result["data"]
+    else:
         error_msg = result.get("error", "Unknown error")
-        st.caption(f"\u26a0\ufe0f Could not load stats: {error_msg}")
-        st.caption("Click an event on the map to inspect details.")
-        return
+        cached_data = st.session_state.get("aggregate_stats_last_success")
+        if isinstance(cached_data, dict):
+            data = cached_data
+            st.caption(f"\u26a0\ufe0f Live stats unavailable ({error_msg}); showing last successful snapshot.")
+        else:
+            st.caption(f"\u26a0\ufe0f Could not load stats: {error_msg}")
+            st.caption("Click an event on the map to inspect details.")
+            return
 
-    data = result["data"]
     count = data.get("count", 0)
     events = data.get("events", [])
 
@@ -507,7 +536,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
     # ── Prominent forecast button at the top ──────────────────────────
     lat = selected_event.get("lat")
     lon = selected_event.get("lon")
-    _render_forecast_section(lat, lon, selected_event.get("end_time"))
+    _render_forecast_section(lat, lon, selected_event.get("end_time"), selected_event)
 
     st.subheader("Fire details")
 
@@ -538,7 +567,7 @@ def render_click_details(last_click: Optional[Dict[str, float]]) -> None:
 
 
 def _render_forecast_section(
-    lat: Any, lon: Any, acq_time: Any
+    lat: Any, lon: Any, acq_time: Any, selected_event: Dict[str, Any]
 ) -> None:
     """Render the prominent forecast button at the top of the details panel."""
     if lat is None or lon is None:
@@ -559,19 +588,39 @@ def _render_forecast_section(
         st.error(f"Invalid coordinates: lat={lat}, lon={lon}")
         return
 
-    radius_deg = 50.0 / 111.0  # Approximate: 1 degree ~ 111 km
+    radius_km = 20.0
+    lat_delta = float(radius_km) / 111.0
+    lon_scale = max(math.cos(math.radians(fire_lat)), 0.1)
+    lon_delta = float(radius_km) / (111.0 * lon_scale)
     forecast_bbox = (
-        fire_lon - radius_deg,
-        fire_lat - radius_deg,
-        fire_lon + radius_deg,
-        fire_lat + radius_deg,
+        fire_lon - lon_delta,
+        fire_lat - lat_delta,
+        fire_lon + lon_delta,
+        fire_lat + lat_delta,
     )
 
+    event_key = _build_event_key(selected_event, fire_lat, fire_lon)
     is_forecast_running = app_state.forecast_job.job_id is not None
+    last_forecast = app_state.forecast_job.last_forecast or {}
+    same_event_completed = bool(
+        (last_forecast.get("run", {}) or {}).get("id")
+        and str(last_forecast.get("event_key") or "") == event_key
+    )
+    disable_reason = ""
+    if is_forecast_running:
+        disable_reason = "A forecast is already running."
+    elif same_event_completed:
+        disable_reason = "A forecast already exists for this fire event."
+    button_label = "Generate Spread Forecast"
+    if is_forecast_running:
+        button_label = "Generating Spread Forecast..."
+    elif same_event_completed:
+        button_label = "Spread Forecast Already Generated"
+
     if st.button(
-        "Generate Spread Forecast",
+        button_label,
         key="generate_forecast_btn",
-        disabled=is_forecast_running,
+        disabled=bool(disable_reason),
         type="primary",
         use_container_width=True,
     ):
@@ -587,17 +636,61 @@ def _render_forecast_section(
                 fire_lat, fire_lon, forecast_bbox
             )
 
-            job_data = create_jit_forecast(
-                bbox=forecast_bbox,
-                horizons=[24, 48, 72],
-                forecast_reference_time=ref_time,
-            )
+            selected = app_state.selection.selected_fire or {}
+            event_id = selected.get("event_id")
+            front_lookup = app_state.selection.front_index_by_event or {}
+            matched_front = front_lookup.get(str(event_id)) if event_id is not None else None
+            front_id = matched_front.get("front_id") if isinstance(matched_front, dict) else None
+            event_snapshot = dict(selected_event)
+            event_snapshot["lat"] = fire_lat
+            event_snapshot["lon"] = fire_lon
+            request_context = {
+                "event_id": event_id,
+                "event_key": event_key,
+                "front_id": front_id,
+                "lat": fire_lat,
+                "lon": fire_lon,
+                "location_label": _location_label_for_event(selected_event, fire_lat, fire_lon),
+                "event_snapshot": event_snapshot,
+            }
+            model_id = get_active_spread_model_id()
+
+            if front_id:
+                job_data = create_jit_forecast_from_front(
+                    str(front_id),
+                    buffer_km=3.0,
+                    horizons=[24, 48, 72],
+                    forecast_reference_time=ref_time,
+                    model_id=model_id,
+                )
+                logger.info(
+                    "Using front-driven forecast trigger: front_id=%s model_id=%s",
+                    front_id,
+                    model_id,
+                )
+            else:
+                job_data = create_jit_forecast(
+                    bbox=forecast_bbox,
+                    horizons=[24, 48, 72],
+                    forecast_reference_time=ref_time,
+                    model_id=model_id,
+                )
+                logger.info(
+                    "Using point-based forecast trigger: event_id=%s model_id=%s",
+                    event_id,
+                    model_id,
+                )
 
             job_id = job_data.get("job_id")
             if job_id:
-                app_state.forecast_job.start(job_id)
+                app_state.forecast_job.start(job_id, request_context=request_context)
+                app_state.forecast_job.notification = {
+                    "kind": "info",
+                    "message": "Spread forecast is being generated and may take around a minute.",
+                    "created_at": time.time(),
+                    "ttl_seconds": 20.0,
+                }
                 app_state._persist()
-                st.success("Forecast job queued successfully!")
                 st.rerun()
             else:
                 logger.error("Forecast job creation returned no job_id")
@@ -610,9 +703,10 @@ def _render_forecast_section(
                 e.status_code, e.response_text, forecast_bbox
             )
             details = f"(status={e.status_code})" if e.status_code is not None else ""
-            st.error(f"Forecast generation failed {details}".strip())
+            msg = (e.message or "Forecast generation failed").strip()
+            st.error(f"{msg} {details}".strip())
             if e.response_text:
                 st.caption(str(e.response_text)[:300])
 
-    if is_forecast_running:
-        st.caption("Forecast in progress...")
+    if disable_reason:
+        st.caption(disable_reason)

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("spread_forecast_ingest")
+SPREAD_CONTOUR_SMOOTHING_FACTOR = "SPREAD_CONTOUR_SMOOTHING_FACTOR"
 
 
 def _as_datetime64_utc_naive(dt: datetime) -> np.datetime64:
@@ -121,6 +123,17 @@ def generate_contours(
     """Generate contours as GeoJSON for specified thresholds."""
     from rasterio import features
 
+    smoothing_factor = 0.35
+    raw_factor = os.getenv(SPREAD_CONTOUR_SMOOTHING_FACTOR)
+    if raw_factor is not None:
+        try:
+            smoothing_factor = float(raw_factor)
+        except ValueError:
+            smoothing_factor = 0.35
+    smoothing_factor = max(0.0, min(0.49, smoothing_factor))
+    cell_size = min(abs(float(transform.a)), abs(float(transform.e)))
+    smooth_radius = float(cell_size * smoothing_factor)
+
     all_contours = []
     for t in thresholds:
         # Create a mask for values >= threshold
@@ -132,6 +145,12 @@ def generate_contours(
         if polygons:
             # Union all polygons for this threshold.
             merged = unary_union(polygons)
+            # Smooth staircase edges from raster cell boundaries for better map readability.
+            # This is a visualization geometry operation only; source probabilities are unchanged.
+            if smooth_radius > 0.0:
+                smoothed = merged.buffer(smooth_radius, join_style=1).buffer(-smooth_radius, join_style=1)
+                if not smoothed.is_empty:
+                    merged = smoothed
             # Normalize type to MultiPolygon to match DB column type.
             if merged.geom_type == "Polygon":
                 merged = MultiPolygon([merged])

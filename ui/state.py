@@ -70,6 +70,7 @@ class LayerState:
 class SelectionState:
     selected_fire: dict | None = None
     last_click: dict | None = None
+    front_index_by_event: dict[str, dict] = field(default_factory=dict)
 
     def update_click(self, coords: dict | None) -> None:
         """Update *last_click* only when the coordinates actually change."""
@@ -83,16 +84,30 @@ class SelectionState:
 
 
 @dataclass
+class ForecastDisplayState:
+    forecast_radius_km: int = 20
+    show_h24: bool = True
+    show_h48: bool = False
+    show_h72: bool = False
+    show_t07: bool = True
+    show_t05: bool = False
+    show_t03: bool = False
+
+
+@dataclass
 class ForecastJobState:
     job_id: str | None = None
     poll_count: int = 0
     last_forecast: dict | None = field(default=None)
+    active_request: dict | None = field(default=None)
+    notification: dict | None = field(default=None)
 
     # -- convenience helpers ------------------------------------------------
 
-    def start(self, job_id: str) -> None:
+    def start(self, job_id: str, request_context: dict | None = None) -> None:
         self.job_id = job_id
         self.poll_count = 0
+        self.active_request = request_context if isinstance(request_context, dict) else None
 
     def increment_poll(self) -> None:
         self.poll_count += 1
@@ -106,13 +121,17 @@ class ForecastJobState:
             "job_id": job_id,
             "completed_at": _time.time(),
         }
+        if isinstance(self.active_request, dict):
+            self.last_forecast.update(self.active_request)
         self.job_id = None
         self.poll_count = 0
+        self.active_request = None
 
     def clear(self) -> None:
         """Clear all polling state (failure / timeout)."""
         self.job_id = None
         self.poll_count = 0
+        self.active_request = None
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +145,7 @@ class AppState:
         self.filters = FilterState()
         self.layers = LayerState()
         self.selection = SelectionState()
+        self.forecast_display = ForecastDisplayState()
         self.forecast_job = ForecastJobState()
         self.active_preset: str | None = None
         self._preset_applied: bool = False
@@ -231,6 +251,19 @@ class AppState:
         lyr = self.layers
         if "risk_checkbox" not in st.session_state:
             st.session_state.risk_checkbox = lyr.show_risk
+        fd = self.forecast_display
+        if "forecast_show_h24" not in st.session_state:
+            st.session_state.forecast_show_h24 = bool(fd.show_h24)
+        if "forecast_show_h48" not in st.session_state:
+            st.session_state.forecast_show_h48 = bool(fd.show_h48)
+        if "forecast_show_h72" not in st.session_state:
+            st.session_state.forecast_show_h72 = bool(fd.show_h72)
+        if "forecast_show_t07" not in st.session_state:
+            st.session_state.forecast_show_t07 = bool(fd.show_t07)
+        if "forecast_show_t05" not in st.session_state:
+            st.session_state.forecast_show_t05 = bool(fd.show_t05)
+        if "forecast_show_t03" not in st.session_state:
+            st.session_state.forecast_show_t03 = bool(fd.show_t03)
 
     def read_widgets_after_render(self) -> None:
         """Pull filter widget values → canonical state (call *after* filter widgets render).
@@ -254,6 +287,21 @@ class AppState:
         f.min_likelihood = st.session_state.get("min_likelihood", f.min_likelihood)
         f.active_only = bool(st.session_state.get("active_only", f.active_only))
         f.cluster_points = bool(st.session_state.get("cluster_points", f.cluster_points))
+        fd = self.forecast_display
+        fd.forecast_radius_km = 20
+        fd.show_h24 = bool(st.session_state.get("forecast_show_h24", fd.show_h24))
+        fd.show_h48 = bool(st.session_state.get("forecast_show_h48", fd.show_h48))
+        fd.show_h72 = bool(st.session_state.get("forecast_show_h72", fd.show_h72))
+        # Keep at least one horizon visible.
+        if not (fd.show_h24 or fd.show_h48 or fd.show_h72):
+            fd.show_h24 = True
+
+        fd.show_t07 = bool(st.session_state.get("forecast_show_t07", fd.show_t07))
+        fd.show_t05 = bool(st.session_state.get("forecast_show_t05", fd.show_t05))
+        fd.show_t03 = bool(st.session_state.get("forecast_show_t03", fd.show_t03))
+        # Keep at least one threshold visible.
+        if not (fd.show_t07 or fd.show_t05 or fd.show_t03):
+            fd.show_t07 = True
 
         # Detect manual filter changes → update active_preset
         cur = (f.hours_start, f.hours_end, f.min_likelihood, f.active_only, f.cluster_points)
@@ -300,6 +348,17 @@ class AppState:
         # Selection
         s.selected_fire = self.selection.selected_fire
         s.last_click = self.selection.last_click
+        s.front_index_by_event = self.selection.front_index_by_event
+
+        # Forecast display controls (persist under non-widget keys to avoid
+        # Streamlit runtime errors when widget keys are already instantiated).
+        s.forecast_display_radius_km = int(self.forecast_display.forecast_radius_km)
+        s.forecast_display_show_h24 = bool(self.forecast_display.show_h24)
+        s.forecast_display_show_h48 = bool(self.forecast_display.show_h48)
+        s.forecast_display_show_h72 = bool(self.forecast_display.show_h72)
+        s.forecast_display_show_t07 = bool(self.forecast_display.show_t07)
+        s.forecast_display_show_t05 = bool(self.forecast_display.show_t05)
+        s.forecast_display_show_t03 = bool(self.forecast_display.show_t03)
 
         # Forecast job
         if self.forecast_job.job_id is not None:
@@ -308,6 +367,8 @@ class AppState:
             del s.jit_job_id
         s.jit_poll_count = self.forecast_job.poll_count
         s.last_forecast = self.forecast_job.last_forecast
+        s.jit_active_request = self.forecast_job.active_request
+        s.jit_notification = self.forecast_job.notification
 
         # Preset
         s.active_preset = self.active_preset
@@ -331,11 +392,35 @@ class AppState:
         self.selection = SelectionState(
             selected_fire=s.get("selected_fire"),
             last_click=s.get("last_click"),
+            front_index_by_event=s.get("front_index_by_event", {}),
+        )
+        self.forecast_display = ForecastDisplayState(
+            forecast_radius_km=20,
+            show_h24=bool(
+                s.get("forecast_display_show_h24", s.get("forecast_show_h24", True))
+            ),
+            show_h48=bool(
+                s.get("forecast_display_show_h48", s.get("forecast_show_h48", False))
+            ),
+            show_h72=bool(
+                s.get("forecast_display_show_h72", s.get("forecast_show_h72", False))
+            ),
+            show_t07=bool(
+                s.get("forecast_display_show_t07", s.get("forecast_show_t07", True))
+            ),
+            show_t05=bool(
+                s.get("forecast_display_show_t05", s.get("forecast_show_t05", False))
+            ),
+            show_t03=bool(
+                s.get("forecast_display_show_t03", s.get("forecast_show_t03", False))
+            ),
         )
         self.forecast_job = ForecastJobState(
             job_id=s.get("jit_job_id"),
             poll_count=s.get("jit_poll_count", 0),
             last_forecast=s.get("last_forecast"),
+            active_request=s.get("jit_active_request"),
+            notification=s.get("jit_notification"),
         )
         self.active_preset = s.get("active_preset")
 

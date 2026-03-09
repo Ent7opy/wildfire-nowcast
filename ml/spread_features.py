@@ -92,6 +92,38 @@ def _assert_same_window(*, expected: GridWindow, actual: GridWindow, label: str)
         )
 
 
+def _resolve_storage_path(path_value: str | Path) -> Path:
+    """Resolve artifact storage paths across host/container mount differences.
+
+    In local development we may write absolute host paths (e.g. `/Users/.../data/...`)
+    while runtime services execute in containers mounted at `/app/data` and `/app/models`.
+    This resolver preserves existing valid paths and remaps common roots when needed.
+    """
+    original = Path(path_value)
+    candidates: list[Path] = []
+
+    def _add_candidate(candidate: Path) -> None:
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    _add_candidate(original)
+
+    if not original.is_absolute():
+        _add_candidate(Path.cwd() / original)
+    else:
+        parts = list(original.parts)
+        for anchor in ("data", "models"):
+            if anchor in parts:
+                idx = parts.index(anchor)
+                suffix = Path(*parts[idx + 1 :]) if idx + 1 < len(parts) else Path()
+                _add_candidate(Path.cwd() / anchor / suffix)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[-1]
+
+
 def _get_latest_weather_run(
     ref_time: datetime,
     bbox: tuple[float, float, float, float],
@@ -145,14 +177,16 @@ def _load_weather_cube(
         ds.attrs["weather_fallback_reason"] = "no_weather_run_found"
         return ds
 
-    path = Path(run["storage_path"])
-    # Resolve relative path if needed (mirroring inspect_weather_run.py pattern)
-    if not path.is_absolute():
-        # Assume relative to current working directory (project root)
-        path = Path.cwd() / path
+    raw_path = str(run["storage_path"])
+    path = _resolve_storage_path(raw_path)
 
     if not path.exists():
-        LOGGER.warning("Weather run %s file missing at %s; using calm fallback.", run["id"], path)
+        LOGGER.warning(
+            "Weather run %s file missing at %s (raw=%s); using calm fallback.",
+            run["id"],
+            path,
+            raw_path,
+        )
         ds = _create_fallback_weather(window, ref_time, horizons_hours)
         ds.attrs["weather_fallback_used"] = True
         ds.attrs["weather_fallback_reason"] = f"weather_file_missing:{run['id']}"
@@ -164,7 +198,18 @@ def _load_weather_cube(
         # Chunk along time dimension for efficient slicing of forecast windows
         # This prevents memory issues with large weather files
         chunks = {"time": "auto", "lat": -1, "lon": -1}
-        ds = xr.open_dataset(path, chunks=chunks)
+        try:
+            ds = xr.open_dataset(path, chunks=chunks)
+        except ValueError as exc:
+            msg = str(exc).lower()
+            if "chunk manager dask" in msg or "unrecognized chunk manager" in msg:
+                LOGGER.info(
+                    "xarray chunk manager unavailable; reopening weather dataset without chunks: %s",
+                    path,
+                )
+                ds = xr.open_dataset(path)
+            else:
+                raise
 
         missing_coords = [c for c in ("lat", "lon", "time") if c not in ds.coords]
         if missing_coords:

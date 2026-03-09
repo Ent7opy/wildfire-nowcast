@@ -21,6 +21,7 @@ from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
 from api.forecast.model_catalog import resolve_request_model_selection
 from ml.spread.factory import get_model_version_hint, get_spread_model
+from ml.spread.region_key import bbox_region_name
 from ml.spread.service import (
     SPREAD_SHADOW_ENABLED_ENV,
     STRICT_FORECAST_INPUTS_ENV,
@@ -153,6 +154,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
         horizons_hours = _normalize_horizons(forecast_params.get("horizons_hours"))
         thresholds = [float(t) for t in forecast_params.get("thresholds", [0.3, 0.5, 0.7])]
         region_name = forecast_params.get("region_name")
+        effective_region_name = str(region_name) if region_name else bbox_region_name(bbox)
         strict_inputs = bool(
             forecast_params.get("strict_inputs")
             if forecast_params.get("strict_inputs") is not None
@@ -184,7 +186,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             bbox=bbox,
             forecast_reference_time=forecast_time,
             horizons_hours=horizons_hours,
-            region_name=region_name,
+            region_name=effective_region_name,
             model_name=model_name,
             model_params=model_params,
             strict_inputs=strict_inputs,
@@ -288,7 +290,11 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
 
                         terrain_output_dir = REPO_ROOT / "data" / "terrain"
                         terrain_output_dir.mkdir(parents=True, exist_ok=True)
-                        terrain_id = ingest_terrain_for_bbox(bbox, terrain_output_dir)
+                        terrain_id = ingest_terrain_for_bbox(
+                            bbox,
+                            terrain_output_dir,
+                            region_name=effective_region_name,
+                        )
                         logger.info(f"JIT job {job_id}: terrain ingestion completed, terrain_id={terrain_id}")
                 finally:
                     terrain_lock.release()
@@ -349,14 +355,14 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             insert_spread_forecast_contours,
             insert_spread_forecast_rasters,
         )
-        from api.core.grid import GridSpec, get_grid_window_for_bbox
+        from api.core.grid import get_grid_window_for_bbox
 
         model = get_spread_model(model_name, model_params)
         model_version = get_model_version_hint(model_name)
 
         # Create forecast run record
         run_id = create_spread_forecast_run(
-            region_name=region_name or "location-based",
+            region_name=effective_region_name,
             model_name=model_name,
             model_version=model_version,
             forecast_reference_time=forecast_time,
@@ -364,6 +370,8 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             metadata={
                 "model_id": selected_model_id,
                 "model_params": model_params,
+                "region_name": region_name,
+                "effective_region_name": effective_region_name,
                 "strict_inputs": strict_inputs,
                 "cache_key": cache_key,
                 "use_result_cache": use_result_cache,
@@ -376,7 +384,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
         try:
             # Build and execute forecast request
             request = SpreadForecastRequest(
-                region_name=region_name,
+                region_name=effective_region_name,
                 bbox=bbox,
                 forecast_reference_time=forecast_time,
                 horizons_hours=horizons_hours,
@@ -406,6 +414,14 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                     "confidence_level",
                     "staleness_hours",
                     "fallback_used",
+                    "sanity_fallback_used",
+                    "sanity_fallback_reason",
+                    "sanity_original_model_name",
+                    "sanity_served_model_name",
+                    "mvp_guardrail_triggered",
+                    "mvp_guardrail_mode",
+                    "mvp_guardrail_reason",
+                    "mvp_guardrail_metrics",
                     "shadow_evaluated",
                     "shadow_metrics_summary",
                     "model_name",
@@ -417,16 +433,13 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 pass
 
             # Derive grid and window for persistence
-            if region_name:
-                from api.fires.service import get_region_grid_spec
-                grid = get_region_grid_spec(region_name)
-            else:
-                grid = GridSpec.from_bbox(bbox)
+            from api.fires.service import get_region_grid_spec
+
+            grid = get_region_grid_spec(effective_region_name)
             window = get_grid_window_for_bbox(grid, bbox, clip=True)
 
             # Save rasters
-            region_dir_name = region_name or "location-based"
-            run_dir = REPO_ROOT / "data" / "forecasts" / region_dir_name / f"run_{run_id}"
+            run_dir = REPO_ROOT / "data" / "forecasts" / effective_region_name / f"run_{run_id}"
             raster_records = save_forecast_rasters(forecast, grid, window, run_dir, emit_cog=True)
             insert_spread_forecast_rasters(run_id, raster_records)
             logger.info(f"JIT job {job_id}: saved {len(raster_records)} rasters")

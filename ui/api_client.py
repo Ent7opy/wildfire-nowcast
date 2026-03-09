@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 import requests
 
-from runtime_config import api_base_url
+from runtime_config import api_base_url, api_base_url_candidates
 
 
 __all__ = [
@@ -23,6 +23,8 @@ __all__ = [
     "get_forecast",
     "generate_forecast",
     "create_jit_forecast",
+    "create_jit_forecast_from_front",
+    "get_active_spread_model_id",
     "get_jit_forecast_status",
     "get_data_freshness_status",
 ]
@@ -31,6 +33,15 @@ __all__ = [
 JsonDict = Dict[str, Any]
 BBox = Tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 TimeRange = Tuple[datetime, datetime]  # (start_time, end_time)
+_GET_CONNECT_TIMEOUT = 2.0
+_GET_READ_TIMEOUT = 8.0
+_GET_RETRY_READ_TIMEOUT = 15.0
+_SLOW_READ_RETRY_PATHS = (
+    "/fires",
+    "/fires/events",
+    "/fires/fronts",
+    "/health/data-freshness",
+)
 
 
 def get_jit_forecast_status(job_id: str) -> JsonDict:
@@ -86,6 +97,20 @@ def get_data_freshness_status() -> JsonDict:
     return _get_json("/health/data-freshness", params={})
 
 
+def get_active_spread_model_id() -> str:
+    """Resolve the currently promoted spread model id from the backend registry."""
+    payload = _get_json("/internal/models/active", params={})
+    models = payload.get("models") if isinstance(payload, dict) else None
+    spread = models.get("spread") if isinstance(models, dict) else None
+    model_id = spread.get("model_id") if isinstance(spread, dict) else None
+    if isinstance(model_id, str) and model_id.strip():
+        return model_id.strip()
+    raise ApiError(
+        message="No active spread model is promoted. Promote a spread model and retry.",
+        status_code=422,
+    )
+
+
 @dataclass
 class ApiError(Exception):
     message: str
@@ -122,12 +147,37 @@ def _isoformat(dt: datetime) -> str:
 
 
 def _get_json(path: str, params: Mapping[str, Any]) -> JsonDict:
-    base = api_base_url()
-    url = f"{base}{path}"
-    try:
-        resp = requests.get(url, params=dict(params), timeout=(2.0, 5.0))
-    except (requests.Timeout, requests.ConnectionError) as e:
-        raise ApiUnavailableError(message=str(e), url=url) from e
+    params_dict = dict(params)
+    last_error: ApiUnavailableError | None = None
+    candidates = api_base_url_candidates() or [api_base_url()]
+
+    resp: requests.Response | None = None
+    for base in candidates:
+        url = f"{base}{path}"
+        try:
+            resp = requests.get(url, params=params_dict, timeout=(_GET_CONNECT_TIMEOUT, _GET_READ_TIMEOUT))
+            break
+        except requests.Timeout as e:
+            # Some endpoints are heavier; retry once with a longer read timeout.
+            if any(path.startswith(prefix) for prefix in _SLOW_READ_RETRY_PATHS):
+                try:
+                    resp = requests.get(
+                        url,
+                        params=params_dict,
+                        timeout=(_GET_CONNECT_TIMEOUT, _GET_RETRY_READ_TIMEOUT),
+                    )
+                    break
+                except (requests.Timeout, requests.ConnectionError) as inner_exc:
+                    last_error = ApiUnavailableError(message=str(inner_exc), url=url)
+            else:
+                last_error = ApiUnavailableError(message=str(e), url=url)
+        except requests.ConnectionError as e:
+            last_error = ApiUnavailableError(message=str(e), url=url)
+
+    if resp is None:
+        if last_error is None:
+            last_error = ApiUnavailableError(message="API unavailable", url=None)
+        raise last_error
 
     if resp.status_code != 200:
         raise ApiError(
@@ -234,7 +284,7 @@ def get_fire_events(
       - limit (int, optional)
 
     Response shape:
-      { "count": int, "events": [ { "event_id": str, "lat": float, "lon": float, ... }, ... ] }
+      { "count": int, "events": [ { "event_id": str, "lat": float, "lon": float, "geom_geojson": str, ... }, ... ] }
     """
     if not bbox or len(bbox) != 4:
         raise ApiError(
@@ -452,6 +502,7 @@ def create_jit_forecast(
     bbox: BBox,
     horizons: Optional[Iterable[int]] = None,
     forecast_reference_time: Optional[datetime] = None,
+    model_id: Optional[str] = None,
 ) -> JsonDict:
     """Enqueue a JIT forecast pipeline for arbitrary bbox.
 
@@ -471,6 +522,8 @@ def create_jit_forecast(
         body["horizons_hours"] = list(horizons)
     if forecast_reference_time is not None:
         body["forecast_reference_time"] = _isoformat(forecast_reference_time)
+    if model_id is not None:
+        body["model_id"] = str(model_id)
 
     base = api_base_url()
     url = f"{base}/forecast/jit"
@@ -481,6 +534,70 @@ def create_jit_forecast(
 
     if resp.status_code != 202:
         message = "Non-202 response from JIT forecast API"
+        try:
+            payload = resp.json()
+            if isinstance(payload, dict) and payload.get("message"):
+                message = str(payload["message"])
+        except ValueError:
+            payload = None
+        raise ApiError(
+            message=message,
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        )
+
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise ApiError(
+            message="API returned non-JSON response",
+            status_code=resp.status_code,
+            url=str(resp.url),
+            response_text=resp.text,
+        ) from e
+
+
+def create_jit_forecast_from_front(
+    front_id: str,
+    *,
+    buffer_km: float = 3.0,
+    horizons: Optional[Iterable[int]] = None,
+    forecast_reference_time: Optional[datetime] = None,
+    model_id: Optional[str] = None,
+) -> JsonDict:
+    """Enqueue a front-driven JIT forecast pipeline.
+
+    Backend contract: POST /forecast/jit/from-front
+      Request body:
+      - front_id: str
+      - buffer_km: float (optional)
+      - forecast_reference_time (optional)
+      - horizons_hours (optional)
+
+    Returns:
+      { "job_id": UUID, "status": "queued", "front_id": str, "bbox": [...] }
+    """
+    body: Dict[str, Any] = {
+        "front_id": str(front_id),
+        "buffer_km": float(buffer_km),
+    }
+    if horizons is not None:
+        body["horizons_hours"] = list(horizons)
+    if forecast_reference_time is not None:
+        body["forecast_reference_time"] = _isoformat(forecast_reference_time)
+    if model_id is not None:
+        body["model_id"] = str(model_id)
+
+    base = api_base_url()
+    url = f"{base}/forecast/jit/from-front"
+    try:
+        resp = requests.post(url, json=body, timeout=(5.0, 10.0))
+    except (requests.Timeout, requests.ConnectionError) as e:
+        raise ApiUnavailableError(message=str(e), url=url) from e
+
+    if resp.status_code != 202:
+        message = "Non-202 response from front JIT forecast API"
         try:
             payload = resp.json()
             if isinstance(payload, dict) and payload.get("message"):

@@ -116,3 +116,66 @@ def test_default_model_selection_infers_v2_from_promoted_metadata(monkeypatch, t
     assert model_name == "LearnedSpreadModelV2"
     assert model_params == {"model_run_dir": str(run_dir)}
     assert model_id == "spread_v2_prod"
+
+
+def test_default_model_selection_infers_v3_from_promoted_metadata(monkeypatch, tmp_path):
+    run_dir = tmp_path / "spread_v3_run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metadata.json").write_text(
+        json.dumps({"model_name": "LearnedSpreadModelV3"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "api.forecast.model_catalog.resolve_active_model",
+        lambda _family: {"model_id": "spread_v3_prod", "artifact_uri": str(run_dir)},
+    )
+    get_spread_model_catalog.cache_clear()
+
+    model_name, model_params, model_id = resolve_request_model_selection(
+        model_id=None,
+        model_name=None,
+        model_params=None,
+    )
+
+    assert model_name == "LearnedSpreadModelV3"
+    assert model_params == {"model_run_dir": str(run_dir)}
+    assert model_id == "spread_v3_prod"
+
+
+def test_default_model_selection_prefers_explicit_spread_model_selection_from_metrics(monkeypatch, tmp_path):
+    run_dir = tmp_path / "spread_v3_run"
+    run_dir.mkdir(parents=True)
+    cal_dir = tmp_path / "spread_calibration_run"
+    cal_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "api.forecast.model_catalog.resolve_active_model",
+        lambda _family: {
+            "model_id": "spread_v3_prod",
+            "artifact_uri": str(run_dir),
+            "metrics_json": {
+                "spread_model_selection": {
+                    "model_name": "LearnedSpreadModelV3",
+                    "model_params": {
+                        "model_run_dir": str(run_dir),
+                        "calibrator_run_dir": str(cal_dir),
+                    },
+                }
+            },
+        },
+    )
+    get_spread_model_catalog.cache_clear()
+
+    model_name, model_params, model_id = resolve_request_model_selection(
+        model_id=None,
+        model_name=None,
+        model_params=None,
+    )
+
+    assert model_name == "LearnedSpreadModelV3"
+    assert model_params == {
+        "model_run_dir": str(run_dir),
+        "calibrator_run_dir": str(cal_dir),
+    }
+    assert model_id == "spread_v3_prod"

@@ -47,6 +47,9 @@ class HeuristicSpreadV0Config:
     # Must be an odd integer >= 7.
     max_kernel_size: int = 201
 
+    # Hard cap on daily spread expansion to keep fallback forecasts operationally sane.
+    max_daily_spread_km: float = 20.0
+
     # Optional terrain bias (upslope)
     #
     # Terrain conventions (from `api.terrain.features_math` / `api.terrain.window`):
@@ -83,6 +86,8 @@ class HeuristicSpreadV0Config:
         # Validate distance_decay_km is positive
         if self.distance_decay_km <= 0:
             raise ValueError(f"distance_decay_km must be positive; got {self.distance_decay_km}")
+        if self.max_daily_spread_km <= 0:
+            raise ValueError(f"max_daily_spread_km must be positive; got {self.max_daily_spread_km}")
 
 class HeuristicSpreadModelV0(SpreadModel):
     """Simple rule-based spread model using wind bias."""
@@ -281,14 +286,20 @@ class HeuristicSpreadModelV0(SpreadModel):
     ) -> np.ndarray:
         """Generate an anisotropic kernel centered at origin with downwind bias."""
         
-        # Base spread distance based on horizon
-        base_dist = self.config.base_spread_km_h * horizon_h
         # Wind speed magnitude
         wind_speed = np.sqrt(u_ms**2 + v_ms**2)
+
+        # Additive spread-rate model (no inverse-base amplification) with a hard daily cap.
+        spread_rate_km_h = float(
+            self.config.base_spread_km_h + (wind_speed * self.config.wind_influence_km_h_per_ms)
+        )
+        max_dist_by_rate_km = float(spread_rate_km_h * horizon_h)
+        max_dist_by_cap_km = float(self.config.max_daily_spread_km * (horizon_h / 24.0))
+        max_dist_km = float(min(max_dist_by_rate_km, max_dist_by_cap_km))
+        max_dist_km = max(max_dist_km, 1e-3)
         
         # Kernel size: cover the spread distance
         # We'll use 4x the max spread distance in pixels to capture the decay
-        max_dist_km = base_dist + (wind_speed * horizon_h * self.config.wind_influence_km_h_per_ms)
         max_dist_px = max(max_dist_km / dx_km, max_dist_km / dy_km)
         k_size = int(max(7, 2 * (max_dist_px * 3) + 1))
         if k_size % 2 == 0:
@@ -331,17 +342,6 @@ class HeuristicSpreadModelV0(SpreadModel):
             
             eff_dist = eff_dist * (1.0 - bias * cos_diff)
             
-            # Additionally, stretch the whole thing proportional to wind speed
-            # Use explicit check for positive base_spread_km_h to avoid division issues
-            # (base_spread_km_h is validated in __post_init__, but we keep this safe)
-            base_spread = self.config.base_spread_km_h
-            if base_spread <= 0:
-                # This should not happen due to __post_init__ validation, but handle gracefully
-                wind_scale = 1.0 + (wind_speed * self.config.wind_influence_km_h_per_ms)
-            else:
-                wind_scale = 1.0 + (wind_speed * self.config.wind_influence_km_h_per_ms / base_spread)
-            eff_dist = eff_dist / wind_scale
-
         # Optional upslope bias (terrain-driven). Uses window-mean slope/aspect.
         if self.config.enable_slope_bias and slope_deg is not None and aspect_deg is not None:
             if np.isfinite(slope_deg) and np.isfinite(aspect_deg) and slope_deg > 0:
@@ -362,6 +362,6 @@ class HeuristicSpreadModelV0(SpreadModel):
             
         # Exponential decay probability
         # We include the decay parameter from config
-        kernel = np.exp(-eff_dist / (base_dist + self.config.distance_decay_km))
+        kernel = np.exp(-eff_dist / (max_dist_km + self.config.distance_decay_km))
         
         return kernel

@@ -435,6 +435,162 @@ def test_run_spread_forecast_weather_fallback_sets_low_confidence(mock_spread_in
     assert out.probabilities.attrs["fallback_used"] is True
 
 
+def test_run_spread_forecast_spatial_sanity_fallback_to_heuristic(monkeypatch, mock_grid, mock_window):
+    import xarray as xr
+
+    monkeypatch.setenv("SPREAD_SANITY_ENABLED", "true")
+    monkeypatch.setenv("SPREAD_SANITY_HIGH_PROB_THRESHOLD", "0.3")
+    monkeypatch.setenv("SPREAD_SANITY_SEED_MIN_PROB", "0.05")
+    monkeypatch.setenv("SPREAD_SANITY_NEAR_SEED_PX", "0")
+    monkeypatch.delenv("SPREAD_CALIBRATOR_RUN_DIR", raising=False)
+    monkeypatch.delenv("SPREAD_CALIBRATOR_ROOT", raising=False)
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+    )
+
+    mock_inputs = MagicMock()
+    mock_inputs.grid = mock_grid
+    mock_inputs.window = mock_window
+    mock_inputs.active_fires = MagicMock()
+    # Single ignition seed at [0, 0].
+    mock_inputs.active_fires.heatmap = np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+    mock_inputs.weather_fallback_used = False
+    mock_inputs.terrain_fallback_used = False
+    mock_inputs.weather_cube = MagicMock()
+    mock_inputs.weather_cube.attrs = {}
+    model_input = MagicMock(spec=SpreadModelInput)
+    mock_inputs.to_model_input.return_value = model_input
+
+    learned_forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            # Implausible: high prob only away from seed.
+            np.array([[[0.0, 0.0], [0.0, 0.9]]], dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="LearnedSpreadModelV3",
+        model_version="v3",
+    )
+    learned_model = MagicMock()
+    learned_model.predict.return_value = learned_forecast
+
+    heuristic_forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            # Plausible: highest probability at seed.
+            np.array([[[0.95, 0.1], [0.05, 0.02]]], dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="HeuristicSpreadModelV0",
+        model_version="v0",
+    )
+    heuristic_model = MagicMock()
+    heuristic_model.predict.return_value = heuristic_forecast
+
+    with (
+        patch("ml.spread.service.build_spread_inputs", return_value=mock_inputs),
+        patch("ml.spread.service.HeuristicSpreadModelV0", return_value=heuristic_model),
+    ):
+        out = run_spread_forecast(request, model=learned_model)
+
+    assert out.model_name == "HeuristicSpreadModelV0"
+    assert out.probabilities.attrs.get("sanity_fallback_used") is True
+    assert "spatial_sanity_failed" in str(out.probabilities.attrs.get("sanity_fallback_reason"))
+    assert out.probabilities.attrs.get("sanity_original_model_name") == learned_model.__class__.__name__
+    learned_model.predict.assert_called_once_with(model_input)
+    heuristic_model.predict.assert_called_once_with(model_input)
+
+
+def test_run_spread_forecast_mvp_guardrail_warn_mode(monkeypatch, mock_spread_inputs):
+    import xarray as xr
+
+    monkeypatch.setenv("SPREAD_MVP_GUARD_ENABLED", "true")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_HORIZON_HOURS", "24")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_PROB_THRESHOLD", "0.7")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_MAX_COVERAGE", "0.60")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_MAX_SEED_CELLS", "1")
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        strict_inputs=False,
+    )
+
+    mock_spread_inputs.active_fires.heatmap = np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+    forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            # 3/4 cells >= 0.7 => 0.75 coverage -> triggers warning.
+            np.array([[[0.9, 0.8], [0.75, 0.2]]], dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="HeuristicSpreadModelV0",
+        model_version="v0",
+    )
+    model = MagicMock()
+    model.predict.return_value = forecast
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        out = run_spread_forecast(request, model=model)
+
+    assert out.probabilities.attrs.get("mvp_guardrail_triggered") is True
+    assert out.probabilities.attrs.get("mvp_guardrail_mode") == "warn"
+    assert "mvp_guardrail_oversized_footprint" in str(out.probabilities.attrs.get("mvp_guardrail_reason"))
+    assert out.probabilities.attrs.get("confidence_level") == "low"
+
+
+def test_run_spread_forecast_mvp_guardrail_strict_fails(monkeypatch, mock_spread_inputs):
+    import xarray as xr
+
+    monkeypatch.setenv("SPREAD_MVP_GUARD_ENABLED", "true")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_HORIZON_HOURS", "24")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_PROB_THRESHOLD", "0.7")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_MAX_COVERAGE", "0.60")
+    monkeypatch.setenv("SPREAD_MVP_GUARD_MAX_SEED_CELLS", "1")
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        strict_inputs=True,
+    )
+
+    mock_spread_inputs.active_fires.heatmap = np.array([[1.0, 0.0], [0.0, 0.0]], dtype=np.float32)
+    forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            np.array([[[0.9, 0.8], [0.75, 0.2]]], dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="HeuristicSpreadModelV0",
+        model_version="v0",
+    )
+    model = MagicMock()
+    model.predict.return_value = forecast
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        with pytest.raises(ValueError, match="MVP_GUARD_STOP"):
+            run_spread_forecast(request, model=model)
+
+
 def test_run_spread_forecast_cpu_latency_p95_40k_cells(monkeypatch):
     import xarray as xr
 

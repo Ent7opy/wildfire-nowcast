@@ -17,11 +17,12 @@ from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, ConfigDict
 
 from api.config import settings
-from api.fires.repo import validate_bbox
+from api.fires.repo import get_fire_front_by_id, validate_bbox
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
 from api.forecast.model_catalog import resolve_request_model_selection
 from api.forecast.worker import queue, run_jit_forecast_pipeline, handle_jit_pipeline_failure
+from ml.spread.region_key import bbox_region_name
 from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS_ENV
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
@@ -64,6 +65,28 @@ class JitForecastResponse(BaseModel):
     """Response body for JIT forecast pipeline initiation."""
     job_id: UUID
     status: str
+
+
+class JitForecastFromFrontRequest(BaseModel):
+    """Request body for front-driven JIT forecast pipeline."""
+    model_config = ConfigDict(protected_namespaces=())
+
+    front_id: str
+    buffer_km: float | None = None
+    forecast_reference_time: str | None = None
+    horizons_hours: list[int] | None = None
+    model_id: str | None = None
+    model_name: str | None = None
+    model_params: dict[str, Any] | None = None
+    use_result_cache: bool | None = None
+
+
+class JitForecastFromFrontResponse(BaseModel):
+    """Response for front-driven JIT forecast initiation."""
+    job_id: UUID
+    status: str
+    front_id: str
+    bbox: list[float]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -277,6 +300,97 @@ def create_jit_forecast(request: JitForecastRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to enqueue JIT forecast: {str(e)}"
+        )
+
+
+@forecast_router.post(
+    "/jit/from-front",
+    response_model=JitForecastFromFrontResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(RateLimiter(times=10, seconds=60))],
+)
+def create_jit_forecast_from_front(request: JitForecastFromFrontRequest):
+    """Enqueue JIT forecast pipeline from an existing fire front geometry."""
+    buffer_km = 0.0 if request.buffer_km is None else float(request.buffer_km)
+    if buffer_km < 0:
+        raise HTTPException(status_code=422, detail="buffer_km must be >= 0.")
+
+    front = get_fire_front_by_id(request.front_id, buffer_km=buffer_km)
+    if front is None:
+        raise HTTPException(status_code=404, detail=f"front_id not found: {request.front_id}")
+
+    bbox = (
+        float(front["bbox_min_lon"]),
+        float(front["bbox_min_lat"]),
+        float(front["bbox_max_lon"]),
+        float(front["bbox_max_lat"]),
+    )
+    try:
+        validate_bbox(bbox)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        model_name, model_params, selected_model_id = resolve_request_model_selection(
+            model_id=request.model_id,
+            model_name=request.model_name,
+            model_params=request.model_params,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        horizons_hours = _normalize_horizons(request.horizons_hours)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    try:
+        forecast_reference_time = (
+            _parse_iso8601_datetime(request.forecast_reference_time)
+            if request.forecast_reference_time
+            else _default_forecast_reference_time()
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    region_name = bbox_region_name(bbox)
+    forecast_params = {
+        "forecast_reference_time": forecast_reference_time.isoformat(),
+        "horizons_hours": horizons_hours,
+        "model_id": selected_model_id,
+        "model_name": model_name,
+        "model_params": model_params,
+        "region_name": region_name,
+        "strict_inputs": True,
+        "use_result_cache": True if request.use_result_cache is None else bool(request.use_result_cache),
+        "front_id": request.front_id,
+        "buffer_km": buffer_km,
+    }
+
+    persisted_request = {
+        "front_id": request.front_id,
+        "buffer_km": buffer_km,
+        "bbox": list(bbox),
+        "region_name": region_name,
+        **forecast_params,
+    }
+    job = repo.create_jit_job(bbox, persisted_request)
+    job_id = job["id"]
+
+    try:
+        queue.enqueue(
+            run_jit_forecast_pipeline,
+            job_id,
+            bbox,
+            forecast_params,
+            on_failure=handle_jit_pipeline_failure,
+        )
+        return {"job_id": job_id, "status": "queued", "front_id": request.front_id, "bbox": list(bbox)}
+    except Exception as e:
+        repo.update_jit_job_status(job_id, "failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to enqueue front-driven JIT forecast: {str(e)}",
         )
 
 

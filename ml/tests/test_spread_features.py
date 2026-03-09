@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -213,6 +214,52 @@ def test_load_weather_cube_aligns_and_sets_coords(mock_open, mock_get_run, _mock
 
 
 @patch("ml.spread_features._get_latest_weather_run")
+@patch("xarray.open_dataset")
+def test_load_weather_cube_remaps_host_absolute_storage_path(
+    mock_open,
+    mock_get_run,
+    mock_window,
+    tmp_path,
+    monkeypatch,
+):
+    """Host absolute data paths should resolve to cwd-mounted data path when present."""
+    monkeypatch.chdir(tmp_path)
+
+    ref_time = datetime(2025, 12, 26, 12, 0, 0, tzinfo=timezone.utc)
+    target_times = [
+        np.datetime64("2025-12-27T12:00:00", "ns"),
+        np.datetime64("2025-12-28T12:00:00", "ns"),
+    ]
+    mapped_path = tmp_path / "data" / "weather" / "mapped.nc"
+    mapped_path.parent.mkdir(parents=True, exist_ok=True)
+    mapped_path.touch()
+
+    mock_get_run.return_value = {
+        "id": 999,
+        "storage_path": "/Users/example/Projects/wildfire-nowcast/data/weather/mapped.nc",
+        "run_time": ref_time,
+    }
+    mock_open.return_value = xr.Dataset(
+        data_vars={
+            "u10": (("time", "lat", "lon"), np.ones((2, 10, 10), dtype=np.float32)),
+            "v10": (("time", "lat", "lon"), np.ones((2, 10, 10), dtype=np.float32)),
+        },
+        coords={"time": target_times, "lat": mock_window.lat, "lon": mock_window.lon},
+    )
+
+    out = _load_weather_cube(
+        ref_time=ref_time,
+        window=mock_window,
+        horizons_hours=[24, 48],
+        bbox=(0, 0, 1, 1),
+    )
+
+    opened_path = Path(mock_open.call_args[0][0])
+    assert opened_path == mapped_path
+    assert out.attrs.get("weather_fallback_used") is False
+
+
+@patch("ml.spread_features._get_latest_weather_run")
 @patch("ml.spread_features.get_fire_cells_heatmap")
 def test_build_spread_inputs_with_region_name_none(mock_get_fire_heatmap, mock_get_weather_run):
     """Verify build_spread_inputs works with region_name=None (bbox-only mode)."""
@@ -272,4 +319,3 @@ def test_build_spread_inputs_with_region_name_none(mock_get_fire_heatmap, mock_g
 
     assert "u10" in inputs.weather_cube.data_vars
     assert "v10" in inputs.weather_cube.data_vars
-

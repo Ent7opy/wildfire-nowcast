@@ -36,6 +36,15 @@ STRICT_FORECAST_INPUTS_ENV = "STRICT_FORECAST_INPUTS"
 SPREAD_STALE_WARN_HOURS_ENV = "SPREAD_STALE_WARN_HOURS"
 SPREAD_SERVE_STALE_ENV = "SPREAD_SERVE_STALE"
 SPREAD_SHADOW_ENABLED_ENV = "SPREAD_SHADOW_ENABLED"
+SPREAD_SANITY_ENABLED_ENV = "SPREAD_SANITY_ENABLED"
+SPREAD_SANITY_HIGH_PROB_THRESHOLD_ENV = "SPREAD_SANITY_HIGH_PROB_THRESHOLD"
+SPREAD_SANITY_SEED_MIN_PROB_ENV = "SPREAD_SANITY_SEED_MIN_PROB"
+SPREAD_SANITY_NEAR_SEED_PX_ENV = "SPREAD_SANITY_NEAR_SEED_PX"
+SPREAD_MVP_GUARD_ENABLED_ENV = "SPREAD_MVP_GUARD_ENABLED"
+SPREAD_MVP_GUARD_HORIZON_HOURS_ENV = "SPREAD_MVP_GUARD_HORIZON_HOURS"
+SPREAD_MVP_GUARD_PROB_THRESHOLD_ENV = "SPREAD_MVP_GUARD_PROB_THRESHOLD"
+SPREAD_MVP_GUARD_MAX_COVERAGE_ENV = "SPREAD_MVP_GUARD_MAX_COVERAGE"
+SPREAD_MVP_GUARD_MAX_SEED_CELLS_ENV = "SPREAD_MVP_GUARD_MAX_SEED_CELLS"
 
 # Performance limit: avoid OOM/high latency for very large areas in synchronous calls.
 # 200x200 = 40,000 cells. At 0.01 degree, this is roughly 220km x 220km.
@@ -253,6 +262,12 @@ def run_spread_forecast(
 
     # 4. Validate output contract
     forecast.validate()
+    forecast = _apply_spatial_sanity_guard(
+        forecast=forecast,
+        model=model,
+        model_input=model_input,
+        active_fire_heatmap=np.asarray(inputs_package.active_fires.heatmap),
+    )
     forecast = _annotate_weather_bias(
         forecast,
         weather_bias_corrected=bool(getattr(inputs_package.weather_cube, "attrs", {}).get("weather_bias_corrected", False)),
@@ -342,6 +357,12 @@ def run_spread_forecast(
                     calibration_run_id=None,
                     calibration_run_dir=str(calibrator_run_dir),
                 )
+
+    forecast = _apply_mvp_footprint_guard(
+        forecast=forecast,
+        request=request,
+        active_fire_heatmap=np.asarray(inputs_package.active_fires.heatmap),
+    )
     
     # 5. Finalize and log
     duration = time.perf_counter() - start_time
@@ -349,7 +370,7 @@ def run_spread_forecast(
         "Spread forecast completed",
         extra={
             "duration_s": round(duration, 3),
-            "model": model_name,
+            "model": forecast.model_name,
             "n_cells": int(n_cells),
             "output_min": float(forecast.probabilities.min()),
             "output_max": float(forecast.probabilities.max()),
@@ -374,6 +395,16 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except Exception:
         return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
 
 
 def _resolve_strict_inputs(strict_inputs: bool | None) -> bool:
@@ -631,6 +662,313 @@ def _annotate_shadow_info(
     except Exception:  # pragma: no cover
         pass
     return forecast
+
+
+def _spatial_sanity_failure_reason(
+    *,
+    forecast: SpreadForecast,
+    active_fire_heatmap: np.ndarray,
+    high_prob_threshold: float,
+    seed_min_prob: float,
+    near_seed_px: int,
+) -> str | None:
+    """Return a reason string when spread is spatially implausible, else None.
+
+    Heuristic used for operational safety:
+    - We expect at least some high-probability cells to stay near seeded active fire cells.
+    - If seed probability is near-zero while all high-probability cells are away from seeds,
+      learned output is likely out-of-distribution artifact and should be rejected.
+    """
+    try:
+        seeds = np.asarray(active_fire_heatmap, dtype=np.float32) > 0.0
+        if seeds.ndim != 2 or not np.any(seeds):
+            return None
+
+        horizons = list(getattr(forecast, "horizons_hours", []) or [])
+        if not horizons:
+            return None
+        idx = horizons.index(24) if 24 in horizons else 0
+        horizon_h = int(horizons[idx])
+        probs = np.asarray(forecast.probabilities.isel(time=idx).values, dtype=np.float32)
+        if probs.shape != seeds.shape:
+            return None
+
+        high = probs >= float(high_prob_threshold)
+        if not np.any(high):
+            return None
+
+        seed_prob_max = float(np.max(probs[seeds]))
+        r = max(0, int(near_seed_px))
+        seed_ij = np.argwhere(seeds)
+        has_high_near_seed = False
+        for i, j in seed_ij:
+            i0 = max(0, int(i) - r)
+            i1 = min(probs.shape[0], int(i) + r + 1)
+            j0 = max(0, int(j) - r)
+            j1 = min(probs.shape[1], int(j) + r + 1)
+            if np.any(high[i0:i1, j0:j1]):
+                has_high_near_seed = True
+                break
+
+        if seed_prob_max < float(seed_min_prob) and not has_high_near_seed:
+            return (
+                "spatial_sanity_failed:"
+                f"horizon={horizon_h},seed_prob_max={seed_prob_max:.4f},"
+                f"high_threshold={float(high_prob_threshold):.3f},near_seed_px={r}"
+            )
+        return None
+    except Exception:
+        LOGGER.exception("Spatial sanity check failed unexpectedly; skipping guard.")
+        return None
+
+
+def _annotate_spatial_sanity(
+    forecast: SpreadForecast,
+    *,
+    sanity_fallback_used: bool,
+    sanity_fallback_reason: str | None,
+    sanity_original_model_name: str | None,
+) -> SpreadForecast:
+    try:
+        attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+        attrs.update(
+            {
+                "sanity_fallback_used": bool(sanity_fallback_used),
+                "sanity_fallback_reason": sanity_fallback_reason,
+                "sanity_original_model_name": sanity_original_model_name,
+                "sanity_served_model_name": forecast.model_name,
+            }
+        )
+        forecast.probabilities.attrs = attrs
+    except Exception:  # pragma: no cover
+        pass
+    return forecast
+
+
+def _apply_spatial_sanity_guard(
+    *,
+    forecast: SpreadForecast,
+    model: SpreadModel,
+    model_input: SpreadModelInput,
+    active_fire_heatmap: np.ndarray,
+) -> SpreadForecast:
+    if not _env_bool(SPREAD_SANITY_ENABLED_ENV, default=True):
+        return forecast
+    if (
+        getattr(model.__class__, "__name__", "") == "HeuristicSpreadModelV0"
+        or getattr(forecast, "model_name", "") == "HeuristicSpreadModelV0"
+    ):
+        return _annotate_spatial_sanity(
+            forecast,
+            sanity_fallback_used=False,
+            sanity_fallback_reason=None,
+            sanity_original_model_name=None,
+        )
+
+    high_prob_threshold = _env_float(SPREAD_SANITY_HIGH_PROB_THRESHOLD_ENV, default=0.3)
+    seed_min_prob = _env_float(SPREAD_SANITY_SEED_MIN_PROB_ENV, default=0.05)
+    near_seed_px = _env_int(SPREAD_SANITY_NEAR_SEED_PX_ENV, default=8)
+    reason = _spatial_sanity_failure_reason(
+        forecast=forecast,
+        active_fire_heatmap=active_fire_heatmap,
+        high_prob_threshold=high_prob_threshold,
+        seed_min_prob=seed_min_prob,
+        near_seed_px=near_seed_px,
+    )
+    if reason is None:
+        return _annotate_spatial_sanity(
+            forecast,
+            sanity_fallback_used=False,
+            sanity_fallback_reason=None,
+            sanity_original_model_name=model.__class__.__name__,
+        )
+
+    LOGGER.warning(
+        "Spatial sanity guard triggered; serving heuristic fallback.",
+        extra={
+            "reason": reason,
+            "original_model": model.__class__.__name__,
+            "high_prob_threshold": high_prob_threshold,
+            "seed_min_prob": seed_min_prob,
+            "near_seed_px": near_seed_px,
+        },
+    )
+    fallback = HeuristicSpreadModelV0()
+    out = fallback.predict(model_input)
+    out.validate()
+    return _annotate_spatial_sanity(
+        out,
+        sanity_fallback_used=True,
+        sanity_fallback_reason=reason,
+        sanity_original_model_name=model.__class__.__name__,
+    )
+
+
+def _mvp_footprint_guard_metrics(
+    *,
+    forecast: SpreadForecast,
+    active_fire_heatmap: np.ndarray,
+    horizon_hours: int,
+    probability_threshold: float,
+) -> dict[str, Any]:
+    try:
+        seeds = np.asarray(active_fire_heatmap, dtype=np.float32) > 0.0
+        seed_count = int(np.count_nonzero(seeds))
+        horizons = list(getattr(forecast, "horizons_hours", []) or [])
+        if not horizons:
+            return {
+                "seed_cell_count": seed_count,
+                "horizon_hours": int(horizon_hours),
+                "probability_threshold": float(probability_threshold),
+                "coverage_fraction": None,
+                "status": "missing_horizons",
+            }
+
+        horizons_int = [int(h) for h in horizons]
+        if int(horizon_hours) not in horizons_int:
+            return {
+                "seed_cell_count": seed_count,
+                "horizon_hours": int(horizon_hours),
+                "probability_threshold": float(probability_threshold),
+                "coverage_fraction": None,
+                "status": "horizon_not_available",
+            }
+
+        idx = horizons_int.index(int(horizon_hours))
+        probs = np.asarray(forecast.probabilities.isel(time=idx).values, dtype=np.float32)
+        if probs.ndim != 2 or probs.size == 0:
+            return {
+                "seed_cell_count": seed_count,
+                "horizon_hours": int(horizon_hours),
+                "probability_threshold": float(probability_threshold),
+                "coverage_fraction": None,
+                "status": "empty_probability_grid",
+            }
+
+        coverage_fraction = float(np.count_nonzero(probs >= float(probability_threshold)) / probs.size)
+        return {
+            "seed_cell_count": seed_count,
+            "horizon_hours": int(horizon_hours),
+            "probability_threshold": float(probability_threshold),
+            "coverage_fraction": coverage_fraction,
+            "status": "ok",
+        }
+    except Exception:
+        return {
+            "seed_cell_count": int(np.count_nonzero(np.asarray(active_fire_heatmap, dtype=np.float32) > 0.0)),
+            "horizon_hours": int(horizon_hours),
+            "probability_threshold": float(probability_threshold),
+            "coverage_fraction": None,
+            "status": "metrics_error",
+        }
+
+
+def _annotate_mvp_guardrail(
+    forecast: SpreadForecast,
+    *,
+    triggered: bool,
+    mode: str,
+    reason: str | None,
+    metrics: dict[str, Any],
+) -> SpreadForecast:
+    try:
+        attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+        attrs.update(
+            {
+                "mvp_guardrail_triggered": bool(triggered),
+                "mvp_guardrail_mode": mode,
+                "mvp_guardrail_reason": reason,
+                "mvp_guardrail_metrics": metrics,
+            }
+        )
+        if triggered and mode == "warn":
+            attrs["confidence_level"] = "low"
+        forecast.probabilities.attrs = attrs
+    except Exception:  # pragma: no cover
+        pass
+    return forecast
+
+
+def _apply_mvp_footprint_guard(
+    *,
+    forecast: SpreadForecast,
+    request: SpreadForecastRequest,
+    active_fire_heatmap: np.ndarray,
+) -> SpreadForecast:
+    if not _env_bool(SPREAD_MVP_GUARD_ENABLED_ENV, default=True):
+        return forecast
+
+    horizon_h = _env_int(SPREAD_MVP_GUARD_HORIZON_HOURS_ENV, default=24)
+    prob_threshold = _env_float(SPREAD_MVP_GUARD_PROB_THRESHOLD_ENV, default=0.7)
+    max_coverage = _env_float(SPREAD_MVP_GUARD_MAX_COVERAGE_ENV, default=0.60)
+    max_seed_cells = _env_int(SPREAD_MVP_GUARD_MAX_SEED_CELLS_ENV, default=1)
+    strict_mode = _resolve_strict_inputs(request.strict_inputs)
+
+    metrics = _mvp_footprint_guard_metrics(
+        forecast=forecast,
+        active_fire_heatmap=active_fire_heatmap,
+        horizon_hours=horizon_h,
+        probability_threshold=prob_threshold,
+    )
+    seed_count = int(metrics.get("seed_cell_count") or 0)
+    coverage_fraction = metrics.get("coverage_fraction")
+    status = str(metrics.get("status") or "unknown")
+
+    # Guard applies only to single-seed (or configured max seed count) runs.
+    if seed_count > int(max_seed_cells):
+        return _annotate_mvp_guardrail(
+            forecast,
+            triggered=False,
+            mode="skip",
+            reason=f"seed_count={seed_count} exceeds max_seed_cells={int(max_seed_cells)}",
+            metrics=metrics,
+        )
+
+    if status != "ok" or coverage_fraction is None:
+        return _annotate_mvp_guardrail(
+            forecast,
+            triggered=False,
+            mode="skip",
+            reason=f"guard_not_evaluated:{status}",
+            metrics=metrics,
+        )
+
+    coverage_fraction = float(coverage_fraction)
+    if coverage_fraction <= float(max_coverage):
+        return _annotate_mvp_guardrail(
+            forecast,
+            triggered=False,
+            mode="pass",
+            reason=None,
+            metrics=metrics,
+        )
+
+    reason = (
+        "mvp_guardrail_oversized_footprint:"
+        f"seed_cell_count={seed_count},"
+        f"horizon_hours={int(horizon_h)},"
+        f"probability_threshold={float(prob_threshold):.3f},"
+        f"coverage_fraction={coverage_fraction:.4f},"
+        f"max_coverage={float(max_coverage):.4f}"
+    )
+    if strict_mode:
+        raise ValueError(f"MVP_GUARD_STOP: {reason}")
+
+    LOGGER.warning(
+        "MVP footprint guardrail triggered in warn mode.",
+        extra={
+            "reason": reason,
+            "metrics": metrics,
+            "strict_mode": strict_mode,
+        },
+    )
+    return _annotate_mvp_guardrail(
+        forecast,
+        triggered=True,
+        mode="warn",
+        reason=reason,
+        metrics=metrics,
+    )
 
 
 def _apply_spread_calibration(

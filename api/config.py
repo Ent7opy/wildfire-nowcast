@@ -82,7 +82,13 @@ class AppSettings(BaseSettings):
 
     # CORS settings (comma-separated list of allowed origins)
     cors_allow_origins: str = Field(
-        default="http://localhost:8501", validation_alias="CORS_ALLOW_ORIGINS"
+        default=(
+            "http://localhost:8501,"
+            "http://127.0.0.1:8501,"
+            "http://localhost:3000,"
+            "http://127.0.0.1:3000"
+        ),
+        validation_alias="CORS_ALLOW_ORIGINS",
     )
 
     # Export settings

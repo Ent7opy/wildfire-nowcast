@@ -41,6 +41,16 @@ def _resolve_promoted_spread_catalog_entry() -> tuple[str, tuple[str, dict[str, 
     if not model_id or not artifact_uri:
         return None
 
+    metrics_json = active.get("metrics_json")
+    if isinstance(metrics_json, dict):
+        explicit = metrics_json.get("spread_model_selection")
+        if isinstance(explicit, dict):
+            explicit_name = explicit.get("model_name")
+            explicit_params = explicit.get("model_params")
+            if isinstance(explicit_name, str) and isinstance(explicit_params, dict):
+                model_name, model_params = normalize_model_selection(explicit_name, explicit_params)
+                return str(model_id), (model_name, model_params)
+
     artifact_path = Path(str(artifact_uri))
     inferred_model_name = "LearnedSpreadModelV1"
     try:
@@ -48,17 +58,24 @@ def _resolve_promoted_spread_catalog_entry() -> tuple[str, tuple[str, dict[str, 
         if meta_path.exists():
             payload = json.loads(meta_path.read_text(encoding="utf-8"))
             name = payload.get("model_name")
-            if name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2"}:
+            if name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2", "LearnedSpreadModelV3"}:
                 inferred_model_name = str(name)
         elif (artifact_path / "model.int8.onnx").exists() or (artifact_path / "model.onnx").exists():
             inferred_model_name = "LearnedSpreadModelV2"
     except Exception:
         inferred_model_name = "LearnedSpreadModelV1"
 
-    model_name, model_params = normalize_model_selection(
-        inferred_model_name,
-        {"model_run_dir": str(artifact_uri)},
-    )
+    # Hardened v2->v3 artifacts may still carry legacy metadata names.
+    if "spread_v3" in artifact_path.as_posix():
+        inferred_model_name = "LearnedSpreadModelV3"
+
+    inferred_params: dict[str, Any] = {"model_run_dir": str(artifact_uri)}
+    if isinstance(metrics_json, dict):
+        calibrator = metrics_json.get("calibrator_run_dir")
+        if isinstance(calibrator, str) and calibrator.strip():
+            inferred_params["calibrator_run_dir"] = calibrator.strip()
+
+    model_name, model_params = normalize_model_selection(inferred_model_name, inferred_params)
     return str(model_id), (model_name, model_params)
 
 
@@ -183,7 +200,7 @@ def resolve_request_model_selection(
         raise ValueError(
             "Direct model artifact paths are not allowed in requests. Use model_id from the approved catalog."
         )
-    if model_name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2"}:
+    if model_name in {"LearnedSpreadModelV1", "LearnedSpreadModelV2", "LearnedSpreadModelV3"}:
         raise ValueError(
             f"{model_name} must be selected via model_id from the approved catalog."
         )

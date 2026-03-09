@@ -245,6 +245,9 @@ def train_spread_v2(config: dict[str, Any]) -> Path:
 
     start_time = datetime.fromisoformat(str(config["start_time"])).replace(tzinfo=timezone.utc)
     end_time = datetime.fromisoformat(str(config["end_time"])).replace(tzinfo=timezone.utc)
+    raw_negative_ratio = config.get("negative_ratio", 3.0)
+    negative_ratio = None if raw_negative_ratio is None else float(raw_negative_ratio)
+
     cases = build_hindcast_tensor_dataset(
         region_name=str(config["region_name"]),
         bbox=tuple(float(v) for v in config["bbox"]),
@@ -253,7 +256,8 @@ def train_spread_v2(config: dict[str, Any]) -> Path:
         horizons_hours=horizons,
         min_detections=int(config.get("min_detections", 5)),
         interval_hours=int(config.get("interval_hours", 24)),
-        negative_ratio=float(config.get("negative_ratio", 3.0)),
+        negative_ratio=negative_ratio,
+        min_negative_samples=int(config.get("min_negative_samples", 500)),
         seed=seed,
         tensor_channels=channel_names,
     )
@@ -384,18 +388,20 @@ def train_spread_v2(config: dict[str, Any]) -> Path:
     )
     onnx_opset = int(export_cfg.get("onnx_opset", 17))
     onnx_path = run_dir / "model.onnx"
-    torch.onnx.export(
-        model,
-        dummy,
-        str(onnx_path),
-        input_names=["x"],
-        output_names=["logits"],
-        opset_version=onnx_opset,
-        dynamic_axes={
+    export_kwargs = {
+        "input_names": ["x"],
+        "output_names": ["logits"],
+        "opset_version": onnx_opset,
+        "dynamic_axes": {
             "x": {0: "batch", 2: "height", 3: "width"},
             "logits": {0: "batch", 2: "height", 3: "width"},
         },
-    )
+    }
+    try:
+        # Prefer legacy exporter path to avoid requiring onnxscript in lean envs.
+        torch.onnx.export(model, dummy, str(onnx_path), dynamo=False, **export_kwargs)
+    except TypeError:
+        torch.onnx.export(model, dummy, str(onnx_path), **export_kwargs)
 
     quantized_path = run_dir / "model.int8.onnx"
     if bool(export_cfg.get("quantize_int8", True)):

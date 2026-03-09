@@ -191,7 +191,7 @@ def get_fire_cells_heatmap(
         )
         return FireHeatmapWindow(grid=grid, window=win, heatmap=heatmap, points=([] if include_points else None))
 
-    detections = list_fire_detections_bbox_time(
+    detections_payload = list_fire_detections_bbox_time(
         bbox=bbox,
         start_time=start_time,
         end_time=end_time,
@@ -200,6 +200,13 @@ def get_fire_cells_heatmap(
         order="asc",
         include_noise=include_noise,
     )
+    # Repo now returns a paginated payload; keep compatibility with legacy
+    # callers that expected a plain sequence of mapping rows.
+    if isinstance(detections_payload, dict) and "data" in detections_payload:
+        detections = detections_payload.get("data") or []
+    else:
+        detections = detections_payload
+
     mapped = fires_to_indices(detections, grid, drop_outside=True)
 
     if not mapped:
@@ -253,4 +260,3 @@ def get_fire_cells_heatmap(
             points.append(rr)
 
     return FireHeatmapWindow(grid=grid, window=win, heatmap=heatmap, points=points)
-

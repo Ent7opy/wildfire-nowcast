@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 
 from api.db import get_engine
 from api.fires.service import get_fire_cells_heatmap
+from ml.spread.region_key import deterministic_region_bucket
 from ml.spread_features import build_spread_inputs
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ V2_TENSOR_CHANNELS: tuple[str, ...] = (
     "dfmc",
     "region_id_embedding_input",
 )
+V3_TENSOR_CHANNELS: tuple[str, ...] = V2_TENSOR_CHANNELS
 
 
 def sample_fire_reference_times(
@@ -119,11 +121,33 @@ def _derive_ruggedness_and_tpi(
     return ruggedness, tpi
 
 
-def _coerce_weather_var(weather_h: Any, var_name: str, shape: tuple[int, int]) -> np.ndarray:
-    data = weather_h.get(var_name)
+def _horizon_weighted_weather_mean(
+    weather_cube: Any,
+    var_name: str,
+    horizons_hours: list[int],
+    shape: tuple[int, int],
+) -> np.ndarray:
+    data = weather_cube.get(var_name)
     if data is None:
         return np.zeros(shape, dtype=np.float32)
-    return np.asarray(data.values, dtype=np.float32)
+
+    arr = np.asarray(data.values, dtype=np.float32)
+    if arr.ndim == 2:
+        return arr
+    if arr.ndim != 3:
+        return np.zeros(shape, dtype=np.float32)
+
+    n_t = int(arr.shape[0])
+    if n_t <= 0:
+        return np.zeros(shape, dtype=np.float32)
+
+    if horizons_hours and len(horizons_hours) == n_t:
+        weights = np.asarray([max(1.0, float(h)) for h in horizons_hours], dtype=np.float32)
+    else:
+        weights = np.ones(n_t, dtype=np.float32)
+    weights = weights / np.maximum(np.sum(weights), 1e-6)
+    out = np.tensordot(weights, arr, axes=(0, 0)).astype(np.float32, copy=False)
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def _flatten_features(
@@ -140,37 +164,53 @@ def _flatten_features(
         horizons_hours=horizons_hours,
     )
 
-    slope = inputs.terrain.slope.astype(np.float32, copy=False)
-    aspect = inputs.terrain.aspect.astype(np.float32, copy=False)
+    slope = np.nan_to_num(
+        inputs.terrain.slope.astype(np.float32, copy=False),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    aspect = np.nan_to_num(
+        inputs.terrain.aspect.astype(np.float32, copy=False),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     elevation = (
-        None if inputs.terrain.elevation is None else inputs.terrain.elevation.astype(np.float32, copy=False)
+        None
+        if inputs.terrain.elevation is None
+        else np.nan_to_num(
+            inputs.terrain.elevation.astype(np.float32, copy=False),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
     )
 
     aspect_rad = np.radians(aspect)
     aspect_sin = np.sin(aspect_rad).astype(np.float32, copy=False)
     aspect_cos = np.cos(aspect_rad).astype(np.float32, copy=False)
 
-    fire_t0 = inputs.active_fires.heatmap.astype(np.float32, copy=False)
+    fire_t0 = np.nan_to_num(inputs.active_fires.heatmap.astype(np.float32, copy=False), nan=0.0, posinf=0.0, neginf=0.0)
     fire_t_minus_6 = _load_fire_history(region_name, bbox, ref_time, lookback_hours=6)
     fire_t_minus_12 = _load_fire_history(region_name, bbox, ref_time, lookback_hours=12)
     ruggedness, tpi = _derive_ruggedness_and_tpi(elevation=elevation, slope=slope)
 
     ny, nx = fire_t0.shape
     lat_grid, lon_grid = np.meshgrid(inputs.window.lat, inputs.window.lon, indexing="ij")
-    region_bucket = int(abs(hash(region_name)) % 10)
+    region_bucket = deterministic_region_bucket(region_name=region_name, bbox=bbox, n_buckets=1024)
+    u10 = _horizon_weighted_weather_mean(inputs.weather_cube, "u10", horizons_hours, (ny, nx))
+    v10 = _horizon_weighted_weather_mean(inputs.weather_cube, "v10", horizons_hours, (ny, nx))
+    t2m = _horizon_weighted_weather_mean(inputs.weather_cube, "t2m", horizons_hours, (ny, nx))
+    rh2m = _horizon_weighted_weather_mean(inputs.weather_cube, "rh2m", horizons_hours, (ny, nx))
+    precip_24h = _horizon_weighted_weather_mean(inputs.weather_cube, "precip_24h", horizons_hours, (ny, nx))
+    ndvi = _horizon_weighted_weather_mean(inputs.weather_cube, "ndvi", horizons_hours, (ny, nx))
+    lfmc = _horizon_weighted_weather_mean(inputs.weather_cube, "lfmc", horizons_hours, (ny, nx))
+    dfmc = _horizon_weighted_weather_mean(inputs.weather_cube, "dfmc", horizons_hours, (ny, nx))
 
     horizon_dfs: list[pd.DataFrame] = []
     for h_idx, horizon_h in enumerate(horizons_hours):
-        weather_h = inputs.weather_cube.isel(time=h_idx)
-        u10 = np.asarray(weather_h["u10"].values, dtype=np.float32)
-        v10 = np.asarray(weather_h["v10"].values, dtype=np.float32)
-        t2m = _coerce_weather_var(weather_h, "t2m", (ny, nx))
-        rh2m = _coerce_weather_var(weather_h, "rh2m", (ny, nx))
-
-        precip_24h = _coerce_weather_var(weather_h, "precip_24h", (ny, nx))
-        ndvi = _coerce_weather_var(weather_h, "ndvi", (ny, nx))
-        lfmc = _coerce_weather_var(weather_h, "lfmc", (ny, nx))
-        dfmc = _coerce_weather_var(weather_h, "dfmc", (ny, nx))
+        _ = h_idx
 
         target_time = ref_time + timedelta(hours=horizon_h)
         target_start = target_time - timedelta(hours=3)
