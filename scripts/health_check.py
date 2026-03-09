@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Health check script for the Wildfire Nowcast stack.
 
-Verifies that all services (API, UI, DB) are running and accessible.
+Verifies that all services (API, React UI, DB) are running and accessible.
 """
 
 from __future__ import annotations

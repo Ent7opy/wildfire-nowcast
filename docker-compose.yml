@@ -39,12 +39,14 @@ services:
       - "8501:8501"
     volumes:
       - ./ui:/app/ui:delegated
-      - /app/ui/.venv
+      - /app/ui/node_modules
     environment:
       APP_ENV: dev
-      API_BASE_URL: http://api:8000
-      API_PUBLIC_BASE_URL: http://localhost:8000
-      STREAMLIT_SERVER_RUN_ON_SAVE: "true"
+      VITE_API_BASE_URL: http://api:8000
+      VITE_API_PUBLIC_BASE_URL: http://localhost:8000
+      VITE_VECTOR_TILES_PUBLIC_BASE_URL: http://localhost:7800
+      VITE_FORECAST_REGION_NAME: smoke_grid
+      CHOKIDAR_USEPOLLING: "true"
     depends_on:
       - api
 

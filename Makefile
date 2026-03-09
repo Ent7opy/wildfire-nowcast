@@ -31,6 +31,10 @@ ifeq ($(OS),Windows_NT)
 	Write-Host 'Checking Python...'; \
 	try { python --version | ForEach-Object { Write-Host \"  [OK] $_\" } } catch { Write-Host '  [FAIL] Python not found' -ForegroundColor Red }; \
 	Write-Host ''; \
+	Write-Host 'Checking Node.js...'; \
+	try { node --version | ForEach-Object { Write-Host \"  [OK] Node $_\" } } catch { Write-Host '  [FAIL] Node.js not found' -ForegroundColor Red }; \
+	try { npm --version | ForEach-Object { Write-Host \"  [OK] npm $_\" } } catch { Write-Host '  [FAIL] npm not found' -ForegroundColor Red }; \
+	Write-Host ''; \
 	Write-Host 'Checking uv...'; \
 	try { uv --version | ForEach-Object { Write-Host \"  [OK] $_\" } } catch { Write-Host '  [FAIL] uv not found. Install: https://astral.sh/uv' -ForegroundColor Red }; \
 	Write-Host ''; \
@@ -60,6 +64,10 @@ else
 	@echo "Checking Python..."
 	@$(PYTHON) --version 2>/dev/null && echo "  [OK]" || echo "  [FAIL] Python not found"
 	@echo ""
+	@echo "Checking Node.js..."
+	@node --version 2>/dev/null && echo "  [OK] Node installed" || echo "  [FAIL] Node.js not found"
+	@npm --version 2>/dev/null && echo "  [OK] npm installed" || echo "  [FAIL] npm not found"
+	@echo ""
 	@echo "Checking uv..."
 	@$(UV) --version 2>/dev/null && echo "  [OK]" || echo "  [FAIL] uv not found. Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
 	@echo ""
@@ -81,26 +89,21 @@ health-check: ## Check if stack services are running (API, UI, DB)
 
 install: ## Install dependencies for all subprojects (with dev extras)
 	cd api && $(UV) sync --dev
-	cd ui && $(UV) sync --dev
+	cd ui && npm ci
 	cd ml && $(UV) sync --dev
 	cd ingest && $(UV) sync --dev
 
 dev-api: ## Start FastAPI development server (requires make install)
 	cd api && $(UV) run python -m uvicorn api.main:app --app-dir .. --reload --host 127.0.0.1 --port 8000
 
-dev-ui: ## Start Streamlit development server (requires make install)
-	cd ui && $(UV) run streamlit run app.py
+dev-ui: ## Start React development server (requires make install)
+	cd ui && npm run dev -- --host 127.0.0.1 --port 8501
 
 test: ## Run unit tests (API + UI + ML + Ingest)
 	@echo "Running API tests..."
 	cd api && $(UV) run pytest
 	@echo "Running UI tests..."
-ifeq ($(OS),Windows_NT)
-	cd ui && $(UV) run pytest
-else
-	@if [ -L "ui/.venv/lib64" ]; then rm -rf ui/.venv; fi
-	cd ui && $(UV) run pytest
-endif
+	cd ui && npm run test:run
 	@echo "Running ML tests..."
 	cd ml && $(UV) run pytest
 	@echo "Running Ingest tests..."
@@ -110,12 +113,7 @@ lint: ## Run Ruff lint checks (API + UI + ML + Ingest)
 	@echo "Linting API..."
 	cd api && $(UV) run --no-sync ruff check .
 	@echo "Linting UI..."
-ifeq ($(OS),Windows_NT)
-	cd ui && $(UV) run --no-sync ruff check .
-else
-	@if [ -L "ui/.venv/lib64" ]; then rm -rf ui/.venv; fi
-	cd ui && $(UV) run --no-sync ruff check .
-endif
+	cd ui && npm run lint && npm run typecheck
 	@echo "Linting ML..."
 	cd ml && $(UV) run --no-sync ruff check .
 	@echo "Linting Ingest..."
@@ -125,7 +123,7 @@ lint-fix: ## Auto-fix Ruff lint errors (API + UI + ML + Ingest)
 	@echo "Fixing API..."
 	cd api && $(UV) run --no-sync ruff check --fix .
 	@echo "Fixing UI..."
-	cd ui && $(UV) run --no-sync ruff check --fix .
+	cd ui && npm run lint -- --fix
 	@echo "Fixing ML..."
 	cd ml && $(UV) run --no-sync ruff check --fix .
 	@echo "Fixing Ingest..."

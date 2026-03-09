@@ -153,7 +153,7 @@ def test_mvt_fires_low_zoom_gate_is_not_present():
 
 
 def test_ui_property_access_matches_mvt_schema():
-    """Test that UI component property access matches MVT schema."""
+    """Test that frontend property access expectations match MVT schema."""
     # Simulate MVT properties as they would appear in session_state
     mvt_properties = {
         "id": 12345,
@@ -209,7 +209,7 @@ def test_fire_map_feature_contract_completeness():
     1. All required properties are defined
     2. All properties have descriptions
     3. No overlap between required and optional
-    4. Contract covers all UI needs (referenced by click_details.py and map_view.py)
+    4. Contract covers all frontend map/detail needs
     """
     # Verify contract structure
     assert "required" in FIRE_MAP_FEATURE_CONTRACT
@@ -229,8 +229,7 @@ def test_fire_map_feature_contract_completeness():
     for prop, desc in FIRE_MAP_FEATURE_CONTRACT["optional"].items():
         assert desc and len(desc) > 0, f"Optional property '{prop}' missing description"
     
-    # Verify contract includes minimum set of properties needed for UI
-    # Based on click_details.py (lines 52-62, 64-82) and map_view.py (lines 178-192)
+    # Verify contract includes minimum set of properties needed for frontend map/details flows.
     essential_for_ui = {
         "id",       # identification
         "lat",      # coordinate for display and forecast
@@ -247,13 +246,13 @@ def test_fire_map_feature_contract_completeness():
     assert len(missing) == 0, f"Contract missing UI-essential properties: {missing}"
 
 
-def test_contract_validates_map_view_to_click_details_flow():
-    """Test that properties flow correctly from map_view selection to click_details rendering.
+def test_contract_validates_map_selection_to_details_flow():
+    """Test that properties flow correctly from map selection to details rendering.
     
     This simulates the actual flow:
     1. MVT layer returns a feature with properties
-    2. map_view.py extracts/enriches the feature (lines 177-195)
-    3. click_details.py accesses properties from selected_fire (lines 52-82)
+    2. Frontend map logic extracts/enriches the feature
+    3. Frontend details logic reads selected-event properties
     """
     # Step 1: Simulate MVT feature as returned by PyDeck
     mvt_feature = {
@@ -273,8 +272,7 @@ def test_contract_validates_map_view_to_click_details_flow():
     for prop in FIRE_MAP_FEATURE_CONTRACT["required"].keys():
         assert prop in mvt_feature, f"MVT feature missing required property '{prop}'"
     
-    # Step 2: Simulate map_view.py selection logic (lines 177-192)
-    # map_view extracts lat/lon from properties or falls back to geometry
+    # Step 2: Simulate frontend map selection logic.
     selected_fire = mvt_feature.copy()
     lat = selected_fire.get("lat")
     lon = selected_fire.get("lon")
@@ -283,7 +281,7 @@ def test_contract_validates_map_view_to_click_details_flow():
     assert lat is not None, "lat must be present for forecast"
     assert lon is not None, "lon must be present for forecast"
     
-    # Step 3: Simulate click_details.py property access patterns (lines 52-82)
+    # Step 3: Simulate frontend details property access patterns.
     # Core properties (must not raise KeyError)
     assert selected_fire.get("lat") is not None
     assert selected_fire.get("lon") is not None
@@ -297,6 +295,6 @@ def test_contract_validates_map_view_to_click_details_flow():
     _ = selected_fire.get("denoised_score")
     _ = selected_fire.get("is_noise")
     
-    # Validate coordinate ranges for forecast bbox calculation (click_details.py lines 95-100)
+    # Validate coordinate ranges for forecast bbox calculation.
     assert -90 <= float(lat) <= 90, "Latitude must be in valid range"
     assert -180 <= float(lon) <= 180, "Longitude must be in valid range"

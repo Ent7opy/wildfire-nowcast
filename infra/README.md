@@ -1,6 +1,6 @@
 # Infrastructure & Local Stack
 
-This `infra` folder documents the local Docker Compose stack (defined in `docker-compose.yml` at the repo root) that runs the FastAPI backend, Streamlit UI, Postgres+PostGIS database, and Redis cache with a single command.
+This `infra` folder documents the local Docker Compose stack (defined in `docker-compose.yml` at the repo root) that runs the FastAPI backend, React UI, Postgres+PostGIS database, and Redis cache with a single command.
 
 ## Prerequisites
 
@@ -33,7 +33,7 @@ docker compose down -v
 | Service | URL (host) | Notes |
 | --- | --- | --- |
 | FastAPI backend | `http://localhost:8000/health` | Exposes `/health` and any future API endpoints. |
-| Streamlit UI | `http://localhost:8501/` | Powered by the Streamlit app in `ui/`. |
+| React UI | `http://localhost:8501/` | Powered by the React SPA in `ui/`. |
 | Postgres+PostGIS | `localhost:5432` | Connection info matches the default env vars below. |
 | Redis | `localhost:6379` | Ready for future caching/queue needs. |
 | TiTiler | `localhost:8080` | Raster tile server (COG). |
@@ -50,8 +50,10 @@ These values can be overridden by defining them in a `.env` file (or your shell)
 | `POSTGRES_DB` | Database name | `wildfire` |
 | `POSTGRES_PORT` | Host port mapped to Postgres | `5432` |
 | `REDIS_PORT` | Host port mapped to Redis | `6379` |
-| `API_BASE_URL` | API URL used by the Streamlit server | `http://api:8000` |
-| `API_PUBLIC_BASE_URL` | API URL used by the browser | `http://localhost:8000` |
+| `VITE_API_BASE_URL` | API URL resolved by the UI container runtime | `http://api:8000` |
+| `VITE_API_PUBLIC_BASE_URL` | API URL used by browser requests | `http://localhost:8000` |
+| `VITE_VECTOR_TILES_PUBLIC_BASE_URL` | Public vector tile server URL | `http://localhost:7800` |
+| `VITE_FORECAST_REGION_NAME` | Default forecast region fallback | `smoke_grid` |
 | `APP_ENV` | Shared indicator for dev vs prod behaviors | `dev` |
 
 ## Database & Migrations
@@ -120,9 +122,8 @@ For local development outside Docker, set `POSTGRES_HOST=localhost` and ensure P
 
 ## Notes
 
-- Both the `api` and `ui` images install dependencies via `uv` and share the same `app/.venv` created during build.
+- The `api` image installs Python dependencies via `uv`; the `ui` image installs Node dependencies via `npm`.
 - The `api` service respects `UVICORN_RELOAD_DIRS=/app/api`, so code changes in `./api` reflected via the bind mount trigger FastAPI's `--reload`.
-- The `ui` service enables `STREAMLIT_SERVER_RUN_ON_SAVE` for rapid Streamlit feedback.
+- The `ui` service runs Vite in dev mode on port `8501` for rapid React feedback.
 - Postgres uses an official `postgis/postgis` image plus a named volume (`db_data`). Redis stores data in `redis_data`, keeping your cache state between restarts.
 - Use `docker compose logs -f api` (or any service name) to tail logs during development.
-

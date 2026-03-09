@@ -88,7 +88,7 @@ add_text_box(slide2, 0.5, 0.3, 9, 0.6, "System Architecture", font_size=28, bold
 add_text_box(slide2, 0.5, 0.75, 9, 0.4, "7 Integrated Services", font_size=16, align=PP_ALIGN.CENTER, color=(100, 100, 100))
 
 # Row 1: UI Layer
-add_box_shape(slide2, 3.5, 1.3, 3, 0.6, "UI (Streamlit) :8501\nMap & Filters", COLOR_UI, 9)
+add_box_shape(slide2, 3.5, 1.3, 3, 0.6, "UI (React SPA) :8501\nMap & Filters", COLOR_UI, 9)
 
 # Row 2: API Layer
 add_box_shape(slide2, 3.5, 2.2, 3, 0.6, "API (FastAPI) :8000\nREST Endpoints", COLOR_API, 9)
@@ -290,7 +290,7 @@ add_bullet_text(slide6, 6.5, 1.35, 3, 1.2, geo, font_size=11)
 
 # Frontend row
 add_text_box(slide6, 0.5, 2.8, 3, 0.4, "Frontend", font_size=14, bold=True, color=COLOR_UI)
-frontend = ["Streamlit", "Pydeck (maps)", "Folium"]
+frontend = ["React + TypeScript", "Deck.gl + MapLibre", "MUI"]
 add_bullet_text(slide6, 0.5, 3.15, 3, 1.0, frontend, font_size=11)
 
 # DevOps row
