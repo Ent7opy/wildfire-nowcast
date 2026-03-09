@@ -131,6 +131,7 @@ reports/
 *.tmp
 *.temp
 .cache/
+test-results/
 
 # Ralph execution artifacts
 .ralph/inbox/
