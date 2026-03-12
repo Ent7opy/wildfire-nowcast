@@ -39,6 +39,14 @@ class FIRMSIngestSettings(BaseSettings):
         default=90,
         validation_alias="FIRMS_WATERMARK_GRACE_MINUTES",
     )
+    firms_initial_lookback_minutes: int = Field(
+        default=360,
+        validation_alias="FIRMS_INITIAL_LOOKBACK_MINUTES",
+    )
+    firms_incremental_lookback_minutes: int = Field(
+        default=30,
+        validation_alias="FIRMS_INCREMENTAL_LOOKBACK_MINUTES",
+    )
     firms_reconcile_unscored_batches: bool = Field(
         default=True,
         validation_alias="FIRMS_RECONCILE_UNSCORED_BATCHES",
@@ -160,6 +168,26 @@ class FIRMSIngestSettings(BaseSettings):
         val = int(value)  # raises if not numeric
         if not 1 <= val <= 10:
             raise ValueError("FIRMS_DAY_RANGE must be between 1 and 10")
+        return val
+
+    @field_validator("firms_watermark_grace_minutes", mode="before")
+    @classmethod
+    def _validate_watermark_grace_minutes(cls, value: object) -> int:
+        val = int(value)
+        if val < 0:
+            raise ValueError("FIRMS_WATERMARK_GRACE_MINUTES must be >= 0")
+        return val
+
+    @field_validator(
+        "firms_initial_lookback_minutes",
+        "firms_incremental_lookback_minutes",
+        mode="before",
+    )
+    @classmethod
+    def _validate_positive_lookback_minutes(cls, value: object) -> int:
+        val = int(value)
+        if val <= 0:
+            raise ValueError("FIRMS lookback windows must be > 0 minutes")
         return val
 
     @field_validator("denoiser_pipeline_version")

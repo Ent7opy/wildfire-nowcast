@@ -76,6 +76,10 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _area_key_from_bbox(bbox: str) -> str:
     """Build deterministic area key from normalized FIRMS bbox string."""
     parts = [float(part.strip()) for part in bbox.split(",")]
@@ -89,16 +93,24 @@ def _filter_detections_by_watermark(
     *,
     watermark_time_utc: datetime | None,
     grace_minutes: int,
+    hard_window_start_utc: datetime | None = None,
 ) -> tuple[list, datetime | None]:
-    """Filter detections to incremental window with late-arrival grace."""
+    """Filter detections to incremental window using watermark and optional hard start."""
     if not detections:
         return [], None
 
     max_acq_time = max((_as_utc(d.acq_time) for d in detections), default=None)
-    if watermark_time_utc is None:
+    threshold: datetime | None = None
+    if watermark_time_utc is not None:
+        threshold = _as_utc(watermark_time_utc) - timedelta(minutes=max(0, int(grace_minutes)))
+
+    hard_window_start_utc = _as_utc(hard_window_start_utc)
+    if hard_window_start_utc is not None:
+        threshold = max(threshold, hard_window_start_utc) if threshold is not None else hard_window_start_utc
+
+    if threshold is None:
         return detections, max_acq_time
 
-    threshold = _as_utc(watermark_time_utc) - timedelta(minutes=max(0, int(grace_minutes)))
     filtered = [d for d in detections if (_as_utc(d.acq_time) or datetime.min.replace(tzinfo=timezone.utc)) > threshold]
     max_filtered = max((_as_utc(d.acq_time) for d in filtered), default=None)
     return filtered, max_filtered
@@ -294,6 +306,8 @@ def run_firms_ingest(
     area_key = _area_key_from_bbox(bbox)
     effective_day_range = day_range if day_range is not None else config.day_range
     source_list = _resolve_sources(sources) or config.sources
+    initial_lookback_minutes = int(config.firms_initial_lookback_minutes)
+    incremental_lookback_minutes = int(config.firms_incremental_lookback_minutes)
 
     if not 1 <= int(effective_day_range) <= MAX_FIRMS_DAY_RANGE:
         LOGGER.error(
@@ -321,6 +335,8 @@ def run_firms_ingest(
             "day_range": effective_day_range,
             "area": bbox,
             "sources": source_list,
+            "initial_lookback_minutes": initial_lookback_minutes,
+            "incremental_lookback_minutes": incremental_lookback_minutes,
         },
     )
 
@@ -355,6 +371,11 @@ def run_firms_ingest(
         watermark = repository.get_ingest_watermark(source, area_key)
         watermark_time_utc = _as_utc((watermark or {}).get("last_acq_time_utc"))
         grace_minutes = int(config.firms_watermark_grace_minutes)
+        now_utc = _utc_now()
+        is_bootstrap = watermark_time_utc is None
+        active_lookback_minutes = initial_lookback_minutes if is_bootstrap else incremental_lookback_minutes
+        hard_window_start_utc = now_utc - timedelta(minutes=active_lookback_minutes)
+        lookback_mode = "bootstrap" if is_bootstrap else "incremental"
 
         source_uri = build_firms_url(config.map_key, source, bbox, effective_day_range)
         batch_id = repository.create_ingest_batch(
@@ -366,6 +387,9 @@ def run_firms_ingest(
                 "area_key": area_key,
                 "watermark_before": watermark_time_utc.isoformat() if watermark_time_utc else None,
                 "watermark_grace_minutes": grace_minutes,
+                "lookback_mode": lookback_mode,
+                "lookback_minutes": active_lookback_minutes,
+                "window_start_utc": hard_window_start_utc.isoformat(),
             },
         )
         LOGGER.info("Created ingest batch %s for %s", batch_id, source)
@@ -390,6 +414,7 @@ def run_firms_ingest(
                 detections,
                 watermark_time_utc=watermark_time_utc,
                 grace_minutes=grace_minutes,
+                hard_window_start_utc=hard_window_start_utc,
             )
             rows_after_watermark_filter = len(filtered_detections)
             _log_firms_validation(source, batch_id, validation)
@@ -452,6 +477,8 @@ def run_firms_ingest(
                 watermark_before=watermark_time_utc.isoformat() if watermark_time_utc else None,
                 rows_after_watermark_filter=rows_after_watermark_filter,
                 watermark_advanced_to=watermark_advanced_to.isoformat() if watermark_advanced_to else None,
+                lookback_mode=lookback_mode,
+                window_start_utc=hard_window_start_utc.isoformat(),
             )
             LOGGER.info(
                 "Ingested source=%s batch=%s fetched=%s parsed=%s post_watermark=%s inserted=%s duplicates=%s",

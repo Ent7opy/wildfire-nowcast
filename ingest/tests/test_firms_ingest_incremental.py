@@ -27,6 +27,35 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         self.assertEqual(2, len(filtered))
         self.assertEqual(datetime(2026, 2, 15, 12, 10, tzinfo=timezone.utc), max_seen)
 
+    def test_filter_detections_uses_hard_window_when_watermark_missing(self):
+        detections = [
+            SimpleNamespace(acq_time=datetime(2026, 2, 15, 8, 59, tzinfo=timezone.utc)),
+            SimpleNamespace(acq_time=datetime(2026, 2, 15, 9, 1, tzinfo=timezone.utc)),
+        ]
+        filtered, max_seen = _filter_detections_by_watermark(
+            detections,
+            watermark_time_utc=None,
+            grace_minutes=90,
+            hard_window_start_utc=datetime(2026, 2, 15, 9, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(1, len(filtered))
+        self.assertEqual(datetime(2026, 2, 15, 9, 1, tzinfo=timezone.utc), max_seen)
+
+    def test_filter_detections_uses_max_of_watermark_and_hard_window(self):
+        detections = [
+            SimpleNamespace(acq_time=datetime(2026, 2, 15, 11, 20, tzinfo=timezone.utc)),
+            SimpleNamespace(acq_time=datetime(2026, 2, 15, 11, 40, tzinfo=timezone.utc)),
+        ]
+        filtered, _max_seen = _filter_detections_by_watermark(
+            detections,
+            watermark_time_utc=datetime(2026, 2, 15, 12, 0, tzinfo=timezone.utc),
+            grace_minutes=90,
+            hard_window_start_utc=datetime(2026, 2, 15, 11, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(1, len(filtered))
+
     @patch("ingest.firms_ingest._update_all_scoring_atomic")
     @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
     @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
@@ -58,6 +87,8 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_settings.sources = ["VIIRS_SNPP_NRT"]
         mock_settings.request_timeout_seconds = 30.0
         mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 100000
+        mock_settings.firms_incremental_lookback_minutes = 100000
         mock_settings.denoiser_enabled = False
         mock_settings.denoiser_required = False
         mock_settings.firms_reconcile_unscored_batches = False
@@ -119,6 +150,8 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_settings.sources = ["VIIRS_SNPP_NRT"]
         mock_settings.request_timeout_seconds = 30.0
         mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 100000
+        mock_settings.firms_incremental_lookback_minutes = 100000
         mock_settings.denoiser_enabled = False
         mock_settings.denoiser_required = False
         mock_settings.firms_reconcile_unscored_batches = False
@@ -178,6 +211,8 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_settings.sources = ["VIIRS_SNPP_NRT"]
         mock_settings.request_timeout_seconds = 30.0
         mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 100000
+        mock_settings.firms_incremental_lookback_minutes = 100000
         mock_settings.denoiser_enabled = False
         mock_settings.denoiser_required = True
         mock_settings.firms_reconcile_unscored_batches = False
@@ -234,6 +269,8 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_settings.sources = ["VIIRS_SNPP_NRT"]
         mock_settings.request_timeout_seconds = 30.0
         mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 100000
+        mock_settings.firms_incremental_lookback_minutes = 100000
         mock_settings.denoiser_enabled = False
         mock_settings.denoiser_required = False
         mock_settings.firms_reconcile_unscored_batches = False
@@ -304,6 +341,8 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_settings.sources = ["VIIRS_SNPP_NRT"]
         mock_settings.request_timeout_seconds = 30.0
         mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 100000
+        mock_settings.firms_incremental_lookback_minutes = 100000
         mock_settings.denoiser_enabled = False
         mock_settings.denoiser_required = True
         mock_settings.firms_reconcile_unscored_batches = False
