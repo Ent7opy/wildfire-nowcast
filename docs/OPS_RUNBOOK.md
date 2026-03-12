@@ -25,14 +25,21 @@ Run scheduler locally:
 make ops-start
 ```
 
-Or in compose (dedicated service):
+Or in compose (full stack, root repo):
+
+```bash
+docker compose up -d
+```
+
+For scheduler-only iteration:
 
 ```bash
 docker compose up ingest_scheduler -d
 ```
 
 Expected runtime profile:
-- FIRMS poll every 30 minutes.
+- FIRMS bootstrap ingest on first run: last 6 hours (`FIRMS_INITIAL_LOOKBACK_MINUTES=360`).
+- FIRMS recurring ingest: every 30 minutes, scoped to the last 30 minutes (`FIRMS_INCREMENTAL_LOOKBACK_MINUTES=30`).
 - Perimeters refresh daily.
 - Freshness checks enabled.
 - Retries enabled (`max_retries=3`, `backoff=20s`).

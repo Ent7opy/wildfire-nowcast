@@ -29,8 +29,12 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: ${REDIS_PORT:-6379}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   ui:
     build:
@@ -46,6 +50,9 @@ services:
       VITE_API_PUBLIC_BASE_URL: http://localhost:8000
       VITE_VECTOR_TILES_PUBLIC_BASE_URL: http://localhost:7800
       VITE_FORECAST_REGION_NAME: smoke_grid
+      VITE_GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VITE_GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      VITE_GEMINI_API_BASE_URL: ${GEMINI_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
       CHOKIDAR_USEPOLLING: "true"
     depends_on:
       - api
@@ -81,6 +88,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  migrate:
+    build:
+      context: ./api
+    command: alembic -c api/alembic.ini upgrade head
+    volumes:
+      - ./api:/app/api:delegated
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-wildfire}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wildfire}
+      POSTGRES_DB: ${POSTGRES_DB:-wildfire}
+    depends_on:
+      db:
+        condition: service_healthy
 
   titiler:
     image: ghcr.io/developmentseed/titiler:latest
@@ -121,8 +145,12 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: ${REDIS_PORT:-6379}
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       disable: true
 
@@ -157,13 +185,20 @@ services:
       DENOISER_ALLOW_UNSAFE_THRESHOLD_OVERRIDE: ${DENOISER_ALLOW_UNSAFE_THRESHOLD_OVERRIDE:-false}
       DENOISER_BATCH_SIZE: ${DENOISER_BATCH_SIZE:-5000}
       FIRMS_MAP_KEY: ${FIRMS_MAP_KEY}
+      FIRMS_DAY_RANGE: ${FIRMS_DAY_RANGE:-1}
+      FIRMS_INITIAL_LOOKBACK_MINUTES: ${FIRMS_INITIAL_LOOKBACK_MINUTES:-360}
+      FIRMS_INCREMENTAL_LOOKBACK_MINUTES: ${FIRMS_INCREMENTAL_LOOKBACK_MINUTES:-30}
+      FIRMS_WATERMARK_GRACE_MINUTES: ${FIRMS_WATERMARK_GRACE_MINUTES:-90}
       POSTGRES_HOST: db
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-wildfire}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wildfire}
       POSTGRES_DB: ${POSTGRES_DB:-wildfire}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "test -f /app/data/ingest/orchestrator_dashboard.json"]
       interval: 30s
