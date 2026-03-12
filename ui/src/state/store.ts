@@ -10,10 +10,10 @@ import type {
   LayersState,
   MapViewState
 } from "../types/state";
-import { matchingPreset, parseBoolFlag } from "../utils/presets";
+import { matchingPreset } from "../utils/presets";
 
 const DEFAULT_FILTERS: FiltersState = {
-  hoursStart: 24,
+  hoursStart: 6,
   hoursEnd: 0,
   minLikelihood: 0,
   activeOnly: true,
@@ -52,7 +52,6 @@ const DEFAULT_ASSISTANT_VIEW_CONTEXT: AssistantViewContext = {
 };
 
 interface AppStoreState {
-  initializedFromUrl: boolean;
   filters: FiltersState;
   layers: LayersState;
   mapView: MapViewState;
@@ -62,7 +61,6 @@ interface AppStoreState {
   activePreset: string | null;
   forecast: ForecastJobState;
   assistantViewContext: AssistantViewContext;
-  initializeFromUrl: () => void;
   setFilters: (patch: Partial<FiltersState>) => void;
   applyPreset: (preset: { name: string; hoursStart: number; hoursEnd: number; likelihood: number }) => void;
   setRiskVisibility: (visible: boolean) => void;
@@ -84,16 +82,7 @@ function updatePreset(filters: FiltersState): string {
   return matchingPreset(filters) || "Custom";
 }
 
-function parseNumber(value: string | null): number | null {
-  if (value === null) {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 export const useAppStore = create<AppStoreState>((set, get) => ({
-  initializedFromUrl: false,
   filters: DEFAULT_FILTERS,
   layers: DEFAULT_LAYERS,
   mapView: DEFAULT_MAP_VIEW,
@@ -103,50 +92,6 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   activePreset: updatePreset(DEFAULT_FILTERS),
   forecast: DEFAULT_FORECAST_STATE,
   assistantViewContext: DEFAULT_ASSISTANT_VIEW_CONTEXT,
-
-  initializeFromUrl: () => {
-    if (get().initializedFromUrl || typeof window === "undefined") {
-      return;
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const next: FiltersState = { ...get().filters };
-
-    const start = parseNumber(params.get("start"));
-    const end = parseNumber(params.get("end"));
-    const likelihood = parseNumber(params.get("likelihood"));
-    const activeOnly = parseBoolFlag(params.get("active_only"));
-    const cluster = parseBoolFlag(params.get("cluster"));
-
-    if (start !== null) {
-      next.hoursStart = Math.max(1, Math.min(48, Math.floor(start)));
-    }
-    if (end !== null) {
-      next.hoursEnd = Math.max(0, Math.min(47, Math.floor(end)));
-    }
-    if (next.hoursStart <= next.hoursEnd) {
-      next.hoursStart = Math.min(48, next.hoursEnd + 1);
-    }
-    if (likelihood !== null) {
-      next.minLikelihood = Math.max(0, Math.min(1, likelihood));
-    }
-    if (activeOnly !== null) {
-      next.activeOnly = activeOnly;
-    }
-    if (cluster !== null) {
-      next.clusterPoints = cluster;
-    }
-
-    set({
-      initializedFromUrl: true,
-      filters: next,
-      layers: {
-        ...get().layers,
-        showRisk: cluster === false ? false : get().layers.showRisk
-      },
-      activePreset: updatePreset(next)
-    });
-  },
 
   setFilters: (patch) => {
     set((state) => {

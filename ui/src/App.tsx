@@ -19,7 +19,6 @@ import FireDetailsPanel from "./components/FireDetailsPanel";
 import FireMap from "./components/FireMap";
 import ForecastNotification from "./components/ForecastNotification";
 import { useForecastPolling } from "./hooks/useForecastPolling";
-import { useUrlStateSync } from "./hooks/useUrlStateSync";
 import { useAppStore } from "./state/store";
 import type { FireEvent } from "./types/api";
 import type {
@@ -120,7 +119,6 @@ export default function App(): JSX.Element {
   const [confidenceFilter, setConfidenceFilter] = useState<AssistantConfidenceFilter>("All");
   const setAssistantViewContext = useAppStore((s) => s.setAssistantViewContext);
 
-  useUrlStateSync();
   useForecastPolling();
 
   const filteredEvents = useMemo(() => {

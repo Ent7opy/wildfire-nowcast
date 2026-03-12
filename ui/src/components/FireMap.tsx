@@ -31,17 +31,25 @@ import {
   clusterEventPoints,
   eventFeature,
   frontFeature,
+  geometryBounds,
   isActiveCandidate,
   isForecastContourVisible,
   toRenderEvent
 } from "../map/layerUtils";
 import { computeTimeRange } from "../utils/time";
 import { eventLimitForZoom, frontLimitForZoom, shouldLoadFronts, shouldRenderCentroids, viewportBbox } from "../utils/mapMath";
+import { selectionViewFromBounds } from "../utils/mapSelection";
 
 const BASEMAP_DARK = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 const FORECAST_FILL = [255, 165, 0, 40];
 const FORECAST_STROKE = [255, 165, 0, 200];
 const HIGH_CONFIDENCE_THRESHOLD = 0.6;
+const MIN_SELECTION_ZOOM = 6;
+const MAX_SELECTION_ZOOM = 14;
+const SELECTION_TARGET_OCCUPANCY = 0.3;
+const SELECTED_FRONT_COLOR: [number, number, number, number] = [59, 130, 246, 255];
+const SELECTED_EVENT_FILL: [number, number, number, number] = [59, 130, 246, 88];
+const SELECTED_EVENT_STROKE: [number, number, number, number] = [96, 165, 250, 255];
 
 type ConfidenceFilter = "All" | "High";
 
@@ -76,6 +84,12 @@ function eventSearchText(event: FireEvent): string {
   ]
     .map((value) => String(value || "").toLowerCase())
     .join(" ");
+}
+
+function geometryProvenanceLabel(event: FireEvent): string {
+  return String(event.geom_source || "").toLowerCase() === "authoritative"
+    ? "Authoritative perimeter"
+    : "Estimated perimeter";
 }
 
 export default function FireMap({
@@ -188,6 +202,39 @@ export default function FireMap({
     setFrontIndexByEvent(buildFrontIndexByEvent(visibleFronts));
   }, [visibleFronts, setFrontIndexByEvent]);
 
+  const selectedEventId = selectedEvent?.event_id ? String(selectedEvent.event_id) : "";
+
+  const selectedEventFeature = useMemo(() => {
+    if (!selectedEvent) {
+      return null;
+    }
+    const selectedRenderEvent = toRenderEvent(selectedEvent);
+    if (!selectedRenderEvent) {
+      return null;
+    }
+    return eventFeature({
+      ...selectedRenderEvent,
+      fill_r: SELECTED_EVENT_FILL[0],
+      fill_g: SELECTED_EVENT_FILL[1],
+      fill_b: SELECTED_EVENT_FILL[2],
+      fill_a: SELECTED_EVENT_FILL[3],
+      line_r: SELECTED_EVENT_STROKE[0],
+      line_g: SELECTED_EVENT_STROKE[1],
+      line_b: SELECTED_EVENT_STROKE[2],
+      line_a: SELECTED_EVENT_STROKE[3]
+    });
+  }, [selectedEvent]);
+
+  const selectedFrontFeatures = useMemo(() => {
+    if (!selectedEventId) {
+      return [];
+    }
+    return visibleFronts
+      .filter((front) => front.event_id && String(front.event_id) === selectedEventId)
+      .map(frontFeature)
+      .filter((feature): feature is Feature => Boolean(feature));
+  }, [selectedEventId, visibleFronts]);
+
   const layers = useMemo(() => {
     const deckLayers: Array<GeoJsonLayer | ScatterplotLayer | MVTLayer> = [];
 
@@ -226,6 +273,32 @@ export default function FireMap({
         }
       })
     );
+
+    if (selectedEventFeature) {
+      deckLayers.push(
+        new GeoJsonLayer({
+          id: `selected-event-${String(selectedEventFeature.properties?.event_id || "event")}`,
+          data: {
+            type: "FeatureCollection",
+            features: [selectedEventFeature]
+          },
+          pickable: false,
+          filled: true,
+          stroked: true,
+          getFillColor: (feature) => {
+            const properties = feature.properties as Record<string, number>;
+            return [properties.fill_r, properties.fill_g, properties.fill_b, properties.fill_a] as [number, number, number, number];
+          },
+          getLineColor: (feature) => {
+            const properties = feature.properties as Record<string, number>;
+            return [properties.line_r, properties.line_g, properties.line_b, properties.line_a] as [number, number, number, number];
+          },
+          getLineWidth: 5,
+          lineWidthMinPixels: 2,
+          lineWidthMaxPixels: 8
+        })
+      );
+    }
 
     if (markerPoints.length > 0 && shouldRenderCentroids(mapView.zoom)) {
       deckLayers.push(
@@ -267,6 +340,25 @@ export default function FireMap({
           getLineWidth: (feature) => Number((feature.properties as Record<string, number>).line_width || 2),
           lineWidthMinPixels: 1,
           lineWidthMaxPixels: 6
+        })
+      );
+    }
+
+    if (selectedFrontFeatures.length > 0) {
+      deckLayers.push(
+        new GeoJsonLayer({
+          id: `selected-fronts-${selectedEventId}-${selectedFrontFeatures.length}`,
+          data: {
+            type: "FeatureCollection",
+            features: selectedFrontFeatures
+          },
+          pickable: false,
+          stroked: true,
+          filled: false,
+          getLineColor: SELECTED_FRONT_COLOR,
+          getLineWidth: (feature) => Math.max(4, Number((feature.properties as Record<string, number>).line_width || 2) + 2),
+          lineWidthMinPixels: 2,
+          lineWidthMaxPixels: 10
         })
       );
     }
@@ -333,6 +425,9 @@ export default function FireMap({
     mapView.zoom,
     normalizedEvents,
     riskQuery.data,
+    selectedEventId,
+    selectedEventFeature,
+    selectedFrontFeatures,
     visibleFronts
   ]);
 
@@ -346,7 +441,23 @@ export default function FireMap({
     const lon = Number(selected.lon);
     setSelectedEvent(selected);
     setLastClick({ lat, lng: lon });
-    focusMapOnPoint(lat, lon, 6);
+    const selectedBounds = geometryBounds(selected.geom_geojson);
+    if (selectedBounds) {
+      const next = selectionViewFromBounds(selectedBounds, {
+        minZoom: MIN_SELECTION_ZOOM,
+        maxZoom: MAX_SELECTION_ZOOM,
+        targetOccupancy: SELECTION_TARGET_OCCUPANCY
+      });
+      setMapView({
+        ...mapView,
+        latitude: next.latitude,
+        longitude: next.longitude,
+        zoom: next.zoom,
+        transitionDuration: 700
+      });
+      return;
+    }
+    focusMapOnPoint(lat, lon, MIN_SELECTION_ZOOM);
   };
 
   const tooltip = (info: PickingInfo): { html: string } | null => {
@@ -367,7 +478,8 @@ export default function FireMap({
             <b>Detections:</b> ${String(selected.detection_count || 0)}<br/>
             <b>Event score:</b> ${String(selected.event_score || "n/a")}<br/>
             <b>Decision:</b> ${String(selected.denoiser_decision || "unknown")}<br/>
-            <b>Review required:</b> ${String(Boolean(selected.review_required))}
+            <b>Review required:</b> ${String(Boolean(selected.review_required))}<br/>
+            <b>Perimeter:</b> ${geometryProvenanceLabel(selected)}
           </div>
         </div>
       `

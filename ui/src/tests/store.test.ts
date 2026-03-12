@@ -8,15 +8,14 @@ describe("app store filters", () => {
   beforeEach(() => {
     useAppStore.setState({
       ...baseState,
-      initializedFromUrl: true,
       filters: {
-        hoursStart: 24,
+        hoursStart: 6,
         hoursEnd: 0,
         minLikelihood: 0,
         activeOnly: true,
         clusterPoints: true
       },
-      activePreset: "Last 24h All",
+      activePreset: "Last 6h All",
       layers: {
         showFires: true,
         showForecast: true,
