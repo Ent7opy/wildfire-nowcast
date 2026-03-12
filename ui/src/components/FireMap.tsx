@@ -5,7 +5,16 @@ import { MVTLayer } from "@deck.gl/geo-layers";
 import type { PickingInfo } from "@deck.gl/core";
 import Map from "react-map-gl/maplibre";
 import maplibregl from "maplibre-gl";
-import { Alert, Box } from "@mui/material";
+import {
+  Alert,
+  Box,
+  IconButton,
+  Tooltip,
+  Typography
+} from "@mui/material";
+import MapOutlinedIcon from "@mui/icons-material/MapOutlined";
+import PublicIcon from "@mui/icons-material/Public";
+import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
 import { normalizePickedEvent } from "../utils/selection";
 import { useQuery } from "@tanstack/react-query";
 import type { Feature } from "geojson";
@@ -32,12 +41,48 @@ import { eventLimitForZoom, frontLimitForZoom, shouldLoadFronts, shouldRenderCen
 const BASEMAP_DARK = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 const FORECAST_FILL = [255, 165, 0, 40];
 const FORECAST_STROKE = [255, 165, 0, 200];
+const HIGH_CONFIDENCE_THRESHOLD = 0.6;
+
+type ConfidenceFilter = "All" | "High";
 
 interface FireMapProps {
   onVisibleEventsChange: (events: FireEvent[]) => void;
+  searchQuery?: string;
+  confidenceFilter?: ConfidenceFilter;
 }
 
-export default function FireMap({ onVisibleEventsChange }: FireMapProps) {
+function toFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isHighConfidence(event: FireEvent): boolean {
+  const score = toFiniteNumber(event.event_score);
+  return score !== null && score >= HIGH_CONFIDENCE_THRESHOLD;
+}
+
+function eventSearchText(event: FireEvent): string {
+  return [
+    event.event_id,
+    event.location_name,
+    event.region_name,
+    event.admin1_name,
+    event.admin0_name,
+    event.country,
+    event.source,
+    event.sensor,
+    event.denoiser_decision
+  ]
+    .map((value) => String(value || "").toLowerCase())
+    .join(" ");
+}
+
+export default function FireMap({
+  onVisibleEventsChange,
+  searchQuery = "",
+  confidenceFilter = "All"
+}: FireMapProps) {
   const filters = useAppStore((s) => s.filters);
   const layersState = useAppStore((s) => s.layers);
   const mapView = useAppStore((s) => s.mapView);
@@ -51,6 +96,7 @@ export default function FireMap({ onVisibleEventsChange }: FireMapProps) {
 
   const bbox = useMemo(() => viewportBbox(mapView), [mapView]);
   const timeRange = useMemo(() => computeTimeRange(filters), [filters]);
+  const normalizedSearch = searchQuery.trim().toLowerCase();
 
   const eventsQuery = useQuery({
     queryKey: ["fire-events", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, filters.clusterPoints, mapView.zoom],
@@ -91,17 +137,39 @@ export default function FireMap({ onVisibleEventsChange }: FireMapProps) {
   const normalizedEvents = useMemo(() => {
     const source = eventsQuery.data?.events || [];
     const renderable = source.filter((event) => !filters.activeOnly || isActiveCandidate(event));
-    const mapped = renderable.map(toRenderEvent).filter((event): event is NonNullable<ReturnType<typeof toRenderEvent>> => Boolean(event));
 
-    if (mapped.length === 0 && selectedEvent) {
+    const searchFiltered = normalizedSearch
+      ? renderable.filter((event) => eventSearchText(event).includes(normalizedSearch))
+      : renderable;
+
+    const confidenceFiltered =
+      confidenceFilter === "High"
+        ? searchFiltered.filter((event) => isHighConfidence(event))
+        : searchFiltered;
+
+    const mapped = confidenceFiltered
+      .map(toRenderEvent)
+      .filter((event): event is NonNullable<ReturnType<typeof toRenderEvent>> => Boolean(event));
+
+    if (selectedEvent) {
       const fallback = toRenderEvent(selectedEvent);
       if (fallback) {
-        return [fallback];
+        const fallbackId = String(fallback.event_id || "");
+        const alreadyIncluded = mapped.some((item) => String(item.event_id || "") === fallbackId);
+        if (!alreadyIncluded) {
+          return [fallback, ...mapped];
+        }
       }
     }
 
     return mapped;
-  }, [eventsQuery.data?.events, filters.activeOnly, selectedEvent]);
+  }, [
+    confidenceFilter,
+    eventsQuery.data?.events,
+    filters.activeOnly,
+    normalizedSearch,
+    selectedEvent
+  ]);
 
   const visibleEvents = useMemo(() => {
     return normalizedEvents.map((event) => ({ ...event }));
@@ -290,8 +358,8 @@ export default function FireMap({ onVisibleEventsChange }: FireMapProps) {
     return {
       html: `
         <div style="font-family:Inter,sans-serif;padding:2px;">
-          <div style="font-size:13px;font-weight:600;color:#ff6b35;margin-bottom:4px;">Fire Event</div>
-          <div style="font-size:12px;color:#e0e0e0;">
+          <div style="font-size:13px;font-weight:700;color:#f97316;margin-bottom:4px;">Fire Event</div>
+          <div style="font-size:12px;color:#e5e7eb;line-height:1.45;">
             <b>Event ID:</b> ${String(selected.event_id || "unknown")}<br/>
             <b>Cluster events:</b> ${String(selected.cluster_event_count || 1)}<br/>
             <b>Window:</b> ${String(selected.start_time || "n/a")} → ${String(selected.end_time || "n/a")}<br/>
@@ -307,12 +375,23 @@ export default function FireMap({ onVisibleEventsChange }: FireMapProps) {
   };
 
   return (
-    <Box sx={{ position: "relative", height: "100%", borderRadius: 1, overflow: "hidden", border: "1px solid rgba(255,255,255,0.08)" }}>
+    <Box
+      sx={{
+        position: "relative",
+        height: "100%",
+        borderRadius: 3,
+        overflow: "hidden",
+        border: "1px solid rgba(255,255,255,0.06)",
+        bgcolor: "#0a0c10",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)"
+      }}
+    >
       {(eventsQuery.isError || frontsQuery.isError || riskQuery.isError) && (
         <Alert severity="warning" sx={{ position: "absolute", top: 12, left: 12, right: 12, zIndex: 20 }}>
           Live map data is partially unavailable; showing last successful snapshot where possible.
         </Alert>
       )}
+
       <DeckGL
         layers={layers}
         viewState={mapView}
@@ -344,6 +423,80 @@ export default function FireMap({ onVisibleEventsChange }: FireMapProps) {
           reuseMaps
         />
       </DeckGL>
+
+      <Box sx={{ position: "absolute", inset: 0, pointerEvents: "none", backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.06) 1px, transparent 1px)", backgroundSize: "30px 30px", opacity: 0.18 }} />
+
+      <Box sx={{ position: "absolute", top: 12, left: 12, px: 1.5, py: 1, bgcolor: "rgba(13,17,23,0.86)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 2, backdropFilter: "blur(8px)", zIndex: 11 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <PublicIcon sx={{ fontSize: 16, color: "rgba(255,255,255,0.45)" }} />
+          <Box>
+            <Typography sx={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", color: "#9ca3af" }}>
+              Global Thermal View
+            </Typography>
+            <Typography sx={{ fontSize: 11, color: "#6b7280" }}>
+              Interactive map layer active
+            </Typography>
+          </Box>
+        </Box>
+      </Box>
+
+      <Box sx={{ position: "absolute", top: 12, right: 12, display: "flex", flexDirection: "column", gap: 1, zIndex: 11 }}>
+        <Tooltip title="Settings">
+          <IconButton
+            size="small"
+            sx={{
+              bgcolor: "#161b22",
+              border: "1px solid rgba(255,255,255,0.1)",
+              color: "#9ca3af",
+              pointerEvents: "auto"
+            }}
+          >
+            <SettingsOutlinedIcon sx={{ fontSize: 18 }} />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title="Map layers">
+          <IconButton
+            size="small"
+            sx={{
+              bgcolor: "#161b22",
+              border: "1px solid rgba(255,255,255,0.1)",
+              color: "#9ca3af",
+              pointerEvents: "auto"
+            }}
+          >
+            <MapOutlinedIcon sx={{ fontSize: 18 }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
+
+      <Box
+        sx={{
+          position: "absolute",
+          left: 12,
+          bottom: 12,
+          px: 1.5,
+          py: 1.2,
+          bgcolor: "rgba(13,17,23,0.88)",
+          border: "1px solid rgba(255,255,255,0.12)",
+          borderRadius: 2,
+          backdropFilter: "blur(8px)",
+          zIndex: 11
+        }}
+      >
+        <Typography sx={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.12em", textTransform: "uppercase", color: "#6b7280", mb: 0.8 }}>
+          Confidence Legend
+        </Typography>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.75 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.7 }}>
+            <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: "#f97316", boxShadow: "0 0 8px rgba(249,115,22,0.55)" }} />
+            <Typography sx={{ fontSize: 10, fontWeight: 700, color: "#d1d5db" }}>High</Typography>
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.7 }}>
+            <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: "rgba(251,146,60,0.35)" }} />
+            <Typography sx={{ fontSize: 10, fontWeight: 700, color: "#d1d5db" }}>Nominal</Typography>
+          </Box>
+        </Box>
+      </Box>
     </Box>
   );
 }

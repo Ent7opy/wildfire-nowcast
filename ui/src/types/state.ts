@@ -55,3 +55,29 @@ export interface ForecastJobState {
   activeRequest: ForecastRequestContext | null;
   notification: ForecastNotification | null;
 }
+
+export type AssistantConfidenceFilter = "All" | "High";
+
+export interface AssistantViewEventSummary {
+  eventId: string;
+  locationLabel: string;
+  lat: number | null;
+  lon: number | null;
+  eventScore: number | null;
+  detectionCount: number;
+  frontCount: number;
+  endTime: string | null;
+  sensor: string | null;
+  source: string | null;
+  reviewRequired: boolean;
+  denoiserDecision: string | null;
+}
+
+export interface AssistantViewContext {
+  updatedAt: number;
+  searchQuery: string;
+  confidenceFilter: AssistantConfidenceFilter;
+  visibleEventCount: number;
+  filteredEventCount: number;
+  topEvents: AssistantViewEventSummary[];
+}

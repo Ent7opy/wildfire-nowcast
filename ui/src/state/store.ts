@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type { FireEvent } from "../types/api";
 import type {
+  AssistantViewContext,
   FiltersState,
   ForecastJobState,
   ForecastNotification,
@@ -41,6 +42,15 @@ const DEFAULT_FORECAST_STATE: ForecastJobState = {
   notification: null
 };
 
+const DEFAULT_ASSISTANT_VIEW_CONTEXT: AssistantViewContext = {
+  updatedAt: Date.now(),
+  searchQuery: "",
+  confidenceFilter: "All",
+  visibleEventCount: 0,
+  filteredEventCount: 0,
+  topEvents: []
+};
+
 interface AppStoreState {
   initializedFromUrl: boolean;
   filters: FiltersState;
@@ -51,6 +61,7 @@ interface AppStoreState {
   frontIndexByEvent: Record<string, { frontId: string; detectionCount: number }>;
   activePreset: string | null;
   forecast: ForecastJobState;
+  assistantViewContext: AssistantViewContext;
   initializeFromUrl: () => void;
   setFilters: (patch: Partial<FiltersState>) => void;
   applyPreset: (preset: { name: string; hoursStart: number; hoursEnd: number; likelihood: number }) => void;
@@ -65,6 +76,7 @@ interface AppStoreState {
   completeForecastJob: (runId: string) => void;
   clearForecastJob: () => void;
   setForecastNotification: (notification: ForecastNotification | null) => void;
+  setAssistantViewContext: (context: AssistantViewContext) => void;
   focusMapOnPoint: (lat: number, lon: number, minZoom: number) => void;
 }
 
@@ -90,6 +102,7 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
   frontIndexByEvent: {},
   activePreset: updatePreset(DEFAULT_FILTERS),
   forecast: DEFAULT_FORECAST_STATE,
+  assistantViewContext: DEFAULT_ASSISTANT_VIEW_CONTEXT,
 
   initializeFromUrl: () => {
     if (get().initializedFromUrl || typeof window === "undefined") {
@@ -240,6 +253,10 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         notification
       }
     }));
+  },
+
+  setAssistantViewContext: (context) => {
+    set({ assistantViewContext: context });
   },
 
   focusMapOnPoint: (lat, lon, minZoom) => {

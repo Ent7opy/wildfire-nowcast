@@ -4,28 +4,34 @@ export const wildfireTheme = createTheme({
   palette: {
     mode: "dark",
     primary: {
-      main: "#ff6b35"
+      main: "#f97316"
     },
     secondary: {
-      main: "#fbbf24"
+      main: "#60a5fa"
     },
     error: {
-      main: "#e63946"
+      main: "#ef4444"
+    },
+    warning: {
+      main: "#f59e0b"
     },
     background: {
-      default: "#0a1628",
-      paper: "#252930"
+      default: "#010409",
+      paper: "#0d1117"
     },
     text: {
-      primary: "#e0e0e0",
-      secondary: "rgba(255,255,255,0.7)"
+      primary: "#e5e7eb",
+      secondary: "#9ca3af"
     }
   },
   shape: {
-    borderRadius: 8
+    borderRadius: 12
   },
   typography: {
     fontFamily: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    h3: {
+      fontWeight: 800
+    },
     h5: {
       fontWeight: 700
     },
@@ -34,6 +40,17 @@ export const wildfireTheme = createTheme({
     }
   },
   components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        "@keyframes pulse": {
+          "0%, 100%": { opacity: 0.45 },
+          "50%": { opacity: 1 }
+        },
+        body: {
+          backgroundColor: "#010409"
+        }
+      }
+    },
     MuiPaper: {
       styleOverrides: {
         root: {
@@ -46,7 +63,22 @@ export const wildfireTheme = createTheme({
       styleOverrides: {
         root: {
           textTransform: "none",
-          fontWeight: 600
+          fontWeight: 700
+        }
+      }
+    },
+    MuiOutlinedInput: {
+      styleOverrides: {
+        notchedOutline: {
+          borderColor: "rgba(255,255,255,0.1)"
+        },
+        root: {
+          '&:hover .MuiOutlinedInput-notchedOutline': {
+            borderColor: "rgba(255,255,255,0.2)"
+          },
+          '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+            borderColor: "rgba(249,115,22,0.6)"
+          }
         }
       }
     }
