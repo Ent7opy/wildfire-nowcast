@@ -119,6 +119,145 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
             last_batch_id=321,
         )
 
+    @patch("ingest.firms_ingest._utc_now", return_value=datetime(2026, 3, 12, 15, 16, tzinfo=timezone.utc))
+    @patch("ingest.firms_ingest._update_all_scoring_atomic")
+    @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
+    @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", return_value=0)
+    @patch("ingest.firms_ingest.repository.insert_detections")
+    @patch("ingest.firms_ingest.repository.get_engine")
+    @patch("ingest.firms_ingest.parse_detection_rows")
+    @patch("ingest.firms_ingest.fetch_csv_rows")
+    @patch("ingest.firms_ingest.repository.create_ingest_batch")
+    @patch("ingest.firms_ingest.repository.get_ingest_watermark")
+    @patch("ingest.firms_ingest.ingest_settings")
+    def test_incremental_window_anchors_to_latest_feed_time_not_wall_clock(
+        self,
+        mock_settings,
+        mock_get_watermark,
+        mock_create_batch,
+        mock_fetch_rows,
+        mock_parse_rows,
+        mock_get_engine,
+        mock_insert,
+        _mock_incomplete,
+        mock_finalize,
+        mock_advance,
+        _mock_scoring,
+        _mock_utc_now,
+    ):
+        mock_settings.map_key = "test-key"
+        mock_settings.resolved_area = "20,40,21,41"
+        mock_settings.day_range = 1
+        mock_settings.sources = ["VIIRS_SNPP_NRT"]
+        mock_settings.request_timeout_seconds = 30.0
+        mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 360
+        mock_settings.firms_incremental_lookback_minutes = 30
+        mock_settings.denoiser_enabled = False
+        mock_settings.denoiser_required = False
+        mock_settings.firms_reconcile_unscored_batches = False
+        mock_settings.firms_reconcile_max_batches = 5
+
+        txn_conn = object()
+        mock_get_engine.return_value.begin.return_value = nullcontext(txn_conn)
+
+        # Existing watermark should force incremental mode.
+        mock_get_watermark.return_value = {
+            "last_acq_time_utc": datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc),
+        }
+        mock_create_batch.return_value = 654
+        mock_fetch_rows.return_value = [{"id": "x"}]
+
+        # Feed is delayed (latest detection around 13:10 while wall clock is 15:16).
+        detection = SimpleNamespace(acq_time=datetime(2026, 3, 12, 13, 10, tzinfo=timezone.utc))
+        mock_parse_rows.return_value = ([detection], FirmsValidationSummary(total_rows=1, parsed_rows=1))
+        mock_insert.return_value = 1
+
+        code = run_firms_ingest(day_range=None, area=None, sources=None)
+
+        self.assertEqual(0, code)
+        mock_finalize.assert_called_once()
+        mock_advance.assert_called_once_with(
+            source="VIIRS_SNPP_NRT",
+            area_key="20.000000,40.000000,21.000000,41.000000",
+            last_acq_time_utc=datetime(2026, 3, 12, 13, 10, tzinfo=timezone.utc),
+            last_batch_id=654,
+        )
+
+    @patch("ingest.firms_ingest._utc_now", return_value=datetime(2026, 3, 12, 15, 16, tzinfo=timezone.utc))
+    @patch("ingest.firms_ingest._update_all_scoring_atomic")
+    @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
+    @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", return_value=0)
+    @patch("ingest.firms_ingest.repository.insert_detections")
+    @patch("ingest.firms_ingest.repository.get_engine")
+    @patch("ingest.firms_ingest.parse_detection_rows")
+    @patch("ingest.firms_ingest.fetch_csv_rows")
+    @patch("ingest.firms_ingest.repository.create_ingest_batch")
+    @patch("ingest.firms_ingest.repository.get_ingest_watermark")
+    @patch("ingest.firms_ingest.ingest_settings")
+    def test_stale_watermark_switches_to_recovery_lookback_window(
+        self,
+        mock_settings,
+        mock_get_watermark,
+        mock_create_batch,
+        mock_fetch_rows,
+        mock_parse_rows,
+        mock_get_engine,
+        mock_insert,
+        _mock_incomplete,
+        mock_finalize,
+        mock_advance,
+        _mock_scoring,
+        _mock_utc_now,
+    ):
+        mock_settings.map_key = "test-key"
+        mock_settings.resolved_area = "20,40,21,41"
+        mock_settings.day_range = 1
+        mock_settings.sources = ["VIIRS_SNPP_NRT"]
+        mock_settings.request_timeout_seconds = 30.0
+        mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 360
+        mock_settings.firms_incremental_lookback_minutes = 30
+        mock_settings.denoiser_enabled = False
+        mock_settings.denoiser_required = False
+        mock_settings.firms_reconcile_unscored_batches = False
+        mock_settings.firms_reconcile_max_batches = 5
+
+        txn_conn = object()
+        mock_get_engine.return_value.begin.return_value = nullcontext(txn_conn)
+
+        # Watermark is older than the configured initial lookback window.
+        mock_get_watermark.return_value = {
+            "last_acq_time_utc": datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc),
+        }
+        mock_create_batch.return_value = 655
+        mock_fetch_rows.return_value = [{"id": "x"}]
+
+        # Include one detection older than incremental 30m but inside 6h recovery window.
+        detections = [
+            SimpleNamespace(acq_time=datetime(2026, 3, 12, 10, 0, tzinfo=timezone.utc)),
+            SimpleNamespace(acq_time=datetime(2026, 3, 12, 13, 10, tzinfo=timezone.utc)),
+        ]
+        mock_parse_rows.return_value = (detections, FirmsValidationSummary(total_rows=2, parsed_rows=2))
+        mock_insert.return_value = 2
+
+        code = run_firms_ingest(day_range=None, area=None, sources=None)
+
+        self.assertEqual(0, code)
+        metadata_extra = mock_create_batch.call_args.kwargs["metadata_extra"]
+        self.assertEqual("recovery", metadata_extra["lookback_mode"])
+        self.assertEqual(360, metadata_extra["lookback_minutes"])
+        self.assertEqual(2, len(mock_insert.call_args.args[0]))
+        mock_finalize.assert_called_once()
+        mock_advance.assert_called_once_with(
+            source="VIIRS_SNPP_NRT",
+            area_key="20.000000,40.000000,21.000000,41.000000",
+            last_acq_time_utc=datetime(2026, 3, 12, 13, 10, tzinfo=timezone.utc),
+            last_batch_id=655,
+        )
+
     @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
     @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
     @patch("ingest.firms_ingest.repository.insert_detections")

@@ -539,6 +539,11 @@ def _write_dashboard(
 
 
 def _is_job_fresh(job_name: str, snapshot: dict[str, Any] | None) -> bool:
+    # FIRMS is a near-real-time feed and must run on its configured interval
+    # even when data-freshness reports "fresh". This keeps incremental ingest
+    # cadence aligned with availability latency in the upstream source.
+    if job_name == JOB_FIRMS:
+        return False
     if not snapshot:
         return False
     source = snapshot.get("sources", {}).get(job_name, {})

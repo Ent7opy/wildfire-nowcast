@@ -71,6 +71,8 @@ class DenoiserRuntimePolicy:
 def _as_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
+    if not isinstance(value, datetime):
+        return None
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
@@ -114,6 +116,11 @@ def _filter_detections_by_watermark(
     filtered = [d for d in detections if (_as_utc(d.acq_time) or datetime.min.replace(tzinfo=timezone.utc)) > threshold]
     max_filtered = max((_as_utc(d.acq_time) for d in filtered), default=None)
     return filtered, max_filtered
+
+
+def _max_detection_time_utc(detections: list) -> datetime | None:
+    """Return max acquisition timestamp from parsed detections."""
+    return max((_as_utc(d.acq_time) for d in detections), default=None)
 
 
 def _resolve_active_denoiser_model() -> dict[str, Any] | None:
@@ -373,9 +380,21 @@ def run_firms_ingest(
         grace_minutes = int(config.firms_watermark_grace_minutes)
         now_utc = _utc_now()
         is_bootstrap = watermark_time_utc is None
-        active_lookback_minutes = initial_lookback_minutes if is_bootstrap else incremental_lookback_minutes
-        hard_window_start_utc = now_utc - timedelta(minutes=active_lookback_minutes)
-        lookback_mode = "bootstrap" if is_bootstrap else "incremental"
+        watermark_age_minutes: float | None = None
+        if watermark_time_utc is not None:
+            watermark_age_minutes = max(0.0, (now_utc - watermark_time_utc).total_seconds() / 60.0)
+        is_recovery = bool(
+            watermark_time_utc is not None and watermark_age_minutes is not None and watermark_age_minutes > initial_lookback_minutes
+        )
+        active_lookback_minutes = (
+            initial_lookback_minutes if (is_bootstrap or is_recovery) else incremental_lookback_minutes
+        )
+        if is_bootstrap:
+            lookback_mode = "bootstrap"
+        elif is_recovery:
+            lookback_mode = "recovery"
+        else:
+            lookback_mode = "incremental"
 
         source_uri = build_firms_url(config.map_key, source, bbox, effective_day_range)
         batch_id = repository.create_ingest_batch(
@@ -386,10 +405,10 @@ def run_firms_ingest(
             metadata_extra={
                 "area_key": area_key,
                 "watermark_before": watermark_time_utc.isoformat() if watermark_time_utc else None,
+                "watermark_age_minutes": round(watermark_age_minutes, 2) if watermark_age_minutes is not None else None,
                 "watermark_grace_minutes": grace_minutes,
                 "lookback_mode": lookback_mode,
                 "lookback_minutes": active_lookback_minutes,
-                "window_start_utc": hard_window_start_utc.isoformat(),
             },
         )
         LOGGER.info("Created ingest batch %s for %s", batch_id, source)
@@ -410,6 +429,15 @@ def run_firms_ingest(
             fetched_count = len(csv_rows)
             detections, validation = parse_detection_rows(csv_rows, source, batch_id)
             parsed_count = len(detections)
+            max_detected_acq_utc = _max_detection_time_utc(detections)
+            if is_bootstrap:
+                hard_window_start_utc = _utc_now() - timedelta(minutes=active_lookback_minutes)
+            else:
+                # FIRMS observations are delayed versus wall-clock time; use the
+                # freshest available acquisition timestamp to define the incremental
+                # tail window instead of `now - 30m`.
+                anchor = max_detected_acq_utc or _utc_now()
+                hard_window_start_utc = anchor - timedelta(minutes=active_lookback_minutes)
             filtered_detections, watermark_advanced_to = _filter_detections_by_watermark(
                 detections,
                 watermark_time_utc=watermark_time_utc,
@@ -478,6 +506,7 @@ def run_firms_ingest(
                 rows_after_watermark_filter=rows_after_watermark_filter,
                 watermark_advanced_to=watermark_advanced_to.isoformat() if watermark_advanced_to else None,
                 lookback_mode=lookback_mode,
+                max_detected_acq_utc=max_detected_acq_utc.isoformat() if max_detected_acq_utc else None,
                 window_start_utc=hard_window_start_utc.isoformat(),
             )
             LOGGER.info(
