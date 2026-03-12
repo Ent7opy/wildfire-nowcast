@@ -10,6 +10,7 @@ from api.fires.repo import (
     list_fire_events_bbox_time,
     list_fire_fronts_bbox_time,
 )
+from api.fires.geocoding import reverse_geocode_point
 
 
 # Standard fire detection columns - defined centrally to stay in sync with schema
@@ -223,3 +224,15 @@ async def get_fronts(
         limit=int(limit or 2000),
     )
     return {"count": len(fronts), "fronts": fronts}
+
+
+@fires_router.get("/reverse-geocode", dependencies=[Depends(RateLimiter(times=120, seconds=60))])
+async def get_reverse_geocode(
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude for reverse geocoding."),
+    lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude for reverse geocoding."),
+):
+    """Resolve a human-readable place label for a coordinate."""
+    try:
+        return reverse_geocode_point(lat=lat, lon=lon)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
