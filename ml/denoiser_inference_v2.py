@@ -47,6 +47,40 @@ _AGRICULTURE_SCORE_TOL = 0.05
 _AGRICULTURE_LULC_CODES = {40}
 _AGRICULTURE_LABEL_TOKENS = ("crop", "cropland", "agri", "agriculture", "farmland")
 
+# Thermal potential class → estimated max normal FRP output (MW).
+# Used to compute industrial_frp_ratio: observed FRP / expected industrial FRP.
+# Values based on satellite thermal anomaly literature for industrial source types.
+_TPC_TO_ESTIMATED_MAX_FRP_MW: dict[float, float] = {
+    1.00: 800.0,   # steel / primary metals
+    0.95: 600.0,   # cement / nonmetallic minerals
+    0.90: 400.0,   # refinery / coke
+    0.85: 300.0,   # oil/gas extraction
+    0.80: 250.0,   # chemicals
+    0.70: 150.0,   # utilities / power plants
+    0.65: 100.0,   # biomass
+    0.50: 80.0,    # generic industrial
+    0.40: 50.0,    # nuclear
+    0.10: 20.0,    # hydro
+    0.05: 10.0,    # wind/solar
+}
+
+
+def _estimated_industrial_frp(tpc: float) -> float:
+    """Linearly interpolate estimated max FRP for a given thermal potential class."""
+    keys = sorted(_TPC_TO_ESTIMATED_MAX_FRP_MW.keys())
+    if tpc >= keys[-1]:
+        return _TPC_TO_ESTIMATED_MAX_FRP_MW[keys[-1]]
+    if tpc <= keys[0]:
+        return _TPC_TO_ESTIMATED_MAX_FRP_MW[keys[0]]
+    for i in range(len(keys) - 1):
+        if keys[i] <= tpc <= keys[i + 1]:
+            frac = (tpc - keys[i]) / (keys[i + 1] - keys[i])
+            return (
+                _TPC_TO_ESTIMATED_MAX_FRP_MW[keys[i]] * (1 - frac)
+                + _TPC_TO_ESTIMATED_MAX_FRP_MW[keys[i + 1]] * frac
+            )
+    return 80.0  # fallback
+
 
 def _confidence_is_high(
     confidence_series: pd.Series,
@@ -185,7 +219,8 @@ def _load_industrial_masked_event_ids(
     batch_id: int,
     policy_version: str | None,
     strict_no_go: bool,
-) -> set[str]:
+) -> tuple[set[str], dict[str, float]]:
+    """Return (masked_event_ids, event_id→max_thermal_potential_class)."""
     meters_to_deg = 1.0 / 111000.0
     stmt = text(
         """
@@ -198,7 +233,9 @@ def _load_industrial_masked_event_ids(
             WHERE d.ingest_batch_id = :batch_id
               AND d.event_id IS NOT NULL
         )
-        SELECT DISTINCT b.event_id::text AS event_id
+        SELECT
+            b.event_id::text AS event_id,
+            MAX(COALESCE(i.thermal_potential_class, 0.5)) AS max_tpc
         FROM base b
         JOIN industrial_sources i
           ON COALESCE(i.is_active, TRUE)
@@ -232,6 +269,7 @@ def _load_industrial_masked_event_ids(
                   AND ST_Intersects(z.geom, b.geom)
             )
         )
+        GROUP BY b.event_id
         """
     )
     params = {
@@ -245,7 +283,15 @@ def _load_industrial_masked_event_ids(
     }
     with engine.begin() as conn:
         rows = conn.execute(stmt, params).mappings().all()
-    return {str(row["event_id"]) for row in rows if row.get("event_id") is not None}
+    event_ids: set[str] = set()
+    tpc_map: dict[str, float] = {}
+    for row in rows:
+        eid = row.get("event_id")
+        if eid is not None:
+            eid_str = str(eid)
+            event_ids.add(eid_str)
+            tpc_map[eid_str] = float(row.get("max_tpc") or 0.5)
+    return event_ids, tpc_map
 
 
 def _normalize_static_score(series: pd.Series, neutral_values: tuple[float, ...]) -> tuple[pd.Series, pd.Series]:
@@ -409,6 +455,16 @@ def _build_event_features(batch_df: pd.DataFrame, *, engine: Engine) -> pd.DataF
         ),
         axis=1,
     )
+    # FRP density: FRP normalized by pixel area for sensor-invariant comparison.
+    scan_num = pd.to_numeric(df["scan"], errors="coerce")
+    track_num = pd.to_numeric(df["track"], errors="coerce")
+    pixel_area = scan_num * track_num
+    df["frp_density_obs"] = np.where(
+        (pixel_area > 0.0) & df["frp"].notna(),
+        pd.to_numeric(df["frp"], errors="coerce") / pixel_area,
+        np.nan,
+    )
+
     df["landcover_is_available"], df["landcover_score_clean"] = _normalize_static_score(
         df["landcover_score"], _NEUTRAL_LANDCOVER
     )
@@ -433,6 +489,9 @@ def _build_event_features(batch_df: pd.DataFrame, *, engine: Engine) -> pd.DataF
             confidence_max=("confidence", "max"),
             frp_mean=("frp", "mean"),
             frp_max=("frp", "max"),
+            frp_density_mean=("frp_density_obs", "mean"),
+            frp_density_max=("frp_density_obs", "max"),
+            frp_spatial_std=("frp", "std"),
             brightness_mean=("brightness", "mean"),
             bright_t31_mean=("bright_t31", "mean"),
             scan_mean=("scan", "mean"),
@@ -458,6 +517,7 @@ def _build_event_features(batch_df: pd.DataFrame, *, engine: Engine) -> pd.DataF
             lfmc_is_available=("lfmc_is_available", "max"),
             dfmc_is_available=("dfmc_is_available", "max"),
             is_day_ratio=("is_day", "mean"),
+            lon_centroid=("lon", "mean"),
         )
         .reset_index()
     )
@@ -470,6 +530,56 @@ def _build_event_features(batch_df: pd.DataFrame, *, engine: Engine) -> pd.DataF
     out["lfmc_is_available"] = out["lfmc_is_available"].astype(np.float32)
     out["dfmc_is_available"] = out["dfmc_is_available"].astype(np.float32)
     out["duration_hours"] = (out["end_time"] - out["start_time"]).dt.total_seconds() / 3600.0
+
+    # FRP spatial std: 0.0 for single-detection events (undefined std).
+    out["frp_spatial_std"] = out["frp_spatial_std"].fillna(0.0)
+
+    # FRP growth rate: (frp_last - frp_first) / duration_hours.
+    # Fires grow; industrial sources stay flat.
+    frp_temporal = (
+        df.sort_values("acq_time")
+        .groupby("event_id", dropna=False)
+        .agg(
+            frp_first=("frp", "first"),
+            frp_last=("frp", "last"),
+        )
+        .reset_index()
+    )
+    out = out.merge(frp_temporal, on="event_id", how="left")
+    out["frp_growth_rate"] = np.where(
+        out["duration_hours"] > 0.0,
+        (pd.to_numeric(out["frp_last"], errors="coerce").fillna(0.0)
+         - pd.to_numeric(out["frp_first"], errors="coerce").fillna(0.0))
+        / out["duration_hours"],
+        0.0,
+    )
+    out.drop(columns=["frp_first", "frp_last"], inplace=True)
+
+    # FRP peak local hour: local solar time of the detection with max FRP.
+    # Wildfires peak in afternoon (1400-1800 local); industrial sources are more uniform.
+    peak_frp_rows = (
+        df.dropna(subset=["frp"])
+        .sort_values("frp", ascending=False)
+        .groupby("event_id", dropna=False)
+        .first()
+        .reset_index()[["event_id", "acq_time"]]
+    )
+    peak_frp_rows["_peak_utc_hour"] = (
+        peak_frp_rows["acq_time"].dt.hour
+        + peak_frp_rows["acq_time"].dt.minute / 60.0
+    )
+    out = out.merge(
+        peak_frp_rows[["event_id", "_peak_utc_hour"]],
+        on="event_id",
+        how="left",
+    )
+    out["frp_peak_local_hour"] = (
+        out["_peak_utc_hour"] + out["lon_centroid"].fillna(0.0) / 15.0
+    ) % 24.0
+    out["sin_frp_peak_hour"] = np.sin(2 * np.pi * out["frp_peak_local_hour"] / 24.0)
+    out["cos_frp_peak_hour"] = np.cos(2 * np.pi * out["frp_peak_local_hour"] / 24.0)
+    out.drop(columns=["_peak_utc_hour"], inplace=True)
+
     out["hour_of_day"] = (
         out["start_time"].dt.hour
         + out["start_time"].dt.minute / 60.0
@@ -539,6 +649,7 @@ def run_inference_v2(
     fail_closed_confidence: float = 80.0,
     high_risk_landcover_min: float = 0.6,
     industrial_policy_version: str | None = _DEFAULT_INDUSTRIAL_POLICY_VERSION,
+    early_ignition_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engine = get_engine()
 
@@ -562,21 +673,10 @@ def run_inference_v2(
         return {"batch_id": batch_id, "count": 0, "events": 0, "shadow_mode": shadow_mode}
     detections["event_id"] = detections["event_id"].fillna(detections["id"].map(lambda x: f"det_{int(x)}"))
 
-    # Hard fail-closed bypass must execute before model scoring.
-    detection_frp = pd.to_numeric(detections["frp"], errors="coerce")
-    _, detection_landcover_clean = _normalize_static_score(detections["landcover_score"], _NEUTRAL_LANDCOVER)
-    high_risk_detection = detection_landcover_clean >= float(high_risk_landcover_min)
-    confidence_high = _confidence_is_high(
-        detections["confidence"],
-        detections["raw_properties"],
-        fail_closed_confidence=float(fail_closed_confidence),
-    )
-    hard_bypass_mask = (detection_frp > float(fail_closed_frp_mw)) | (
-        confidence_high & high_risk_detection.fillna(False)
-    )
-    hard_bypass_event_ids = set(detections.loc[hard_bypass_mask, "event_id"].astype(str).tolist())
+    # Industrial masking must execute BEFORE hard bypass so that high-FRP
+    # industrial sources (e.g. 600 MW steel mills) are not exempt from suppression.
     industrial_policy = _active_industrial_policy(engine, policy_version=industrial_policy_version)
-    industrial_mask_event_ids = _load_industrial_masked_event_ids(
+    industrial_mask_event_ids, industrial_tpc_map = _load_industrial_masked_event_ids(
         engine,
         batch_id=int(batch_id),
         policy_version=(
@@ -586,6 +686,24 @@ def run_inference_v2(
         ),
         strict_no_go=bool((industrial_policy or {}).get("strict_no_go", False)),
     )
+
+    # Hard fail-closed bypass — but NOT for events near known industrial sources.
+    detection_frp = pd.to_numeric(detections["frp"], errors="coerce")
+    _, detection_landcover_clean = _normalize_static_score(detections["landcover_score"], _NEUTRAL_LANDCOVER)
+    high_risk_detection = detection_landcover_clean >= float(high_risk_landcover_min)
+    confidence_high = _confidence_is_high(
+        detections["confidence"],
+        detections["raw_properties"],
+        fail_closed_confidence=float(fail_closed_confidence),
+    )
+    detection_in_industrial_event = detections["event_id"].astype(str).isin(industrial_mask_event_ids)
+    hard_bypass_mask = (
+        (detection_frp > float(fail_closed_frp_mw))
+        & ~detection_in_industrial_event
+    ) | (
+        confidence_high & high_risk_detection.fillna(False)
+    )
+    hard_bypass_event_ids = set(detections.loc[hard_bypass_mask, "event_id"].astype(str).tolist())
 
     bundle = _load_bundle(model_run_dir)
     model = bundle["model"]
@@ -618,6 +736,21 @@ def run_inference_v2(
     events_df["event_score"] = np.nan
     events_df["fail_closed_hard_bypass"] = events_df["event_id"].astype(str).isin(hard_bypass_event_ids)
     events_df["industrial_masked"] = events_df["event_id"].astype(str).isin(industrial_mask_event_ids)
+
+    # Industrial FRP ratio: observed frp_max / estimated industrial source FRP.
+    # Ratio < 1.0 → FRP consistent with industrial source; ratio >> 1.0 → anomalous.
+    event_id_strs = events_df["event_id"].astype(str)
+    tpc_series = event_id_strs.map(industrial_tpc_map)
+    estimated_frp = tpc_series.map(
+        lambda tpc: _estimated_industrial_frp(tpc) if pd.notna(tpc) else np.nan
+    )
+    frp_max_num = pd.to_numeric(events_df.get("frp_max"), errors="coerce").fillna(0.0)
+    events_df["industrial_frp_ratio"] = np.where(
+        estimated_frp.notna() & (estimated_frp > 0.0),
+        frp_max_num / estimated_frp,
+        np.nan,
+    )
+
     events_df["low_frp_noise"] = (
         pd.to_numeric(events_df.get("frp_max"), errors="coerce").fillna(0.0) < _FRP_NOISE_FLOOR_MW
     )
@@ -635,6 +768,20 @@ def run_inference_v2(
         | events_df["biophysical_zero_fuel"].fillna(False).astype(bool)
         | events_df["agriculture_masked"].fillna(False).astype(bool)
     )
+
+    # Early ignition candidate flag: young events with few detections.
+    ei_cfg = early_ignition_config or {}
+    if ei_cfg.get("enabled"):
+        ei_max_dur = float(ei_cfg.get("max_duration_hours", 2.0))
+        ei_max_det = int(ei_cfg.get("max_detection_count", 3))
+        duration_col = pd.to_numeric(events_df.get("duration_hours"), errors="coerce").fillna(0.0)
+        det_count_col = pd.to_numeric(events_df.get("detection_count"), errors="coerce").fillna(1)
+        events_df["is_early_ignition_candidate"] = (
+            (duration_col <= ei_max_dur) & (det_count_col <= ei_max_det)
+        )
+    else:
+        events_df["is_early_ignition_candidate"] = False
+
     score_mask = ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
     if bool(score_mask.any()):
         score_df = events_df.loc[score_mask].copy().reset_index()
@@ -646,34 +793,48 @@ def run_inference_v2(
             calibrated[i] = float(_apply_calibrator(cal, np.asarray([raw[i]]))[0])
         events_df.loc[score_df["index"].to_numpy(dtype=int), "event_score"] = calibrated
     events_df.loc[events_df["fail_closed_hard_bypass"], "event_score"] = 1.0
-    industrial_suppress_mask = (
-        events_df["industrial_masked"].fillna(False).astype(bool)
-        & ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
-    )
-    agriculture_suppress_mask = (
-        events_df["agriculture_masked"].fillna(False).astype(bool)
-        & ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
-    )
-    physical_suppress_mask = (
-        events_df["physical_noise_masked"].fillna(False).astype(bool)
-        & ~events_df["fail_closed_hard_bypass"].fillna(False).astype(bool)
-    )
+    # Suppress masks apply unconditionally — industrial events are already
+    # excluded from hard_bypass_event_ids, so the bypass flag is only set for
+    # genuinely non-industrial high-energy detections.
+    industrial_suppress_mask = events_df["industrial_masked"].fillna(False).astype(bool)
+    agriculture_suppress_mask = events_df["agriculture_masked"].fillna(False).astype(bool)
+    physical_suppress_mask = events_df["physical_noise_masked"].fillna(False).astype(bool)
     events_df.loc[
         industrial_suppress_mask | agriculture_suppress_mask | physical_suppress_mask,
         "event_score",
     ] = 0.0
 
+    ei_enabled = bool(ei_cfg.get("enabled"))
+    ei_review_threshold = float(ei_cfg.get("review_threshold", 0.35))
+
     decisions: list[str] = []
     review_flags: list[bool] = []
     for _, row in events_df.iterrows():
-        if bool(row.get("fail_closed_hard_bypass")):
-            decision, review_required = "review", True
+        if bool(row.get("industrial_masked")):
+            decision, review_required = "drop", False
         elif bool(row.get("agriculture_masked")):
             decision, review_required = "drop", False
         elif bool(row.get("physical_noise_masked")):
             decision, review_required = "drop", False
-        elif bool(row.get("industrial_masked")):
-            decision, review_required = "drop", False
+        elif bool(row.get("fail_closed_hard_bypass")):
+            decision, review_required = "review", True
+        elif ei_enabled and bool(row.get("is_early_ignition_candidate")):
+            # Early ignition safety net: lower review threshold for young events
+            # to avoid auto-dropping new fires before evidence accumulates.
+            score = float(row.get("event_score") or 0.0)
+            if score >= ei_review_threshold:
+                decision, review_required = "early_ignition_review", True
+            else:
+                decision, review_required = _decide_event(
+                    row,
+                    strong_filter_threshold=strong_filter_threshold,
+                    downweight_threshold=downweight_threshold,
+                    uncertainty_band_low=uncertainty_band_low,
+                    uncertainty_band_high=uncertainty_band_high,
+                    fail_closed_frp_mw=fail_closed_frp_mw,
+                    fail_closed_confidence=fail_closed_confidence,
+                    high_risk_landcover_min=high_risk_landcover_min,
+                )
         else:
             decision, review_required = _decide_event(
                 row,

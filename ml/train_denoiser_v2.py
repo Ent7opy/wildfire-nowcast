@@ -388,10 +388,16 @@ def _stratified_majority_sample(
     rng: np.random.Generator,
 ) -> tuple[pd.DataFrame, np.ndarray, dict[str, Any]]:
     positive_idx = np.flatnonzero(y_train == 1)
-    majority_idx = np.flatnonzero(y_train != 1)
+    negative_idx = np.flatnonzero(y_train == 0)
+    unknown_idx = np.flatnonzero(y_train == -1)
     positive_rows = int(positive_idx.size)
-    majority_rows = int(majority_idx.size)
+    negative_rows = int(negative_idx.size)
+    unknown_rows = int(unknown_idx.size)
     ratio = max(0.0, float(ratio_majority_to_positive))
+    # Only downsample known negatives; preserve all unknowns for PU bagging
+    # OOB voting. Unknowns are concatenated back after negative downsampling.
+    majority_idx = negative_idx
+    majority_rows = negative_rows
     if positive_rows == 0 or majority_rows == 0:
         return train_df.copy(), y_train.copy(), {
             "enabled": True,
@@ -399,6 +405,7 @@ def _stratified_majority_sample(
             "positive_rows": positive_rows,
             "majority_rows_before_sampling": majority_rows,
             "majority_rows_after_sampling": majority_rows,
+            "unknown_rows_preserved": unknown_rows,
             "target_majority_rows": majority_rows,
             "sampling_applied": False,
             "reason": "insufficient_class_rows",
@@ -412,6 +419,7 @@ def _stratified_majority_sample(
             "positive_rows": positive_rows,
             "majority_rows_before_sampling": majority_rows,
             "majority_rows_after_sampling": majority_rows,
+            "unknown_rows_preserved": unknown_rows,
             "target_majority_rows": target_majority,
             "sampling_applied": False,
             "reason": "target_exceeds_majority",
@@ -457,7 +465,8 @@ def _stratified_majority_sample(
                 [sampled_majority, rng.choice(pool, size=top_up, replace=False)]
             )
 
-    sampled_idx = np.concatenate([positive_idx, sampled_majority])
+    # Reassemble: positives + downsampled negatives + ALL unknowns
+    sampled_idx = np.concatenate([positive_idx, sampled_majority, unknown_idx])
     sampled_df = train_df.iloc[sampled_idx].copy().reset_index(drop=True)
     sampled_y = y_train[sampled_idx]
 
@@ -465,8 +474,9 @@ def _stratified_majority_sample(
         "enabled": True,
         "ratio_majority_to_positive": ratio,
         "positive_rows": positive_rows,
-        "majority_rows_before_sampling": majority_rows,
+        "majority_rows_before_sampling": negative_rows,
         "majority_rows_after_sampling": int(sampled_majority.size),
+        "unknown_rows_preserved": unknown_rows,
         "target_majority_rows": int(target_majority),
         "sampling_applied": True,
         "stratify_columns_used": use_slice_cols,
@@ -739,6 +749,16 @@ def _fit_teacher_student_pu(
     vote_counts = np.zeros(unknown_count, dtype=np.int32)
     spy_scores_by_bag: list[np.ndarray] = []
 
+    # Build weighted sampling probabilities for unknowns: boost high-FRP events
+    # so they appear more often in teacher bags without using FRP as a label.
+    high_frp_pu_boost = float(pu_cfg.get("high_frp_sampling_boost", 2.5))
+    high_frp_pu_threshold_mw = float(pu_cfg.get("high_frp_sampling_threshold_mw", 100.0))
+    unknown_sample_weights: np.ndarray | None = None
+    if unknown_count > 0 and "frp_max" in x_unknown.columns and high_frp_pu_boost > 1.0:
+        frp_vals = pd.to_numeric(x_unknown["frp_max"], errors="coerce").fillna(0.0).to_numpy()
+        raw_weights = np.where(frp_vals >= high_frp_pu_threshold_mw, high_frp_pu_boost, 1.0)
+        unknown_sample_weights = raw_weights / raw_weights.sum()
+
     teacher_params = dict(config.get("model_params", {}))
     teacher_params["max_depth"] = int(pu_cfg.get("teacher_max_depth", 4))
     teacher_params["colsample_bytree"] = float(pu_cfg.get("teacher_colsample_bytree", 0.8))
@@ -751,7 +771,12 @@ def _fit_teacher_student_pu(
     for _ in range(num_bags):
         sampled_unknown: np.ndarray
         if unknown_count > 0:
-            sampled_unknown = rng.choice(unknown_count, size=teacher_sample_size, replace=False)
+            sampled_unknown = rng.choice(
+                unknown_count,
+                size=teacher_sample_size,
+                replace=False,
+                p=unknown_sample_weights,
+            )
         else:
             sampled_unknown = np.asarray([], dtype=int)
 
@@ -820,6 +845,23 @@ def _fit_teacher_student_pu(
             derived_neg = float(np.quantile(spy_scores, spy_neg_quantile))
             pos_threshold = max(pos_threshold, derived_pos)
             neg_threshold = min(neg_threshold, derived_neg)
+
+        # Diagnostic logging for PU bagging
+        _n_valid = int(valid_votes.sum())
+        _finite_oob = oob_mean[valid_votes & np.isfinite(oob_mean)]
+        LOGGER.info(
+            "PU OOB diagnostics: unknown_count=%d, valid_votes=%d, "
+            "vote_counts_min=%d, vote_counts_max=%d, vote_counts_mean=%.1f, "
+            "oob_mean_min=%.4f, oob_mean_max=%.4f, oob_mean_median=%.4f, "
+            "pos_threshold=%.4f, neg_threshold=%.4f, oob_margin_min=%.4f",
+            unknown_count, _n_valid,
+            int(vote_counts.min()), int(vote_counts.max()), float(vote_counts.mean()),
+            float(_finite_oob.min()) if _finite_oob.size > 0 else float("nan"),
+            float(_finite_oob.max()) if _finite_oob.size > 0 else float("nan"),
+            float(np.median(_finite_oob)) if _finite_oob.size > 0 else float("nan"),
+            pos_threshold, neg_threshold, oob_margin_min,
+        )
+
         pseudo_pos_mask, pseudo_neg_mask, ignored_mask, pos_cut, neg_cut = _build_pseudo_label_masks(
             oob_mean=oob_mean,
             valid_votes=valid_votes,
@@ -831,12 +873,21 @@ def _fit_teacher_student_pu(
         if pseudo_pos_count < min_pseudo_positive_rows:
             valid_scores = oob_mean[valid_votes & np.isfinite(oob_mean)]
             target_rows = min(int(min_pseudo_positive_rows), int(valid_scores.size))
+            LOGGER.info(
+                "PU relaxation: pseudo_pos_count=%d, valid_scores_size=%d, "
+                "target_rows=%d, pos_cut=%.4f",
+                pseudo_pos_count, int(valid_scores.size), target_rows, pos_cut,
+            )
             if target_rows > 0:
                 rank_cut = int(max(0, valid_scores.size - target_rows))
                 relaxed_pos_cut = float(np.partition(valid_scores, rank_cut)[rank_cut])
                 pseudo_pos_mask = valid_votes & (oob_mean >= relaxed_pos_cut)
                 pos_cut = min(float(pos_cut), relaxed_pos_cut)
                 pseudo_pos_count = int(pseudo_pos_mask.sum())
+                LOGGER.info(
+                    "PU relaxation result: relaxed_pos_cut=%.4f, pseudo_pos_count=%d",
+                    relaxed_pos_cut, pseudo_pos_count,
+                )
             if pseudo_pos_count < min_pseudo_positive_rows:
                 raise ValueError(
                     "xgboost_pu_bagging produced too few pseudo positives: "

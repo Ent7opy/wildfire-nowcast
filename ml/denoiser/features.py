@@ -36,6 +36,19 @@ def add_firms_features(df: pd.DataFrame) -> pd.DataFrame:
     if "daynight" in df.columns:
         df["is_day"] = (df["daynight"] == "D").astype(int)
     
+    # FRP density: FRP normalized by pixel area (scan * track).
+    # Industrial point sources produce very high density; spatially distributed
+    # wildfires produce moderate density.
+    if "frp" in df.columns and "scan" in df.columns and "track" in df.columns:
+        scan = pd.to_numeric(df["scan"], errors="coerce")
+        track = pd.to_numeric(df["track"], errors="coerce")
+        pixel_area = scan * track
+        df["frp_per_km2"] = np.where(
+            (pixel_area > 0.0) & df["frp"].notna(),
+            pd.to_numeric(df["frp"], errors="coerce") / pixel_area,
+            np.nan,
+        )
+
     # instrument/satellite
     for col in ["instrument", "satellite"]:
         if col not in df.columns and "raw_properties" in df.columns:

@@ -73,6 +73,8 @@ def fit_binary_probability_calibrator(
         return {"type": "identity", "model": None}
 
     method_norm = str(method).strip().lower()
+    if method_norm == "identity":
+        return {"type": "identity", "model": None}
     if method_norm == "isotonic":
         model = IsotonicRegression(out_of_bounds="clip")
         model.fit(scores, y)
