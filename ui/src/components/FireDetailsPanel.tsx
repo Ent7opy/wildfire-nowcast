@@ -3,6 +3,9 @@ import {
   Alert,
   Box,
   Button,
+  Dialog,
+  DialogContent,
+  DialogTitle,
   Divider,
   IconButton,
   Stack,
@@ -17,6 +20,7 @@ import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import QueryStatsIcon from "@mui/icons-material/QueryStats";
 import ShowChartIcon from "@mui/icons-material/ShowChart";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import ZoomOutMapIcon from "@mui/icons-material/ZoomOutMap";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import {
@@ -44,6 +48,39 @@ interface GdeltArticle {
   socialimage?: string;
   seendate: string;
   sourcecountry?: string;
+}
+
+const STRONG_WILDFIRE_TERMS = [
+  "wildfire", "wildfires", "bushfire", "bushfires", "forest fire", "forest fires",
+  "brush fire", "brush fires", "grass fire", "grass fires",
+  "fire evacuation", "fire evacuations", "fire season", "acres burned",
+  "fire containment", "fire crews", "firefighter", "firefighters",
+  "prescribed burn", "prescribed fire", "controlled burn",
+  "fire weather", "red flag warning", "structure fire", "fire behavior",
+  "fire perimeter", "fire spread", "fire retardant", "air tanker"
+];
+
+const FIRE_CONTEXT_TERMS = [
+  "evacuate", "evacuation", "blaze", "flames", "contained", "containment",
+  "smoke", "acres", "crews", "perimeter", "hotspot", "embers",
+  "arson", "drought", "fire line", "backfire", "torching", "spotting"
+];
+
+const EXCLUDE_TERMS = [
+  "gunfire", "ceasefire", "cease-fire", "opens fire", "open fire",
+  "fired on", "fired at", "under fire", "crossfire", "hail of fire",
+  "fire sale", "fired from", "firing squad", "return fire", "friendly fire",
+  "rapid fire", "spitfire", "fire someone", "fired over", "drew fire",
+  "facing fire", "political fire", "israel", "gaza", "ukraine", "russia",
+  "shooting", "gunman", "military", "soldier", "missile", "bomb"
+];
+
+function isWildfireArticle(title: string): boolean {
+  const lower = title.toLowerCase();
+  if (EXCLUDE_TERMS.some((term) => lower.includes(term))) return false;
+  if (STRONG_WILDFIRE_TERMS.some((term) => lower.includes(term))) return true;
+  if (lower.includes("fire") && FIRE_CONTEXT_TERMS.some((term) => lower.includes(term))) return true;
+  return false;
 }
 
 const HIGH_CONFIDENCE_THRESHOLD = 0.6;
@@ -192,6 +229,134 @@ function geometryProvenanceLabel(event: FireEvent): "Authoritative perimeter" | 
     : "Estimated perimeter";
 }
 
+function formatSeenDate(seendate: string): string {
+  return new Date(
+    seendate.replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/, "$1-$2-$3T$4:$5:$6Z")
+  ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function NewsCard({ item, expanded = false }: { item: GdeltArticle; expanded?: boolean }): JSX.Element {
+  return (
+    <Box
+      component="a"
+      href={item.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      sx={{
+        display: "block",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 2.5,
+        overflow: "hidden",
+        textDecoration: "none",
+        transition: "all 160ms ease",
+        bgcolor: "rgba(22,27,34,0.5)",
+        "&:hover": { borderColor: "rgba(249,115,22,0.3)", bgcolor: "#1c2128" }
+      }}
+    >
+      {item.socialimage && (
+        <Box sx={{ position: "relative", height: expanded ? 140 : 80, overflow: "hidden" }}>
+          <Box
+            component="img"
+            src={item.socialimage}
+            alt=""
+            sx={{
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              filter: "grayscale(100%)",
+              transition: "filter 500ms ease",
+              "&:hover": { filter: "grayscale(0%)" }
+            }}
+          />
+          {item.sourcecountry && (
+            <Box sx={{
+              position: "absolute", top: 6, left: 6, px: 0.75, py: 0.25,
+              bgcolor: "rgba(0,0,0,0.65)", backdropFilter: "blur(8px)",
+              borderRadius: 0.75, border: "1px solid rgba(255,255,255,0.1)"
+            }}>
+              <Typography sx={{ fontSize: 8, fontWeight: 700, color: "#fff", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                {item.sourcecountry}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      )}
+      <Box sx={{ p: 1.5 }}>
+        <Typography sx={{
+          fontSize: expanded ? 12 : 11, fontWeight: 700, color: "#d1d5db", lineHeight: 1.4,
+          display: "-webkit-box", WebkitLineClamp: expanded ? 3 : 2,
+          WebkitBoxOrient: "vertical", overflow: "hidden"
+        }}>
+          {item.title}
+        </Typography>
+        <Box sx={{ mt: 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <Typography sx={{ fontSize: 9, fontWeight: 700, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            {formatSeenDate(item.seendate)}
+          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.4 }}>
+            <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(249,115,22,0.5)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+              Read
+            </Typography>
+            <OpenInNewIcon sx={{ fontSize: 9, color: "rgba(249,115,22,0.5)" }} />
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+function NewsExpandedModal({ open, articles, onClose }: { open: boolean; articles: GdeltArticle[]; onClose: () => void }): JSX.Element {
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="lg"
+      fullWidth
+      PaperProps={{
+        sx: {
+          bgcolor: "#0d1117",
+          border: "1px solid rgba(255,255,255,0.08)",
+          borderRadius: 3,
+          boxShadow: "0 32px 100px rgba(0,0,0,0.6)",
+          maxHeight: "85vh"
+        }
+      }}
+    >
+      <DialogTitle sx={{ px: 3, py: 2, borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <NewspaperIcon sx={{ fontSize: 16, color: "#f97316" }} />
+          <Typography sx={{ fontSize: 12, fontWeight: 800, color: "#fff", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+            Ground Reports
+          </Typography>
+          <Typography sx={{ fontSize: 10, fontWeight: 700, color: "#6b7280", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            · {articles.length} reports · last 12h
+          </Typography>
+        </Box>
+        <IconButton onClick={onClose} size="small" sx={{ color: "#6b7280", "&:hover": { color: "#fff" } }}>
+          <CloseIcon sx={{ fontSize: 16 }} />
+        </IconButton>
+      </DialogTitle>
+      <DialogContent sx={{ p: 3 }}>
+        <Box sx={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+          gap: 2,
+          pt: 0.5
+        }}>
+          {articles.map((item, idx) => (
+            <NewsCard key={idx} item={item} expanded />
+          ))}
+          {articles.length === 0 && (
+            <Typography sx={{ fontSize: 13, color: "#6b7280", gridColumn: "1 / -1" }}>
+              No wildfire reports found.
+            </Typography>
+          )}
+        </Box>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProps): JSX.Element {
   const selectedEvent = useAppStore((s) => s.selectedEvent);
   const setSelectedEvent = useAppStore((s) => s.setSelectedEvent);
@@ -207,6 +372,7 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"telemetry" | "news">("telemetry");
+  const [newsExpanded, setNewsExpanded] = useState(false);
   const [resolvedGeocodes, setResolvedGeocodes] = useState<Record<string, ReverseGeocodeResponse>>({});
   const resolvedGeocodesRef = useRef<Record<string, ReverseGeocodeResponse>>({});
   const geocodeInFlightRef = useRef<Set<string>>(new Set());
@@ -224,11 +390,14 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
   const { data: newsData, isLoading: newsLoading, isError: newsError } = useQuery({
     queryKey: ["gdelt-news"],
     queryFn: async () => {
-      const url = "https://api.gdeltproject.org/api/v2/doc/doc?query=(wildfire OR fire) sourcelang:english&mode=artlist&format=json&timespan=6h&sort=datedesc&maxrecords=50";
+      const query = encodeURIComponent(
+        "(wildfire OR bushfire OR \"forest fire\" OR \"brush fire\" OR \"grass fire\" OR firefighter OR \"fire evacuation\" OR \"fire season\" OR \"fire crews\" OR \"prescribed burn\" OR \"controlled burn\" OR \"fire weather\" OR \"red flag warning\") sourcelang:english"
+      );
+      const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${query}&mode=artlist&format=json&timespan=12h&sort=datedesc&maxrecords=75`;
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch news");
       const json = await res.json() as { articles?: GdeltArticle[] };
-      return json.articles ?? [];
+      return (json.articles ?? []).filter((a) => isWildfireArticle(a.title));
     },
     staleTime: 5 * 60 * 1000,
     refetchInterval: 10 * 60 * 1000,
@@ -378,7 +547,7 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
           boxShadow: "0 24px 80px rgba(0,0,0,0.35)",
           display: "flex",
           flexDirection: "column",
-          minHeight: 360
+          height: 460
         }}
       >
         {/* Tab switcher */}
@@ -524,91 +693,45 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
         )}
 
         {activeTab === "news" && (
-          <Box sx={{ p: 2.25, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1.5 }}>
-            {newsLoading && (
-              <Typography sx={{ fontSize: 12, color: "#6b7280" }}>Loading ground reports...</Typography>
-            )}
-            {newsError && (
-              <Typography sx={{ fontSize: 12, color: "#ef4444" }}>Failed to load news. Check your connection.</Typography>
-            )}
-            {!newsLoading && !newsError && (newsData ?? []).length === 0 && (
-              <Typography sx={{ fontSize: 12, color: "#6b7280" }}>No wildfire reports in the last 6 hours.</Typography>
-            )}
-            {(newsData ?? []).map((item, idx) => (
-              <Box
-                key={idx}
-                component="a"
-                href={item.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                sx={{
-                  display: "block",
-                  border: "1px solid rgba(255,255,255,0.06)",
-                  borderRadius: 2.5,
-                  overflow: "hidden",
-                  textDecoration: "none",
-                  transition: "all 160ms ease",
-                  bgcolor: "rgba(22,27,34,0.5)",
-                  "&:hover": {
-                    borderColor: "rgba(249,115,22,0.3)",
-                    bgcolor: "#1c2128"
-                  }
-                }}
+          <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+            {/* News header */}
+            <Box sx={{ px: 2.25, py: 1.2, borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+              <Typography sx={{ fontSize: 10, fontWeight: 700, color: "#6b7280", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                {newsLoading ? "Loading…" : `${(newsData ?? []).length} reports`}
+              </Typography>
+              <IconButton
+                size="small"
+                onClick={() => setNewsExpanded(true)}
+                disabled={newsLoading || (newsData ?? []).length === 0}
+                sx={{ color: "#4b5563", "&:hover": { color: "#9ca3af" }, p: 0.5 }}
               >
-                {item.socialimage && (
-                  <Box sx={{ position: "relative", height: 80, overflow: "hidden" }}>
-                    <Box
-                      component="img"
-                      src={item.socialimage}
-                      alt=""
-                      sx={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                        filter: "grayscale(100%)",
-                        transition: "filter 500ms ease",
-                        "&:hover": { filter: "grayscale(0%)" }
-                      }}
-                    />
-                    {item.sourcecountry && (
-                      <Box sx={{
-                        position: "absolute",
-                        top: 6,
-                        left: 6,
-                        px: 0.75,
-                        py: 0.25,
-                        bgcolor: "rgba(0,0,0,0.65)",
-                        backdropFilter: "blur(8px)",
-                        borderRadius: 0.75,
-                        border: "1px solid rgba(255,255,255,0.1)"
-                      }}>
-                        <Typography sx={{ fontSize: 8, fontWeight: 700, color: "#fff", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                          {item.sourcecountry}
-                        </Typography>
-                      </Box>
-                    )}
-                  </Box>
-                )}
-                <Box sx={{ p: 1.5 }}>
-                  <Typography sx={{ fontSize: 11, fontWeight: 700, color: "#d1d5db", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                    {item.title}
-                  </Typography>
-                  <Box sx={{ mt: 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                    <Typography sx={{ fontSize: 9, fontWeight: 700, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em" }}>
-                      {new Date(item.seendate.replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/, "$1-$2-$3T$4:$5:$6Z")).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                    </Typography>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.4 }}>
-                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(249,115,22,0.5)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
-                        Read
-                      </Typography>
-                      <OpenInNewIcon sx={{ fontSize: 9, color: "rgba(249,115,22,0.5)" }} />
-                    </Box>
-                  </Box>
-                </Box>
-              </Box>
-            ))}
+                <ZoomOutMapIcon sx={{ fontSize: 13 }} />
+              </IconButton>
+            </Box>
+            {/* Scrollable list */}
+            <Box sx={{ flex: 1, overflowY: "auto", p: 2.25, display: "flex", flexDirection: "column", gap: 1.5 }}>
+              {newsLoading && (
+                <Typography sx={{ fontSize: 12, color: "#6b7280" }}>Loading ground reports...</Typography>
+              )}
+              {newsError && (
+                <Typography sx={{ fontSize: 12, color: "#ef4444" }}>Failed to load news. Check your connection.</Typography>
+              )}
+              {!newsLoading && !newsError && (newsData ?? []).length === 0 && (
+                <Typography sx={{ fontSize: 12, color: "#6b7280" }}>No wildfire reports in the last 12 hours.</Typography>
+              )}
+              {(newsData ?? []).map((item, idx) => (
+                <NewsCard key={idx} item={item} />
+              ))}
+            </Box>
           </Box>
         )}
+
+        {/* Expanded news modal */}
+        <NewsExpandedModal
+          open={newsExpanded}
+          articles={newsData ?? []}
+          onClose={() => setNewsExpanded(false)}
+        />
       </Box>
     );
   }
