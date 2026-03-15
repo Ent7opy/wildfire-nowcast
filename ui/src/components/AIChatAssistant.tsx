@@ -8,6 +8,7 @@ import {
 } from "@mui/material";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import SendIcon from "@mui/icons-material/Send";
+import ReactMarkdown from "react-markdown";
 
 import { EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT } from "../config/assistant";
 import { useAppStore } from "../state/store";
@@ -186,7 +187,7 @@ export default function AIChatAssistant(): JSX.Element {
               }
             ],
             generationConfig: {
-              temperature: 0.2
+              temperature: 0.5
             }
           })
         }
@@ -276,10 +277,19 @@ export default function AIChatAssistant(): JSX.Element {
                 color: message.role === "user" ? "#fff" : "#d1d5db",
                 border: message.role === "assistant" ? "1px solid rgba(255,255,255,0.07)" : "none",
                 fontSize: 13,
-                lineHeight: 1.45
+                lineHeight: 1.6,
+                "& p": { m: 0, mb: 0.75, "&:last-child": { mb: 0 } },
+                "& strong": { color: "#f1f5f9", fontWeight: 700 },
+                "& ul, & ol": { pl: 2.5, m: 0, mb: 0.75 },
+                "& li": { mb: 0.25 },
+                "& code": { fontFamily: "monospace", fontSize: 11, bgcolor: "rgba(255,255,255,0.07)", px: 0.5, borderRadius: 0.5 }
               }}
             >
-              {message.text}
+              {message.role === "assistant" ? (
+                <ReactMarkdown>{message.text}</ReactMarkdown>
+              ) : (
+                message.text
+              )}
             </Box>
           </Box>
         ))}
