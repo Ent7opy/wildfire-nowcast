@@ -47,7 +47,7 @@ def export_training_snapshot(
             d.raw_properties,
             l.label
         FROM fire_detections d
-        JOIN fire_labels l ON d.id = l.fire_detection_id
+        JOIN denoiser_labels_v2 l ON d.id = l.fire_detection_id
         WHERE l.rule_version = :version
           AND l.label IN ('POSITIVE', 'NEGATIVE')
           AND d.acq_time BETWEEN :start AND :end

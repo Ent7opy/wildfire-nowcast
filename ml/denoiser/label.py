@@ -430,14 +430,13 @@ def label_detections(
     rule_counts = df.groupby("rule_applied").size().to_dict()
     LOGGER.info("Rule breakdown: %s", rule_counts)
 
-    # ── 5. Upsert into fire_labels ──────────────────────────────────────
-    LOGGER.info("Upserting %d labels into fire_labels...", len(df))
+    # ── 5. Upsert into denoiser_labels_v2 ───────────────────────────────
+    LOGGER.info("Upserting %d labels into denoiser_labels_v2...", len(df))
     upsert_stmt = text("""
-        INSERT INTO fire_labels (fire_detection_id, label, rule_version, source, rule_params, labeled_at)
-        VALUES (:id, :label, :version, :source, :params, :now)
-        ON CONFLICT (fire_detection_id) DO UPDATE SET
+        INSERT INTO denoiser_labels_v2 (fire_detection_id, label, rule_version, source, rule_params, weak_supervision, labeled_at)
+        VALUES (:id, :label, :version, :source, :params, false, :now)
+        ON CONFLICT (fire_detection_id, rule_version) DO UPDATE SET
             label = EXCLUDED.label,
-            rule_version = EXCLUDED.rule_version,
             source = EXCLUDED.source,
             rule_params = EXCLUDED.rule_params,
             labeled_at = EXCLUDED.labeled_at
@@ -462,7 +461,7 @@ def label_detections(
         for i in range(0, len(batch), batch_size):
             conn.execute(upsert_stmt, batch[i : i + batch_size])
 
-    LOGGER.info("Upserted %d labels into fire_labels.", len(df))
+    LOGGER.info("Upserted %d labels into denoiser_labels_v2.", len(df))
 
 
 def main() -> None:

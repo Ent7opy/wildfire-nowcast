@@ -12,7 +12,7 @@ def load_labeled_data(
     start_date: str,
     end_date: str,
     region_name: Optional[str] = None,
-    label_table: str = "fire_labels"
+    label_table: str = "denoiser_labels_v2"
 ) -> pd.DataFrame:
     """Load detections joined with labels for a given time window."""
     
