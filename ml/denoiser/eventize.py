@@ -305,12 +305,14 @@ def _eventize_single_window(
         estimated AS (
             SELECT
                 g.*,
-                ST_Multi(
-                    ST_CollectionExtract(
-                        ST_MakeValid(ST_ConcaveHull(g.point_geom, :estimated_concave_percent, FALSE)),
-                        3
+                CASE WHEN ST_Area(ST_ConvexHull(g.point_geom)) > 0 THEN
+                    ST_Multi(
+                        ST_CollectionExtract(
+                            ST_MakeValid(ST_ConcaveHull(g.point_geom, :estimated_concave_percent, FALSE)),
+                            3
+                        )
                     )
-                ) AS concave_geom,
+                ELSE NULL END AS concave_geom,
                 ST_Multi(
                     ST_CollectionExtract(
                         ST_MakeValid(ST_ConvexHull(g.point_geom)),
@@ -509,12 +511,14 @@ def _eventize_single_window(
         estimated AS (
             SELECT
                 g.*,
-                ST_Multi(
-                    ST_CollectionExtract(
-                        ST_MakeValid(ST_ConcaveHull(g.front_geom, :estimated_concave_percent, FALSE)),
-                        3
+                CASE WHEN ST_Area(ST_ConvexHull(g.front_geom)) > 0 THEN
+                    ST_Multi(
+                        ST_CollectionExtract(
+                            ST_MakeValid(ST_ConcaveHull(g.front_geom, :estimated_concave_percent, FALSE)),
+                            3
+                        )
                     )
-                ) AS concave_geom,
+                ELSE NULL END AS concave_geom,
                 ST_Multi(
                     ST_CollectionExtract(
                         ST_MakeValid(ST_ConvexHull(g.front_geom)),
@@ -1141,13 +1145,13 @@ def _eventize_single_window(
         conn.execute(create_target_ids_sql, query_params)
         conn.execute(create_front_edges_sql, query_params)
         conn.execute(create_front_components_sql)
-        conn.execute(create_front_summary_sql)
+        conn.execute(create_front_summary_sql, query_params)
         conn.execute(create_detection_front_sql)
         conn.execute(create_front_nodes_sql)
         conn.execute(create_event_edges_sql, query_params)
         conn.execute(create_event_edges_undir_sql)
         conn.execute(create_event_components_sql)
-        conn.execute(create_event_summary_sql)
+        conn.execute(create_event_summary_sql, query_params)
         conn.execute(create_front_event_map_sql)
         conn.execute(create_detection_event_sql)
         conn.execute(create_assignments_sql)
