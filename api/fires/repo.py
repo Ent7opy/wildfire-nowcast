@@ -758,29 +758,68 @@ def list_fire_events_bbox_time(
 
     stmt = text(
         f"""
+        WITH selected_events AS (
+            SELECT
+                event_id,
+                source,
+                sensor,
+                start_time,
+                end_time,
+                detection_count,
+                front_count,
+                event_score,
+                denoiser_decision,
+                review_required,
+                geom_source,
+                geom_method,
+                geom_quality,
+                authority_profile,
+                authoritative_perimeter_id,
+                geom
+            FROM fire_events
+            WHERE start_time <= :end_time
+              AND end_time >= :start_time
+              AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+              AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
+              {review_predicate}
+              {score_predicate}
+            ORDER BY COALESCE(start_time, end_time) DESC, event_id DESC
+            LIMIT :limit
+        )
         SELECT
-            event_id,
-            source,
-            sensor,
-            start_time,
-            end_time,
-            detection_count,
-            front_count,
-            event_score,
-            denoiser_decision,
-            review_required,
-            ST_AsGeoJSON(geom) AS geom_geojson,
-            ST_X(ST_Centroid(geom)) AS lon,
-            ST_Y(ST_Centroid(geom)) AS lat
-        FROM fire_events
-        WHERE start_time <= :end_time
-          AND end_time >= :start_time
-          AND geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
-          AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
-          {review_predicate}
-          {score_predicate}
-        ORDER BY COALESCE(start_time, end_time) DESC, event_id DESC
-        LIMIT :limit
+            e.event_id,
+            e.source,
+            e.sensor,
+            e.start_time,
+            e.end_time,
+            e.detection_count,
+            e.front_count,
+            e.event_score,
+            e.denoiser_decision,
+            e.review_required,
+            e.geom_source,
+            e.geom_method,
+            e.geom_quality,
+            e.authority_profile,
+            e.authoritative_perimeter_id,
+            intensity.frp_max,
+            intensity.frp_mean,
+            intensity.brightness_max,
+            intensity.brightness_mean,
+            ST_AsGeoJSON(e.geom) AS geom_geojson,
+            ST_X(ST_Centroid(e.geom)) AS lon,
+            ST_Y(ST_Centroid(e.geom)) AS lat
+        FROM selected_events e
+        LEFT JOIN LATERAL (
+            SELECT
+                MAX(fd.frp) AS frp_max,
+                AVG(fd.frp) FILTER (WHERE fd.frp IS NOT NULL) AS frp_mean,
+                MAX(fd.brightness) AS brightness_max,
+                AVG(fd.brightness) FILTER (WHERE fd.brightness IS NOT NULL) AS brightness_mean
+            FROM fire_detections fd
+            WHERE fd.event_id = e.event_id
+        ) intensity ON TRUE
+        ORDER BY COALESCE(e.start_time, e.end_time) DESC, e.event_id DESC
         """
     )
 
@@ -815,37 +854,133 @@ def list_fire_fronts_bbox_time(
     else:
         end_time = end_time.astimezone(timezone.utc)
 
+    review_predicate = ""
+    if not include_review_required:
+        review_predicate = "AND fe.review_required IS NOT TRUE"
+
+    score_predicate = ""
     params: dict[str, object] = {
+        "start_time": start_time,
+        "end_time": end_time,
         "min_lon": float(min_lon),
         "min_lat": float(min_lat),
         "max_lon": float(max_lon),
         "max_lat": float(max_lat),
         "limit": effective_limit,
     }
+    if min_event_score is not None:
+        score_predicate = "AND (fe.event_score IS NULL OR fe.event_score >= :min_event_score)"
+        params["min_event_score"] = float(min_event_score)
 
     stmt = text(
-        """
+        f"""
+        WITH candidate_events AS (
+            SELECT
+                fe.event_id,
+                fe.event_score,
+                fe.denoiser_decision,
+                fe.review_required,
+                fe.start_time,
+                fe.end_time
+            FROM fire_events fe
+            WHERE fe.start_time <= :end_time
+              AND fe.end_time >= :start_time
+              {review_predicate}
+              {score_predicate}
+        ),
+        linked_fronts AS (
+            SELECT DISTINCT
+                fem.front_id,
+                ce.event_id,
+                ce.event_score,
+                ce.denoiser_decision,
+                ce.review_required,
+                ce.start_time,
+                ce.end_time
+            FROM fire_event_memberships fem
+            JOIN candidate_events ce ON ce.event_id = fem.event_id
+            WHERE fem.front_id IS NOT NULL
+        ),
+        ranked_fronts AS (
+            SELECT
+                ff.front_id,
+                ff.source,
+                ff.sensor,
+                ff.overpass_start,
+                ff.overpass_end,
+                ff.detection_count,
+                ff.frp_max,
+                ff.frp_mean,
+                ff.confidence_max,
+                ff.geom_source,
+                ff.geom_method,
+                ff.geom_quality,
+                ff.authority_profile,
+                ff.authoritative_perimeter_id,
+                lf.event_id,
+                lf.event_score,
+                lf.denoiser_decision,
+                lf.review_required,
+                ff.geom,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ff.front_id
+                    ORDER BY COALESCE(lf.end_time, lf.start_time) DESC NULLS LAST, lf.event_id DESC
+                ) AS front_rank
+            FROM linked_fronts lf
+            JOIN fire_fronts ff ON ff.front_id = lf.front_id
+            WHERE ff.geom IS NOT NULL
+              AND ff.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
+              AND ST_Intersects(ff.geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
+        ),
+        selected_fronts AS (
+            SELECT
+                front_id,
+                source,
+                sensor,
+                overpass_start,
+                overpass_end,
+                detection_count,
+                frp_max,
+                frp_mean,
+                confidence_max,
+                geom_source,
+                geom_method,
+                geom_quality,
+                authority_profile,
+                authoritative_perimeter_id,
+                event_id,
+                event_score,
+                denoiser_decision,
+                review_required,
+                geom
+            FROM ranked_fronts
+            WHERE front_rank = 1
+            ORDER BY COALESCE(overpass_end, overpass_start) DESC NULLS LAST, front_id DESC
+            LIMIT :limit
+        )
         SELECT
-            ff.front_id,
-            ff.source,
-            ff.sensor,
-            ff.overpass_start,
-            ff.overpass_end,
-            ff.detection_count,
-            ff.frp_max,
-            ff.frp_mean,
-            ff.confidence_max,
-            NULL::text AS event_id,
-            NULL::double precision AS event_score,
-            NULL::text AS denoiser_decision,
-            NULL::boolean AS review_required,
-            ST_X(ST_Centroid(ff.geom)) AS lon,
-            ST_Y(ST_Centroid(ff.geom)) AS lat,
-            ST_AsGeoJSON(ff.geom) AS geom_geojson
-        FROM fire_fronts ff
-        WHERE ff.geom IS NOT NULL
-          AND ff.geom && ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326)
-        LIMIT :limit
+            sf.front_id,
+            sf.source,
+            sf.sensor,
+            sf.overpass_start,
+            sf.overpass_end,
+            sf.detection_count,
+            sf.frp_max,
+            sf.frp_mean,
+            sf.confidence_max,
+            sf.geom_source,
+            sf.geom_method,
+            sf.geom_quality,
+            sf.authority_profile,
+            sf.authoritative_perimeter_id,
+            sf.event_id,
+            sf.event_score,
+            sf.denoiser_decision,
+            sf.review_required,
+            ST_X(ST_Centroid(sf.geom)) AS lon,
+            ST_Y(ST_Centroid(sf.geom)) AS lat,
+            ST_AsGeoJSON(sf.geom) AS geom_geojson
+        FROM selected_fronts sf
         """
     )
 

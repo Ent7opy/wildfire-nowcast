@@ -2,27 +2,70 @@ import type { Feature, FeatureCollection, MultiPolygon, Polygon } from "geojson"
 
 export type BBox = [number, number, number, number];
 
+export type GeometrySource = "authoritative" | "estimated";
+export type GeometryMethod =
+  | "authoritative"
+  | "estimated_concave"
+  | "estimated_convex"
+  | "estimated_point_buffer";
+
 export interface FireEvent {
   event_id?: string;
   lat?: number;
   lon?: number;
   geom_geojson?: unknown;
+  geom_source?: GeometrySource;
+  geom_method?: GeometryMethod;
+  geom_quality?: number;
+  authority_profile?: string;
+  authoritative_perimeter_id?: number;
   event_score?: number;
   denoiser_decision?: string;
   review_required?: boolean;
   detection_count?: number;
   front_count?: number;
+  frp_max?: number;
+  frp_mean?: number;
+  brightness_max?: number;
+  brightness_mean?: number;
   source?: string;
   sensor?: string;
   start_time?: string;
   end_time?: string;
+  location_name?: string;
+  admin1_name?: string;
+  admin0_name?: string;
+  country?: string;
+  region_name?: string;
   [key: string]: unknown;
+}
+
+export interface ReverseGeocodeResponse {
+  lat: number;
+  lon: number;
+  cached_lat?: number;
+  cached_lon?: number;
+  provider: string;
+  cache_hit: boolean;
+  status: "resolved" | "unresolved" | "error" | "disabled" | string;
+  location_name?: string | null;
+  country?: string | null;
+  admin1_name?: string | null;
+  admin2_name?: string | null;
+  display_name?: string | null;
+  updated_at?: string | null;
+  expires_at?: string | null;
 }
 
 export interface FireFront {
   front_id?: string;
   event_id?: string;
   geom_geojson?: unknown;
+  geom_source?: GeometrySource;
+  geom_method?: GeometryMethod;
+  geom_quality?: number;
+  authority_profile?: string;
+  authoritative_perimeter_id?: number;
   event_score?: number;
   detection_count?: number;
   [key: string]: unknown;

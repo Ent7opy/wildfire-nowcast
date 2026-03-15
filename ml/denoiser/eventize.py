@@ -44,6 +44,10 @@ class EventizeParams:
     event_max_gap_days: int = 11
     static_persistence_threshold: float = 0.85
     strict_static_split: bool = True
+    perimeter_match_overlap_min: float = 0.2
+    perimeter_match_time_pad_hours: int = 24
+    estimated_concave_percent: float = 0.92
+    estimated_point_buffer_m: float = 375.0
 
     def __post_init__(self) -> None:
         if float(self.front_link_radius_m) <= 0:
@@ -57,6 +61,16 @@ class EventizeParams:
         threshold = float(self.static_persistence_threshold)
         if not 0.0 <= threshold <= 1.0:
             raise ValueError("static_persistence_threshold must be in [0, 1]")
+        overlap = float(self.perimeter_match_overlap_min)
+        if not 0.0 <= overlap <= 1.0:
+            raise ValueError("perimeter_match_overlap_min must be in [0, 1]")
+        if int(self.perimeter_match_time_pad_hours) < 0:
+            raise ValueError("perimeter_match_time_pad_hours must be >= 0")
+        concave = float(self.estimated_concave_percent)
+        if not 0.0 < concave <= 1.0:
+            raise ValueError("estimated_concave_percent must be in (0, 1]")
+        if float(self.estimated_point_buffer_m) <= 0:
+            raise ValueError("estimated_point_buffer_m must be > 0")
 
 
 def _is_static_like(
@@ -125,6 +139,10 @@ def _eventize_single_window(
         "event_max_gap_days": int(params.event_max_gap_days),
         "static_persistence_threshold": float(params.static_persistence_threshold),
         "strict_static_split": bool(params.strict_static_split),
+        "perimeter_match_overlap_min": float(params.perimeter_match_overlap_min),
+        "perimeter_match_time_pad_hours": int(params.perimeter_match_time_pad_hours),
+        "estimated_concave_percent": float(params.estimated_concave_percent),
+        "estimated_point_buffer_m": float(params.estimated_point_buffer_m),
         "apply_start_time": apply_start_time,
         "apply_end_time": apply_end_time,
     }
@@ -142,6 +160,33 @@ def _eventize_single_window(
             frp,
             confidence,
             geom,
+            NULLIF(
+                lower(
+                    trim(
+                        COALESCE(
+                            raw_properties->>'irwinid',
+                            raw_properties->>'IRWINID',
+                            raw_properties->>'poly_IRWINID',
+                            raw_properties->>'attr_IrwinID'
+                        )
+                    )
+                ),
+                ''
+            ) AS det_irwinid,
+            NULLIF(
+                lower(
+                    trim(
+                        COALESCE(
+                            raw_properties->>'sourceglobalid',
+                            raw_properties->>'SourceGlobalID',
+                            raw_properties->>'poly_SourceGlobalID',
+                            raw_properties->>'GlobalID',
+                            raw_properties->>'globalid'
+                        )
+                    )
+                ),
+                ''
+            ) AS det_sourceglobalid,
             COALESCE(false_source_masked, FALSE) AS false_source_masked,
             COALESCE(persistence_score, 0.0) AS persistence_score,
             (
@@ -228,6 +273,8 @@ def _eventize_single_window(
             s.frp,
             s.confidence,
             s.geom,
+            s.det_irwinid,
+            s.det_sourceglobalid,
             s.is_static_like
         FROM normalized n
         JOIN tmp_eventize_selected s ON s.id = n.node_id
@@ -237,30 +284,84 @@ def _eventize_single_window(
     create_front_summary_sql = text(
         """
         CREATE TEMP TABLE tmp_eventize_front_summary ON COMMIT DROP AS
+        WITH grouped AS (
+            SELECT
+                component_anchor_id,
+                MAX(source) AS source,
+                MAX(sensor) AS sensor,
+                MIN(acq_time) AS overpass_start,
+                MAX(acq_time) AS overpass_end,
+                COUNT(*)::int AS detection_count,
+                MAX(frp) AS frp_max,
+                AVG(frp) AS frp_mean,
+                MAX(confidence) AS confidence_max,
+                MAX(det_irwinid) FILTER (WHERE det_irwinid IS NOT NULL) AS det_irwinid,
+                MAX(det_sourceglobalid) FILTER (WHERE det_sourceglobalid IS NOT NULL) AS det_sourceglobalid,
+                ST_Collect(geom) AS point_geom,
+                AVG(CASE WHEN is_static_like THEN 1.0 ELSE 0.0 END) >= 0.5 AS front_static_like
+            FROM tmp_eventize_front_components
+            GROUP BY component_anchor_id
+        ),
+        estimated AS (
+            SELECT
+                g.*,
+                ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(ST_ConcaveHull(g.point_geom, :estimated_concave_percent, FALSE)),
+                        3
+                    )
+                ) AS concave_geom,
+                ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(ST_ConvexHull(g.point_geom)),
+                        3
+                    )
+                ) AS convex_geom,
+                ST_Multi(
+                    ST_Buffer(ST_Centroid(g.point_geom)::geography, :estimated_point_buffer_m)::geometry
+                ) AS point_buffer_geom
+            FROM grouped g
+        )
         SELECT
             md5(
                 concat_ws(
                     '|',
                     'front_v2',
-                    COALESCE(MAX(source), ''),
-                    COALESCE(MAX(sensor), ''),
-                    component_anchor_id::text,
-                    to_char(MIN(acq_time) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')
+                    COALESCE(e.source, ''),
+                    COALESCE(e.sensor, ''),
+                    e.component_anchor_id::text,
+                    to_char(e.overpass_start AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US')
                 )
             ) AS front_id,
-            component_anchor_id,
-            MAX(source) AS source,
-            MAX(sensor) AS sensor,
-            MIN(acq_time) AS overpass_start,
-            MAX(acq_time) AS overpass_end,
-            COUNT(*)::int AS detection_count,
-            MAX(frp) AS frp_max,
-            AVG(frp) AS frp_mean,
-            MAX(confidence) AS confidence_max,
-            ST_ConvexHull(ST_Collect(geom)) AS geom,
-            AVG(CASE WHEN is_static_like THEN 1.0 ELSE 0.0 END) >= 0.5 AS front_static_like
-        FROM tmp_eventize_front_components
-        GROUP BY component_anchor_id
+            e.component_anchor_id,
+            e.source,
+            e.sensor,
+            e.overpass_start,
+            e.overpass_end,
+            e.detection_count,
+            e.frp_max,
+            e.frp_mean,
+            e.confidence_max,
+            e.det_irwinid,
+            e.det_sourceglobalid,
+            CASE
+                WHEN e.detection_count = 1 THEN e.point_buffer_geom
+                WHEN NOT ST_IsEmpty(e.concave_geom) THEN e.concave_geom
+                WHEN NOT ST_IsEmpty(e.convex_geom) THEN e.convex_geom
+                ELSE e.point_buffer_geom
+            END AS geom,
+            CASE
+                WHEN e.detection_count = 1 THEN 'estimated_point_buffer'
+                WHEN NOT ST_IsEmpty(e.concave_geom) THEN 'estimated_concave'
+                WHEN NOT ST_IsEmpty(e.convex_geom) THEN 'estimated_convex'
+                ELSE 'estimated_point_buffer'
+            END AS geom_method,
+            0.45::double precision AS geom_quality,
+            'estimated'::text AS geom_source,
+            NULL::bigint AS authoritative_perimeter_id,
+            NULL::text AS authority_profile,
+            e.front_static_like
+        FROM estimated e
         """
     )
 
@@ -287,6 +388,8 @@ def _eventize_single_window(
             f.overpass_start,
             f.overpass_end,
             f.geom,
+            f.det_irwinid,
+            f.det_sourceglobalid,
             ST_Centroid(f.geom) AS centroid_geom,
             f.front_static_like
         FROM tmp_eventize_front_summary f
@@ -362,6 +465,8 @@ def _eventize_single_window(
                 fn.overpass_start,
                 fn.overpass_end,
                 fn.geom,
+                fn.det_irwinid,
+                fn.det_sourceglobalid,
                 fn.front_static_like
             FROM tmp_eventize_event_components ec
             JOIN tmp_eventize_front_nodes fn ON fn.front_id = ec.front_id
@@ -381,22 +486,75 @@ def _eventize_single_window(
                 ) AS event_id
             FROM component_rows
             GROUP BY component_anchor_id
+        ),
+        grouped AS (
+            SELECT
+                e.event_id,
+                c.component_anchor_id,
+                MAX(c.source) AS source,
+                MAX(c.sensor) AS sensor,
+                MIN(c.overpass_start) AS start_time,
+                MAX(c.overpass_end) AS end_time,
+                COUNT(df.id)::int AS detection_count,
+                COUNT(DISTINCT c.front_id)::int AS front_count,
+                MAX(c.det_irwinid) FILTER (WHERE c.det_irwinid IS NOT NULL) AS det_irwinid,
+                MAX(c.det_sourceglobalid) FILTER (WHERE c.det_sourceglobalid IS NOT NULL) AS det_sourceglobalid,
+                ST_Collect(c.geom) AS front_geom,
+                AVG(CASE WHEN c.front_static_like THEN 1.0 ELSE 0.0 END) AS static_front_ratio
+            FROM component_rows c
+            JOIN event_ids e ON e.component_anchor_id = c.component_anchor_id
+            LEFT JOIN tmp_eventize_detection_front df ON df.front_id = c.front_id
+            GROUP BY e.event_id, c.component_anchor_id
+        ),
+        estimated AS (
+            SELECT
+                g.*,
+                ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(ST_ConcaveHull(g.front_geom, :estimated_concave_percent, FALSE)),
+                        3
+                    )
+                ) AS concave_geom,
+                ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(ST_ConvexHull(g.front_geom)),
+                        3
+                    )
+                ) AS convex_geom,
+                ST_Multi(
+                    ST_Buffer(ST_Centroid(g.front_geom)::geography, :estimated_point_buffer_m)::geometry
+                ) AS point_buffer_geom
+            FROM grouped g
         )
         SELECT
             e.event_id,
-            c.component_anchor_id,
-            MAX(c.source) AS source,
-            MAX(c.sensor) AS sensor,
-            MIN(c.overpass_start) AS start_time,
-            MAX(c.overpass_end) AS end_time,
-            COUNT(df.id)::int AS detection_count,
-            COUNT(DISTINCT c.front_id)::int AS front_count,
-            ST_ConvexHull(ST_Collect(c.geom)) AS geom,
-            AVG(CASE WHEN c.front_static_like THEN 1.0 ELSE 0.0 END) AS static_front_ratio
-        FROM component_rows c
-        JOIN event_ids e ON e.component_anchor_id = c.component_anchor_id
-        LEFT JOIN tmp_eventize_detection_front df ON df.front_id = c.front_id
-        GROUP BY e.event_id, c.component_anchor_id
+            e.component_anchor_id,
+            e.source,
+            e.sensor,
+            e.start_time,
+            e.end_time,
+            e.detection_count,
+            e.front_count,
+            e.det_irwinid,
+            e.det_sourceglobalid,
+            CASE
+                WHEN e.detection_count = 1 THEN e.point_buffer_geom
+                WHEN NOT ST_IsEmpty(e.concave_geom) THEN e.concave_geom
+                WHEN NOT ST_IsEmpty(e.convex_geom) THEN e.convex_geom
+                ELSE e.point_buffer_geom
+            END AS geom,
+            CASE
+                WHEN e.detection_count = 1 THEN 'estimated_point_buffer'
+                WHEN NOT ST_IsEmpty(e.concave_geom) THEN 'estimated_concave'
+                WHEN NOT ST_IsEmpty(e.convex_geom) THEN 'estimated_convex'
+                ELSE 'estimated_point_buffer'
+            END AS geom_method,
+            0.4::double precision AS geom_quality,
+            'estimated'::text AS geom_source,
+            NULL::bigint AS authoritative_perimeter_id,
+            NULL::text AS authority_profile,
+            e.static_front_ratio
+        FROM estimated e
         """
     )
 
@@ -453,6 +611,266 @@ def _eventize_single_window(
         """
     )
 
+    create_front_authoritative_matches_sql = text(
+        """
+        CREATE TEMP TABLE tmp_eventize_front_authoritative_matches ON COMMIT DROP AS
+        WITH candidate AS (
+            SELECT
+                f.front_id,
+                f.overpass_start,
+                f.overpass_end,
+                ap.perimeter_id AS authoritative_perimeter_id,
+                CASE
+                    WHEN ap.source_profile LIKE 'wfigs_%' THEN 'wfigs_us'
+                    WHEN ap.source_profile LIKE 'cwfis_%' THEN 'cwfis_ca'
+                    WHEN ap.source_profile LIKE 'copernicus_%' THEN 'copernicus_eu'
+                    ELSE NULL
+                END AS authority_profile,
+                ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(ap.geom),
+                        3
+                    )
+                ) AS authoritative_geom,
+                COALESCE(
+                    ST_Area(
+                        ST_Intersection(
+                            f.geom,
+                            ST_Multi(
+                                ST_CollectionExtract(
+                                    ST_MakeValid(ap.geom),
+                                    3
+                                )
+                            )
+                        )::geography
+                    )
+                    / NULLIF(ST_Area(f.geom::geography), 0.0),
+                    0.0
+                ) AS overlap_ratio,
+                CASE
+                    WHEN (
+                        f.det_irwinid IS NOT NULL
+                        AND lower(trim(f.det_irwinid)) = lower(trim(ap.poly_irwinid))
+                    )
+                    OR (
+                        f.det_sourceglobalid IS NOT NULL
+                        AND lower(trim(f.det_sourceglobalid)) = lower(trim(ap.poly_sourceglobalid))
+                    )
+                    THEN 1
+                    ELSE 0
+                END AS id_match,
+                COALESCE(ap.attr_firediscoverydatetime, ap.poly_polygondatetime, f.overpass_start) AS perimeter_start,
+                COALESCE(
+                    ap.attr_containmentdatetime,
+                    ap.attr_controldatetime,
+                    ap.poly_polygondatetime,
+                    f.overpass_end
+                ) AS perimeter_end
+            FROM tmp_eventize_front_summary f
+            JOIN authoritative_perimeters ap
+              ON ap.geom && f.geom
+             AND ST_Intersects(ap.geom, f.geom)
+            WHERE ap.is_authoritative IS TRUE
+              AND ap.tier IN ('silver', 'gold')
+              AND COALESCE(ap.attr_isvalid, 1) = 1
+              AND COALESCE(ap.attr_isquarantined, 0) = 0
+              AND NOT ST_IsEmpty(
+                  ST_CollectionExtract(
+                      ST_MakeValid(ap.geom),
+                      3
+                  )
+              )
+        ),
+        gated AS (
+            SELECT c.*
+            FROM candidate c
+            WHERE c.authority_profile IS NOT NULL
+              AND c.overlap_ratio >= :perimeter_match_overlap_min
+              AND c.overpass_start <= c.perimeter_end + make_interval(hours => :perimeter_match_time_pad_hours)
+              AND c.overpass_end >= c.perimeter_start - make_interval(hours => :perimeter_match_time_pad_hours)
+              AND EXISTS (
+                  SELECT 1
+                  FROM perimeter_coverage_masks pcm
+                  WHERE pcm.is_active
+                    AND pcm.authority_profile = c.authority_profile
+                    AND pcm.geom && c.authoritative_geom
+                    AND ST_Intersects(pcm.geom, c.authoritative_geom)
+                    AND (pcm.valid_from IS NULL OR c.overpass_end >= pcm.valid_from)
+                    AND (pcm.valid_to IS NULL OR c.overpass_start <= pcm.valid_to)
+              )
+        ),
+        ranked AS (
+            SELECT
+                g.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY g.front_id
+                    ORDER BY g.id_match DESC, g.overlap_ratio DESC, g.perimeter_end DESC NULLS LAST, g.authoritative_perimeter_id DESC
+                ) AS rank_id
+            FROM gated g
+        )
+        SELECT
+            front_id,
+            authoritative_perimeter_id,
+            authority_profile,
+            authoritative_geom,
+            overlap_ratio,
+            id_match
+        FROM ranked
+        WHERE rank_id = 1
+        """
+    )
+
+    apply_front_authoritative_matches_sql = text(
+        """
+        UPDATE tmp_eventize_front_summary f
+        SET
+            geom = m.authoritative_geom,
+            geom_source = 'authoritative',
+            geom_method = 'authoritative',
+            geom_quality = LEAST(
+                1.0,
+                GREATEST(
+                    0.0,
+                    0.55 + (0.4 * m.overlap_ratio) + (CASE WHEN m.id_match = 1 THEN 0.05 ELSE 0.0 END)
+                )
+            ),
+            authoritative_perimeter_id = m.authoritative_perimeter_id,
+            authority_profile = m.authority_profile
+        FROM tmp_eventize_front_authoritative_matches m
+        WHERE m.front_id = f.front_id
+        """
+    )
+
+    create_event_authoritative_matches_sql = text(
+        """
+        CREATE TEMP TABLE tmp_eventize_event_authoritative_matches ON COMMIT DROP AS
+        WITH candidate AS (
+            SELECT
+                e.event_id,
+                e.start_time,
+                e.end_time,
+                ap.perimeter_id AS authoritative_perimeter_id,
+                CASE
+                    WHEN ap.source_profile LIKE 'wfigs_%' THEN 'wfigs_us'
+                    WHEN ap.source_profile LIKE 'cwfis_%' THEN 'cwfis_ca'
+                    WHEN ap.source_profile LIKE 'copernicus_%' THEN 'copernicus_eu'
+                    ELSE NULL
+                END AS authority_profile,
+                ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(ap.geom),
+                        3
+                    )
+                ) AS authoritative_geom,
+                COALESCE(
+                    ST_Area(
+                        ST_Intersection(
+                            e.geom,
+                            ST_Multi(
+                                ST_CollectionExtract(
+                                    ST_MakeValid(ap.geom),
+                                    3
+                                )
+                            )
+                        )::geography
+                    )
+                    / NULLIF(ST_Area(e.geom::geography), 0.0),
+                    0.0
+                ) AS overlap_ratio,
+                CASE
+                    WHEN (
+                        e.det_irwinid IS NOT NULL
+                        AND lower(trim(e.det_irwinid)) = lower(trim(ap.poly_irwinid))
+                    )
+                    OR (
+                        e.det_sourceglobalid IS NOT NULL
+                        AND lower(trim(e.det_sourceglobalid)) = lower(trim(ap.poly_sourceglobalid))
+                    )
+                    THEN 1
+                    ELSE 0
+                END AS id_match,
+                COALESCE(ap.attr_firediscoverydatetime, ap.poly_polygondatetime, e.start_time) AS perimeter_start,
+                COALESCE(
+                    ap.attr_containmentdatetime,
+                    ap.attr_controldatetime,
+                    ap.poly_polygondatetime,
+                    e.end_time
+                ) AS perimeter_end
+            FROM tmp_eventize_event_summary e
+            JOIN authoritative_perimeters ap
+              ON ap.geom && e.geom
+             AND ST_Intersects(ap.geom, e.geom)
+            WHERE ap.is_authoritative IS TRUE
+              AND ap.tier IN ('silver', 'gold')
+              AND COALESCE(ap.attr_isvalid, 1) = 1
+              AND COALESCE(ap.attr_isquarantined, 0) = 0
+              AND NOT ST_IsEmpty(
+                  ST_CollectionExtract(
+                      ST_MakeValid(ap.geom),
+                      3
+                  )
+              )
+        ),
+        gated AS (
+            SELECT c.*
+            FROM candidate c
+            WHERE c.authority_profile IS NOT NULL
+              AND c.overlap_ratio >= :perimeter_match_overlap_min
+              AND c.start_time <= c.perimeter_end + make_interval(hours => :perimeter_match_time_pad_hours)
+              AND c.end_time >= c.perimeter_start - make_interval(hours => :perimeter_match_time_pad_hours)
+              AND EXISTS (
+                  SELECT 1
+                  FROM perimeter_coverage_masks pcm
+                  WHERE pcm.is_active
+                    AND pcm.authority_profile = c.authority_profile
+                    AND pcm.geom && c.authoritative_geom
+                    AND ST_Intersects(pcm.geom, c.authoritative_geom)
+                    AND (pcm.valid_from IS NULL OR c.end_time >= pcm.valid_from)
+                    AND (pcm.valid_to IS NULL OR c.start_time <= pcm.valid_to)
+              )
+        ),
+        ranked AS (
+            SELECT
+                g.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY g.event_id
+                    ORDER BY g.id_match DESC, g.overlap_ratio DESC, g.perimeter_end DESC NULLS LAST, g.authoritative_perimeter_id DESC
+                ) AS rank_id
+            FROM gated g
+        )
+        SELECT
+            event_id,
+            authoritative_perimeter_id,
+            authority_profile,
+            authoritative_geom,
+            overlap_ratio,
+            id_match
+        FROM ranked
+        WHERE rank_id = 1
+        """
+    )
+
+    apply_event_authoritative_matches_sql = text(
+        """
+        UPDATE tmp_eventize_event_summary e
+        SET
+            geom = m.authoritative_geom,
+            geom_source = 'authoritative',
+            geom_method = 'authoritative',
+            geom_quality = LEAST(
+                1.0,
+                GREATEST(
+                    0.0,
+                    0.55 + (0.4 * m.overlap_ratio) + (CASE WHEN m.id_match = 1 THEN 0.05 ELSE 0.0 END)
+                )
+            ),
+            authoritative_perimeter_id = m.authoritative_perimeter_id,
+            authority_profile = m.authority_profile
+        FROM tmp_eventize_event_authoritative_matches m
+        WHERE m.event_id = e.event_id
+        """
+    )
+
     count_sql = text(
         """
         SELECT
@@ -475,6 +893,11 @@ def _eventize_single_window(
             frp_mean,
             confidence_max,
             geom,
+            geom_source,
+            geom_method,
+            geom_quality,
+            authoritative_perimeter_id,
+            authority_profile,
             updated_at
         )
         SELECT
@@ -488,6 +911,11 @@ def _eventize_single_window(
             f.frp_mean,
             f.confidence_max,
             f.geom,
+            f.geom_source,
+            f.geom_method,
+            f.geom_quality,
+            f.authoritative_perimeter_id,
+            f.authority_profile,
             NOW() AS updated_at
         FROM tmp_eventize_front_summary f
         JOIN tmp_eventize_target_fronts tf ON tf.front_id = f.front_id
@@ -501,6 +929,11 @@ def _eventize_single_window(
             frp_mean = EXCLUDED.frp_mean,
             confidence_max = EXCLUDED.confidence_max,
             geom = EXCLUDED.geom,
+            geom_source = EXCLUDED.geom_source,
+            geom_method = EXCLUDED.geom_method,
+            geom_quality = EXCLUDED.geom_quality,
+            authoritative_perimeter_id = EXCLUDED.authoritative_perimeter_id,
+            authority_profile = EXCLUDED.authority_profile,
             updated_at = NOW()
         WHERE
             fire_fronts.source IS DISTINCT FROM EXCLUDED.source
@@ -512,6 +945,11 @@ def _eventize_single_window(
             OR fire_fronts.frp_mean IS DISTINCT FROM EXCLUDED.frp_mean
             OR fire_fronts.confidence_max IS DISTINCT FROM EXCLUDED.confidence_max
             OR fire_fronts.geom IS DISTINCT FROM EXCLUDED.geom
+            OR fire_fronts.geom_source IS DISTINCT FROM EXCLUDED.geom_source
+            OR fire_fronts.geom_method IS DISTINCT FROM EXCLUDED.geom_method
+            OR fire_fronts.geom_quality IS DISTINCT FROM EXCLUDED.geom_quality
+            OR fire_fronts.authoritative_perimeter_id IS DISTINCT FROM EXCLUDED.authoritative_perimeter_id
+            OR fire_fronts.authority_profile IS DISTINCT FROM EXCLUDED.authority_profile
         """
     )
 
@@ -530,6 +968,11 @@ def _eventize_single_window(
             lfmc_is_available,
             dfmc_is_available,
             geom,
+            geom_source,
+            geom_method,
+            geom_quality,
+            authoritative_perimeter_id,
+            authority_profile,
             updated_at
         )
         SELECT
@@ -545,6 +988,11 @@ def _eventize_single_window(
             FALSE AS lfmc_is_available,
             FALSE AS dfmc_is_available,
             e.geom,
+            e.geom_source,
+            e.geom_method,
+            e.geom_quality,
+            e.authoritative_perimeter_id,
+            e.authority_profile,
             NOW() AS updated_at
         FROM tmp_eventize_event_summary e
         JOIN tmp_eventize_target_events te ON te.event_id = e.event_id
@@ -560,6 +1008,11 @@ def _eventize_single_window(
             lfmc_is_available = EXCLUDED.lfmc_is_available,
             dfmc_is_available = EXCLUDED.dfmc_is_available,
             geom = EXCLUDED.geom,
+            geom_source = EXCLUDED.geom_source,
+            geom_method = EXCLUDED.geom_method,
+            geom_quality = EXCLUDED.geom_quality,
+            authoritative_perimeter_id = EXCLUDED.authoritative_perimeter_id,
+            authority_profile = EXCLUDED.authority_profile,
             updated_at = NOW()
         WHERE
             fire_events.source IS DISTINCT FROM EXCLUDED.source
@@ -573,6 +1026,11 @@ def _eventize_single_window(
             OR fire_events.lfmc_is_available IS DISTINCT FROM EXCLUDED.lfmc_is_available
             OR fire_events.dfmc_is_available IS DISTINCT FROM EXCLUDED.dfmc_is_available
             OR fire_events.geom IS DISTINCT FROM EXCLUDED.geom
+            OR fire_events.geom_source IS DISTINCT FROM EXCLUDED.geom_source
+            OR fire_events.geom_method IS DISTINCT FROM EXCLUDED.geom_method
+            OR fire_events.geom_quality IS DISTINCT FROM EXCLUDED.geom_quality
+            OR fire_events.authoritative_perimeter_id IS DISTINCT FROM EXCLUDED.authoritative_perimeter_id
+            OR fire_events.authority_profile IS DISTINCT FROM EXCLUDED.authority_profile
         """
     )
 
@@ -701,6 +1159,13 @@ def _eventize_single_window(
         for stmt in post_build_indexes_sql:
             conn.execute(stmt)
         _log_step("eventize.component_indexes", started)
+
+        started = time.perf_counter()
+        conn.execute(create_front_authoritative_matches_sql, query_params)
+        conn.execute(apply_front_authoritative_matches_sql)
+        conn.execute(create_event_authoritative_matches_sql, query_params)
+        conn.execute(apply_event_authoritative_matches_sql)
+        _log_step("eventize.apply_authoritative_matches", started)
 
         stats_row = conn.execute(count_sql).mappings().first()
         if stats_row is None:
@@ -871,6 +1336,10 @@ def main() -> None:
     parser.add_argument("--event-link-radius-m", type=float, default=10000.0)
     parser.add_argument("--event-link-max-gap-days", type=int, default=11)
     parser.add_argument("--event-static-persistence-threshold", type=float, default=0.85)
+    parser.add_argument("--perimeter-match-overlap-min", type=float, default=0.2)
+    parser.add_argument("--perimeter-match-time-pad-hours", type=int, default=24)
+    parser.add_argument("--estimated-concave-percent", type=float, default=0.92)
+    parser.add_argument("--estimated-point-buffer-m", type=float, default=375.0)
     parser.add_argument("--event-strict-static-split", action="store_true")
     parser.add_argument("--no-event-strict-static-split", action="store_true")
     parser.add_argument("--chunk-days", type=int, default=0, help="Optional chunking window in days")
@@ -890,6 +1359,10 @@ def main() -> None:
         event_max_gap_days=int(args.event_link_max_gap_days),
         static_persistence_threshold=float(args.event_static_persistence_threshold),
         strict_static_split=bool(strict_static_split),
+        perimeter_match_overlap_min=float(args.perimeter_match_overlap_min),
+        perimeter_match_time_pad_hours=int(args.perimeter_match_time_pad_hours),
+        estimated_concave_percent=float(args.estimated_concave_percent),
+        estimated_point_buffer_m=float(args.estimated_point_buffer_m),
     )
 
     stats = eventize_detections(

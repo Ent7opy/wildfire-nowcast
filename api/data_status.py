@@ -121,15 +121,35 @@ def _fetch_latest_firms_status(conn) -> dict[str, Any]:
         )
     ).mappings().first()
 
+    watermark_row = None
+    try:
+        watermark_row = conn.execute(
+            text(
+                """
+                SELECT
+                    MAX(last_acq_time_utc) AS latest_acq_time_utc,
+                    MAX(updated_at) AS latest_watermark_updated_at
+                FROM ingest_watermarks
+                """
+            )
+        ).mappings().first()
+    except Exception:
+        watermark_row = None
+
+    watermark_last_acq = _as_utc((watermark_row or {}).get("latest_acq_time_utc"))
+    watermark_updated_at = _as_utc((watermark_row or {}).get("latest_watermark_updated_at"))
+
     if row is None:
         return {
-            "last_seen_at": None,
+            "last_seen_at": watermark_last_acq,
             "idempotency": {
                 "latest_batch_id": None,
                 "records_fetched": 0,
                 "records_inserted": 0,
                 "records_skipped_duplicates": 0,
                 "duplicate_ratio": None,
+                "latest_watermark_acq_time": watermark_last_acq.isoformat() if watermark_last_acq else None,
+                "latest_watermark_updated_at": watermark_updated_at.isoformat() if watermark_updated_at else None,
             },
         }
 
@@ -138,7 +158,7 @@ def _fetch_latest_firms_status(conn) -> dict[str, Any]:
     duplicate_ratio = (float(skipped) / float(fetched)) if fetched > 0 else None
 
     return {
-        "last_seen_at": _as_utc(row.get("completed_at")),
+        "last_seen_at": watermark_last_acq or _as_utc(row.get("completed_at")),
         "idempotency": {
             "latest_batch_id": row.get("id"),
             "latest_source": row.get("source"),
@@ -146,6 +166,8 @@ def _fetch_latest_firms_status(conn) -> dict[str, Any]:
             "records_inserted": int(row.get("records_inserted") or 0),
             "records_skipped_duplicates": skipped,
             "duplicate_ratio": round(duplicate_ratio, 4) if duplicate_ratio is not None else None,
+            "latest_watermark_acq_time": watermark_last_acq.isoformat() if watermark_last_acq else None,
+            "latest_watermark_updated_at": watermark_updated_at.isoformat() if watermark_updated_at else None,
         },
     }
 

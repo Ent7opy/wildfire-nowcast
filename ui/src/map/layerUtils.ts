@@ -274,6 +274,67 @@ export function normalizeGeometry(rawGeom: unknown): Geometry | null {
   return null;
 }
 
+function updateBoundsFromPosition(position: unknown, bounds: { minLon: number; minLat: number; maxLon: number; maxLat: number }): void {
+  if (!Array.isArray(position) || position.length < 2) {
+    return;
+  }
+  const lon = Number(position[0]);
+  const lat = Number(position[1]);
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+    return;
+  }
+  bounds.minLon = Math.min(bounds.minLon, lon);
+  bounds.maxLon = Math.max(bounds.maxLon, lon);
+  bounds.minLat = Math.min(bounds.minLat, lat);
+  bounds.maxLat = Math.max(bounds.maxLat, lat);
+}
+
+function walkCoordinates(value: unknown, bounds: { minLon: number; minLat: number; maxLon: number; maxLat: number }): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+  if (value.length >= 2 && typeof value[0] !== "object" && typeof value[1] !== "object") {
+    updateBoundsFromPosition(value, bounds);
+    return;
+  }
+  for (const child of value) {
+    walkCoordinates(child, bounds);
+  }
+}
+
+function geometryBoundsFromGeometry(geometry: Geometry, bounds: { minLon: number; minLat: number; maxLon: number; maxLat: number }): void {
+  if (geometry.type === "GeometryCollection") {
+    const collection = geometry as Geometry & { geometries?: Geometry[] };
+    for (const child of collection.geometries || []) {
+      geometryBoundsFromGeometry(child, bounds);
+    }
+    return;
+  }
+
+  const coordinates = (geometry as Geometry & { coordinates?: unknown }).coordinates;
+  walkCoordinates(coordinates, bounds);
+}
+
+export function geometryBounds(rawGeom: unknown): [number, number, number, number] | null {
+  const geometry = normalizeGeometry(rawGeom);
+  if (!geometry) {
+    return null;
+  }
+
+  const bounds = {
+    minLon: Number.POSITIVE_INFINITY,
+    minLat: Number.POSITIVE_INFINITY,
+    maxLon: Number.NEGATIVE_INFINITY,
+    maxLat: Number.NEGATIVE_INFINITY
+  };
+  geometryBoundsFromGeometry(geometry, bounds);
+
+  if (!Number.isFinite(bounds.minLon) || !Number.isFinite(bounds.minLat) || !Number.isFinite(bounds.maxLon) || !Number.isFinite(bounds.maxLat)) {
+    return null;
+  }
+  return [bounds.minLon, bounds.minLat, bounds.maxLon, bounds.maxLat];
+}
+
 export function eventFeature(event: RenderEvent): Feature {
   const fillAlpha = Math.min(Math.max(event.fill_a || 70, 45), 110);
   const lineAlpha = Math.min(Math.max(event.line_a || 180, 120), 220);

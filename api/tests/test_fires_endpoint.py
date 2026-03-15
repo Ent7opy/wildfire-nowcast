@@ -191,6 +191,45 @@ def test_get_events_endpoint_passthrough_geom_geojson(monkeypatch):
     assert payload["events"][0]["geom_geojson"] == '{"type":"MultiPolygon","coordinates":[]}'
 
 
+def test_get_events_endpoint_passthrough_geom_provenance(monkeypatch):
+    """Test that /fires/events preserves geometry provenance fields from repo."""
+    mock_events = MagicMock(
+        return_value=[
+            {
+                "event_id": "evt_geom_2",
+                "geom_source": "estimated",
+                "geom_method": "estimated_concave",
+                "geom_quality": 0.42,
+                "authority_profile": None,
+                "authoritative_perimeter_id": None,
+            }
+        ]
+    )
+    monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
+
+    response = client.get(
+        "/fires/events",
+        params={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 22.0,
+            "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    event = payload["events"][0]
+    assert event["geom_source"] == "estimated"
+    assert event["geom_method"] == "estimated_concave"
+    assert event["geom_quality"] == 0.42
+    assert event["authority_profile"] is None
+    assert event["authoritative_perimeter_id"] is None
+
+
 def test_get_fronts_endpoint(monkeypatch):
     """Test that /fires/fronts delegates to list_fire_fronts_bbox_time."""
     mock_fronts = MagicMock(return_value=[{"front_id": "front_1", "event_id": "evt_1"}])
@@ -218,3 +257,84 @@ def test_get_fronts_endpoint(monkeypatch):
     _, kwargs = mock_fronts.call_args
     assert kwargs["min_event_score"] == 0.5
     assert kwargs["include_review_required"] is False
+
+
+def test_get_fronts_endpoint_passthrough_geom_provenance(monkeypatch):
+    """Test that /fires/fronts preserves geometry provenance fields from repo."""
+    mock_fronts = MagicMock(
+        return_value=[
+            {
+                "front_id": "front_geom_1",
+                "event_id": "evt_geom_2",
+                "geom_source": "authoritative",
+                "geom_method": "authoritative",
+                "geom_quality": 0.97,
+                "authority_profile": "wfigs_us",
+                "authoritative_perimeter_id": 12345,
+            }
+        ]
+    )
+    monkeypatch.setattr(fires, "list_fire_fronts_bbox_time", mock_fronts)
+
+    response = client.get(
+        "/fires/fronts",
+        params={
+            "min_lon": 20.0,
+            "min_lat": 40.0,
+            "max_lon": 22.0,
+            "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    front = payload["fronts"][0]
+    assert front["geom_source"] == "authoritative"
+    assert front["geom_method"] == "authoritative"
+    assert front["geom_quality"] == 0.97
+    assert front["authority_profile"] == "wfigs_us"
+    assert front["authoritative_perimeter_id"] == 12345
+
+
+def test_get_reverse_geocode_endpoint(monkeypatch):
+    """Test that /fires/reverse-geocode delegates to reverse_geocode_point."""
+    mock_reverse = MagicMock(
+        return_value={
+            "lat": 34.1,
+            "lon": -118.2,
+            "provider": "nominatim",
+            "cache_hit": False,
+            "status": "resolved",
+            "location_name": "California, United States",
+        }
+    )
+    monkeypatch.setattr(fires, "reverse_geocode_point", mock_reverse)
+
+    response = client.get(
+        "/fires/reverse-geocode",
+        params={"lat": 34.1, "lon": -118.2},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "resolved"
+    assert payload["location_name"] == "California, United States"
+    _, kwargs = mock_reverse.call_args
+    assert kwargs["lat"] == 34.1
+    assert kwargs["lon"] == -118.2
+
+
+def test_get_reverse_geocode_endpoint_bad_request(monkeypatch):
+    """Test ValueError from service is mapped to HTTP 400."""
+    mock_reverse = MagicMock(side_effect=ValueError("Unsupported geocoding provider: bad"))
+    monkeypatch.setattr(fires, "reverse_geocode_point", mock_reverse)
+
+    response = client.get(
+        "/fires/reverse-geocode",
+        params={"lat": 34.1, "lon": -118.2},
+    )
+
+    assert response.status_code == 400

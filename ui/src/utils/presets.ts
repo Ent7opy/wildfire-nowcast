@@ -9,6 +9,7 @@ export interface FilterPreset {
 
 export const FILTER_PRESETS: FilterPreset[] = [
   { name: "Last Hour High", hoursStart: 1, hoursEnd: 0, likelihood: 0.6 },
+  { name: "Last 6h All", hoursStart: 6, hoursEnd: 0, likelihood: 0.0 },
   { name: "Last 6h Medium+", hoursStart: 6, hoursEnd: 0, likelihood: 0.33 },
   { name: "Last 24h High", hoursStart: 24, hoursEnd: 0, likelihood: 0.6 },
   { name: "Last 24h All", hoursStart: 24, hoursEnd: 0, likelihood: 0.0 }

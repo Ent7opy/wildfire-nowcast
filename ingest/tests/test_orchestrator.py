@@ -190,7 +190,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(2, calls["count"])
         self.assertEqual([3.0], sleeps)
 
-    def test_run_once_skips_fresh_job_when_enforced(self):
+    def test_run_once_does_not_skip_firms_when_freshness_enforced(self):
         calls = {"count": 0}
 
         def _runner() -> int:
@@ -203,6 +203,32 @@ class TestOrchestrator(unittest.TestCase):
             return {
                 "sources": {
                     "firms": {"state": "fresh"},
+                }
+            }
+
+        exit_code = run_once(
+            jobs,
+            stop_on_error=True,
+            enforce_freshness=True,
+            status_snapshot_fn=_snapshot,
+        )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(1, calls["count"])
+
+    def test_run_once_skips_non_firms_fresh_job_when_enforced(self):
+        calls = {"count": 0}
+
+        def _runner() -> int:
+            calls["count"] += 1
+            return 0
+
+        jobs = [ScheduledJob(name="weather", interval_seconds=60.0, runner=_runner)]
+
+        def _snapshot():
+            return {
+                "sources": {
+                    "weather": {"state": "fresh"},
                 }
             }
 

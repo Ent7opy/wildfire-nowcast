@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -22,11 +22,13 @@ import {
   buildEventKey,
   createJitForecast,
   createJitForecastFromFront,
-  getActiveSpreadModelId
+  getActiveSpreadModelId,
+  getReverseGeocode
 } from "../api/client";
 import { useAppStore } from "../state/store";
-import type { FireEvent } from "../types/api";
+import type { FireEvent, ReverseGeocodeResponse } from "../types/api";
 import { forecastButtonState } from "../utils/forecast";
+import { comparePriorityFeedEvents } from "../utils/priorityFeed";
 
 interface FireDetailsPanelProps {
   visibleEvents: FireEvent[];
@@ -46,32 +48,36 @@ function severity(event: FireEvent): number {
   return Math.max(0, Math.min(score, 1));
 }
 
-function significance(event: FireEvent): number {
-  const sev = severity(event);
-  const detections = safeNumber(event.detection_count) ?? 0;
-  const detectionsComponent = Math.max(0, Math.min(1, Math.log1p(detections) / Math.log1p(100)));
-  let recency = 0;
-  if (event.end_time) {
-    const end = new Date(event.end_time);
-    if (!Number.isNaN(end.getTime())) {
-      const ageHours = Math.max((Date.now() - end.getTime()) / 3_600_000, 0);
-      recency = Math.max(0, 1 - Math.min(ageHours, 24) / 24);
-    }
+function coordinateKey(lat: number | null, lon: number | null): string | null {
+  if (lat === null || lon === null) {
+    return null;
   }
-  return 0.65 * sev + 0.25 * detectionsComponent + 0.1 * recency;
+  return `${lat.toFixed(4)},${lon.toFixed(4)}`;
 }
 
-function locationLabel(event: FireEvent, lat: number | null, lon: number | null): string {
+function hasDirectLocation(event: FireEvent): boolean {
   const candidates = [event.location_name, event.region_name, event.admin1_name, event.admin0_name, event.country];
+  return candidates.some((candidate) => typeof candidate === "string" && candidate.trim().length > 0);
+}
+
+function locationLabel(event: FireEvent, resolved?: ReverseGeocodeResponse | null): string {
+  const candidates = [
+    resolved?.location_name,
+    event.location_name,
+    event.region_name,
+    resolved?.admin1_name,
+    event.admin1_name,
+    event.admin0_name,
+    resolved?.country,
+    event.country,
+    resolved?.display_name
+  ];
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate.trim().length > 0) {
       return candidate.trim();
     }
   }
-  if (lat !== null && lon !== null) {
-    return `${lat.toFixed(2)}, ${lon.toFixed(2)}`;
-  }
-  return "Unknown region";
+  return "Unresolved location";
 }
 
 function confidenceLabel(event: FireEvent): "High" | "Nominal" {
@@ -89,6 +95,46 @@ function formattedTime(value: unknown): string {
   return parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+interface IntensityDescriptor {
+  label: string;
+  value: number;
+  unit: "MW" | "K";
+}
+
+function primaryIntensity(event: FireEvent): IntensityDescriptor | null {
+  const frpMax = safeNumber(event.frp_max);
+  if (frpMax !== null) {
+    return { label: "Peak FRP", value: frpMax, unit: "MW" };
+  }
+
+  const frpMean = safeNumber(event.frp_mean);
+  if (frpMean !== null) {
+    return { label: "Mean FRP", value: frpMean, unit: "MW" };
+  }
+
+  const brightnessMax = safeNumber(event.brightness_max);
+  if (brightnessMax !== null) {
+    return { label: "Peak Brightness", value: brightnessMax, unit: "K" };
+  }
+
+  const brightnessMean = safeNumber(event.brightness_mean);
+  if (brightnessMean !== null) {
+    return { label: "Mean Brightness", value: brightnessMean, unit: "K" };
+  }
+
+  return null;
+}
+
+function formatIntensity(value: number, unit: "MW" | "K"): string {
+  if (!Number.isFinite(value)) {
+    return `n/a ${unit}`;
+  }
+  if (unit === "MW") {
+    return `${value.toFixed(2)} ${unit}`;
+  }
+  return `${value.toFixed(1)} ${unit}`;
+}
+
 function insightText(event: FireEvent): string {
   if (event.review_required) {
     return "This event is marked for analyst review. Treat the perimeter as provisional until verified.";
@@ -97,6 +143,12 @@ function insightText(event: FireEvent): string {
     return `Denoiser decision is ${event.denoiser_decision}. Continue monitoring event score and fronts for escalation.`;
   }
   return "No denoiser decision is attached to this event snapshot.";
+}
+
+function geometryProvenanceLabel(event: FireEvent): "Authoritative perimeter" | "Estimated perimeter" {
+  return String(event.geom_source || "").toLowerCase() === "authoritative"
+    ? "Authoritative perimeter"
+    : "Estimated perimeter";
 }
 
 export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProps): JSX.Element {
@@ -110,12 +162,74 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
   const setForecastNotification = useAppStore((s) => s.setForecastNotification);
 
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [resolvedGeocodes, setResolvedGeocodes] = useState<Record<string, ReverseGeocodeResponse>>({});
+  const resolvedGeocodesRef = useRef<Record<string, ReverseGeocodeResponse>>({});
+  const geocodeInFlightRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    resolvedGeocodesRef.current = resolvedGeocodes;
+  }, [resolvedGeocodes]);
 
   const topFires = useMemo(() => {
     return [...visibleEvents]
-      .sort((a, b) => significance(b) - significance(a))
-      .slice(0, 10);
+      .sort(comparePriorityFeedEvents)
+      .slice(0, 5);
   }, [visibleEvents]);
+
+  const resolveLocation = useCallback(async (event: FireEvent): Promise<void> => {
+    if (hasDirectLocation(event)) {
+      return;
+    }
+    const lat = safeNumber(event.lat);
+    const lon = safeNumber(event.lon);
+    const key = coordinateKey(lat, lon);
+    if (lat === null || lon === null || key === null) {
+      return;
+    }
+    if (resolvedGeocodesRef.current[key] || geocodeInFlightRef.current.has(key)) {
+      return;
+    }
+
+    geocodeInFlightRef.current.add(key);
+    try {
+      const geocode = await getReverseGeocode({ lat, lon });
+      setResolvedGeocodes((prev) => {
+        if (prev[key]) {
+          return prev;
+        }
+        return { ...prev, [key]: geocode };
+      });
+    } catch {
+      // Ignore transient reverse geocode errors in UI and keep fallback label.
+    } finally {
+      geocodeInFlightRef.current.delete(key);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateTopFires = async (): Promise<void> => {
+      for (const event of topFires) {
+        if (cancelled) {
+          return;
+        }
+        await resolveLocation(event);
+      }
+    };
+
+    void hydrateTopFires();
+    return () => {
+      cancelled = true;
+    };
+  }, [resolveLocation, topFires]);
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      return;
+    }
+    void resolveLocation(selectedEvent);
+  }, [resolveLocation, selectedEvent]);
 
   const forecastMutation = useMutation({
     mutationFn: async (event: FireEvent) => {
@@ -132,7 +246,9 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
       const forecastReferenceTime = Number.isNaN(refTime.getTime()) ? new Date() : refTime;
 
       const front = event.event_id ? frontIndex[String(event.event_id)] : undefined;
-      const location = locationLabel(event, lat, lon);
+      const cacheKey = coordinateKey(lat, lon);
+      const geocoded = cacheKey ? resolvedGeocodesRef.current[cacheKey] : null;
+      const location = locationLabel(event, geocoded);
       const requestContext = {
         eventId: event.event_id ? String(event.event_id) : undefined,
         eventKey,
@@ -220,8 +336,10 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
           {topFires.map((event, index) => {
             const lat = safeNumber(event.lat);
             const lon = safeNumber(event.lon);
-            const loc = locationLabel(event, lat, lon);
-            const score = severity(event);
+            const key = coordinateKey(lat, lon);
+            const geocoded = key ? resolvedGeocodes[key] : null;
+            const loc = locationLabel(event, geocoded);
+            const intensity = primaryIntensity(event);
             const canSelect = lat !== null && lon !== null;
 
             return (
@@ -276,7 +394,7 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
                       }}
                     />
                     <Typography sx={{ fontSize: 12, color: "#fff", fontWeight: 700 }}>
-                      SCORE: {score.toFixed(3)} • DETECTIONS: {Number(event.detection_count || 0)}
+                      {intensity ? `${intensity.label.toUpperCase()}: ${formatIntensity(intensity.value, intensity.unit)}` : "INTENSITY: n/a"}
                     </Typography>
                   </Box>
                   <ChevronRightIcon sx={{ fontSize: 16, color: "#4b5563" }} />
@@ -304,8 +422,12 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
     sameEventCompleted
   });
 
-  const loc = locationLabel(selectedEvent, lat, lon);
+  const selectedKey = coordinateKey(lat, lon);
+  const selectedGeocoded = selectedKey ? resolvedGeocodes[selectedKey] : null;
+  const loc = locationLabel(selectedEvent, selectedGeocoded);
+  const intensity = primaryIntensity(selectedEvent);
   const score = severity(selectedEvent);
+  const provenance = geometryProvenanceLabel(selectedEvent);
 
   return (
     <Box
@@ -365,11 +487,32 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
                 Event Selected
               </Typography>
               <Typography sx={{ fontSize: 21, fontWeight: 800, color: "#fff", lineHeight: 1.1 }}>{loc}</Typography>
+              <Typography
+                sx={{
+                  mt: 0.75,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  px: 0.9,
+                  py: 0.3,
+                  borderRadius: 999,
+                  bgcolor: provenance === "Authoritative perimeter" ? "rgba(34,197,94,0.18)" : "rgba(59,130,246,0.2)",
+                  border: provenance === "Authoritative perimeter" ? "1px solid rgba(34,197,94,0.45)" : "1px solid rgba(59,130,246,0.5)",
+                  color: provenance === "Authoritative perimeter" ? "#86efac" : "#93c5fd",
+                  fontSize: 10,
+                  fontWeight: 800,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase"
+                }}
+              >
+                {provenance}
+              </Typography>
             </Box>
             <Box sx={{ textAlign: "right" }}>
-              <Typography sx={{ fontSize: 30, fontWeight: 900, color: "#fff", lineHeight: 0.95 }}>{score.toFixed(3)}</Typography>
+              <Typography sx={{ fontSize: 30, fontWeight: 900, color: "#fff", lineHeight: 0.95 }}>
+                {intensity ? formatIntensity(intensity.value, intensity.unit) : "n/a"}
+              </Typography>
               <Typography sx={{ fontSize: 10, color: "#4b5563", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", mt: 0.4 }}>
-                Event Score
+                {intensity ? intensity.label : "Fire Intensity"}
               </Typography>
             </Box>
           </Box>
@@ -385,10 +528,10 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
             </Box>
             <Box sx={{ p: 1.2, bgcolor: "#0d1117", borderRadius: 1.7, border: "1px solid rgba(255,255,255,0.08)" }}>
               <Typography sx={{ fontSize: 10, color: "#4b5563", fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase", mb: 0.4 }}>
-                Detections
+                Event Score
               </Typography>
               <Typography sx={{ fontSize: 12, fontWeight: 800, color: "#fff" }}>
-                {Number(selectedEvent.detection_count || 0)}
+                {score.toFixed(3)}
               </Typography>
             </Box>
           </Box>
@@ -425,6 +568,10 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
             <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>
               {String(selectedEvent.source || "unknown")} • {String(selectedEvent.sensor || "unknown")}
             </Typography>
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
+            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Detections</Typography>
+            <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>{Number(selectedEvent.detection_count || 0)}</Typography>
           </Box>
           <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
             <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Window</Typography>

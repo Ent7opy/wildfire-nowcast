@@ -8,6 +8,7 @@ import type {
   FrontsResponse,
   JitCreateResponse,
   JitForecastStatus,
+  ReverseGeocodeResponse,
   RiskFeatureCollection
 } from "../types/api";
 
@@ -234,6 +235,17 @@ export async function getFireFronts(args: {
       include_review_required: args.includeReviewRequired,
       limit: args.limit
     },
+    { slowPath: true }
+  );
+}
+
+export async function getReverseGeocode(args: {
+  lat: number;
+  lon: number;
+}): Promise<ReverseGeocodeResponse> {
+  return getJson<ReverseGeocodeResponse>(
+    "/fires/reverse-geocode",
+    { lat: args.lat, lon: args.lon },
     { slowPath: true }
   );
 }

@@ -124,6 +124,43 @@ class AppSettings(BaseSettings):
         validation_alias="DATA_STATUS_CRITICAL_SOURCES",
     )
 
+    # Reverse geocoding settings (open Nominatim by default)
+    geocoding_enabled: bool = Field(
+        default=True, validation_alias="GEOCODING_ENABLED"
+    )
+    geocoding_provider: str = Field(
+        default="nominatim", validation_alias="GEOCODING_PROVIDER"
+    )
+    geocoding_nominatim_base_url: str = Field(
+        default="https://nominatim.openstreetmap.org",
+        validation_alias="GEOCODING_NOMINATIM_BASE_URL",
+    )
+    geocoding_user_agent: str = Field(
+        default="wildfire-nowcast/0.1",
+        validation_alias="GEOCODING_USER_AGENT",
+    )
+    geocoding_email: str | None = Field(
+        default=None, validation_alias="GEOCODING_EMAIL"
+    )
+    geocoding_timeout_seconds: float = Field(
+        default=5.0, ge=0.5, le=30.0, validation_alias="GEOCODING_TIMEOUT_SECONDS"
+    )
+    geocoding_min_interval_seconds: float = Field(
+        default=1.0, ge=0.0, le=60.0, validation_alias="GEOCODING_MIN_INTERVAL_SECONDS"
+    )
+    geocoding_cache_ttl_hours: int = Field(
+        default=24 * 14, ge=1, le=24 * 365, validation_alias="GEOCODING_CACHE_TTL_HOURS"
+    )
+    geocoding_cache_precision: int = Field(
+        default=2, ge=0, le=6, validation_alias="GEOCODING_CACHE_PRECISION"
+    )
+    geocoding_zoom: int = Field(
+        default=6, ge=3, le=18, validation_alias="GEOCODING_ZOOM"
+    )
+    geocoding_accept_language: str = Field(
+        default="en", validation_alias="GEOCODING_ACCEPT_LANGUAGE"
+    )
+
     @property
     def data_status_critical_sources_set(self) -> set[str]:
         return {
