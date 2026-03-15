@@ -368,7 +368,8 @@ export default function App(): JSX.Element {
                       borderRadius: 2,
                       fontSize: 12,
                       color: "#e5e7eb"
-                    }
+                    },
+                    "& input": { colorScheme: "light" }
                   }}
                 />
                 <Box sx={{ display: "flex", gap: 0.5 }}>
@@ -494,7 +495,7 @@ export default function App(): JSX.Element {
           </Box>
         </Box>
 
-        <DataFreshnessBanner />
+        {!isArchiveMode && <DataFreshnessBanner />}
         <ForecastNotification />
 
         <Box

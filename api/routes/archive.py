@@ -74,6 +74,7 @@ def _run_archive_ingest(date_str: str, timeframe: str) -> None:
     exit_code = run_firms_ingest(day_range=day_range, area=None, sources=None)
     if exit_code != 0:
         logger.error("Archive FIRMS ingest exited with code %d", exit_code)
+        raise RuntimeError(f"FIRMS ingest failed with exit code {exit_code}")
 
 
 @archive_router.get("/fires/archive/availability", response_model=ArchiveAvailabilityResponse)
