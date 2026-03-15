@@ -44,6 +44,7 @@ import {
 } from "../map/layerUtils";
 import { computeTimeRange } from "../utils/time";
 import { eventLimitForZoom, frontLimitForZoom, shouldLoadFronts, shouldRenderCentroids, viewportBbox } from "../utils/mapMath";
+import { useDebounce } from "../hooks/useDebounce";
 import { selectionViewFromBounds } from "../utils/mapSelection";
 
 const BASEMAP_DARK = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
@@ -130,12 +131,13 @@ export default function FireMap({
 
   const [layersPanelAnchor, setLayersPanelAnchor] = useState<HTMLElement | null>(null);
 
-  const bbox = useMemo(() => viewportBbox(mapView), [mapView]);
+  const debouncedMapView = useDebounce(mapView, 400);
+  const bbox = useMemo(() => viewportBbox(debouncedMapView), [debouncedMapView]);
   const timeRange = useMemo(() => computeTimeRange(filters), [filters]);
   const normalizedSearch = searchQuery.trim().toLowerCase();
 
   const eventsQuery = useQuery({
-    queryKey: ["fire-events", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, filters.clusterPoints, mapView.zoom],
+    queryKey: ["fire-events", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, filters.clusterPoints, debouncedMapView.zoom],
     queryFn: () =>
       getFireEvents({
         bbox,
@@ -143,13 +145,13 @@ export default function FireMap({
         endTime: timeRange.endTime,
         minEventScore: filters.minLikelihood,
         includeReviewRequired: true,
-        limit: eventLimitForZoom(mapView.zoom)
+        limit: eventLimitForZoom(debouncedMapView.zoom)
       }),
     placeholderData: (prev) => prev
   });
 
   const frontsQuery = useQuery({
-    queryKey: ["fire-fronts", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, mapView.zoom],
+    queryKey: ["fire-fronts", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, debouncedMapView.zoom],
     queryFn: () =>
       getFireFronts({
         bbox,
@@ -157,9 +159,9 @@ export default function FireMap({
         endTime: timeRange.endTime,
         minEventScore: filters.minLikelihood,
         includeReviewRequired: true,
-        limit: frontLimitForZoom(mapView.zoom)
+        limit: frontLimitForZoom(debouncedMapView.zoom)
       }),
-    enabled: shouldLoadFronts(mapView.zoom),
+    enabled: shouldLoadFronts(debouncedMapView.zoom),
     placeholderData: (prev) => prev
   });
 
