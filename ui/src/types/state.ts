@@ -97,3 +97,22 @@ export interface AssistantViewContext {
   filteredEventCount: number;
   topEvents: AssistantViewEventSummary[];
 }
+
+export type SafetyTier = 'SAFE' | 'WATCH' | 'WARNING' | 'DANGER';
+
+export interface UserLocationState {
+  lat: number;
+  lon: number;
+  accuracyM: number;
+  acquiredAt: number;
+}
+
+export interface SafetyModeState {
+  enabled: boolean;
+  userLocation: UserLocationState | null;
+  locationPermission: 'unknown' | 'granted' | 'denied' | 'requesting';
+  proximityRadiusKm: number;
+  nearestFireDistanceKm: number | null;
+  safetyTier: SafetyTier;
+  pendingBriefingPrompt: string | null;
+}

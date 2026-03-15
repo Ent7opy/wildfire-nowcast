@@ -26,8 +26,11 @@ import DataFreshnessBanner from "./components/DataFreshnessBanner";
 import FireDetailsPanel from "./components/FireDetailsPanel";
 import FireMap from "./components/FireMap";
 import ForecastNotification from "./components/ForecastNotification";
+import SafetyStatusBar from "./components/SafetyStatusBar";
 import { useArchiveData } from "./hooks/useArchiveData";
 import { useForecastPolling } from "./hooks/useForecastPolling";
+import { useGeolocation } from "./hooks/useGeolocation";
+import { useSafetyMetrics } from "./hooks/useSafetyMetrics";
 import { useAppStore } from "./state/store";
 import type { FireEvent } from "./types/api";
 import type {
@@ -35,6 +38,7 @@ import type {
   AssistantConfidenceFilter,
   AssistantViewEventSummary
 } from "./types/state";
+import { eventsWithinRadius } from "./utils/geo";
 import { TIMEFRAME_DEFS } from "./utils/time";
 
 const HIGH_CONFIDENCE_THRESHOLD = 0.6;
@@ -141,11 +145,18 @@ export default function App(): JSX.Element {
   const exitToLiveMode = useAppStore((s) => s.exitToLiveMode);
   const setArchiveDate = useAppStore((s) => s.setArchiveDate);
   const setArchiveTimeframe = useAppStore((s) => s.setArchiveTimeframe);
+  const safety = useAppStore((s) => s.safety);
+  const enableSafetyMode = useAppStore((s) => s.enableSafetyMode);
+  const disableSafetyMode = useAppStore((s) => s.disableSafetyMode);
+  const focusMapOnPoint = useAppStore((s) => s.focusMapOnPoint);
 
   const isArchiveMode = archive.viewMode === "archive";
+  const isSafetyMode = safety.enabled;
   const archiveData = useArchiveData();
+  const { requestLocation } = useGeolocation();
 
   useForecastPolling();
+  useSafetyMetrics(visibleEvents);
 
   const filteredEvents = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -211,6 +222,25 @@ export default function App(): JSX.Element {
     visibleEvents.length
   ]);
 
+  // Auto-pan to user location when safety mode is enabled and GPS acquired
+  useEffect(() => {
+    if (isSafetyMode && safety.userLocation) {
+      focusMapOnPoint(safety.userLocation.lat, safety.userLocation.lon, 7);
+    }
+  }, [isSafetyMode, safety.userLocation?.lat, safety.userLocation?.lon, focusMapOnPoint]);
+
+  // Auto-request location when safety mode is first enabled
+  useEffect(() => {
+    if (isSafetyMode && safety.locationPermission === 'unknown') {
+      requestLocation();
+    }
+  }, [isSafetyMode, safety.locationPermission, requestLocation]);
+
+  const nearbyEvents = useMemo(() => {
+    if (!isSafetyMode || !safety.userLocation) return [];
+    return eventsWithinRadius(safety.userLocation.lat, safety.userLocation.lon, safety.proximityRadiusKm, filteredEvents);
+  }, [isSafetyMode, safety.userLocation, safety.proximityRadiusKm, filteredEvents]);
+
   const maxIntensityFrp = useMemo(() => {
     if (filteredEvents.length === 0) return null;
     const frpValues = filteredEvents
@@ -239,7 +269,43 @@ export default function App(): JSX.Element {
     { label: "Context", value: "ARCHIVE", unit: "", icon: PublicIcon, color: "#4ade80" }
   ];
 
-  const stats: StatCard[] = isArchiveMode ? archiveStats : liveStats;
+  const SAFETY_TIER_COLORS: Record<string, string> = {
+    SAFE: "#22c55e", WATCH: "#eab308", WARNING: "#f97316", DANGER: "#ef4444"
+  };
+  const tierColor = SAFETY_TIER_COLORS[safety.safetyTier] ?? "#6b7280";
+
+  const safetyStats: StatCard[] = [
+    {
+      label: "Nearest Fire",
+      value: safety.nearestFireDistanceKm !== null ? formatStatValue(safety.nearestFireDistanceKm, 1) : "—",
+      unit: "km",
+      icon: LocalFireDepartmentIcon,
+      color: tierColor
+    },
+    {
+      label: "Fires in Radius",
+      value: formatStatValue(nearbyEvents.length),
+      unit: "",
+      icon: QueryStatsIcon,
+      color: "#f97316"
+    },
+    {
+      label: "Risk Level",
+      value: safety.safetyTier,
+      unit: "",
+      icon: PublicIcon,
+      color: tierColor
+    },
+    {
+      label: "Radius",
+      value: formatStatValue(safety.proximityRadiusKm),
+      unit: "km",
+      icon: ShowChartIcon,
+      color: "#60a5fa"
+    }
+  ];
+
+  const stats: StatCard[] = isSafetyMode ? safetyStats : isArchiveMode ? archiveStats : liveStats;
 
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "#010409", color: "#d1d5db" }}>
@@ -314,6 +380,30 @@ export default function App(): JSX.Element {
                 }}
               >
                 Historical Archive
+              </Box>
+              {/* Personal Safety Mode badge — clickable */}
+              <Box
+                component="button"
+                onClick={() => isSafetyMode ? disableSafetyMode() : enableSafetyMode()}
+                sx={{
+                  px: 1,
+                  py: 0.4,
+                  borderRadius: 1,
+                  cursor: "pointer",
+                  border: isSafetyMode
+                    ? "1px solid rgba(239,68,68,0.5)"
+                    : "1px dashed rgba(239,68,68,0.25)",
+                  bgcolor: isSafetyMode ? "rgba(239,68,68,0.12)" : "transparent",
+                  color: isSafetyMode ? "#f87171" : "rgba(248,113,113,0.45)",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                  transition: "all 0.15s",
+                  "&:hover": { opacity: 0.8 }
+                }}
+              >
+                Personal Safety
               </Box>
               <Box
                 sx={{
@@ -496,6 +586,13 @@ export default function App(): JSX.Element {
 
         <DataFreshnessBanner />
         <ForecastNotification />
+        {isSafetyMode && (
+          <SafetyStatusBar
+            onDisable={disableSafetyMode}
+            onLocate={requestLocation}
+            nearbyCount={nearbyEvents.length}
+          />
+        )}
 
         <Box
           sx={{

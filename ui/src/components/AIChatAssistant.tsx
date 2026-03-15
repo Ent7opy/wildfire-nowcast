@@ -10,7 +10,7 @@ import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import SendIcon from "@mui/icons-material/Send";
 import ReactMarkdown from "react-markdown";
 
-import { EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT } from "../config/assistant";
+import { EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT, SAFETY_ASSISTANT_SYSTEM_PROMPT } from "../config/assistant";
 import { useAppStore } from "../state/store";
 import type { FireEvent } from "../types/api";
 import { computeTimeRange } from "../utils/time";
@@ -87,7 +87,11 @@ export default function AIChatAssistant(): JSX.Element {
   const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_MESSAGE]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [autoBriefing, setAutoBriefing] = useState<string | null>(null);
+  const [isBriefing, setIsBriefing] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const lastBriefedEventId = useRef<string | null>(null);
+  const lastBriefedPrompt = useRef<string | null>(null);
 
   const selectedEvent = useAppStore((s) => s.selectedEvent);
   const filters = useAppStore((s) => s.filters);
@@ -96,6 +100,9 @@ export default function AIChatAssistant(): JSX.Element {
   const activePreset = useAppStore((s) => s.activePreset);
   const forecast = useAppStore((s) => s.forecast);
   const assistantViewContext = useAppStore((s) => s.assistantViewContext);
+  const safety = useAppStore((s) => s.safety);
+  const clearAssistantBriefingPrompt = useAppStore((s) => s.clearAssistantBriefingPrompt);
+  const isSafetyMode = safety.enabled;
 
   const geminiApiBaseUrl = String(import.meta.env.VITE_GEMINI_API_BASE_URL || "https://generativelanguage.googleapis.com/v1beta").trim();
   const geminiModel = String(import.meta.env.VITE_GEMINI_MODEL || "gemini-2.5-flash").trim();
@@ -151,6 +158,67 @@ export default function AIChatAssistant(): JSX.Element {
     }),
     [activePreset, assistantViewContext, eventContext, filters, forecast, layers, mapView, timeRange]
   );
+
+  const triggerBriefing = async (prompt: string): Promise<void> => {
+    if (!assistantConfigured || isBriefing) return;
+    setIsBriefing(true);
+    setAutoBriefing(null);
+    try {
+      const systemPrompt = isSafetyMode ? SAFETY_ASSISTANT_SYSTEM_PROMPT : EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT;
+      const response = await fetch(
+        `${geminiApiBaseUrl}/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{
+              role: "user",
+              parts: [{
+                text: [
+                  "Use the following wildfire dashboard context as the source of truth.",
+                  `DASHBOARD_CONTEXT_JSON: ${JSON.stringify(viewingContext)}`,
+                  `BRIEFING_REQUEST: ${prompt}`
+                ].join("\n")
+              }]
+            }],
+            generationConfig: { temperature: 0.4 }
+          })
+        }
+      );
+      if (!response.ok) throw new Error(`briefing call failed with ${response.status}`);
+      const payload = (await response.json()) as unknown;
+      const reply = extractReply(payload);
+      if (reply) setAutoBriefing(reply);
+    } catch {
+      // Silently fail for auto-briefings — don't disrupt UX
+    } finally {
+      setIsBriefing(false);
+    }
+  };
+
+  // Auto-briefing when a new event is selected
+  useEffect(() => {
+    if (!selectedEvent || !assistantConfigured) return;
+    const eventId = String(selectedEvent.event_id ?? "");
+    if (!eventId || eventId === lastBriefedEventId.current) return;
+    lastBriefedEventId.current = eventId;
+    const prompt = isSafetyMode
+      ? "Give a 2-sentence safety briefing for this fire. Plain language only: risk level and what the person should do right now."
+      : "Give a 2-sentence analyst briefing: fire behavior context, intensity interpretation, and spread risk.";
+    void triggerBriefing(prompt);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEvent?.event_id]);
+
+  // Watch for imperatively requested briefings (from FireDetailsPanel "Get Safety Info")
+  useEffect(() => {
+    const prompt = safety.pendingBriefingPrompt;
+    if (!prompt || prompt === lastBriefedPrompt.current) return;
+    lastBriefedPrompt.current = prompt;
+    clearAssistantBriefingPrompt();
+    void triggerBriefing(prompt);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [safety.pendingBriefingPrompt]);
 
   useEffect(() => {
     if (!scrollRef.current) {
@@ -245,9 +313,9 @@ export default function AIChatAssistant(): JSX.Element {
     >
       <Box sx={{ px: 2, py: 1.5, borderBottom: "1px solid rgba(255,255,255,0.08)", bgcolor: "#161b22", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.9 }}>
-          <ChatBubbleOutlineIcon sx={{ fontSize: 16, color: "#f97316" }} />
+          <ChatBubbleOutlineIcon sx={{ fontSize: 16, color: isSafetyMode ? "#ef4444" : "#f97316" }} />
           <Typography sx={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", color: "#fff" }}>
-            Ecological Assistant
+            {isSafetyMode ? "Safety Assistant" : "Fire Analyst"}
           </Typography>
         </Box>
 
@@ -276,6 +344,30 @@ export default function AIChatAssistant(): JSX.Element {
       )}
 
       <Box ref={scrollRef} sx={{ flex: 1, overflowY: "auto", p: 2, display: "flex", flexDirection: "column", gap: 1.2 }}>
+        {/* AI Briefing card — shown above chat thread when a briefing is available */}
+        {(isBriefing || autoBriefing) && (
+          <Box
+            sx={{
+              p: 1.5,
+              borderRadius: 2,
+              bgcolor: isSafetyMode ? "rgba(239,68,68,0.08)" : "rgba(59,130,246,0.08)",
+              border: `1px solid ${isSafetyMode ? "rgba(239,68,68,0.25)" : "rgba(59,130,246,0.25)"}`,
+              mb: 0.5
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, mb: 0.75 }}>
+              <Box sx={{ width: 5, height: 5, borderRadius: "50%", bgcolor: isSafetyMode ? "#ef4444" : "#60a5fa" }} />
+              <Typography sx={{ fontSize: 9, fontWeight: 900, letterSpacing: "0.14em", textTransform: "uppercase", color: isSafetyMode ? "#f87171" : "#93c5fd" }}>
+                AI Briefing
+              </Typography>
+            </Box>
+            {isBriefing
+              ? <CircularProgress size={14} sx={{ color: isSafetyMode ? "#ef4444" : "#60a5fa" }} />
+              : <Typography sx={{ fontSize: 12, color: "#d1d5db", lineHeight: 1.6, fontStyle: "italic" }}>{autoBriefing}</Typography>
+            }
+          </Box>
+        )}
+
         {messages.map((message, index) => (
           <Box key={`${message.role}-${index}`} sx={{ display: "flex", justifyContent: message.role === "user" ? "flex-end" : "flex-start" }}>
             <Box
@@ -321,7 +413,7 @@ export default function AIChatAssistant(): JSX.Element {
             value={input}
             fullWidth
             size="small"
-            placeholder="Ask AI about this region..."
+            placeholder={isSafetyMode ? "Ask about safety, evacuation, risk..." : "Ask AI about this region..."}
             onChange={(event) => setInput(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {

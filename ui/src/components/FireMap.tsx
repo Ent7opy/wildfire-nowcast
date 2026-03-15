@@ -19,11 +19,14 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
+import GpsFixedIcon from "@mui/icons-material/GpsFixed";
 import ReplayIcon from "@mui/icons-material/Replay";
 import MapOutlinedIcon from "@mui/icons-material/MapOutlined";
 import PublicIcon from "@mui/icons-material/Public";
 import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
 import { normalizePickedEvent } from "../utils/selection";
+import { buildUserLocationLayers } from "../utils/userLocationLayers";
+import { useGeolocation } from "../hooks/useGeolocation";
 import { useQuery } from "@tanstack/react-query";
 import type { Feature } from "geojson";
 
@@ -125,6 +128,8 @@ export default function FireMap({
   const forecast = useAppStore((s) => s.forecast);
   const selectedEvent = useAppStore((s) => s.selectedEvent);
   const archive = useAppStore((s) => s.archive);
+  const safety = useAppStore((s) => s.safety);
+  const { requestLocation } = useGeolocation();
   const setMapView = useAppStore((s) => s.setMapView);
   const setSelectedEvent = useAppStore((s) => s.setSelectedEvent);
   const setLastClick = useAppStore((s) => s.setLastClick);
@@ -458,6 +463,12 @@ export default function FireMap({
       );
     }
 
+    // User location layers (safety mode)
+    if (safety.enabled && safety.userLocation) {
+      const locationLayers = buildUserLocationLayers(safety.userLocation, safety.proximityRadiusKm);
+      deckLayers.push(...locationLayers);
+    }
+
     return deckLayers;
   }, [
     filters.clusterPoints,
@@ -469,6 +480,9 @@ export default function FireMap({
     mapView.zoom,
     normalizedEvents,
     riskQuery.data,
+    safety.enabled,
+    safety.userLocation,
+    safety.proximityRadiusKm,
     selectedEventId,
     selectedEventFeature,
     selectedFrontFeatures,
@@ -601,6 +615,22 @@ export default function FireMap({
       </Box>
 
       <Box sx={{ position: "absolute", top: 12, right: 12, display: "flex", flexDirection: "column", gap: 1, zIndex: 11 }}>
+        {safety.enabled && (
+          <Tooltip title={safety.locationPermission === 'granted' ? "Location active" : "Find my location"}>
+            <IconButton
+              size="small"
+              onClick={requestLocation}
+              sx={{
+                bgcolor: safety.userLocation ? "rgba(59,130,246,0.18)" : "#161b22",
+                border: `1px solid ${safety.userLocation ? "rgba(59,130,246,0.5)" : "rgba(255,255,255,0.1)"}`,
+                color: safety.userLocation ? "#60a5fa" : "#9ca3af",
+                pointerEvents: "auto"
+              }}
+            >
+              <GpsFixedIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
+        )}
         <Tooltip title="Settings">
           <IconButton
             size="small"
