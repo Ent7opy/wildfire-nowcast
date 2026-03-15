@@ -85,7 +85,7 @@ function updatePreset(filters: FiltersState): string {
   return matchingPreset(filters) || "Custom";
 }
 
-export const useAppStore = create<AppStoreState>((set, _get) => ({
+export const useAppStore = create<AppStoreState>((set) => ({
   filters: DEFAULT_FILTERS,
   layers: DEFAULT_LAYERS,
   mapView: DEFAULT_MAP_VIEW,
