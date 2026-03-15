@@ -254,7 +254,7 @@ function NewsCard({ item, expanded = false }: { item: GdeltArticle; expanded?: b
       }}
     >
       {item.socialimage && (
-        <Box sx={{ position: "relative", height: expanded ? 140 : 80, overflow: "hidden" }}>
+        <Box sx={{ position: "relative", height: expanded ? 140 : 110, overflow: "hidden" }}>
           <Box
             component="img"
             src={item.socialimage}
