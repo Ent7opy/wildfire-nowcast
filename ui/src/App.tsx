@@ -2,15 +2,23 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Box,
   Button,
+  CircularProgress,
   InputAdornment,
   Paper,
   TextField,
+  Tooltip,
   Typography
 } from "@mui/material";
+import AccessTimeIcon from "@mui/icons-material/AccessTime";
+import Brightness3Icon from "@mui/icons-material/Brightness3";
 import LocalFireDepartmentIcon from "@mui/icons-material/LocalFireDepartment";
 import PublicIcon from "@mui/icons-material/Public";
 import QueryStatsIcon from "@mui/icons-material/QueryStats";
 import SearchIcon from "@mui/icons-material/Search";
+import ShowChartIcon from "@mui/icons-material/ShowChart";
+import SunriseIcon from "@mui/icons-material/WbTwilight";
+import SunsetIcon from "@mui/icons-material/Nightlight";
+import SunIcon from "@mui/icons-material/WbSunny";
 import VerifiedIcon from "@mui/icons-material/Verified";
 
 import AIChatAssistant from "./components/AIChatAssistant";
@@ -18,13 +26,16 @@ import DataFreshnessBanner from "./components/DataFreshnessBanner";
 import FireDetailsPanel from "./components/FireDetailsPanel";
 import FireMap from "./components/FireMap";
 import ForecastNotification from "./components/ForecastNotification";
+import { useArchiveData } from "./hooks/useArchiveData";
 import { useForecastPolling } from "./hooks/useForecastPolling";
 import { useAppStore } from "./state/store";
 import type { FireEvent } from "./types/api";
 import type {
+  ArchiveTimeframe,
   AssistantConfidenceFilter,
   AssistantViewEventSummary
 } from "./types/state";
+import { TIMEFRAME_DEFS } from "./utils/time";
 
 const HIGH_CONFIDENCE_THRESHOLD = 0.6;
 
@@ -113,11 +124,26 @@ function toEventSummary(event: FireEvent): AssistantViewEventSummary {
   };
 }
 
+const TIMEFRAME_ICONS: Record<ArchiveTimeframe, React.ElementType> = {
+  morning: SunriseIcon,
+  afternoon: SunIcon,
+  evening: SunsetIcon,
+  night: Brightness3Icon,
+};
+
 export default function App(): JSX.Element {
   const [visibleEvents, setVisibleEvents] = useState<FireEvent[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [confidenceFilter, setConfidenceFilter] = useState<AssistantConfidenceFilter>("All");
   const setAssistantViewContext = useAppStore((s) => s.setAssistantViewContext);
+  const archive = useAppStore((s) => s.archive);
+  const enterArchiveMode = useAppStore((s) => s.enterArchiveMode);
+  const exitToLiveMode = useAppStore((s) => s.exitToLiveMode);
+  const setArchiveDate = useAppStore((s) => s.setArchiveDate);
+  const setArchiveTimeframe = useAppStore((s) => s.setArchiveTimeframe);
+
+  const isArchiveMode = archive.viewMode === "archive";
+  const archiveData = useArchiveData();
 
   useForecastPolling();
 
@@ -185,36 +211,35 @@ export default function App(): JSX.Element {
     visibleEvents.length
   ]);
 
-  const stats = [
-    {
-      label: "Total Detections",
-      value: formatStatValue(totalDetections),
-      unit: "",
-      icon: QueryStatsIcon,
-      color: "#f97316"
-    },
-    {
-      label: "Active Perimeters",
-      value: formatStatValue(activePerimeters),
-      unit: "",
-      icon: LocalFireDepartmentIcon,
-      color: "#ef4444"
-    },
-    {
-      label: "Avg Event Score",
-      value: averageScore === null ? "n/a" : formatStatValue(averageScore, 3),
-      unit: "0-1",
-      icon: PublicIcon,
-      color: "#60a5fa"
-    },
-    {
-      label: "High Confidence",
-      value: confidencePercent === null ? "n/a" : formatStatValue(confidencePercent, 1),
-      unit: "%",
-      icon: VerifiedIcon,
-      color: "#4ade80"
-    }
-  ] as const;
+  const maxIntensityFrp = useMemo(() => {
+    if (filteredEvents.length === 0) return null;
+    const frpValues = filteredEvents
+      .map((e) => toFiniteNumber(e.frp_max))
+      .filter((v): v is number => v !== null);
+    return frpValues.length > 0 ? Math.max(...frpValues) : null;
+  }, [filteredEvents]);
+
+  const activeTimeframeDef = isArchiveMode
+    ? TIMEFRAME_DEFS.find((d) => d.id === archive.archiveTimeframe) ?? TIMEFRAME_DEFS[1]
+    : null;
+
+  type StatCard = { label: string; value: string; unit: string; icon: React.ElementType; color: string };
+
+  const liveStats: StatCard[] = [
+    { label: "Total Detections", value: formatStatValue(totalDetections), unit: "", icon: QueryStatsIcon, color: "#f97316" },
+    { label: "Active Perimeters", value: formatStatValue(activePerimeters), unit: "", icon: LocalFireDepartmentIcon, color: "#ef4444" },
+    { label: "Avg Event Score", value: averageScore === null ? "n/a" : formatStatValue(averageScore, 3), unit: "0-1", icon: PublicIcon, color: "#60a5fa" },
+    { label: "High Confidence", value: confidencePercent === null ? "n/a" : formatStatValue(confidencePercent, 1), unit: "%", icon: VerifiedIcon, color: "#4ade80" }
+  ];
+
+  const archiveStats: StatCard[] = [
+    { label: "Time Filter", value: activeTimeframeDef?.label ?? "—", unit: "", icon: activeTimeframeDef ? TIMEFRAME_ICONS[activeTimeframeDef.id] : AccessTimeIcon, color: "#60a5fa" },
+    { label: "Active Events", value: formatStatValue(filteredEvents.length), unit: "", icon: ShowChartIcon, color: "#f97316" },
+    { label: "Max Intensity", value: maxIntensityFrp === null ? "n/a" : formatStatValue(maxIntensityFrp), unit: "MW", icon: LocalFireDepartmentIcon, color: "#ef4444" },
+    { label: "Context", value: "ARCHIVE", unit: "", icon: PublicIcon, color: "#4ade80" }
+  ];
+
+  const stats: StatCard[] = isArchiveMode ? archiveStats : liveStats;
 
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "#010409", color: "#d1d5db" }}>
@@ -241,22 +266,54 @@ export default function App(): JSX.Element {
           }}
         >
           <Box>
-            <Box sx={{ display: "flex", gap: 1, mb: 1.25, flexWrap: "wrap" }}>
+            <Box sx={{ display: "flex", gap: 1, mb: 1.25, flexWrap: "wrap", alignItems: "center" }}>
+              {/* Live Nowcast badge — clickable */}
               <Box
+                component="button"
+                onClick={exitToLiveMode}
                 sx={{
                   px: 1,
                   py: 0.4,
                   borderRadius: 1,
-                  bgcolor: "rgba(249,115,22,0.12)",
-                  border: "1px solid rgba(249,115,22,0.25)",
-                  color: "#f97316",
+                  cursor: "pointer",
+                  border: isArchiveMode
+                    ? "1px dashed rgba(249,115,22,0.25)"
+                    : "1px solid rgba(249,115,22,0.5)",
+                  bgcolor: isArchiveMode ? "transparent" : "rgba(249,115,22,0.12)",
+                  color: isArchiveMode ? "rgba(249,115,22,0.45)" : "#f97316",
                   fontSize: 10,
                   fontWeight: 700,
                   letterSpacing: "0.14em",
-                  textTransform: "uppercase"
+                  textTransform: "uppercase",
+                  transition: "all 0.15s",
+                  "&:hover": { opacity: 0.8 }
                 }}
               >
                 Live Nowcast
+              </Box>
+              {/* Historical Archive badge — clickable */}
+              <Box
+                component="button"
+                onClick={enterArchiveMode}
+                sx={{
+                  px: 1,
+                  py: 0.4,
+                  borderRadius: 1,
+                  cursor: "pointer",
+                  border: isArchiveMode
+                    ? "1px solid rgba(59,130,246,0.5)"
+                    : "1px dashed rgba(59,130,246,0.25)",
+                  bgcolor: isArchiveMode ? "rgba(59,130,246,0.12)" : "transparent",
+                  color: isArchiveMode ? "#60a5fa" : "rgba(96,165,250,0.45)",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                  transition: "all 0.15s",
+                  "&:hover": { opacity: 0.8 }
+                }}
+              >
+                Historical Archive
               </Box>
               <Box
                 sx={{
@@ -276,12 +333,94 @@ export default function App(): JSX.Element {
               </Box>
             </Box>
 
-            <Typography variant="h3" sx={{ color: "#fff", fontWeight: 800, lineHeight: 1.05, letterSpacing: "-0.02em", mb: 0.8 }}>
-              Wildfire Nowcast
-            </Typography>
-            <Typography sx={{ color: "#6b7280", maxWidth: 650, fontSize: 14, lineHeight: 1.65 }}>
-              Global thermal anomalies from NASA FIRMS with denoiser-scored event confidence and live spread context.
-            </Typography>
+            {/* Title */}
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.8 }}>
+              {isArchiveMode && <AccessTimeIcon sx={{ color: "#60a5fa", fontSize: 28 }} />}
+              <Typography variant="h3" sx={{ color: "#fff", fontWeight: 800, lineHeight: 1.05, letterSpacing: "-0.02em" }}>
+                {isArchiveMode ? "Wildfire Snapshot" : "Wildfire Nowcast"}
+              </Typography>
+            </Box>
+
+            {/* Subtitle */}
+            {isArchiveMode ? (
+              <Typography sx={{ color: "#6b7280", maxWidth: 650, fontSize: 14, lineHeight: 1.65 }}>
+                Viewing Archive for {archive.archiveDate ?? "—"}. Quadrant:{" "}
+                {activeTimeframeDef?.label ?? "—"}.
+              </Typography>
+            ) : (
+              <Typography sx={{ color: "#6b7280", maxWidth: 650, fontSize: 14, lineHeight: 1.65 }}>
+                Global thermal anomalies from NASA FIRMS with denoiser-scored event confidence and live spread context.
+              </Typography>
+            )}
+
+            {/* Archive date + timeframe controls */}
+            {isArchiveMode && (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mt: 1.5, flexWrap: "wrap" }}>
+                <TextField
+                  type="date"
+                  size="small"
+                  value={archive.archiveDate ?? ""}
+                  onChange={(e) => setArchiveDate(e.target.value)}
+                  inputProps={{ max: new Date().toISOString().slice(0, 10) }}
+                  sx={{
+                    "& .MuiOutlinedInput-root": {
+                      bgcolor: "#0d1117",
+                      borderRadius: 2,
+                      fontSize: 12,
+                      color: "#e5e7eb"
+                    }
+                  }}
+                />
+                <Box sx={{ display: "flex", gap: 0.5 }}>
+                  {TIMEFRAME_DEFS.map((def) => {
+                    const Icon = TIMEFRAME_ICONS[def.id];
+                    const isSelected = archive.archiveTimeframe === def.id;
+                    return (
+                      <Tooltip key={def.id} title={def.label}>
+                        <Box
+                          component="button"
+                          onClick={() => setArchiveTimeframe(def.id)}
+                          sx={{
+                            p: 0.8,
+                            borderRadius: 1.5,
+                            border: isSelected ? "1px solid rgba(59,130,246,0.6)" : "1px solid rgba(255,255,255,0.1)",
+                            bgcolor: isSelected ? "rgba(59,130,246,0.15)" : "#0d1117",
+                            color: isSelected ? "#60a5fa" : "#6b7280",
+                            cursor: "pointer",
+                            display: "flex",
+                            alignItems: "center",
+                            transition: "all 0.15s",
+                            "&:hover": { borderColor: "rgba(59,130,246,0.4)", color: "#93c5fd" }
+                          }}
+                        >
+                          <Icon sx={{ fontSize: 16 }} />
+                        </Box>
+                      </Tooltip>
+                    );
+                  })}
+                </Box>
+                {/* Ingestion status indicator */}
+                {archiveData.status === "checking" && (
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                    <CircularProgress size={14} sx={{ color: "#60a5fa" }} />
+                    <Typography sx={{ fontSize: 11, color: "#6b7280" }}>Checking data…</Typography>
+                  </Box>
+                )}
+                {archiveData.status === "ingesting" && (
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                    <CircularProgress size={14} sx={{ color: "#f97316" }} />
+                    <Typography sx={{ fontSize: 11, color: "#f97316" }}>
+                      {archiveData.message ?? "Ingesting data…"}
+                    </Typography>
+                  </Box>
+                )}
+                {archiveData.status === "unavailable" && (
+                  <Typography sx={{ fontSize: 11, color: "#ef4444" }}>
+                    {archiveData.message ?? "Data unavailable for this date."}
+                  </Typography>
+                )}
+              </Box>
+            )}
           </Box>
 
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap" }}>

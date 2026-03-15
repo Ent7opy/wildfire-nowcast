@@ -360,6 +360,30 @@ export function buildMapPngExportUrl(baseUrl: string, args: {
   return `${baseUrl}/map.png?${params.toString()}`;
 }
 
+export interface ArchiveAvailabilityResponse {
+  has_data: boolean;
+  detection_count: number;
+}
+
+export interface ArchiveIngestResponse {
+  job_id: string;
+  estimated_minutes: number;
+}
+
+export async function checkArchiveAvailability(
+  date: string,
+  timeframe: string
+): Promise<ArchiveAvailabilityResponse> {
+  return getJson<ArchiveAvailabilityResponse>("/fires/archive/availability", { date, timeframe });
+}
+
+export async function triggerArchiveIngest(
+  date: string,
+  timeframe: string
+): Promise<ArchiveIngestResponse> {
+  return postJson<ArchiveIngestResponse>("/fires/archive/ingest", { date, timeframe }, 202);
+}
+
 export function buildEventKey(event: FireEvent, lat: number, lon: number): string {
   if (event.event_id && String(event.event_id).trim().length > 0) {
     return `event_id:${event.event_id}`;

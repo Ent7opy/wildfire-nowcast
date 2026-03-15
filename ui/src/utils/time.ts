@@ -1,4 +1,17 @@
-import type { FiltersState } from "../types/state";
+import type { ArchiveTimeframe, FiltersState } from "../types/state";
+
+export interface TimeframeDef {
+  id: ArchiveTimeframe;
+  label: string;
+  hours: [number, number];  // [startHour, endHour] inclusive, local time
+}
+
+export const TIMEFRAME_DEFS: TimeframeDef[] = [
+  { id: 'morning',   label: 'Morning',   hours: [6,  11] },
+  { id: 'afternoon', label: 'Afternoon', hours: [12, 17] },
+  { id: 'evening',   label: 'Evening',   hours: [18, 23] },
+  { id: 'night',     label: 'Night',     hours: [0,  5]  },
+];
 
 export function isoFormat(date: Date): string {
   const d = new Date(date);
@@ -16,6 +29,27 @@ export function computeTimeRange(filters: FiltersState): { startTime: Date; endT
   const spanHours = filters.hoursStart - filters.hoursEnd;
   const startTime = new Date(endTime.getTime() - spanHours * 3600_000);
   return { startTime, endTime };
+}
+
+export function computeArchiveTimeRange(date: string, timeframe: ArchiveTimeframe): { startTime: Date; endTime: Date } {
+  const def = TIMEFRAME_DEFS.find((d) => d.id === timeframe) ?? TIMEFRAME_DEFS[1];
+  const [startHour, endHour] = def.hours;
+  // Parse date as local time
+  const [year, month, day] = date.split('-').map(Number);
+  const startTime = new Date(year, month - 1, day, startHour, 0, 0, 0);
+  const endTime = new Date(year, month - 1, day, endHour, 59, 59, 0);
+  return { startTime, endTime };
+}
+
+export function currentTimeframe(): ArchiveTimeframe {
+  const hour = new Date().getHours();
+  for (const def of TIMEFRAME_DEFS) {
+    const [s, e] = def.hours;
+    if (s <= e ? hour >= s && hour <= e : hour >= s || hour <= e) {
+      return def.id;
+    }
+  }
+  return 'afternoon';
 }
 
 export function formatTimeWindow(filters: FiltersState): string {

@@ -2,6 +2,8 @@ import { create } from "zustand";
 
 import type { FireEvent } from "../types/api";
 import type {
+  ArchiveModeState,
+  ArchiveTimeframe,
   AssistantViewContext,
   FiltersState,
   ForecastJobState,
@@ -9,8 +11,10 @@ import type {
   ForecastRequestContext,
   ForecastRunMeta,
   LayersState,
-  MapViewState
+  MapViewState,
+  ViewMode
 } from "../types/state";
+import { currentTimeframe } from "../utils/time";
 import { matchingPreset } from "../utils/presets";
 
 const DEFAULT_FILTERS: FiltersState = {
@@ -45,6 +49,12 @@ const DEFAULT_FORECAST_STATE: ForecastJobState = {
   notification: null
 };
 
+const DEFAULT_ARCHIVE_STATE: ArchiveModeState = {
+  viewMode: 'live',
+  archiveDate: null,
+  archiveTimeframe: null,
+};
+
 const DEFAULT_ASSISTANT_VIEW_CONTEXT: AssistantViewContext = {
   updatedAt: Date.now(),
   searchQuery: "",
@@ -64,6 +74,7 @@ interface AppStoreState {
   activePreset: string | null;
   forecast: ForecastJobState;
   assistantViewContext: AssistantViewContext;
+  archive: ArchiveModeState;
   setFilters: (patch: Partial<FiltersState>) => void;
   applyPreset: (preset: { name: string; hoursStart: number; hoursEnd: number; likelihood: number }) => void;
   setLayersState: (patch: Partial<LayersState>) => void;
@@ -80,6 +91,11 @@ interface AppStoreState {
   setForecastNotification: (notification: ForecastNotification | null) => void;
   setAssistantViewContext: (context: AssistantViewContext) => void;
   focusMapOnPoint: (lat: number, lon: number, minZoom: number) => void;
+  enterArchiveMode: () => void;
+  exitToLiveMode: () => void;
+  setArchiveDate: (date: string) => void;
+  setArchiveTimeframe: (tf: ArchiveTimeframe) => void;
+  setViewMode: (mode: ViewMode) => void;
 }
 
 function updatePreset(filters: FiltersState): string {
@@ -96,6 +112,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
   activePreset: updatePreset(DEFAULT_FILTERS),
   forecast: DEFAULT_FORECAST_STATE,
   assistantViewContext: DEFAULT_ASSISTANT_VIEW_CONTEXT,
+  archive: DEFAULT_ARCHIVE_STATE,
 
   setFilters: (patch) => {
     set((state) => {
@@ -213,6 +230,28 @@ export const useAppStore = create<AppStoreState>((set) => ({
 
   setAssistantViewContext: (context) => {
     set({ assistantViewContext: context });
+  },
+
+  enterArchiveMode: () => {
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    set({ archive: { viewMode: 'archive', archiveDate: date, archiveTimeframe: currentTimeframe() } });
+  },
+
+  exitToLiveMode: () => {
+    set({ archive: DEFAULT_ARCHIVE_STATE });
+  },
+
+  setArchiveDate: (date) => {
+    set((state) => ({ archive: { ...state.archive, archiveDate: date } }));
+  },
+
+  setArchiveTimeframe: (tf) => {
+    set((state) => ({ archive: { ...state.archive, archiveTimeframe: tf } }));
+  },
+
+  setViewMode: (mode) => {
+    set((state) => ({ archive: { ...state.archive, viewMode: mode } }));
   },
 
   focusMapOnPoint: (lat, lon, minZoom) => {
