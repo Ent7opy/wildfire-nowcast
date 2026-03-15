@@ -296,9 +296,18 @@ def run_firms_ingest(
     day_range: Optional[int],
     area: Optional[str],
     sources: Optional[str],
+    archive_date: Optional[str] = None,
 ) -> int:
-    """Run the FIRMS ingestion pipeline."""
+    """Run the FIRMS ingestion pipeline.
+
+    Args:
+        archive_date: When set (YYYY-MM-DD), fetches exactly that one calendar day
+            using the FIRMS DATE parameter (day_range is forced to 1).  The watermark
+            filter is bypassed so historical detections are not silently dropped, and
+            the watermark is NOT advanced so the live-ingest state is unaffected.
+    """
     config = ingest_settings
+    is_archive_mode = archive_date is not None
 
     # Validate FIRMS API key is configured
     if not config.map_key or config.map_key.strip() == "":
@@ -311,7 +320,8 @@ def run_firms_ingest(
         return 2
     bbox = _resolve_area(area) if area else config.resolved_area
     area_key = _area_key_from_bbox(bbox)
-    effective_day_range = day_range if day_range is not None else config.day_range
+    # Archive mode always fetches exactly 1 day (the specific date); ignore caller-supplied day_range.
+    effective_day_range = 1 if is_archive_mode else (day_range if day_range is not None else config.day_range)
     source_list = _resolve_sources(sources) or config.sources
     initial_lookback_minutes = int(config.firms_initial_lookback_minutes)
     incremental_lookback_minutes = int(config.firms_incremental_lookback_minutes)
@@ -425,6 +435,7 @@ def run_firms_ingest(
                 bbox=bbox,
                 day_range=effective_day_range,
                 timeout_seconds=config.request_timeout_seconds,
+                date=archive_date,
             )
             fetched_count = len(csv_rows)
             detections, validation = parse_detection_rows(csv_rows, source, batch_id)
@@ -438,12 +449,19 @@ def run_firms_ingest(
                 # tail window instead of `now - 30m`.
                 anchor = max_detected_acq_utc or _utc_now()
                 hard_window_start_utc = anchor - timedelta(minutes=active_lookback_minutes)
-            filtered_detections, watermark_advanced_to = _filter_detections_by_watermark(
-                detections,
-                watermark_time_utc=watermark_time_utc,
-                grace_minutes=grace_minutes,
-                hard_window_start_utc=hard_window_start_utc,
-            )
+            if is_archive_mode:
+                # Bypass the watermark filter entirely: a live watermark at today's date
+                # would silently drop all historical detections.  Duplicates are handled
+                # by the DB unique constraint in insert_detections.
+                filtered_detections = detections
+                watermark_advanced_to = None
+            else:
+                filtered_detections, watermark_advanced_to = _filter_detections_by_watermark(
+                    detections,
+                    watermark_time_utc=watermark_time_utc,
+                    grace_minutes=grace_minutes,
+                    hard_window_start_utc=hard_window_start_utc,
+                )
             rows_after_watermark_filter = len(filtered_detections)
             _log_firms_validation(source, batch_id, validation)
             if filtered_detections:
@@ -488,7 +506,7 @@ def run_firms_ingest(
                 inserted=inserted,
                 skipped=max(skipped_duplicates, 0),
             )
-            if watermark_advanced_to is not None:
+            if watermark_advanced_to is not None and not is_archive_mode:
                 repository.advance_ingest_watermark(
                     source=source,
                     area_key=area_key,
@@ -753,6 +771,8 @@ def _run_denoiser_inference(
         )
     )
 
+    subprocess_timeout: int | None = int(config.denoiser_subprocess_timeout_seconds) or None
+
     try:
         # We capture output to get the JSON summary
         result = subprocess.run(
@@ -760,6 +780,7 @@ def _run_denoiser_inference(
             capture_output=True,
             text=True,
             check=True,
+            timeout=subprocess_timeout,
         )
 
         # The module prints JSON to stdout as its last line
@@ -781,6 +802,16 @@ def _run_denoiser_inference(
         else:
             LOGGER.warning("Denoiser inference finished but no JSON summary found in stdout.")
 
+    except subprocess.TimeoutExpired as e:
+        LOGGER.error(
+            "Denoiser inference timed out after %ss for batch %s. "
+            "Increase DENOISER_SUBPROCESS_TIMEOUT_SECONDS if the model is large.",
+            subprocess_timeout,
+            batch_id,
+        )
+        raise RuntimeError(
+            f"Denoiser inference timed out after {subprocess_timeout}s for batch {batch_id}"
+        ) from e
     except subprocess.CalledProcessError as e:
         LOGGER.error(
             "Denoiser inference failed for batch %s: %s\nStdout: %s\nStderr: %s",

@@ -141,6 +141,14 @@ class FIRMSIngestSettings(BaseSettings):
     Defaults to sys.executable if not set. Useful in Docker when the ML venv
     has a different Python than the ingest venv (e.g., /app/.venv/bin/python3).
     """
+    denoiser_subprocess_timeout_seconds: int = Field(
+        default=180,
+        validation_alias="DENOISER_SUBPROCESS_TIMEOUT_SECONDS",
+    )
+    """Hard timeout (seconds) for the denoiser subprocess. Prevents a stalled
+    denoiser from blocking the ingest job indefinitely. Defaults to 180s (3 min).
+    Set to 0 to disable (not recommended for production).
+    """
 
     @field_validator("sources", mode="before")
     @classmethod
