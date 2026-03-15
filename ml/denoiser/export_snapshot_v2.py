@@ -18,6 +18,7 @@ from api.db import get_engine
 from ml.parquet_io import write_parquet_with_fallback
 from ml.denoiser.weather_context import WeatherContextParams, append_weather_context_features
 from ml.denoiser.moisture_context import MoistureContextParams, append_moisture_context_features
+from ml.denoiser_inference_v2 import _estimated_industrial_frp, _INDUSTRIAL_SILVER_BUFFER_M
 
 logging.basicConfig(
     level=logging.INFO,
@@ -286,6 +287,8 @@ def export_training_snapshot_v2(
             frp_mean=("frp", "mean"),
             frp_max=("frp", "max"),
             frp_density_mean=("frp_density_obs", "mean"),
+            frp_density_max=("frp_density_obs", "max"),
+            frp_spatial_std=("frp", "std"),
             brightness_mean=("brightness", "mean"),
             bright_t31_mean=("bright_t31", "mean"),
             scan_mean=("scan", "mean"),
@@ -325,6 +328,30 @@ def export_training_snapshot_v2(
     event_df["duration_hours"] = (
         (event_df["end_time"] - event_df["start_time"]).dt.total_seconds() / 3600.0
     )
+
+    # FRP spatial std: 0.0 for single-detection events (undefined std).
+    event_df["frp_spatial_std"] = event_df["frp_spatial_std"].fillna(0.0)
+
+    # FRP growth rate: (frp_last - frp_first) / duration_hours.
+    frp_temporal = (
+        rows.sort_values("acq_time")
+        .groupby("event_id", dropna=False)
+        .agg(
+            frp_first=("frp", "first"),
+            frp_last=("frp", "last"),
+        )
+        .reset_index()
+    )
+    event_df = event_df.merge(frp_temporal, on="event_id", how="left")
+    event_df["frp_growth_rate"] = np.where(
+        event_df["duration_hours"] > 0.0,
+        (pd.to_numeric(event_df["frp_last"], errors="coerce").fillna(0.0)
+         - pd.to_numeric(event_df["frp_first"], errors="coerce").fillna(0.0))
+        / event_df["duration_hours"],
+        0.0,
+    )
+    event_df.drop(columns=["frp_first", "frp_last"], inplace=True)
+
     # Explicit first-class model features requested for feature-driven rollbacks.
     event_df["confidence"] = pd.to_numeric(event_df["confidence_mean"], errors="coerce")
     event_df["frp"] = pd.to_numeric(event_df["frp_mean"], errors="coerce")
@@ -346,6 +373,30 @@ def export_training_snapshot_v2(
     event_df["sin_doy"] = event_df["sin_day_of_year"]
     event_df["cos_doy"] = event_df["cos_day_of_year"]
 
+    # FRP peak local hour: local solar time of the detection with max FRP.
+    peak_frp_rows = (
+        rows.dropna(subset=["frp"])
+        .sort_values("frp", ascending=False)
+        .groupby("event_id", dropna=False)
+        .first()
+        .reset_index()[["event_id", "acq_time"]]
+    )
+    peak_frp_rows["_peak_utc_hour"] = (
+        peak_frp_rows["acq_time"].dt.hour
+        + peak_frp_rows["acq_time"].dt.minute / 60.0
+    )
+    event_df = event_df.merge(
+        peak_frp_rows[["event_id", "_peak_utc_hour"]],
+        on="event_id",
+        how="left",
+    )
+    event_df["frp_peak_local_hour"] = (
+        event_df["_peak_utc_hour"] + event_df["lon_centroid"].fillna(0.0) / 15.0
+    ) % 24.0
+    event_df["sin_frp_peak_hour"] = np.sin(2 * np.pi * event_df["frp_peak_local_hour"] / 24.0)
+    event_df["cos_frp_peak_hour"] = np.cos(2 * np.pi * event_df["frp_peak_local_hour"] / 24.0)
+    event_df.drop(columns=["_peak_utc_hour"], inplace=True)
+
     event_df["landcover_is_available"] = event_df["landcover_is_available"].astype(np.float32)
     event_df["persistence_is_available"] = event_df["persistence_is_available"].astype(np.float32)
     event_df["weather_is_available"] = event_df["weather_is_available"].astype(np.float32)
@@ -361,6 +412,48 @@ def export_training_snapshot_v2(
         bins=[-np.inf, 0.25, 0.6, np.inf],
         labels=["low_fuel", "mixed_fuel", "high_fuel"],
     ).astype(str)
+
+    # Industrial FRP ratio: query nearby industrial TPC for each event centroid.
+    _industrial_tpc_sql = text(
+        """
+        SELECT
+            e.event_id::text AS event_id,
+            MAX(COALESCE(i.thermal_potential_class, 0.5)) AS max_tpc
+        FROM fire_events e
+        JOIN industrial_sources i
+          ON COALESCE(i.is_active, TRUE)
+         AND i.authority_tier IN ('gold', 'silver')
+         AND i.geom && ST_Expand(e.geom, :buffer_deg)
+         AND ST_DWithin(e.geom::geography, i.geom::geography, :buffer_m)
+        WHERE e.event_id = ANY(:event_ids)
+        GROUP BY e.event_id
+        """
+    )
+    _engine = get_engine()
+    event_id_list = event_df["event_id"].dropna().astype(str).tolist()
+    if event_id_list:
+        with _engine.begin() as conn:
+            _tpc_rows = conn.execute(
+                _industrial_tpc_sql,
+                {
+                    "event_ids": event_id_list,
+                    "buffer_m": float(_INDUSTRIAL_SILVER_BUFFER_M),
+                    "buffer_deg": float(_INDUSTRIAL_SILVER_BUFFER_M) / 111000.0,
+                },
+            ).mappings().all()
+        _tpc_map = {str(r["event_id"]): float(r["max_tpc"]) for r in _tpc_rows}
+    else:
+        _tpc_map = {}
+    tpc_series = event_df["event_id"].astype(str).map(_tpc_map)
+    estimated_frp = tpc_series.map(
+        lambda tpc: _estimated_industrial_frp(tpc) if pd.notna(tpc) else np.nan
+    )
+    frp_max_num = pd.to_numeric(event_df.get("frp_max"), errors="coerce").fillna(0.0)
+    event_df["industrial_frp_ratio"] = np.where(
+        estimated_frp.notna() & (estimated_frp > 0.0),
+        frp_max_num / estimated_frp,
+        np.nan,
+    )
 
     event_df["event_label"] = "UNKNOWN"
     event_df.loc[event_df["positive_count"] > 0, "event_label"] = "POSITIVE"

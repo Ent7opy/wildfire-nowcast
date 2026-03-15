@@ -1,6 +1,6 @@
 seed: 42
 model_output_root: "models/denoiser_v2"
-snapshot_path: "data/denoiser/snapshots_v2/run_YYYYMMDD_HHMMSS"
+snapshot_path: "data/denoiser/snapshots_v2/latest"
 
 label_column: "event_label"
 slice_columns:
@@ -47,6 +47,15 @@ features:
   - "cos_day_of_year"
   - "sin_doy"
   - "cos_doy"
+  # FRP signal features (v2.1)
+  - "frp_density_mean"
+  - "frp_density_max"
+  - "frp_growth_rate"
+  - "frp_spatial_std"
+  - "industrial_frp_ratio"
+  - "frp_peak_local_hour"
+  - "sin_frp_peak_hour"
+  - "cos_frp_peak_hour"
 
 model_backend: "xgboost_pu_bagging"
 model_params:
@@ -83,6 +92,8 @@ pu_bagging:
   spy_min_rows: 30
   spy_pos_quantile: 0.65
   spy_neg_quantile: 0.10
+  high_frp_sampling_boost: 2.5
+  high_frp_sampling_threshold_mw: 100.0
 
 sampling:
   enabled: true
@@ -111,3 +122,10 @@ strong_filter_threshold: 0.5
 downweight_threshold: 0.7
 uncertainty_band_low: 0.45
 uncertainty_band_high: 0.55
+
+early_ignition:
+  enabled: true
+  max_duration_hours: 2.0
+  max_detection_count: 3
+  review_threshold: 0.35
+  require_no_prior_cell: true

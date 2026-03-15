@@ -42,6 +42,8 @@ DEFAULT_PARAMS = {
     "probable_positive_frp_mw": 100.0,
     "probable_positive_confidence": 70.0,
     "probable_positive_landcover_min": 0.5,
+    "probable_positive_min_detections": 2,
+    "probable_positive_min_duration_hours": 2.0,
     "negative_event_static_ratio_min": 0.7,
     "negative_event_persistence_min": 0.85,
     "negative_event_min_days": 3,
@@ -341,6 +343,8 @@ def _label_single_window(
         "probable_positive_frp_mw": float(p["probable_positive_frp_mw"]),
         "probable_positive_confidence": float(p["probable_positive_confidence"]),
         "probable_positive_landcover_min": float(p["probable_positive_landcover_min"]),
+        "probable_positive_min_detections": int(p["probable_positive_min_detections"]),
+        "probable_positive_min_duration_hours": float(p["probable_positive_min_duration_hours"]),
         "negative_event_static_ratio_min": float(p["negative_event_static_ratio_min"]),
         "negative_event_persistence_min": float(p["negative_event_persistence_min"]),
         "negative_event_min_days": int(p["negative_event_min_days"]),
@@ -608,16 +612,28 @@ def _label_single_window(
         """
     )
 
+    # Probable positive uses spatiotemporal criteria (multi-detection event with
+    # sufficient duration) instead of FRP to avoid circular label leakage when
+    # FRP is also used as a model feature.
     create_probable_sql = text(
         """
         CREATE TEMP TABLE tmp_label_probable_positive_ids ON COMMIT DROP AS
         SELECT c.id
         FROM tmp_label_candidates c
         WHERE c.in_coverage
-          AND COALESCE(c.frp, 0) >= :probable_positive_frp_mw
           AND COALESCE(c.confidence, 0) >= :probable_positive_confidence
           AND COALESCE(c.landcover_score, 0.5) >= :probable_positive_landcover_min
           AND NOT c.is_agri_lulc
+          AND c.event_id IS NOT NULL
+          AND c.event_id IN (
+              SELECT event_id
+              FROM tmp_label_candidates
+              WHERE in_coverage AND event_id IS NOT NULL
+              GROUP BY event_id
+              HAVING COUNT(*) >= :probable_positive_min_detections
+                 AND EXTRACT(EPOCH FROM (MAX(acq_time) - MIN(acq_time))) / 3600.0
+                     >= :probable_positive_min_duration_hours
+          )
         """
     )
 
