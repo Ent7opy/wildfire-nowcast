@@ -1,25 +1,12 @@
 """Seed dummy data for denoiser smoke test."""
 
-import pandas as pd
 from datetime import datetime, timedelta
 from api.db import get_engine
 from sqlalchemy import text
 
 def seed():
     engine = get_engine()
-    
-    # 1. Create labels table if it doesn't exist (it won't)
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS fire_labels"))
-        conn.execute(text("""
-            CREATE TABLE fire_labels (
-                fire_detection_id BIGINT PRIMARY KEY,
-                label VARCHAR(32) NOT NULL
-            )
-        """))
-    
-    # 2. Insert dummy detections if none exist or just insert some specifically for the test
-    # We'll insert a few points
+
     t0 = datetime.now() - timedelta(days=5)
     
     detections = [
@@ -30,7 +17,7 @@ def seed():
     ]
     
     with engine.begin() as conn:
-        # Clear existing for clean test
+        # Clear existing smoke test data for clean re-runs
         conn.execute(text("DELETE FROM fire_detections WHERE source LIKE 'smoke_test%'"))
         
         ids = []
@@ -49,11 +36,16 @@ def seed():
             })
             ids.append(res.scalar())
         
-        # 3. Insert labels
-        conn.execute(text("INSERT INTO fire_labels (fire_detection_id, label) VALUES (:id, :label)"), [
-            {"id": ids[0], "label": "POSITIVE"},
-            {"id": ids[1], "label": "POSITIVE"},
-            {"id": ids[2], "label": "NEGATIVE"},
+        # Insert labels into denoiser_labels_v2
+        conn.execute(text("""
+            INSERT INTO denoiser_labels_v2 (fire_detection_id, label, rule_version, source)
+            VALUES (:id, :label, :version, :source)
+            ON CONFLICT (fire_detection_id, rule_version) DO UPDATE SET
+                label = EXCLUDED.label
+        """), [
+            {"id": ids[0], "label": "POSITIVE", "version": "smoke_test", "source": "smoke_test"},
+            {"id": ids[1], "label": "POSITIVE", "version": "smoke_test", "source": "smoke_test"},
+            {"id": ids[2], "label": "NEGATIVE", "version": "smoke_test", "source": "smoke_test"},
         ])
         
     print(f"Seeded {len(ids)} detections and labels for smoke test.")

@@ -15,7 +15,7 @@ def main():
     parser.add_argument(
         "--label-table",
         type=str,
-        default="fire_labels",
+        default="denoiser_labels_v2",
         help="Labels table to join (identifier only: <table> or <schema>.<table>)",
     )
     
