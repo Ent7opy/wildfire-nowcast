@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { checkArchiveAvailability, triggerArchiveIngest } from "../api/client";
+import { checkArchiveAvailability, getArchiveIngestStatus, triggerArchiveIngest } from "../api/client";
 import { useAppStore } from "../state/store";
 
 export type ArchiveDataStatus = "idle" | "checking" | "ingesting" | "ready" | "error" | "unavailable";
@@ -11,7 +11,7 @@ export interface ArchiveDataState {
   estimatedMinutes: number | null;
 }
 
-const POLL_INTERVAL_MS = 15_000;
+const POLL_INTERVAL_MS = 5_000;
 
 export function useArchiveData(): ArchiveDataState {
   const archive = useAppStore((s) => s.archive);
@@ -72,9 +72,11 @@ export function useArchiveData(): ArchiveDataState {
 
       // No data — trigger ingestion
       let estimatedMinutes = 2;
+      let jobId: string | null = null;
       try {
         const ingestResult = await triggerArchiveIngest(date, timeframe);
         estimatedMinutes = ingestResult.estimated_minutes;
+        jobId = ingestResult.job_id;
       } catch (err: unknown) {
         if (cancelled) return;
         const message = err instanceof Error ? err.message : "Ingestion unavailable for this date.";
@@ -89,15 +91,34 @@ export function useArchiveData(): ArchiveDataState {
         estimatedMinutes,
       });
 
-      // Poll until data is available, giving up after 2× the estimated window
+      // Poll until data is available, giving up after 1.5× the estimated window
+      // (estimated_minutes already includes generous padding on the server side)
       let pollCount = 0;
-      const maxPolls = Math.ceil((estimatedMinutes * 60_000 * 2) / POLL_INTERVAL_MS);
+      const maxPolls = Math.ceil((estimatedMinutes * 60_000 * 1.5) / POLL_INTERVAL_MS);
       pollRef.current = setInterval(async () => {
         if (cancelled) {
           stopPolling();
           return;
         }
         pollCount++;
+
+        // Check if the job itself has failed so we can show the real error
+        if (jobId) {
+          try {
+            const jobStatus = await getArchiveIngestStatus(jobId);
+            if (!cancelled && jobStatus.status === "failed") {
+              stopPolling();
+              const errorDetail = jobStatus.error
+                ? `Ingest job failed: ${jobStatus.error}`
+                : "Ingest job failed. Check worker logs for details.";
+              setState({ status: "unavailable", message: errorDetail, estimatedMinutes: null });
+              return;
+            }
+          } catch {
+            // status check failed — keep polling for data
+          }
+        }
+
         const ready = await check();
         if (!cancelled && ready) {
           stopPolling();
@@ -106,7 +127,7 @@ export function useArchiveData(): ArchiveDataState {
           stopPolling();
           setState({
             status: "unavailable",
-            message: "Ingest did not complete in time. Check that FIRMS_MAP_KEY is configured.",
+            message: "Ingest did not complete in time. Check the worker logs or verify FIRMS_MAP_KEY is set.",
             estimatedMinutes: null,
           });
         }

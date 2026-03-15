@@ -214,6 +214,13 @@ export default function App(): JSX.Element {
     visibleEvents.length
   ]);
 
+  // Clear region filter when entering archive mode
+  useEffect(() => {
+    if (isArchiveMode) {
+      setRegionFilter(EMPTY_REGION_FILTER);
+    }
+  }, [isArchiveMode]);
+
   // Auto-pan to user location when safety mode is enabled and GPS acquired
   useEffect(() => {
     if (isSafetyMode && safety.userLocation) {
@@ -638,9 +645,11 @@ export default function App(): JSX.Element {
             <Box sx={{ flex: "0 0 auto", minHeight: { xs: 360, lg: 0 } }}>
               <FireDetailsPanel visibleEvents={filteredEvents} />
             </Box>
-            <Box sx={{ flex: 1, minHeight: 320 }}>
-              <AIChatAssistant />
-            </Box>
+            {!isArchiveMode && (
+              <Box sx={{ flex: 1, minHeight: 320 }}>
+                <AIChatAssistant />
+              </Box>
+            )}
           </Box>
         </Box>
       </Box>

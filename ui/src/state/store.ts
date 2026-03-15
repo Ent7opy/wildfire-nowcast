@@ -266,7 +266,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
   enterArchiveMode: () => {
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    set({ archive: { viewMode: 'archive', archiveDate: date, archiveTimeframe: currentTimeframe() } });
+    set({ archive: { viewMode: 'archive', archiveDate: date, archiveTimeframe: currentTimeframe() }, selectedEvent: null, lastClick: null });
   },
 
   exitToLiveMode: () => {

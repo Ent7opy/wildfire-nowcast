@@ -37,6 +37,7 @@ import type { FireEvent, ReverseGeocodeResponse } from "../types/api";
 import { haversineKm } from "../utils/geo";
 import { forecastButtonState } from "../utils/forecast";
 import { comparePriorityFeedEvents } from "../utils/priorityFeed";
+import { computeArchiveTimeRange } from "../utils/time";
 
 interface FireDetailsPanelProps {
   visibleEvents: FireEvent[];
@@ -369,6 +370,8 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
   const setForecastNotification = useAppStore((s) => s.setForecastNotification);
   const safety = useAppStore((s) => s.safety);
   const requestAssistantBriefing = useAppStore((s) => s.requestAssistantBriefing);
+  const archive = useAppStore((s) => s.archive);
+  const isArchiveMode = archive.viewMode === "archive";
   const isSafetyMode = safety.enabled;
 
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -388,20 +391,33 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
       .slice(0, 5);
   }, [visibleEvents]);
 
+  const gdeltTimeParam = useMemo(() => {
+    if (isArchiveMode && archive.archiveDate && archive.archiveTimeframe) {
+      const { startTime, endTime } = computeArchiveTimeRange(archive.archiveDate, archive.archiveTimeframe);
+      const fmt = (d: Date) =>
+        `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}`;
+      return { startdatetime: fmt(startTime), enddatetime: fmt(endTime) };
+    }
+    return null;
+  }, [isArchiveMode, archive.archiveDate, archive.archiveTimeframe]);
+
   const { data: newsData, isLoading: newsLoading, isError: newsError } = useQuery({
-    queryKey: ["gdelt-news"],
+    queryKey: ["gdelt-news", gdeltTimeParam],
     queryFn: async () => {
       const query = encodeURIComponent(
         "(wildfire OR bushfire OR \"forest fire\" OR \"brush fire\" OR \"grass fire\" OR firefighter OR \"fire evacuation\" OR \"fire season\" OR \"fire crews\" OR \"prescribed burn\" OR \"controlled burn\" OR \"fire weather\" OR \"red flag warning\") sourcelang:english"
       );
-      const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${query}&mode=artlist&format=json&timespan=12h&sort=datedesc&maxrecords=75`;
+      const timeQuery = gdeltTimeParam
+        ? `&startdatetime=${gdeltTimeParam.startdatetime}&enddatetime=${gdeltTimeParam.enddatetime}`
+        : `&timespan=12h`;
+      const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${query}&mode=artlist&format=json${timeQuery}&sort=datedesc&maxrecords=75`;
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch news");
       const json = await res.json() as { articles?: GdeltArticle[] };
       return (json.articles ?? []).filter((a) => isWildfireArticle(a.title));
     },
     staleTime: 5 * 60 * 1000,
-    refetchInterval: 10 * 60 * 1000,
+    refetchInterval: isArchiveMode ? false : 10 * 60 * 1000,
     enabled: activeTab === "news"
   });
 

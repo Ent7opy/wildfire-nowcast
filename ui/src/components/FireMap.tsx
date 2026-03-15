@@ -740,9 +740,9 @@ export default function FireMap({
         <Box
           sx={{
             position: "absolute",
-            top: "50%",
+            top: 12,
             left: "50%",
-            transform: "translate(-50%, -50%)",
+            transform: "translateX(-50%)",
             zIndex: 20,
             pointerEvents: "auto"
           }}

@@ -370,6 +370,15 @@ export interface ArchiveIngestResponse {
   estimated_minutes: number;
 }
 
+export interface ArchiveIngestStatusResponse {
+  status: string;
+  error: string | null;
+}
+
+export async function getArchiveIngestStatus(jobId: string): Promise<ArchiveIngestStatusResponse> {
+  return getJson<ArchiveIngestStatusResponse>(`/fires/archive/ingest/${jobId}`);
+}
+
 export async function checkArchiveAvailability(
   date: string,
   timeframe: string

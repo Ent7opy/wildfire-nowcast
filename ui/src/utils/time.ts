@@ -34,10 +34,12 @@ export function computeTimeRange(filters: FiltersState): { startTime: Date; endT
 export function computeArchiveTimeRange(date: string, timeframe: ArchiveTimeframe): { startTime: Date; endTime: Date } {
   const def = TIMEFRAME_DEFS.find((d) => d.id === timeframe) ?? TIMEFRAME_DEFS[1];
   const [startHour, endHour] = def.hours;
-  // Parse date as local time
+  // Anchor to UTC — satellite acquisition timestamps (acq_time) are always UTC,
+  // and the backend's _timeframe_window also treats these hours as UTC.
+  // Using Date.UTC avoids browser-timezone drift shifting the query window.
   const [year, month, day] = date.split('-').map(Number);
-  const startTime = new Date(year, month - 1, day, startHour, 0, 0, 0);
-  const endTime = new Date(year, month - 1, day, endHour, 59, 59, 0);
+  const startTime = new Date(Date.UTC(year, month - 1, day, startHour, 0, 0, 0));
+  const endTime = new Date(Date.UTC(year, month - 1, day, endHour, 59, 59, 0));
   return { startTime, endTime };
 }
 
