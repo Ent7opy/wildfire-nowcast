@@ -140,6 +140,8 @@ export default function App(): JSX.Element {
   const enableSafetyMode = useAppStore((s) => s.enableSafetyMode);
   const disableSafetyMode = useAppStore((s) => s.disableSafetyMode);
   const focusMapOnPoint = useAppStore((s) => s.focusMapOnPoint);
+  const setMapView = useAppStore((s) => s.setMapView);
+  const mapView = useAppStore((s) => s.mapView);
 
   const isArchiveMode = archive.viewMode === "archive";
   const isSafetyMode = safety.enabled;
@@ -233,14 +235,14 @@ export default function App(): JSX.Element {
 
     // Try to centre on the actual events in the region first
     const matching = visibleEvents.filter((e) => matchesRegionFilter(e, regionFilter));
+    const targetZoom = admin1 ? 6 : country ? 5 : 3;
     if (matching.length > 0) {
       const avgLat = matching.reduce((s, e) => s + (e.lat ?? 0), 0) / matching.length;
       const avgLon = matching.reduce((s, e) => s + (e.lon ?? 0), 0) / matching.length;
-      const zoom = admin1 ? 6 : country ? 5 : 3;
-      focusMapOnPoint(avgLat, avgLon, zoom);
+      setMapView({ ...mapView, latitude: avgLat, longitude: avgLon, zoom: targetZoom, transitionDuration: 700 });
     } else if (continent && CONTINENT_VIEWPORTS[continent]) {
       const vp = CONTINENT_VIEWPORTS[continent];
-      focusMapOnPoint(vp.lat, vp.lon, vp.zoom);
+      setMapView({ ...mapView, latitude: vp.lat, longitude: vp.lon, zoom: vp.zoom, transitionDuration: 700 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [regionFilter]);

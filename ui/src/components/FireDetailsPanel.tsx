@@ -634,7 +634,7 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
                       }
                       setSelectedEvent({ ...event, lat, lon });
                       setLastClick({ lat, lng: lon });
-                      focusMapOnPoint(lat, lon, 5.5);
+                      focusMapOnPoint(lat, lon, 8);
                     }}
                     sx={{
                       textAlign: "left",

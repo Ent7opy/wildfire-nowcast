@@ -8,7 +8,6 @@ import type { FireEvent } from "../types/api";
 import {
   ALL_CONTINENTS,
   getContinentForCountry,
-  getContinentFromEvent,
   getAdmin1FromEvent,
   getCountryFromEvent,
   type RegionFilterValue,
@@ -84,14 +83,7 @@ export default function RegionFilter({ events, value, onChange }: Props): JSX.El
 
   // ── Available options derived from current visible events ──────────────────
 
-  const availableContinents = useMemo(() => {
-    const seen = new Set<string>();
-    for (const event of events) {
-      const continent = getContinentFromEvent(event);
-      if (continent) seen.add(continent);
-    }
-    return ALL_CONTINENTS.filter((c) => seen.has(c));
-  }, [events]);
+  const availableContinents = ALL_CONTINENTS;
 
   const availableCountries = useMemo(() => {
     const seen = new Set<string>();

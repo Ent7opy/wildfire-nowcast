@@ -13,6 +13,7 @@ from sqlalchemy import text, column as sa_column
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
+from api.config import settings
 from api.db import get_engine
 from api.fires.scoring import (
     compute_fire_likelihood,
@@ -808,7 +809,10 @@ def list_fire_events_bbox_time(
             intensity.brightness_mean,
             ST_AsGeoJSON(e.geom) AS geom_geojson,
             ST_X(ST_Centroid(e.geom)) AS lon,
-            ST_Y(ST_Centroid(e.geom)) AS lat
+            ST_Y(ST_Centroid(e.geom)) AS lat,
+            rgc.location_name,
+            rgc.country_name AS country,
+            rgc.admin1_name
         FROM selected_events e
         LEFT JOIN LATERAL (
             SELECT
@@ -819,9 +823,17 @@ def list_fire_events_bbox_time(
             FROM fire_detections fd
             WHERE fd.event_id = e.event_id
         ) intensity ON TRUE
+        LEFT JOIN reverse_geocode_cache rgc ON
+            rgc.provider = :geocoding_provider
+            AND rgc.cached_lat = ROUND(CAST(ST_Y(ST_Centroid(e.geom)) AS NUMERIC), :geocoding_precision)
+            AND rgc.cached_lon = ROUND(CAST(ST_X(ST_Centroid(e.geom)) AS NUMERIC), :geocoding_precision)
+            AND rgc.expires_at > NOW()
         ORDER BY COALESCE(e.start_time, e.end_time) DESC, e.event_id DESC
         """
     )
+
+    params["geocoding_provider"] = settings.geocoding_provider.strip().lower()
+    params["geocoding_precision"] = settings.geocoding_cache_precision
 
     with get_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
