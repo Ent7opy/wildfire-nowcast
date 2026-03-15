@@ -16,7 +16,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from ml.calibration import SpreadProbabilityCalibrator
-from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadForecast, SpreadModel
+from ml.spread.contract import DEFAULT_HORIZONS_HOURS, SpreadForecast, SpreadModel, SpreadModelInput
 from ml.spread.factory import get_model_version_hint
 from ml.spread.heuristic_v0 import HeuristicSpreadModelV0
 from ml.weather_bias_correction import resolve_weather_bias_corrector_path_full

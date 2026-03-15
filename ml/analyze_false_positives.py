@@ -26,7 +26,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from ml.parquet_io import read_parquet_with_fallback
+from ml.parquet_io import read_parquet_with_fallback  # noqa: E402
 
 _EARTH_RADIUS_M = 6_371_000.0
 _DEFAULT_DBSCAN_EPS_M = 2315.0

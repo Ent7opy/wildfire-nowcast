@@ -1,8 +1,7 @@
-.PHONY: help doctor dev-api dev-ui install test lint lint-fix clean db-up db-down migrate revision db-cleanup ingest-firms ingest-firms-backfill ingest-weather ingest-dem ingest-industrial ingest-industrial-authoritative industrial-build-policy industrial-load-no-go-zones industrial-coverage-report br-build-hybrid-curated ingest-viirs ingest-fwi ingest-all repair-fire-detections recompute-fire-scores denoiser-data-coverage-report prepare ops-start smoke-grid smoke-terrain-features denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 denoiser-association-report denoiser-drift-monitor denoiser-load-coverage-masks denoiser-build-coverage-masks denoiser-build-coverage-from-authoritative denoiser-freeze-baseline denoiser-sweep-v2 denoiser-pipeline ingest-nifc-perimeters ingest-authoritative-perimeters ingest-authoritative-perimeters-ca ingest-authoritative-perimeters-eu ingest-orchestrator download-fuels model-register model-promote model-rollback model-update-contract train-denoiser train-spread hindcast-build spread-champion-challenger weather-bias ralph-init ralph-plan ralph-run ralph-status health-check
+.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias
 
 PYTHON ?= python3
 UV ?= uv
-RALPH_TASK_FILE ?=
 
 # Avoid cross-OS venv collisions (e.g., WSL-created venvs on Windows).
 ifeq ($(OS),Windows_NT)
@@ -14,10 +13,8 @@ export UV_PROJECT_ENVIRONMENT
 
 # Ralph detection
 ifeq ($(OS),Windows_NT)
-    # Windows (CMD or PowerShell)
     RALPH_CMD = @C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -ExecutionPolicy Bypass -File .ralph/ralph.ps1
 else
-    # Linux / WSL / macOS
     RALPH_CMD = @./.ralph/ralph.sh
 endif
 
@@ -87,29 +84,27 @@ endif
 health-check: ## Check if stack services are running (API, UI, DB)
 	@$(PYTHON) scripts/health_check.py
 
+# ── Dependencies ───────────────────────────────────────────────────────────────
+
 install: ## Install dependencies for all subprojects (with dev extras)
 	cd api && $(UV) sync --dev
-	cd ui && npm ci
+	cd ui && npm install
 	cd ml && $(UV) sync --dev
 	cd ingest && $(UV) sync --dev
 
-dev-api: ## Start FastAPI development server (requires make install)
-	cd api && $(UV) run python -m uvicorn api.main:app --app-dir .. --reload --host 127.0.0.1 --port 8000
-
-dev-ui: ## Start React development server (requires make install)
-	cd ui && npm run dev -- --host 127.0.0.1 --port 8501
+# ── Quality ────────────────────────────────────────────────────────────────────
 
 test: ## Run unit tests (API + UI + ML + Ingest)
 	@echo "Running API tests..."
-	cd api && $(UV) run pytest
+	cd api && $(UV) run pytest -m "not integration"
 	@echo "Running UI tests..."
 	cd ui && npm run test:run
 	@echo "Running ML tests..."
-	cd ml && $(UV) run pytest
+	cd ml && $(UV) run pytest -m "not integration"
 	@echo "Running Ingest tests..."
-	cd ingest && $(UV) run pytest
+	cd ingest && $(UV) run pytest -m "not integration"
 
-lint: ## Run Ruff lint checks (API + UI + ML + Ingest)
+lint: ## Run lint and type checks (API + UI + ML + Ingest)
 	@echo "Linting API..."
 	cd api && $(UV) run --no-sync ruff check .
 	@echo "Linting UI..."
@@ -119,7 +114,7 @@ lint: ## Run Ruff lint checks (API + UI + ML + Ingest)
 	@echo "Linting Ingest..."
 	cd ingest && $(UV) run --no-sync ruff check .
 
-lint-fix: ## Auto-fix Ruff lint errors (API + UI + ML + Ingest)
+lint-fix: ## Auto-fix lint errors (API + UI + ML + Ingest)
 	@echo "Fixing API..."
 	cd api && $(UV) run --no-sync ruff check --fix .
 	@echo "Fixing UI..."
@@ -136,6 +131,19 @@ clean: ## Remove Python caches and build artifacts
 clean-venv: ## Remove .venv directories (fixes Windows permission issues)
 	@$(PYTHON) scripts/clean.py --include-venv
 
+# ── Database ───────────────────────────────────────────────────────────────────
+
+migrate: ## Run database migrations
+	@echo "Running database migrations..."
+	cd api && $(UV) run alembic upgrade head
+
+revision: ## Create a new migration revision (usage: make revision msg="description")
+	@echo "Creating new migration revision..."
+	$(if $(msg),,$(error Please provide a message with msg='your message'))
+	cd api && $(UV) run alembic revision -m "$(msg)"
+
+# ── Ralph ──────────────────────────────────────────────────────────────────────
+
 ralph-init: ## Initialize Ralph loop (.ralph/)
 	$(RALPH_CMD) init "$(RALPH_TASK_FILE)"
 
@@ -148,121 +156,7 @@ ralph-run: ## Run Ralph loop (optional: RALPH_TASK_FILE=...)
 ralph-status: ## Show Ralph loop status
 	$(RALPH_CMD) status
 
-db-up: ## Start the database service
-	@echo "Starting database service..."
-	docker compose up db -d
-
-db-down: ## Stop the database service
-	@echo "Stopping database service..."
-	docker compose stop db
-
-migrate: ## Run database migrations
-	@echo "Running database migrations..."
-	cd api && uv run alembic upgrade head
-
-revision: ## Create a new migration revision (usage: make revision msg="description")
-	@echo "Creating new migration revision..."
-	$(if $(msg),,$(error Please provide a message with msg='your message'))
-	cd api && uv run alembic revision -m "$(msg)"
-
-ingest-firms: ## Run NASA FIRMS ingestion (pass ARGS="--day-range 3")
-	$(UV) run --project ingest -m ingest.firms_ingest $(ARGS)
-
-ingest-firms-backfill: ## Backfill historical FIRMS detections (pass ARGS="--start YYYY-MM-DD --end YYYY-MM-DD --area w,s,e,n --sources ...")
-	$(UV) run --project ingest -m ingest.firms_backfill $(ARGS)
-
-repair-fire-detections: ## Repair synthetic rows, thermal fields, stale running batches, and batch metadata
-	$(UV) run --project api scripts/repair_fire_detections.py $(ARGS)
-
-recompute-fire-scores: ## Recompute scoring fields for batches with incomplete derived columns
-	$(UV) run --project api scripts/recompute_fire_scores.py $(ARGS)
-
-denoiser-data-coverage-report: ## Export denoiser data coverage/neutral report (pass ARGS="--start ... --end ...")
-	$(UV) run --project api scripts/denoiser_data_coverage_report.py $(ARGS)
-
-ingest-weather: ## Run NOAA GFS weather ingestion (pass ARGS="--run-time 2025-12-06T00:00Z")
-	$(UV) run --project ingest -m ingest.weather_ingest $(ARGS)
-
-ingest-dem: ## Run Copernicus DEM preprocessing (pass ARGS="--cog")
-	$(UV) run --project ingest -m ingest.dem_preprocess $(ARGS)
-
-smoke-grid: ## Run DEM + weather smoke check for grid alignment (pass ARGS="--bbox 5.1 35.4 6.0 36.0")
-	$(UV) run --project ingest scripts/smoke_grid_alignment.py $(ARGS)
-
-smoke-terrain-features: ## Run DEM + slope/aspect smoke check (pass ARGS="--bbox ... --region smoke_grid")
-	$(UV) run --project ingest scripts/smoke_terrain_features.py $(ARGS)
-
-ingest-forecast: ## Run spread forecast and persist (pass ARGS="--region ... --bbox ...")
-	$(UV) run --project ingest -m ingest.spread_forecast $(ARGS)
-
-ingest-industrial: ## Ingest industrial sources (pass ARGS="--wri --bbox ...")
-	$(UV) run --project ingest -m ingest.industrial_sources_ingest $(ARGS)
-
-ingest-industrial-authoritative: ## Ingest authoritative industrial profile (pass ARGS="--source-profile ... [--curated-file ...]")
-	$(UV) run --project ingest -m ingest.industrial_sources_ingest $(ARGS)
-
-industrial-build-policy: ## Build/update industrial mask policy (pass ARGS="--policy-version global_authoritative_industrial_v1")
-	$(UV) run --project ingest -m ingest.industrial_policy_builder $(ARGS)
-
-industrial-load-no-go-zones: ## Load industrial no-go zones (pass ARGS="--config configs/industrial_policy_global_v1.yaml")
-	$(UV) run --project ingest -m ingest.industrial_no_go_loader $(ARGS)
-
-industrial-coverage-report: ## Export denoiser data coverage report incl. industrial policy metrics
-	$(UV) run --project api scripts/denoiser_data_coverage_report.py $(ARGS)
-
-br-build-hybrid-curated: ## Build BR hybrid curated CSV from CTF identity + IBGE coordinate base
-	$(UV) run --project ingest python scripts/build_br_ctf_ibge_hybrid_curated.py $(ARGS)
-
-ingest-viirs: ## Alias for ingest-firms
-	$(MAKE) ingest-firms ARGS="$(ARGS)"
-
-ingest-fwi: ## Alias for ingest-forecast
-	$(MAKE) ingest-forecast ARGS="$(ARGS)"
-
-ingest-all: ingest-viirs ingest-fwi ingest-weather ## Run all primary ingestion pipelines
-
-db-cleanup: ## Run database cleanup (14-day retention)
-	$(UV) run --project api scripts/db_cleanup.py
-
-# Default local bootstrap window for weather/terrain/perimeters.
-# FIRMS defaults to `world` so the map has recent detections out of the box.
-# Override these on demand:
-#   make prepare PREPARE_BBOX="-125 24 -66 50" PREPARE_FIRMS_AREA="-125,24,-66,50" PREPARE_REGION="conus"
-PREPARE_BBOX ?= 22 40 24 42
-PREPARE_FIRMS_AREA ?= world
-PREPARE_REGION ?= smoke_grid
-PREPARE_JOBS ?= firms,weather,terrain,perimeters
-PREPARE_MAX_RETRIES ?= 3
-PREPARE_RETRY_BACKOFF_SECONDS ?= 20
-PREPARE_FIRMS_DAY_RANGE ?= 1
-PREPARE_PERIMETER_YEARS ?=
-PREPARE_WEATHER_PATCH_MODE ?= --weather-patch-mode
-PREPARE_EXTRA_ARGS ?=
-
-prepare: ## Prepare DB + core context data (migrate, cleanup, orchestrated FIRMS/weather/terrain/perimeters)
-	@echo "=== Step 1/3: Running migrations ==="
-	$(MAKE) migrate
-	@echo ""
-	@echo "=== Step 2/3: Cleaning old operational records ==="
-	$(MAKE) db-cleanup
-	@echo ""
-	@echo "=== Step 3/3: Running orchestrated ingestion ==="
-	$(MAKE) ingest-orchestrator ARGS="--once --jobs $(PREPARE_JOBS) --enforce-freshness --max-retries $(PREPARE_MAX_RETRIES) --retry-backoff-seconds $(PREPARE_RETRY_BACKOFF_SECONDS) --firms-day-range $(PREPARE_FIRMS_DAY_RANGE) --firms-area $(PREPARE_FIRMS_AREA) --weather-bbox $(PREPARE_BBOX) $(PREPARE_WEATHER_PATCH_MODE) --terrain-bbox $(PREPARE_BBOX) --terrain-region-name $(PREPARE_REGION) --perimeters-bbox $(PREPARE_BBOX) $(PREPARE_PERIMETER_YEARS) $(PREPARE_EXTRA_ARGS)"
-	@echo ""
-	@echo "Prepare complete."
-	@echo "Check freshness/status: curl http://localhost:8000/health/data-freshness"
-
-OPS_JOBS ?= firms,perimeters
-OPS_FIRMS_INTERVAL_MINUTES ?= 30
-OPS_WEATHER_INTERVAL_MINUTES ?= 180
-OPS_TERRAIN_INTERVAL_MINUTES ?= 1440
-OPS_PERIMETERS_INTERVAL_MINUTES ?= 1440
-OPS_MAX_RETRIES ?= 3
-OPS_RETRY_BACKOFF_SECONDS ?= 20
-OPS_DASHBOARD_PATH ?= data/ingest/orchestrator_dashboard.json
-
-ops-start: ## Start continuous runtime scheduler profile (FIRMS 30m, weather/perimeters periodic)
-	$(MAKE) ingest-orchestrator ARGS="--loop --jobs $(OPS_JOBS) --poll-seconds 30 --enforce-freshness --max-retries $(OPS_MAX_RETRIES) --retry-backoff-seconds $(OPS_RETRY_BACKOFF_SECONDS) --firms-interval-minutes $(OPS_FIRMS_INTERVAL_MINUTES) --weather-interval-minutes $(OPS_WEATHER_INTERVAL_MINUTES) --terrain-interval-minutes $(OPS_TERRAIN_INTERVAL_MINUTES) --perimeters-interval-minutes $(OPS_PERIMETERS_INTERVAL_MINUTES) --dashboard-path $(OPS_DASHBOARD_PATH)"
+# ── ML research ────────────────────────────────────────────────────────────────
 
 denoiser-label: ## Run ground-truth labeling (pass ARGS="--bbox ... --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.label $(ARGS)
@@ -273,15 +167,15 @@ denoiser-snapshot: ## Export training snapshot (pass ARGS="--bbox ... --start ..
 denoiser-train: ## Train denoiser (pass CONFIG="configs/denoiser_train.yaml")
 	$(UV) run --project ml -m ml.train_denoiser --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train.yaml)
 
-denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="models/denoiser/<run_id>" SNAPSHOT="data/denoiser/snapshots/<run>" OUT="reports/denoiser/<run_id>" ARGS="--target_precision 0.95 ...")
+denoiser-eval: ## Evaluate denoiser and choose thresholds (pass MODEL_RUN="models/denoiser/<run_id>" SNAPSHOT="data/denoiser/snapshots/<run>" OUT="reports/denoiser/<run_id>")
 	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser/<run_id>"))
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT="data/denoiser/snapshots/<run>" or a labeled parquet))
 	$(UV) run --project ml -m ml.eval_denoiser --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) $(if $(OUT),--out $(OUT),) $(ARGS)
 
-denoiser-eventize: ## Build front/event clusters for v2 (pass ARGS="--batch-id ... | --start ... --end ...")
+denoiser-eventize: ## Build fire/event clusters for v2 (pass ARGS="--batch-id ... | --start ... --end ...")
 	$(UV) run --project ml -m ml.denoiser.eventize $(ARGS)
 
-denoiser-label-v2: ## Run v2 labeling (pass ARGS="--start ... --end ... [--bbox ...] --version ... --authority-profile wfigs_us --perimeter-source authoritative_perimeters --authoritative-tier both --industrial-policy-version global_authoritative_industrial_v1")
+denoiser-label-v2: ## Run v2 labeling (pass ARGS="--start ... --end ... [--bbox ...]")
 	$(UV) run --project ml -m ml.denoiser.label_v2 $(ARGS)
 
 denoiser-snapshot-v2: ## Export v2 event snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
@@ -290,50 +184,22 @@ denoiser-snapshot-v2: ## Export v2 event snapshot (pass ARGS="--bbox ... --start
 denoiser-train-v2: ## Train v2 denoiser (pass CONFIG="configs/denoiser_train_v2.yaml")
 	$(UV) run --project ml -m ml.train_denoiser_v2 --config $(if $(CONFIG),$(CONFIG),configs/denoiser_train_v2.yaml)
 
-denoiser-eval-v2: ## Evaluate v2 denoiser (pass MODEL_RUN="models/denoiser_v2/<run_id>" SNAPSHOT=".../run_<id>" OUT="reports/denoiser_v2/<run_id>" ARGS="--gate-scope covered")
+denoiser-eval-v2: ## Evaluate v2 denoiser (pass MODEL_RUN="models/denoiser_v2/<run_id>" SNAPSHOT=".../run_<id>" OUT="reports/denoiser_v2/<run_id>")
 	$(if $(MODEL_RUN),,$(error Please provide MODEL_RUN="models/denoiser_v2/<run_id>"))
 	$(if $(SNAPSHOT),,$(error Please provide SNAPSHOT=<snapshot dir/parquet>))
 	$(if $(OUT),,$(error Please provide OUT="reports/denoiser_v2/<run_id>"))
 	$(UV) run --project ml -m ml.eval_denoiser_v2 --model_run $(MODEL_RUN) --snapshot $(SNAPSHOT) --out $(OUT) $(ARGS)
 
-denoiser-association-report: ## Compare baseline vs updated event association quality (pass ARGS="--start ... --end ...")
-	$(UV) run --project ml -m ml.denoiser.eval_event_association $(ARGS)
+hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG="configs/hindcast_smoke_grid_balkans_mvp.yaml")
+	$(UV) run --project ml -m ml.spread.hindcast_builder --config $(if $(CONFIG),$(CONFIG),configs/hindcast_smoke_grid_balkans_mvp.yaml) $(ARGS)
 
-denoiser-drift-monitor: ## Run denoiser drift monitor (+ optional rollback) (pass ARGS="--dry-run")
-	$(UV) run --project ingest -m ingest.denoiser_drift_monitor $(ARGS)
+spread-champion-challenger: ## Evaluate spread champion vs challenger (pass CONFIG="configs/spread_champion_challenger.yaml")
+	$(UV) run --project ml -m ml.eval_spread_champion_challenger --config $(if $(CONFIG),$(CONFIG),configs/spread_champion_challenger.yaml) $(ARGS)
 
-denoiser-load-coverage-masks: ## Load coverage masks (pass ARGS="--input ... --authority-profile wfigs_us --source-uri ... --source-version ...")
-	$(UV) run --project api scripts/load_perimeter_coverage_masks.py $(ARGS)
+weather-bias: ## Run weather bias analysis (pass ARGS="--forecast-nc ... --truth-nc ...")
+	$(UV) run --project ml -m ml.weather_bias_analysis $(ARGS)
 
-denoiser-build-coverage-masks: ## Build coverage masks from authoritative geometry (pass ARGS="--input ... --authority-profile wfigs_us --source-uri ... --source-version ...")
-	$(UV) run --project ingest -m ingest.coverage_mask_builder $(ARGS)
-
-denoiser-build-coverage-from-authoritative: ## Build coverage mask from authoritative_perimeters rows (pass ARGS="--source-profile ... --authority-profile ... --tier-policy ...")
-	$(UV) run --project ingest -m ingest.coverage_mask_from_authoritative $(ARGS)
-
-denoiser-freeze-baseline: ## Freeze baseline artifacts (pass ARGS="--model-run models/denoiser_v2/<run_id> --snapshot ...")
-	$(UV) run --project api scripts/denoiser_v2_freeze_baseline.py $(ARGS)
-
-denoiser-sweep-v2: ## Run/dry-run constrained PU-bagging sweep (pass ARGS="--base-config ... --snapshot ... [--execute]")
-	$(UV) run --project api scripts/denoiser_v2_sweep.py $(ARGS)
-
-ingest-nifc-perimeters: ## Ingest NIFC fire perimeters (pass ARGS="--year 2024 --year 2025")
-	$(UV) run --project ingest -m ingest.nifc_perimeters_ingest $(ARGS)
-
-ingest-authoritative-perimeters: ## Ingest authoritative WFIGS perimeters (pass ARGS="--source-profile ... [--start ... --end ...]")
-	$(UV) run --project ingest -m ingest.wfigs_authority_ingest $(ARGS)
-
-ingest-authoritative-perimeters-ca: ## Ingest authoritative Canada perimeters from CWFIS (pass ARGS="--source-profile cwfis_nbac_historical [--start ... --end ...]")
-	$(UV) run --project ingest -m ingest.cwfis_authority_ingest $(ARGS)
-
-ingest-authoritative-perimeters-eu: ## Ingest Copernicus EMS wildfire AOIs as silver perimeters (pass ARGS="--start ... --end ... [--category Wildfire]")
-	$(UV) run --project ingest -m ingest.copernicus_ems_authority_ingest $(ARGS)
-
-ingest-orchestrator: ## Run unified FIRMS/weather/terrain/perimeters orchestrator (pass ARGS="--loop --poll-seconds 30")
-	$(UV) run --project ingest -m ingest.orchestrator $(ARGS)
-
-download-fuels: ## Build/cache fuel-moisture feature cube (pass ARGS="--bbox ... --run-time ...")
-	$(UV) run --project ingest -m ingest.fuels_ingest $(ARGS)
+# ── Model registry ─────────────────────────────────────────────────────────────
 
 model-register: ## Register model artifact (usage: make model-register FAMILY=denoiser ARTIFACT=... METRICS=@path/or-json RUNTIME_CONTRACT=@path/or-json)
 	$(if $(FAMILY),,$(error Please provide FAMILY=denoiser|spread))
@@ -354,6 +220,8 @@ model-update-contract: ## Update runtime contract on a registered model (usage: 
 	$(if $(MODEL_ID),,$(error Please provide MODEL_ID=<registered model id>))
 	$(if $(RUNTIME_CONTRACT),,$(error Please provide RUNTIME_CONTRACT=@path/or-json))
 	$(UV) run --project api scripts/model_registry.py update-contract --family "$(FAMILY)" --model-id "$(MODEL_ID)" --runtime-contract '$(RUNTIME_CONTRACT)' $(if $(REPLACE),--replace,)
+
+# ── Full train pipelines ───────────────────────────────────────────────────────
 
 TRAIN_DENOISER_PIPELINE ?= v1
 TRAIN_DENOISER_CONFIG_V1 ?= configs/denoiser_train.yaml
@@ -445,44 +313,3 @@ json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file
 	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_SPREAD_FAMILY) --artifact "$$latest_run" --metrics "@$$registry_metrics"); \
 	echo "Promoting $$model_id"; \
 	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_SPREAD_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-spread pipeline=$(TRAIN_SPREAD_PIPELINE)"
-
-# ── Denoiser end-to-end pipeline ─────────────────────────────────────
-# Usage:
-#   make denoiser-pipeline BBOX="-180 -90 180 90" START=2026-01-18 END=2026-01-30 YEARS="--year 2024 --year 2025 --year 2026"
-#
-# BBOX is intentionally global: labeling auto-restricts negatives to the
-# perimeter coverage region, so non-US detections stay UNKNOWN (safe).
-# This runs: migrate → ingest perimeters → label → snapshot → train.
-# NOTE: START/END must match dates in fire_detections. Update when backfilling.
-BBOX ?= -180 -90 180 90
-START ?= 2026-01-18
-END ?= 2026-01-30
-YEARS ?= --year 2024 --year 2025 --year 2026
-DENOISER_LABEL_VERSION ?= default
-
-denoiser-pipeline: ## End-to-end denoiser: migrate → ingest perimeters → label → snapshot → train
-	@echo "=== Step 1/5: Running migrations ==="
-	$(MAKE) migrate
-	@echo ""
-	@echo "=== Step 2/5: Ingesting NIFC fire perimeters ==="
-	$(MAKE) ingest-nifc-perimeters ARGS="$(YEARS) --bbox $(BBOX)"
-	@echo ""
-	@echo "=== Step 3/5: Labeling detections with ground truth ==="
-	$(MAKE) denoiser-label ARGS="--bbox $(BBOX) --start $(START) --end $(END)"
-	@echo ""
-	@echo "=== Step 4/5: Exporting training snapshot ==="
-	$(MAKE) denoiser-snapshot ARGS="--bbox $(BBOX) --start $(START) --end $(END) --version $(DENOISER_LABEL_VERSION)"
-	@echo ""
-	@echo "=== Step 5/5: Training denoiser (auto-detecting latest snapshot) ==="
-	$(UV) run --project ml -m ml.train_denoiser \
-		--config configs/denoiser_train.yaml \
-		--snapshot-path latest
-
-hindcast-build: ## Build spread hindcast predicted/observed dataset (pass CONFIG="configs/hindcast_smoke_grid_balkans_mvp.yaml")
-	$(UV) run --project ml -m ml.spread.hindcast_builder --config $(if $(CONFIG),$(CONFIG),configs/hindcast_smoke_grid_balkans_mvp.yaml) $(ARGS)
-
-spread-champion-challenger: ## Evaluate spread champion vs challenger (pass CONFIG="configs/spread_champion_challenger.yaml")
-	$(UV) run --project ml -m ml.eval_spread_champion_challenger --config $(if $(CONFIG),$(CONFIG),configs/spread_champion_challenger.yaml) $(ARGS)
-
-weather-bias: ## Run weather bias analysis (pass ARGS="--forecast-nc ... --truth-nc ...")
-	$(UV) run --project ml -m ml.weather_bias_analysis $(ARGS)
