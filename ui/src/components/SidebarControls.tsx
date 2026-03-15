@@ -14,7 +14,7 @@ import {
 import { apiPublicBaseUrl } from "../config/runtime";
 import { useAppStore } from "../state/store";
 import { FILTER_PRESETS } from "../utils/presets";
-import { computeTimeRange, formatTimeWindow } from "../utils/time";
+import { computeArchiveTimeRange, computeTimeRange, formatTimeWindow } from "../utils/time";
 import { viewportBbox } from "../utils/mapMath";
 import { buildFiresCsvExportUrl, buildMapPngExportUrl } from "../api/client";
 
@@ -24,12 +24,17 @@ export default function SidebarControls(): JSX.Element {
   const mapView = useAppStore((s) => s.mapView);
   const activePreset = useAppStore((s) => s.activePreset);
   const forecast = useAppStore((s) => s.forecast);
+  const archive = useAppStore((s) => s.archive);
   const setFilters = useAppStore((s) => s.setFilters);
   const applyPreset = useAppStore((s) => s.applyPreset);
   const setRiskVisibility = useAppStore((s) => s.setRiskVisibility);
   const clearSelection = useAppStore((s) => s.clearSelection);
 
-  const timeRange = computeTimeRange(filters);
+  const isArchiveMode = archive.viewMode === "archive";
+  const timeRange =
+    isArchiveMode && archive.archiveDate && archive.archiveTimeframe
+      ? computeArchiveTimeRange(archive.archiveDate, archive.archiveTimeframe)
+      : computeTimeRange(filters);
   const bbox = viewportBbox(mapView);
 
   const csvUrl = buildFiresCsvExportUrl(apiPublicBaseUrl(), {
@@ -50,7 +55,7 @@ export default function SidebarControls(): JSX.Element {
 
   return (
     <Stack spacing={1.5}>
-      <Card>
+      {!isArchiveMode && <Card>
         <CardContent>
           <Typography variant="subtitle2" gutterBottom>
             Quick presets
@@ -80,9 +85,9 @@ export default function SidebarControls(): JSX.Element {
             </Box>
           </Box>
         </CardContent>
-      </Card>
+      </Card>}
 
-      <Card>
+      {!isArchiveMode && <Card>
         <CardContent>
           <Typography variant="subtitle2" gutterBottom>
             Time window
@@ -148,7 +153,7 @@ export default function SidebarControls(): JSX.Element {
             label="Include risk index overlay"
           />
         </CardContent>
-      </Card>
+      </Card>}
 
       <Card>
         <CardContent>

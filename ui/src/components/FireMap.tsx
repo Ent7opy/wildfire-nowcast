@@ -8,6 +8,7 @@ import maplibregl from "maplibre-gl";
 import {
   Alert,
   Box,
+  Button,
   Divider,
   FormControlLabel,
   IconButton,
@@ -18,6 +19,7 @@ import {
   Tooltip,
   Typography
 } from "@mui/material";
+import ReplayIcon from "@mui/icons-material/Replay";
 import MapOutlinedIcon from "@mui/icons-material/MapOutlined";
 import PublicIcon from "@mui/icons-material/Public";
 import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
@@ -42,7 +44,7 @@ import {
   isForecastContourVisible,
   toRenderEvent
 } from "../map/layerUtils";
-import { computeTimeRange } from "../utils/time";
+import { computeArchiveTimeRange, computeTimeRange } from "../utils/time";
 import { eventLimitForZoom, frontLimitForZoom, shouldLoadFronts, shouldRenderCentroids, viewportBbox } from "../utils/mapMath";
 import { useDebounce } from "../hooks/useDebounce";
 import { selectionViewFromBounds } from "../utils/mapSelection";
@@ -122,22 +124,31 @@ export default function FireMap({
   const mapView = useAppStore((s) => s.mapView);
   const forecast = useAppStore((s) => s.forecast);
   const selectedEvent = useAppStore((s) => s.selectedEvent);
+  const archive = useAppStore((s) => s.archive);
   const setMapView = useAppStore((s) => s.setMapView);
   const setSelectedEvent = useAppStore((s) => s.setSelectedEvent);
   const setLastClick = useAppStore((s) => s.setLastClick);
   const focusMapOnPoint = useAppStore((s) => s.focusMapOnPoint);
   const setFrontIndexByEvent = useAppStore((s) => s.setFrontIndexByEvent);
   const setLayersState = useAppStore((s) => s.setLayersState);
+  const exitToLiveMode = useAppStore((s) => s.exitToLiveMode);
+
+  const isArchiveMode = archive.viewMode === "archive";
 
   const [layersPanelAnchor, setLayersPanelAnchor] = useState<HTMLElement | null>(null);
 
   const debouncedMapView = useDebounce(mapView, 400);
   const bbox = useMemo(() => viewportBbox(debouncedMapView), [debouncedMapView]);
-  const timeRange = useMemo(() => computeTimeRange(filters), [filters]);
+  const timeRange = useMemo(() => {
+    if (isArchiveMode && archive.archiveDate && archive.archiveTimeframe) {
+      return computeArchiveTimeRange(archive.archiveDate, archive.archiveTimeframe);
+    }
+    return computeTimeRange(filters);
+  }, [isArchiveMode, archive.archiveDate, archive.archiveTimeframe, filters]);
   const normalizedSearch = searchQuery.trim().toLowerCase();
 
   const eventsQuery = useQuery({
-    queryKey: ["fire-events", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, filters.clusterPoints, debouncedMapView.zoom],
+    queryKey: ["fire-events", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, filters.clusterPoints, debouncedMapView.zoom, archive.viewMode, archive.archiveDate, archive.archiveTimeframe],
     queryFn: () =>
       getFireEvents({
         bbox,
@@ -151,7 +162,7 @@ export default function FireMap({
   });
 
   const frontsQuery = useQuery({
-    queryKey: ["fire-fronts", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, debouncedMapView.zoom],
+    queryKey: ["fire-fronts", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, debouncedMapView.zoom, archive.viewMode, archive.archiveDate, archive.archiveTimeframe],
     queryFn: () =>
       getFireFronts({
         bbox,
@@ -694,6 +705,40 @@ export default function FireMap({
           ))}
         </ToggleButtonGroup>
       </Popover>
+
+      {isArchiveMode && (
+        <Box
+          sx={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            zIndex: 20,
+            pointerEvents: "auto"
+          }}
+        >
+          <Button
+            variant="contained"
+            startIcon={<ReplayIcon />}
+            onClick={exitToLiveMode}
+            sx={{
+              bgcolor: "#f97316",
+              color: "#fff",
+              fontWeight: 800,
+              fontSize: 11,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              px: 2.5,
+              py: 1.2,
+              borderRadius: 2,
+              boxShadow: "0 4px 20px rgba(249,115,22,0.4)",
+              "&:hover": { bgcolor: "#ea6f10" }
+            }}
+          >
+            Return to Live Feed
+          </Button>
+        </Box>
+      )}
 
       <Box
         sx={{

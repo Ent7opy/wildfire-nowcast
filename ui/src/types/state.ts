@@ -1,5 +1,14 @@
 import type { FireEvent } from "./api";
 
+export type ViewMode = 'live' | 'archive';
+export type ArchiveTimeframe = 'morning' | 'afternoon' | 'evening' | 'night';
+
+export interface ArchiveModeState {
+  viewMode: ViewMode;
+  archiveDate: string | null;  // 'YYYY-MM-DD'
+  archiveTimeframe: ArchiveTimeframe | null;
+}
+
 export interface FiltersState {
   hoursStart: number;
   hoursEnd: number;
