@@ -244,6 +244,7 @@ function NewsCard({ item, expanded = false }: { item: GdeltArticle; expanded?: b
       rel="noopener noreferrer"
       sx={{
         display: "block",
+        flexShrink: 0,
         border: "1px solid rgba(255,255,255,0.06)",
         borderRadius: 2.5,
         overflow: "hidden",
@@ -547,7 +548,7 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
           boxShadow: "0 24px 80px rgba(0,0,0,0.35)",
           display: "flex",
           flexDirection: "column",
-          height: 460
+          height: 560
         }}
       >
         {/* Tab switcher */}
