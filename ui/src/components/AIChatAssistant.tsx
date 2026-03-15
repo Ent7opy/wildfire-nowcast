@@ -46,7 +46,13 @@ function compactEventContext(selectedEvent: FireEvent | null): Record<string, un
     region_name: selectedEvent.region_name,
     admin1_name: selectedEvent.admin1_name,
     admin0_name: selectedEvent.admin0_name,
-    country: selectedEvent.country
+    country: selectedEvent.country,
+    frp_max: selectedEvent.frp_max ?? null,
+    frp_mean: selectedEvent.frp_mean ?? null,
+    brightness_max: selectedEvent.brightness_max ?? null,
+    brightness_mean: selectedEvent.brightness_mean ?? null,
+    geom_source: selectedEvent.geom_source ?? null,
+    geom_method: selectedEvent.geom_method ?? null
   };
 }
 
@@ -125,6 +131,12 @@ export default function AIChatAssistant(): JSX.Element {
         active_job_id: forecast.jobId,
         last_run_id: forecast.lastForecast?.run.id || null,
         last_event_key: forecast.lastForecast?.eventKey || null,
+        run_quality: forecast.lastForecast?.runMeta
+          ? {
+              weather_available: forecast.lastForecast.runMeta.weatherRunId !== null,
+              confidence_level: forecast.lastForecast.runMeta.confidenceLevel
+            }
+          : null,
         active_request: forecast.activeRequest
           ? {
               event_id: forecast.activeRequest.eventId || null,

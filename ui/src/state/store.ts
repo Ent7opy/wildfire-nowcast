@@ -7,6 +7,7 @@ import type {
   ForecastJobState,
   ForecastNotification,
   ForecastRequestContext,
+  ForecastRunMeta,
   LayersState,
   MapViewState
 } from "../types/state";
@@ -74,7 +75,7 @@ interface AppStoreState {
   setFrontIndexByEvent: (index: Record<string, { frontId: string; detectionCount: number }>) => void;
   startForecastJob: (jobId: string, request: ForecastRequestContext) => void;
   incrementForecastPoll: () => void;
-  completeForecastJob: (runId: string) => void;
+  completeForecastJob: (runId: string, runMeta?: ForecastRunMeta) => void;
   clearForecastJob: () => void;
   setForecastNotification: (notification: ForecastNotification | null) => void;
   setAssistantViewContext: (context: AssistantViewContext) => void;
@@ -170,7 +171,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
     }));
   },
 
-  completeForecastJob: (runId) => {
+  completeForecastJob: (runId, runMeta) => {
     set((state) => ({
       forecast: {
         ...state.forecast,
@@ -178,6 +179,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
         pollCount: 0,
         lastForecast: {
           run: { id: runId },
+          ...(runMeta ? { runMeta } : {}),
           ...(state.forecast.activeRequest || {})
         },
         activeRequest: null

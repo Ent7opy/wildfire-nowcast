@@ -50,10 +50,15 @@ export interface ForecastNotification {
   };
 }
 
+export interface ForecastRunMeta {
+  weatherRunId: string | null;
+  confidenceLevel: string | null;
+}
+
 export interface ForecastJobState {
   jobId: string | null;
   pollCount: number;
-  lastForecast: ({ run: { id: string } } & Partial<ForecastRequestContext>) | null;
+  lastForecast: ({ run: { id: string }; runMeta?: ForecastRunMeta } & Partial<ForecastRequestContext>) | null;
   activeRequest: ForecastRequestContext | null;
   notification: ForecastNotification | null;
 }

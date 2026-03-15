@@ -135,14 +135,29 @@ function formatIntensity(value: number, unit: "MW" | "K"): string {
   return `${value.toFixed(1)} ${unit}`;
 }
 
-function insightText(event: FireEvent): string {
+function observationSummary(event: FireEvent): string {
   if (event.review_required) {
-    return "This event is marked for analyst review. Treat the perimeter as provisional until verified.";
+    return "This event is flagged for analyst review. Treat the perimeter and intensity as provisional until verified.";
   }
-  if (typeof event.denoiser_decision === "string" && event.denoiser_decision.trim().length > 0) {
-    return `Denoiser decision is ${event.denoiser_decision}. Continue monitoring event score and fronts for escalation.`;
-  }
-  return "No denoiser decision is attached to this event snapshot.";
+  const time = typeof event.start_time === "string" && event.start_time.trim().length > 0
+    ? ` at ${formattedTime(event.start_time)}`
+    : "";
+  const provenance = String(event.geom_source || "").toLowerCase() === "authoritative"
+    ? "Authoritative perimeter from official source."
+    : "Perimeter is estimated from detection cluster.";
+  const fronts = Number(event.front_count || 0);
+  const frontStr = fronts === 1 ? "1 active front tracked." : fronts > 1 ? `${fronts} active fronts tracked.` : "No fronts tracked yet.";
+  return `Satellite thermal anomaly detected${time}. ${provenance} ${frontStr}`;
+}
+
+function satelliteLabel(source?: string | null, sensor?: string | null): string {
+  const s = `${source || ""} ${sensor || ""}`.toUpperCase();
+  if (s.includes("VIIRS") && (s.includes("NOAA20") || s.includes("NOAA-20"))) return "VIIRS · NOAA-20";
+  if (s.includes("VIIRS") && (s.includes("SNPP") || s.includes("NPP"))) return "VIIRS · Suomi-NPP";
+  if (s.includes("MODIS") && s.includes("TERRA")) return "MODIS · Terra";
+  if (s.includes("MODIS") && s.includes("AQUA")) return "MODIS · Aqua";
+  if (s.includes("CLUSTER") || s.includes("AGGREGATED")) return "Multi-sensor cluster";
+  return [source, sensor].filter(Boolean).join(" · ") || "Unknown sensor";
 }
 
 function geometryProvenanceLabel(event: FireEvent): "Authoritative perimeter" | "Estimated perimeter" {
@@ -548,11 +563,11 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
           <Box sx={{ display: "flex", alignItems: "center", gap: 0.85 }}>
             <InfoOutlinedIcon sx={{ fontSize: 14, color: "#60a5fa" }} />
             <Typography sx={{ fontSize: 10, color: "#fff", fontWeight: 800, letterSpacing: "0.12em", textTransform: "uppercase" }}>
-              Environment Insight
+              Observation
             </Typography>
           </Box>
           <Typography sx={{ fontSize: 12, color: "#9ca3af", lineHeight: 1.65, p: 1.6, borderRadius: 2.4, border: "1px solid rgba(255,255,255,0.06)", bgcolor: "rgba(22,27,34,0.55)", fontStyle: "italic" }}>
-            {insightText(selectedEvent)}
+            {observationSummary(selectedEvent)}
           </Typography>
         </Stack>
 
@@ -560,39 +575,38 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
 
         <Stack spacing={1}>
           <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
-            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Event ID</Typography>
-            <Typography sx={{ fontSize: 11, color: "#e5e7eb", fontFamily: "monospace" }}>{String(selectedEvent.event_id || "unknown")}</Typography>
+            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>First detected</Typography>
+            <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>{formattedTime(selectedEvent.start_time)}</Typography>
           </Box>
           <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
-            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Source / Sensor</Typography>
+            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Satellite</Typography>
             <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>
-              {String(selectedEvent.source || "unknown")} • {String(selectedEvent.sensor || "unknown")}
+              {satelliteLabel(selectedEvent.source, selectedEvent.sensor)}
             </Typography>
           </Box>
           <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
-            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Detections</Typography>
-            <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>{Number(selectedEvent.detection_count || 0)}</Typography>
-          </Box>
-          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
-            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Window</Typography>
-            <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>
-              {formattedTime(selectedEvent.start_time)} → {formattedTime(selectedEvent.end_time)}
-            </Typography>
-          </Box>
-          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
-            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Fronts</Typography>
+            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Active fronts</Typography>
             <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>{Number(selectedEvent.front_count || 0)}</Typography>
           </Box>
           <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1 }}>
-            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Decision</Typography>
-            <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>{String(selectedEvent.denoiser_decision || "unknown")}</Typography>
+            <Typography sx={{ fontSize: 11, color: "#6b7280", fontWeight: 700 }}>Perimeter</Typography>
+            <Typography sx={{ fontSize: 11, color: "#e5e7eb" }}>{geometryProvenanceLabel(selectedEvent)}</Typography>
           </Box>
 
           {selectedEvent.review_required && (
             <Box sx={{ mt: 0.8, px: 1.25, py: 1, border: "1px solid rgba(250,204,21,0.3)", bgcolor: "rgba(250,204,21,0.08)", borderRadius: 1.6, display: "flex", alignItems: "center", gap: 0.85 }}>
               <WarningAmberIcon sx={{ fontSize: 14, color: "#facc15" }} />
               <Typography sx={{ fontSize: 11, color: "#fcd34d", fontWeight: 700 }}>
-                Review required flag is active for this event.
+                Analyst review required — perimeter and intensity are provisional.
+              </Typography>
+            </Box>
+          )}
+
+          {forecast.lastForecast?.runMeta && forecast.lastForecast.runMeta.weatherRunId === null && (
+            <Box sx={{ mt: 0.8, px: 1.25, py: 1, border: "1px solid rgba(251,146,60,0.3)", bgcolor: "rgba(251,146,60,0.08)", borderRadius: 1.6, display: "flex", alignItems: "flex-start", gap: 0.85 }}>
+              <WarningAmberIcon sx={{ fontSize: 14, color: "#fb923c", mt: 0.1 }} />
+              <Typography sx={{ fontSize: 11, color: "#fdba74", fontWeight: 600, lineHeight: 1.5 }}>
+                Spread forecast assumed calm conditions — no weather data was available for this area and time. The symmetric shape reflects this, not actual wind direction.
               </Typography>
             </Box>
           )}
