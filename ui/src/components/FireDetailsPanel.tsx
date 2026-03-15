@@ -12,9 +12,12 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import CloseIcon from "@mui/icons-material/Close";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import LocalFireDepartmentIcon from "@mui/icons-material/LocalFireDepartment";
+import NewspaperIcon from "@mui/icons-material/Newspaper";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import QueryStatsIcon from "@mui/icons-material/QueryStats";
+import ShowChartIcon from "@mui/icons-material/ShowChart";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
 import {
   ApiError,
@@ -33,6 +36,14 @@ import { comparePriorityFeedEvents } from "../utils/priorityFeed";
 
 interface FireDetailsPanelProps {
   visibleEvents: FireEvent[];
+}
+
+interface GdeltArticle {
+  title: string;
+  url: string;
+  socialimage?: string;
+  seendate: string;
+  sourcecountry?: string;
 }
 
 const HIGH_CONFIDENCE_THRESHOLD = 0.6;
@@ -195,6 +206,7 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
   const isSafetyMode = safety.enabled;
 
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"telemetry" | "news">("telemetry");
   const [resolvedGeocodes, setResolvedGeocodes] = useState<Record<string, ReverseGeocodeResponse>>({});
   const resolvedGeocodesRef = useRef<Record<string, ReverseGeocodeResponse>>({});
   const geocodeInFlightRef = useRef<Set<string>>(new Set());
@@ -208,6 +220,20 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
       .sort(comparePriorityFeedEvents)
       .slice(0, 5);
   }, [visibleEvents]);
+
+  const { data: newsData, isLoading: newsLoading, isError: newsError } = useQuery({
+    queryKey: ["gdelt-news"],
+    queryFn: async () => {
+      const url = "https://api.gdeltproject.org/api/v2/doc/doc?query=(wildfire OR fire) sourcelang:english&mode=artlist&format=json&timespan=6h&sort=datedesc&maxrecords=50";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to fetch news");
+      const json = await res.json() as { articles?: GdeltArticle[] };
+      return json.articles ?? [];
+    },
+    staleTime: 5 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    enabled: activeTab === "news"
+  });
 
   const resolveLocation = useCallback(async (event: FireEvent): Promise<void> => {
     if (hasDirectLocation(event)) {
@@ -355,93 +381,234 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
           minHeight: 360
         }}
       >
-        <Box sx={{ px: 2.25, py: 1.6, borderBottom: "1px solid rgba(255,255,255,0.05)", bgcolor: "#161b22", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <Typography sx={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", color: "#fff", display: "flex", alignItems: "center", gap: 0.75 }}>
-            <LocalFireDepartmentIcon sx={{ fontSize: 14, color: "#f97316" }} />
-            Priority Feed
-          </Typography>
-          <Typography sx={{ fontSize: 10, fontWeight: 700, color: "#6b7280", letterSpacing: "0.1em", textTransform: "uppercase" }}>
-            {topFires.length} in view
-          </Typography>
+        {/* Tab switcher */}
+        <Box sx={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.05)", bgcolor: "#161b22" }}>
+          <Box
+            component="button"
+            onClick={() => setActiveTab("telemetry")}
+            sx={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 0.75,
+              py: 1.5,
+              fontSize: 10,
+              fontWeight: 800,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              border: "none",
+              cursor: "pointer",
+              transition: "all 160ms ease",
+              ...(activeTab === "telemetry"
+                ? { bgcolor: "#0d1117", color: "#fff" }
+                : { bgcolor: "transparent", color: "#4b5563", "&:hover": { color: "#9ca3af" } })
+            }}
+          >
+            <ShowChartIcon sx={{ fontSize: 12 }} />
+            Telemetry
+          </Box>
+          <Box
+            component="button"
+            onClick={() => setActiveTab("news")}
+            sx={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 0.75,
+              py: 1.5,
+              fontSize: 10,
+              fontWeight: 800,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              border: "none",
+              borderLeft: "1px solid rgba(255,255,255,0.05)",
+              cursor: "pointer",
+              transition: "all 160ms ease",
+              ...(activeTab === "news"
+                ? { bgcolor: "#0d1117", color: "#f97316" }
+                : { bgcolor: "transparent", color: "#4b5563", "&:hover": { color: "#9ca3af" } })
+            }}
+          >
+            <NewspaperIcon sx={{ fontSize: 12 }} />
+            Ground Reports
+          </Box>
         </Box>
 
-        <Box sx={{ p: 2.25, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1.2 }}>
-          {topFires.map((event, index) => {
-            const lat = safeNumber(event.lat);
-            const lon = safeNumber(event.lon);
-            const key = coordinateKey(lat, lon);
-            const geocoded = key ? resolvedGeocodes[key] : null;
-            const loc = locationLabel(event, geocoded);
-            const intensity = primaryIntensity(event);
-            const canSelect = lat !== null && lon !== null;
+        {activeTab === "telemetry" && (
+          <>
+            <Box sx={{ px: 2.25, py: 1.2, borderBottom: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <Typography sx={{ fontSize: 10, fontWeight: 700, color: "#6b7280", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                {topFires.length} in view
+              </Typography>
+            </Box>
+            <Box sx={{ p: 2.25, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1.2 }}>
+              {topFires.map((event, index) => {
+                const lat = safeNumber(event.lat);
+                const lon = safeNumber(event.lon);
+                const key = coordinateKey(lat, lon);
+                const geocoded = key ? resolvedGeocodes[key] : null;
+                const loc = locationLabel(event, geocoded);
+                const intensity = primaryIntensity(event);
+                const canSelect = lat !== null && lon !== null;
 
-            return (
+                return (
+                  <Box
+                    key={`${String(event.event_id || "event")}-${index}`}
+                    component="button"
+                    disabled={!canSelect}
+                    onClick={() => {
+                      if (lat === null || lon === null) {
+                        return;
+                      }
+                      setSelectedEvent({ ...event, lat, lon });
+                      setLastClick({ lat, lng: lon });
+                      focusMapOnPoint(lat, lon, 5.5);
+                    }}
+                    sx={{
+                      textAlign: "left",
+                      border: "1px solid rgba(255,255,255,0.06)",
+                      borderRadius: 2.5,
+                      background: "rgba(22,27,34,0.5)",
+                      color: "inherit",
+                      p: 1.6,
+                      cursor: canSelect ? "pointer" : "not-allowed",
+                      transition: "all 160ms ease",
+                      opacity: canSelect ? 1 : 0.55,
+                      '&:hover': canSelect
+                        ? {
+                            borderColor: "rgba(249,115,22,0.34)",
+                            backgroundColor: "#1c2128"
+                          }
+                        : undefined
+                    }}
+                  >
+                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 0.75 }}>
+                      <Typography sx={{ fontSize: 10, color: "#6b7280", letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700, pr: 1 }}>
+                        {loc}
+                      </Typography>
+                      <Typography sx={{ fontSize: 10, color: "#4b5563", fontWeight: 700 }}>
+                        {formattedTime(event.end_time)}
+                      </Typography>
+                    </Box>
+
+                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 0.9 }}>
+                        <Box
+                          sx={{
+                            width: 7,
+                            height: 7,
+                            borderRadius: "50%",
+                            bgcolor: confidenceLabel(event) === "High" ? "#f97316" : "#6b7280",
+                            boxShadow: confidenceLabel(event) === "High" ? "0 0 8px rgba(249,115,22,0.45)" : undefined
+                          }}
+                        />
+                        <Typography sx={{ fontSize: 12, color: "#fff", fontWeight: 700 }}>
+                          {intensity ? `${intensity.label.toUpperCase()}: ${formatIntensity(intensity.value, intensity.unit)}` : "INTENSITY: n/a"}
+                        </Typography>
+                      </Box>
+                      <ChevronRightIcon sx={{ fontSize: 16, color: "#4b5563" }} />
+                    </Box>
+                  </Box>
+                );
+              })}
+
+              {topFires.length === 0 && (
+                <Typography sx={{ fontSize: 13, color: "#6b7280" }}>
+                  No events match the current viewport and filter settings.
+                </Typography>
+              )}
+            </Box>
+          </>
+        )}
+
+        {activeTab === "news" && (
+          <Box sx={{ p: 2.25, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1.5 }}>
+            {newsLoading && (
+              <Typography sx={{ fontSize: 12, color: "#6b7280" }}>Loading ground reports...</Typography>
+            )}
+            {newsError && (
+              <Typography sx={{ fontSize: 12, color: "#ef4444" }}>Failed to load news. Check your connection.</Typography>
+            )}
+            {!newsLoading && !newsError && (newsData ?? []).length === 0 && (
+              <Typography sx={{ fontSize: 12, color: "#6b7280" }}>No wildfire reports in the last 6 hours.</Typography>
+            )}
+            {(newsData ?? []).map((item, idx) => (
               <Box
-                key={`${String(event.event_id || "event")}-${index}`}
-                component="button"
-                disabled={!canSelect}
-                onClick={() => {
-                  if (lat === null || lon === null) {
-                    return;
-                  }
-                  setSelectedEvent({ ...event, lat, lon });
-                  setLastClick({ lat, lng: lon });
-                  focusMapOnPoint(lat, lon, 5.5);
-                }}
+                key={idx}
+                component="a"
+                href={item.url}
+                target="_blank"
+                rel="noopener noreferrer"
                 sx={{
-                  textAlign: "left",
+                  display: "block",
                   border: "1px solid rgba(255,255,255,0.06)",
                   borderRadius: 2.5,
-                  background: "rgba(22,27,34,0.5)",
-                  color: "inherit",
-                  p: 1.6,
-                  cursor: canSelect ? "pointer" : "not-allowed",
+                  overflow: "hidden",
+                  textDecoration: "none",
                   transition: "all 160ms ease",
-                  opacity: canSelect ? 1 : 0.55,
-                  '&:hover': canSelect
-                    ? {
-                        borderColor: "rgba(249,115,22,0.34)",
-                        backgroundColor: "#1c2128"
-                      }
-                    : undefined
+                  bgcolor: "rgba(22,27,34,0.5)",
+                  "&:hover": {
+                    borderColor: "rgba(249,115,22,0.3)",
+                    bgcolor: "#1c2128"
+                  }
                 }}
               >
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 0.75 }}>
-                  <Typography sx={{ fontSize: 10, color: "#6b7280", letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 700, pr: 1 }}>
-                    {loc}
-                  </Typography>
-                  <Typography sx={{ fontSize: 10, color: "#4b5563", fontWeight: 700 }}>
-                    {formattedTime(event.end_time)}
-                  </Typography>
-                </Box>
-
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.9 }}>
+                {item.socialimage && (
+                  <Box sx={{ position: "relative", height: 80, overflow: "hidden" }}>
                     <Box
+                      component="img"
+                      src={item.socialimage}
+                      alt=""
                       sx={{
-                        width: 7,
-                        height: 7,
-                        borderRadius: "50%",
-                        bgcolor: confidenceLabel(event) === "High" ? "#f97316" : "#6b7280",
-                        boxShadow: confidenceLabel(event) === "High" ? "0 0 8px rgba(249,115,22,0.45)" : undefined
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                        filter: "grayscale(100%)",
+                        transition: "filter 500ms ease",
+                        "&:hover": { filter: "grayscale(0%)" }
                       }}
                     />
-                    <Typography sx={{ fontSize: 12, color: "#fff", fontWeight: 700 }}>
-                      {intensity ? `${intensity.label.toUpperCase()}: ${formatIntensity(intensity.value, intensity.unit)}` : "INTENSITY: n/a"}
-                    </Typography>
+                    {item.sourcecountry && (
+                      <Box sx={{
+                        position: "absolute",
+                        top: 6,
+                        left: 6,
+                        px: 0.75,
+                        py: 0.25,
+                        bgcolor: "rgba(0,0,0,0.65)",
+                        backdropFilter: "blur(8px)",
+                        borderRadius: 0.75,
+                        border: "1px solid rgba(255,255,255,0.1)"
+                      }}>
+                        <Typography sx={{ fontSize: 8, fontWeight: 700, color: "#fff", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                          {item.sourcecountry}
+                        </Typography>
+                      </Box>
+                    )}
                   </Box>
-                  <ChevronRightIcon sx={{ fontSize: 16, color: "#4b5563" }} />
+                )}
+                <Box sx={{ p: 1.5 }}>
+                  <Typography sx={{ fontSize: 11, fontWeight: 700, color: "#d1d5db", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                    {item.title}
+                  </Typography>
+                  <Box sx={{ mt: 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <Typography sx={{ fontSize: 9, fontWeight: 700, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                      {new Date(item.seendate.replace(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/, "$1-$2-$3T$4:$5:$6Z")).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </Typography>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.4 }}>
+                      <Typography sx={{ fontSize: 9, fontWeight: 700, color: "rgba(249,115,22,0.5)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                        Read
+                      </Typography>
+                      <OpenInNewIcon sx={{ fontSize: 9, color: "rgba(249,115,22,0.5)" }} />
+                    </Box>
+                  </Box>
                 </Box>
               </Box>
-            );
-          })}
-
-          {topFires.length === 0 && (
-            <Typography sx={{ fontSize: 13, color: "#6b7280" }}>
-              No events match the current viewport and filter settings.
-            </Typography>
-          )}
-        </Box>
+            ))}
+          </Box>
+        )}
       </Box>
     );
   }
