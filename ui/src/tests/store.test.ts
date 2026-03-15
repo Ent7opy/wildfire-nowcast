@@ -18,8 +18,10 @@ describe("app store filters", () => {
       activePreset: "Last 6h All",
       layers: {
         showFires: true,
+        showFronts: true,
         showForecast: true,
-        showRisk: false
+        showRisk: false,
+        basemap: 'dark' as const
       }
     });
   });

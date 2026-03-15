@@ -10,8 +10,10 @@ export interface FiltersState {
 
 export interface LayersState {
   showFires: boolean;
+  showFronts: boolean;
   showForecast: boolean;
   showRisk: boolean;
+  basemap: 'dark' | 'light' | 'satellite';
 }
 
 export interface MapViewState {

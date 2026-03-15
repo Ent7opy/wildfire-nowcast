@@ -89,18 +89,18 @@ export function fireLineRgba(severity: number): number[] {
 
 export function eventRadiusM(detectionCount: number | null): number {
   if (detectionCount === null) {
-    return 3_000;
-  }
-  if (detectionCount >= 50) {
-    return 12_000;
-  }
-  if (detectionCount >= 20) {
     return 8_000;
   }
-  if (detectionCount >= 5) {
-    return 5_000;
+  if (detectionCount >= 50) {
+    return 25_000;
   }
-  return 3_000;
+  if (detectionCount >= 20) {
+    return 15_000;
+  }
+  if (detectionCount >= 5) {
+    return 10_000;
+  }
+  return 8_000;
 }
 
 export function frontLineWidth(detectionCount: number | null): number {
@@ -341,7 +341,7 @@ export function eventFeature(event: RenderEvent): Feature {
 
   const geometry = normalizeGeometry(event.geom_geojson) || {
     type: "Polygon",
-    coordinates: [eventRingCoords(event.lon, event.lat, Math.min(Math.max(event.radius_m || 500, 500), 20_000))]
+    coordinates: [eventRingCoords(event.lon, event.lat, Math.min(Math.max(event.radius_m || 500, 500), 50_000))]
   };
 
   return {
