@@ -600,7 +600,6 @@ export default function App(): JSX.Element {
             <Box sx={{ minHeight: { xs: 420, md: 520 }, flex: 1 }}>
               <FireMap
                 onVisibleEventsChange={setVisibleEvents}
-                searchQuery={searchQuery}
                 confidenceFilter={confidenceFilter}
               />
             </Box>
