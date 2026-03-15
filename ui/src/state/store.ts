@@ -12,6 +12,9 @@ import type {
   ForecastRunMeta,
   LayersState,
   MapViewState,
+  SafetyModeState,
+  SafetyTier,
+  UserLocationState,
   ViewMode
 } from "../types/state";
 import { currentTimeframe } from "../utils/time";
@@ -55,6 +58,24 @@ const DEFAULT_ARCHIVE_STATE: ArchiveModeState = {
   archiveTimeframe: null,
 };
 
+function computeSafetyTier(nearestKm: number | null): SafetyTier {
+  if (nearestKm === null) return 'SAFE';
+  if (nearestKm <= 5)  return 'DANGER';
+  if (nearestKm <= 20) return 'WARNING';
+  if (nearestKm <= 50) return 'WATCH';
+  return 'SAFE';
+}
+
+const DEFAULT_SAFETY_STATE: SafetyModeState = {
+  enabled: false,
+  userLocation: null,
+  locationPermission: 'unknown',
+  proximityRadiusKm: 50,
+  nearestFireDistanceKm: null,
+  safetyTier: 'SAFE',
+  pendingBriefingPrompt: null,
+};
+
 const DEFAULT_ASSISTANT_VIEW_CONTEXT: AssistantViewContext = {
   updatedAt: Date.now(),
   searchQuery: "",
@@ -75,6 +96,7 @@ interface AppStoreState {
   forecast: ForecastJobState;
   assistantViewContext: AssistantViewContext;
   archive: ArchiveModeState;
+  safety: SafetyModeState;
   setFilters: (patch: Partial<FiltersState>) => void;
   applyPreset: (preset: { name: string; hoursStart: number; hoursEnd: number; likelihood: number }) => void;
   setLayersState: (patch: Partial<LayersState>) => void;
@@ -96,6 +118,14 @@ interface AppStoreState {
   setArchiveDate: (date: string) => void;
   setArchiveTimeframe: (tf: ArchiveTimeframe) => void;
   setViewMode: (mode: ViewMode) => void;
+  enableSafetyMode: () => void;
+  disableSafetyMode: () => void;
+  setSafetyLocation: (location: UserLocationState | null) => void;
+  setSafetyLocationPermission: (status: SafetyModeState['locationPermission']) => void;
+  updateSafetyMetrics: (nearestKm: number | null) => void;
+  setSafetyProximityRadius: (km: number) => void;
+  requestAssistantBriefing: (prompt: string) => void;
+  clearAssistantBriefingPrompt: () => void;
 }
 
 function updatePreset(filters: FiltersState): string {
@@ -113,6 +143,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
   forecast: DEFAULT_FORECAST_STATE,
   assistantViewContext: DEFAULT_ASSISTANT_VIEW_CONTEXT,
   archive: DEFAULT_ARCHIVE_STATE,
+  safety: DEFAULT_SAFETY_STATE,
 
   setFilters: (patch) => {
     set((state) => {
@@ -264,5 +295,43 @@ export const useAppStore = create<AppStoreState>((set) => ({
         transitionDuration: 700
       }
     }));
-  }
+  },
+
+  enableSafetyMode: () => set((state) => ({
+    safety: { ...state.safety, enabled: true }
+  })),
+
+  disableSafetyMode: () => set({ safety: DEFAULT_SAFETY_STATE }),
+
+  setSafetyLocation: (location) => set((state) => ({
+    safety: {
+      ...state.safety,
+      userLocation: location,
+      locationPermission: location ? 'granted' : state.safety.locationPermission
+    }
+  })),
+
+  setSafetyLocationPermission: (status) => set((state) => ({
+    safety: { ...state.safety, locationPermission: status }
+  })),
+
+  updateSafetyMetrics: (nearestKm) => set((state) => ({
+    safety: {
+      ...state.safety,
+      nearestFireDistanceKm: nearestKm,
+      safetyTier: computeSafetyTier(nearestKm)
+    }
+  })),
+
+  setSafetyProximityRadius: (km) => set((state) => ({
+    safety: { ...state.safety, proximityRadiusKm: km }
+  })),
+
+  requestAssistantBriefing: (prompt) => set((state) => ({
+    safety: { ...state.safety, pendingBriefingPrompt: prompt }
+  })),
+
+  clearAssistantBriefingPrompt: () => set((state) => ({
+    safety: { ...state.safety, pendingBriefingPrompt: null }
+  })),
 }));

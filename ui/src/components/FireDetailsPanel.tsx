@@ -27,6 +27,7 @@ import {
 } from "../api/client";
 import { useAppStore } from "../state/store";
 import type { FireEvent, ReverseGeocodeResponse } from "../types/api";
+import { haversineKm } from "../utils/geo";
 import { forecastButtonState } from "../utils/forecast";
 import { comparePriorityFeedEvents } from "../utils/priorityFeed";
 
@@ -135,6 +136,20 @@ function formatIntensity(value: number, unit: "MW" | "K"): string {
   return `${value.toFixed(1)} ${unit}`;
 }
 
+function frpHumanLabel(frpMw: number): string {
+  if (frpMw >= 500) return "Extreme Intensity / Rapid Spread";
+  if (frpMw >= 100) return "Intense Fire Activity";
+  if (frpMw >= 10)  return "Moderate Activity";
+  return "Smoldering / Low Intensity";
+}
+
+function riskTierFromScore(score: number): { label: string; color: string } {
+  if (score >= 0.75) return { label: "Critical", color: "#ef4444" };
+  if (score >= 0.5)  return { label: "High",     color: "#f97316" };
+  if (score >= 0.25) return { label: "Moderate", color: "#eab308" };
+  return { label: "Low", color: "#22c55e" };
+}
+
 function observationSummary(event: FireEvent): string {
   if (event.review_required) {
     return "This event is flagged for analyst review. Treat the perimeter and intensity as provisional until verified.";
@@ -175,6 +190,9 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
   const forecast = useAppStore((s) => s.forecast);
   const startForecastJob = useAppStore((s) => s.startForecastJob);
   const setForecastNotification = useAppStore((s) => s.setForecastNotification);
+  const safety = useAppStore((s) => s.safety);
+  const requestAssistantBriefing = useAppStore((s) => s.requestAssistantBriefing);
+  const isSafetyMode = safety.enabled;
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [resolvedGeocodes, setResolvedGeocodes] = useState<Record<string, ReverseGeocodeResponse>>({});
@@ -444,6 +462,14 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
   const score = severity(selectedEvent);
   const provenance = geometryProvenanceLabel(selectedEvent);
 
+  // Safety-mode derived values
+  const riskTier = riskTierFromScore(score);
+  const distanceToFireKm = isSafetyMode && safety.userLocation && lat !== null && lon !== null
+    ? haversineKm(safety.userLocation.lat, safety.userLocation.lon, lat, lon)
+    : null;
+  const isNearby = isSafetyMode && (safety.safetyTier === 'DANGER' || safety.safetyTier === 'WARNING');
+  const frpHuman = intensity?.unit === "MW" ? frpHumanLabel(intensity.value) : null;
+
   return (
     <Box
       sx={{
@@ -459,8 +485,8 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
     >
       <Box sx={{ px: 2.25, py: 1.6, borderBottom: "1px solid rgba(255,255,255,0.05)", bgcolor: "#161b22", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <Typography sx={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", color: "#fff", display: "flex", alignItems: "center", gap: 0.75 }}>
-          <LocalFireDepartmentIcon sx={{ fontSize: 14, color: "#f97316" }} />
-          Fire Inspector
+          <LocalFireDepartmentIcon sx={{ fontSize: 14, color: isSafetyMode ? "#ef4444" : "#f97316" }} />
+          {isSafetyMode ? "Immediate Threat Assessment" : "Fire Inspector"}
         </Typography>
         <IconButton
           size="small"
@@ -472,63 +498,137 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
       </Box>
 
       <Box sx={{ p: 2.25, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1.5 }}>
+        {/* Safety Mode: threat zone banner */}
+        {isNearby && (
+          <Box sx={{ mx: -2.25, mt: -2.25, mb: 0, px: 2.25, py: 1, bgcolor: "rgba(239,68,68,0.14)", borderBottom: "2px solid #ef4444" }}>
+            <Typography sx={{ fontSize: 11, fontWeight: 900, color: "#fca5a5", letterSpacing: "0.14em" }}>
+              {safety.safetyTier === 'DANGER' ? "⚠ DANGER ZONE" : "⚠ WATCH ZONE"}
+              {distanceToFireKm !== null ? ` — ${distanceToFireKm.toFixed(1)} km away` : ""}
+            </Typography>
+          </Box>
+        )}
+
         {submitError && <Alert severity="error">{submitError}</Alert>}
 
-        <Button
-          variant="contained"
-          disabled={button.disabled || forecastMutation.isPending || lat === null || lon === null}
-          onClick={() => forecastMutation.mutate(selectedEvent)}
-          sx={{
-            alignSelf: "flex-start",
-            bgcolor: "#f97316",
-            color: "#fff",
-            '&:hover': { bgcolor: "#ea580c" },
-            '&.Mui-disabled': { bgcolor: "rgba(249,115,22,0.4)", color: "rgba(255,255,255,0.8)" }
-          }}
-        >
-          {button.label}
-        </Button>
+        {/* Safety Mode: "Get Safety Info" is the primary action */}
+        {isSafetyMode && (
+          <Button
+            variant="contained"
+            onClick={() => requestAssistantBriefing(
+              `Give a safety briefing for this fire. Focus on: risk level, distance from user (${distanceToFireKm !== null ? distanceToFireKm.toFixed(1) + ' km' : 'unknown distance'}), and immediate actions. 2-3 sentences, plain language only.`
+            )}
+            sx={{
+              alignSelf: "flex-start",
+              bgcolor: "#ef4444",
+              color: "#fff",
+              '&:hover': { bgcolor: "#dc2626" }
+            }}
+          >
+            Get Safety Info
+          </Button>
+        )}
 
-        {button.reason && (
+        {/* Analyst Mode / Safety Mode: forecast button (demoted in safety mode) */}
+        {!isSafetyMode && (
+          <Button
+            variant="contained"
+            disabled={button.disabled || forecastMutation.isPending || lat === null || lon === null}
+            onClick={() => forecastMutation.mutate(selectedEvent)}
+            sx={{
+              alignSelf: "flex-start",
+              bgcolor: "#f97316",
+              color: "#fff",
+              '&:hover': { bgcolor: "#ea580c" },
+              '&.Mui-disabled': { bgcolor: "rgba(249,115,22,0.4)", color: "rgba(255,255,255,0.8)" }
+            }}
+          >
+            {button.label}
+          </Button>
+        )}
+
+        {!isSafetyMode && button.reason && (
           <Typography sx={{ fontSize: 11, color: "#6b7280" }}>
             {button.reason}
           </Typography>
         )}
 
-        <Box sx={{ p: 2, bgcolor: "#161b22", borderRadius: 2.5, border: "1px solid rgba(249,115,22,0.16)" }}>
+        <Box sx={{ p: 2, bgcolor: "#161b22", borderRadius: 2.5, border: `1px solid ${isSafetyMode ? "rgba(239,68,68,0.16)" : "rgba(249,115,22,0.16)"}` }}>
           <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 1.5, mb: 1.5 }}>
             <Box>
-              <Typography sx={{ fontSize: 10, color: "#f97316", fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", mb: 0.5 }}>
-                Event Selected
+              <Typography sx={{ fontSize: 10, color: isSafetyMode ? "#ef4444" : "#f97316", fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", mb: 0.5 }}>
+                {isSafetyMode ? "Threat Assessment" : "Event Selected"}
               </Typography>
               <Typography sx={{ fontSize: 21, fontWeight: 800, color: "#fff", lineHeight: 1.1 }}>{loc}</Typography>
-              <Typography
-                sx={{
-                  mt: 0.75,
-                  display: "inline-flex",
-                  alignItems: "center",
-                  px: 0.9,
-                  py: 0.3,
-                  borderRadius: 999,
-                  bgcolor: provenance === "Authoritative perimeter" ? "rgba(34,197,94,0.18)" : "rgba(59,130,246,0.2)",
-                  border: provenance === "Authoritative perimeter" ? "1px solid rgba(34,197,94,0.45)" : "1px solid rgba(59,130,246,0.5)",
-                  color: provenance === "Authoritative perimeter" ? "#86efac" : "#93c5fd",
-                  fontSize: 10,
-                  fontWeight: 800,
-                  letterSpacing: "0.08em",
-                  textTransform: "uppercase"
-                }}
-              >
-                {provenance}
-              </Typography>
+              {/* Safety Mode: risk tier chip shown prominently */}
+              {isSafetyMode && (
+                <Box
+                  sx={{
+                    mt: 0.75,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    px: 0.9,
+                    py: 0.3,
+                    borderRadius: 999,
+                    bgcolor: `${riskTier.color}20`,
+                    border: `1px solid ${riskTier.color}60`,
+                    color: riskTier.color,
+                    fontSize: 10,
+                    fontWeight: 900,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase"
+                  }}
+                >
+                  {riskTier.label} Risk
+                </Box>
+              )}
+              {!isSafetyMode && (
+                <Typography
+                  sx={{
+                    mt: 0.75,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    px: 0.9,
+                    py: 0.3,
+                    borderRadius: 999,
+                    bgcolor: provenance === "Authoritative perimeter" ? "rgba(34,197,94,0.18)" : "rgba(59,130,246,0.2)",
+                    border: provenance === "Authoritative perimeter" ? "1px solid rgba(34,197,94,0.45)" : "1px solid rgba(59,130,246,0.5)",
+                    color: provenance === "Authoritative perimeter" ? "#86efac" : "#93c5fd",
+                    fontSize: 10,
+                    fontWeight: 800,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase"
+                  }}
+                >
+                  {provenance}
+                </Typography>
+              )}
             </Box>
             <Box sx={{ textAlign: "right" }}>
-              <Typography sx={{ fontSize: 30, fontWeight: 900, color: "#fff", lineHeight: 0.95 }}>
-                {intensity ? formatIntensity(intensity.value, intensity.unit) : "n/a"}
-              </Typography>
-              <Typography sx={{ fontSize: 10, color: "#4b5563", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", mt: 0.4 }}>
-                {intensity ? intensity.label : "Fire Intensity"}
-              </Typography>
+              {isSafetyMode && frpHuman ? (
+                <>
+                  <Typography sx={{ fontSize: 13, fontWeight: 900, color: "#fff", lineHeight: 1.2, maxWidth: 130, textAlign: "right" }}>
+                    {frpHuman}
+                  </Typography>
+                  <Box
+                    component="details"
+                    sx={{ mt: 0.5, cursor: "pointer", "& summary": { fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", userSelect: "none", listStyle: "none", "&::-webkit-details-marker": { display: "none" } } }}
+                  >
+                    <Box component="summary">Technical Details ▾</Box>
+                    <Typography sx={{ fontSize: 11, color: "#9ca3af", mt: 0.3 }}>
+                      {formatIntensity(intensity!.value, intensity!.unit)}
+                    </Typography>
+                  </Box>
+                </>
+              ) : (
+                <>
+                  <Typography sx={{ fontSize: 30, fontWeight: 900, color: "#fff", lineHeight: 0.95 }}>
+                    {intensity ? formatIntensity(intensity.value, intensity.unit) : "n/a"}
+                  </Typography>
+                  <Typography sx={{ fontSize: 10, color: "#4b5563", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", mt: 0.4 }}>
+                    {intensity ? intensity.label : "Fire Intensity"}
+                  </Typography>
+                </>
+              )}
             </Box>
           </Box>
 
@@ -611,6 +711,26 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
             </Box>
           )}
         </Stack>
+
+        {/* Safety Mode: forecast button demoted to bottom */}
+        {isSafetyMode && (
+          <Button
+            variant="outlined"
+            size="small"
+            disabled={button.disabled || forecastMutation.isPending || lat === null || lon === null}
+            onClick={() => forecastMutation.mutate(selectedEvent)}
+            sx={{
+              alignSelf: "flex-start",
+              borderColor: "rgba(249,115,22,0.4)",
+              color: "#f97316",
+              fontSize: 10,
+              '&:hover': { borderColor: "#f97316", bgcolor: "rgba(249,115,22,0.08)" },
+              '&.Mui-disabled': { borderColor: "rgba(249,115,22,0.2)", color: "rgba(249,115,22,0.4)" }
+            }}
+          >
+            {button.label}
+          </Button>
+        )}
       </Box>
     </Box>
   );
