@@ -89,16 +89,26 @@ export function useArchiveData(): ArchiveDataState {
         estimatedMinutes,
       });
 
-      // Poll until data is available
+      // Poll until data is available, giving up after 2× the estimated window
+      let pollCount = 0;
+      const maxPolls = Math.ceil((estimatedMinutes * 60_000 * 2) / POLL_INTERVAL_MS);
       pollRef.current = setInterval(async () => {
         if (cancelled) {
           stopPolling();
           return;
         }
+        pollCount++;
         const ready = await check();
         if (!cancelled && ready) {
           stopPolling();
           setState({ status: "ready", message: null, estimatedMinutes: null });
+        } else if (!cancelled && pollCount >= maxPolls) {
+          stopPolling();
+          setState({
+            status: "unavailable",
+            message: "Ingest did not complete in time. Check that FIRMS_MAP_KEY is configured.",
+            estimatedMinutes: null,
+          });
         }
       }, POLL_INTERVAL_MS);
     }
