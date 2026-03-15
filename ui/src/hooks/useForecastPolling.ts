@@ -47,7 +47,9 @@ export function useForecastPolling(): void {
     if (status === "completed") {
       const runId = String(query.data.result?.run_id || "");
       if (runId) {
-        completeForecastJob(runId);
+        const weatherRunId = (query.data.result?.weather_run_id as string | null | undefined) ?? null;
+        const confidenceLevel = (query.data.result?.confidence_level as string | null | undefined) ?? null;
+        completeForecastJob(runId, { weatherRunId, confidenceLevel });
         setForecastNotification({
           kind: "ready",
           message: `Forecast for the fire event from ${activeRequest?.locationLabel || "the selected area"} is ready!`,
