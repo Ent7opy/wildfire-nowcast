@@ -3,7 +3,6 @@ import {
   Box,
   Button,
   CircularProgress,
-  InputAdornment,
   Paper,
   TextField,
   Tooltip,
@@ -14,7 +13,6 @@ import Brightness3Icon from "@mui/icons-material/Brightness3";
 import LocalFireDepartmentIcon from "@mui/icons-material/LocalFireDepartment";
 import PublicIcon from "@mui/icons-material/Public";
 import QueryStatsIcon from "@mui/icons-material/QueryStats";
-import SearchIcon from "@mui/icons-material/Search";
 import ShowChartIcon from "@mui/icons-material/ShowChart";
 import SunriseIcon from "@mui/icons-material/WbTwilight";
 import SunsetIcon from "@mui/icons-material/Nightlight";
@@ -26,6 +24,7 @@ import DataFreshnessBanner from "./components/DataFreshnessBanner";
 import FireDetailsPanel from "./components/FireDetailsPanel";
 import FireMap from "./components/FireMap";
 import ForecastNotification from "./components/ForecastNotification";
+import RegionFilter from "./components/RegionFilter";
 import SafetyStatusBar from "./components/SafetyStatusBar";
 import { useArchiveData } from "./hooks/useArchiveData";
 import { useForecastPolling } from "./hooks/useForecastPolling";
@@ -38,6 +37,13 @@ import type {
   AssistantConfidenceFilter,
   AssistantViewEventSummary
 } from "./types/state";
+import {
+  CONTINENT_VIEWPORTS,
+  EMPTY_REGION_FILTER,
+  formatRegionFilter,
+  matchesRegionFilter,
+  type RegionFilterValue,
+} from "./utils/continents";
 import { eventsWithinRadius } from "./utils/geo";
 import { TIMEFRAME_DEFS } from "./utils/time";
 
@@ -78,21 +84,6 @@ function isHighConfidence(event: FireEvent): boolean {
   return score !== null && score >= HIGH_CONFIDENCE_THRESHOLD;
 }
 
-function matchesSearch(event: FireEvent, normalizedQuery: string): boolean {
-  if (!normalizedQuery) return true;
-
-  const haystack = [
-    locationLabel(event),
-    event.event_id,
-    event.source,
-    event.sensor,
-    event.denoiser_decision
-  ]
-    .map((value) => String(value || "").toLowerCase())
-    .join(" ");
-
-  return haystack.includes(normalizedQuery);
-}
 
 function formatStatValue(value: number, digits = 0): string {
   if (!Number.isFinite(value)) {
@@ -137,7 +128,7 @@ const TIMEFRAME_ICONS: Record<ArchiveTimeframe, React.ElementType> = {
 
 export default function App(): JSX.Element {
   const [visibleEvents, setVisibleEvents] = useState<FireEvent[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [regionFilter, setRegionFilter] = useState<RegionFilterValue>(EMPTY_REGION_FILTER);
   const [confidenceFilter, setConfidenceFilter] = useState<AssistantConfidenceFilter>("All");
   const setAssistantViewContext = useAppStore((s) => s.setAssistantViewContext);
   const archive = useAppStore((s) => s.archive);
@@ -159,14 +150,13 @@ export default function App(): JSX.Element {
   useSafetyMetrics(visibleEvents);
 
   const filteredEvents = useMemo(() => {
-    const normalizedQuery = searchQuery.trim().toLowerCase();
     return visibleEvents.filter((event) => {
       if (confidenceFilter === "High" && !isHighConfidence(event)) {
         return false;
       }
-      return matchesSearch(event, normalizedQuery);
+      return matchesRegionFilter(event, regionFilter);
     });
-  }, [confidenceFilter, searchQuery, visibleEvents]);
+  }, [confidenceFilter, regionFilter, visibleEvents]);
 
   const totalDetections = useMemo(() => {
     const aggregate = filteredEvents.reduce((sum, event) => sum + (toFiniteNumber(event.detection_count) || 0), 0);
@@ -207,7 +197,7 @@ export default function App(): JSX.Element {
   useEffect(() => {
     setAssistantViewContext({
       updatedAt: Date.now(),
-      searchQuery,
+      searchQuery: formatRegionFilter(regionFilter) ?? "",
       confidenceFilter,
       visibleEventCount: visibleEvents.length,
       filteredEventCount: filteredEvents.length,
@@ -216,7 +206,7 @@ export default function App(): JSX.Element {
   }, [
     confidenceFilter,
     filteredEvents.length,
-    searchQuery,
+    regionFilter,
     setAssistantViewContext,
     topEventsForAssistant,
     visibleEvents.length
@@ -235,6 +225,25 @@ export default function App(): JSX.Element {
       requestLocation();
     }
   }, [isSafetyMode, safety.locationPermission, requestLocation]);
+
+  // Fly to selected region when the region filter changes
+  useEffect(() => {
+    const { continent, country, admin1 } = regionFilter;
+    if (!continent && !country && !admin1) return;
+
+    // Try to centre on the actual events in the region first
+    const matching = visibleEvents.filter((e) => matchesRegionFilter(e, regionFilter));
+    if (matching.length > 0) {
+      const avgLat = matching.reduce((s, e) => s + (e.lat ?? 0), 0) / matching.length;
+      const avgLon = matching.reduce((s, e) => s + (e.lon ?? 0), 0) / matching.length;
+      const zoom = admin1 ? 6 : country ? 5 : 3;
+      focusMapOnPoint(avgLat, avgLon, zoom);
+    } else if (continent && CONTINENT_VIEWPORTS[continent]) {
+      const vp = CONTINENT_VIEWPORTS[continent];
+      focusMapOnPoint(vp.lat, vp.lon, vp.zoom);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [regionFilter]);
 
   const nearbyEvents = useMemo(() => {
     if (!isSafetyMode || !safety.userLocation) return [];
@@ -515,27 +524,10 @@ export default function App(): JSX.Element {
           </Box>
 
           <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap" }}>
-            <TextField
-              size="small"
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Filter regions..."
-              sx={{
-                minWidth: { xs: "100%", sm: 240 },
-                "& .MuiOutlinedInput-root": {
-                  bgcolor: "#0d1117",
-                  borderRadius: 2,
-                  fontSize: 12,
-                  color: "#e5e7eb"
-                }
-              }}
-              InputProps={{
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <SearchIcon sx={{ fontSize: 16, color: "#6b7280" }} />
-                  </InputAdornment>
-                )
-              }}
+            <RegionFilter
+              events={visibleEvents}
+              value={regionFilter}
+              onChange={setRegionFilter}
             />
 
             <Box
