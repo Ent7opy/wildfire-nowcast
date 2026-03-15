@@ -106,8 +106,17 @@ def test_stratified_majority_sample_respects_1_to_10_ratio() -> None:
 
     assert len(sampled_df) == len(sampled_y)
     assert int((sampled_y == 1).sum()) == 3
-    assert int((sampled_y != 1).sum()) == 30
-    assert stats["sampling_applied"] is True
+    # New behavior: only negatives (y==0) are downsampled; all unknowns (y==-1)
+    # are preserved for PU bagging OOB voting.
+    # 6 negatives (all kept, since 6 < target 30) + 31 unknowns = 37
+    assert int((sampled_y == 0).sum()) == 6
+    assert int((sampled_y == -1).sum()) == 31
+    assert int((sampled_y != 1).sum()) == 37
+    # No actual downsampling needed: 6 negatives < target 30
+    assert stats["sampling_applied"] is False
+    assert stats["reason"] == "target_exceeds_majority"
+    assert stats["unknown_rows_preserved"] == 31
+    assert stats["majority_rows_before_sampling"] == 6
 
 
 def test_apply_adasyn_high_intensity_generates_positive_rows() -> None:
