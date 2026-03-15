@@ -22,8 +22,10 @@ const DEFAULT_FILTERS: FiltersState = {
 
 const DEFAULT_LAYERS: LayersState = {
   showFires: true,
+  showFronts: true,
   showForecast: true,
-  showRisk: false
+  showRisk: false,
+  basemap: 'dark'
 };
 
 const DEFAULT_MAP_VIEW: MapViewState = {
@@ -63,6 +65,7 @@ interface AppStoreState {
   assistantViewContext: AssistantViewContext;
   setFilters: (patch: Partial<FiltersState>) => void;
   applyPreset: (preset: { name: string; hoursStart: number; hoursEnd: number; likelihood: number }) => void;
+  setLayersState: (patch: Partial<LayersState>) => void;
   setRiskVisibility: (visible: boolean) => void;
   setMapView: (next: MapViewState) => void;
   setSelectedEvent: (event: FireEvent | null) => void;
@@ -82,7 +85,7 @@ function updatePreset(filters: FiltersState): string {
   return matchingPreset(filters) || "Custom";
 }
 
-export const useAppStore = create<AppStoreState>((set, get) => ({
+export const useAppStore = create<AppStoreState>((set, _get) => ({
   filters: DEFAULT_FILTERS,
   layers: DEFAULT_LAYERS,
   mapView: DEFAULT_MAP_VIEW,
@@ -119,6 +122,12 @@ export const useAppStore = create<AppStoreState>((set, get) => ({
         minLikelihood: preset.likelihood
       },
       activePreset: preset.name
+    }));
+  },
+
+  setLayersState: (patch) => {
+    set((state) => ({
+      layers: { ...state.layers, ...patch }
     }));
   },
 

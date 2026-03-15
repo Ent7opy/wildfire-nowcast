@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import DeckGL from "@deck.gl/react";
 import { GeoJsonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { MVTLayer } from "@deck.gl/geo-layers";
@@ -8,7 +8,13 @@ import maplibregl from "maplibre-gl";
 import {
   Alert,
   Box,
+  Divider,
+  FormControlLabel,
   IconButton,
+  Popover,
+  Switch,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography
 } from "@mui/material";
@@ -41,6 +47,19 @@ import { eventLimitForZoom, frontLimitForZoom, shouldLoadFronts, shouldRenderCen
 import { selectionViewFromBounds } from "../utils/mapSelection";
 
 const BASEMAP_DARK = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+const BASEMAP_LIGHT = "https://basemaps.cartocdn.com/gl/positron-nolabels-gl-style/style.json";
+const BASEMAP_SATELLITE = {
+  version: 8 as const,
+  sources: {
+    "esri-satellite": {
+      type: "raster" as const,
+      tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+      tileSize: 256,
+      attribution: "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community"
+    }
+  },
+  layers: [{ id: "esri-satellite", type: "raster" as const, source: "esri-satellite" }]
+};
 const FORECAST_FILL = [255, 165, 0, 40];
 const FORECAST_STROKE = [255, 165, 0, 200];
 const HIGH_CONFIDENCE_THRESHOLD = 0.6;
@@ -107,6 +126,9 @@ export default function FireMap({
   const setLastClick = useAppStore((s) => s.setLastClick);
   const focusMapOnPoint = useAppStore((s) => s.focusMapOnPoint);
   const setFrontIndexByEvent = useAppStore((s) => s.setFrontIndexByEvent);
+  const setLayersState = useAppStore((s) => s.setLayersState);
+
+  const [layersPanelAnchor, setLayersPanelAnchor] = useState<HTMLElement | null>(null);
 
   const bbox = useMemo(() => viewportBbox(mapView), [mapView]);
   const timeRange = useMemo(() => computeTimeRange(filters), [filters]);
@@ -247,44 +269,23 @@ export default function FireMap({
         ]
       : normalizedEvents;
 
-    const fireFeatures = polygonPoints.map(eventFeature);
+    if (layersState.showFires) {
+      const fireFeatures = polygonPoints.map(eventFeature);
 
-    deckLayers.push(
-      new GeoJsonLayer({
-        id: `events-${mapView.zoom.toFixed(2)}-${fireFeatures.length}`,
-        data: {
-          type: "FeatureCollection",
-          features: fireFeatures
-        },
-        pickable: true,
-        autoHighlight: true,
-        filled: true,
-        stroked: true,
-        getLineWidth: 3,
-        lineWidthMinPixels: 1,
-        lineWidthMaxPixels: 4,
-        getFillColor: (feature) => {
-          const properties = feature.properties as Record<string, number>;
-          return [properties.fill_r, properties.fill_g, properties.fill_b, properties.fill_a] as [number, number, number, number];
-        },
-        getLineColor: (feature) => {
-          const properties = feature.properties as Record<string, number>;
-          return [properties.line_r, properties.line_g, properties.line_b, properties.line_a] as [number, number, number, number];
-        }
-      })
-    );
-
-    if (selectedEventFeature) {
       deckLayers.push(
         new GeoJsonLayer({
-          id: `selected-event-${String(selectedEventFeature.properties?.event_id || "event")}`,
+          id: `events-${mapView.zoom.toFixed(2)}-${fireFeatures.length}`,
           data: {
             type: "FeatureCollection",
-            features: [selectedEventFeature]
+            features: fireFeatures
           },
-          pickable: false,
+          pickable: true,
+          autoHighlight: true,
           filled: true,
           stroked: true,
+          getLineWidth: 3,
+          lineWidthMinPixels: 1,
+          lineWidthMaxPixels: 4,
           getFillColor: (feature) => {
             const properties = feature.properties as Record<string, number>;
             return [properties.fill_r, properties.fill_g, properties.fill_b, properties.fill_a] as [number, number, number, number];
@@ -292,105 +293,132 @@ export default function FireMap({
           getLineColor: (feature) => {
             const properties = feature.properties as Record<string, number>;
             return [properties.line_r, properties.line_g, properties.line_b, properties.line_a] as [number, number, number, number];
-          },
-          getLineWidth: 5,
-          lineWidthMinPixels: 2,
-          lineWidthMaxPixels: 8
+          }
         })
       );
+
+      if (selectedEventFeature) {
+        deckLayers.push(
+          new GeoJsonLayer({
+            id: `selected-event-${String(selectedEventFeature.properties?.event_id || "event")}`,
+            data: {
+              type: "FeatureCollection",
+              features: [selectedEventFeature]
+            },
+            pickable: false,
+            filled: true,
+            stroked: true,
+            getFillColor: (feature) => {
+              const properties = feature.properties as Record<string, number>;
+              return [properties.fill_r, properties.fill_g, properties.fill_b, properties.fill_a] as [number, number, number, number];
+            },
+            getLineColor: (feature) => {
+              const properties = feature.properties as Record<string, number>;
+              return [properties.line_r, properties.line_g, properties.line_b, properties.line_a] as [number, number, number, number];
+            },
+            getLineWidth: 5,
+            lineWidthMinPixels: 2,
+            lineWidthMaxPixels: 8
+          })
+        );
+      }
+
+      if (markerPoints.length > 0 && shouldRenderCentroids(mapView.zoom)) {
+        deckLayers.push(
+          new ScatterplotLayer({
+            id: `events-centroids-${mapView.zoom.toFixed(2)}-${markerPoints.length}`,
+            data: markerPoints,
+            pickable: true,
+            autoHighlight: true,
+            filled: true,
+            stroked: true,
+            getPosition: (d) => [d.lon, d.lat],
+            getFillColor: (d) => [d.fill_r, d.fill_g, d.fill_b, 220],
+            getLineColor: (d) => [d.line_r, d.line_g, d.line_b, 240],
+            getRadius: 8,
+            radiusUnits: "pixels",
+            radiusMinPixels: 4,
+            radiusMaxPixels: 16,
+            lineWidthMinPixels: 1
+          })
+        );
+      }
     }
 
-    if (markerPoints.length > 0 && shouldRenderCentroids(mapView.zoom)) {
+    if (layersState.showFronts) {
+      const frontFeatures = visibleFronts.map(frontFeature).filter((feature): feature is Feature => Boolean(feature));
+      if (frontFeatures.length > 0) {
+        deckLayers.push(
+          new GeoJsonLayer({
+            id: `fronts-${mapView.zoom.toFixed(2)}-${frontFeatures.length}`,
+            data: {
+              type: "FeatureCollection",
+              features: frontFeatures
+            },
+            pickable: false,
+            stroked: true,
+            filled: false,
+            getLineColor: (feature) => {
+              const properties = feature.properties as Record<string, number>;
+              return [properties.line_r, properties.line_g, properties.line_b, properties.line_a];
+            },
+            getLineWidth: (feature) => Number((feature.properties as Record<string, number>).line_width || 2),
+            lineWidthMinPixels: 1,
+            lineWidthMaxPixels: 6
+          })
+        );
+      }
+
+      if (selectedFrontFeatures.length > 0) {
+        deckLayers.push(
+          new GeoJsonLayer({
+            id: `selected-fronts-${selectedEventId}-${selectedFrontFeatures.length}`,
+            data: {
+              type: "FeatureCollection",
+              features: selectedFrontFeatures
+            },
+            pickable: false,
+            stroked: true,
+            filled: false,
+            getLineColor: SELECTED_FRONT_COLOR,
+            getLineWidth: (feature) => Math.max(4, Number((feature.properties as Record<string, number>).line_width || 2) + 2),
+            lineWidthMinPixels: 2,
+            lineWidthMaxPixels: 10
+          })
+        );
+      }
+    }
+
+    if (layersState.showForecast) {
+      const runId = forecast.lastForecast?.run.id;
+      const contourUrl = `${apiPublicBaseUrl()}/tiles/forecast_contours/{z}/{x}/{y}.pbf${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`;
+
       deckLayers.push(
-        new ScatterplotLayer({
-          id: `events-centroids-${mapView.zoom.toFixed(2)}-${markerPoints.length}`,
-          data: markerPoints,
-          pickable: true,
-          autoHighlight: true,
-          filled: true,
-          stroked: true,
-          getPosition: (d) => [d.lon, d.lat],
-          getFillColor: (d) => [d.fill_r, d.fill_g, d.fill_b, 220],
-          getLineColor: (d) => [d.line_r, d.line_g, d.line_b, 240],
-          getRadius: 5,
-          radiusUnits: "pixels",
-          radiusMinPixels: 3,
-          radiusMaxPixels: 8,
+        new MVTLayer({
+          id: "forecast-contours",
+          data: contourUrl,
+          pickable: false,
+          getFillColor: (feature) =>
+            isForecastContourVisible(
+              feature.properties as { horizon_hours?: number; threshold?: number },
+              FORECAST_DEFAULT_HORIZONS,
+              FORECAST_DEFAULT_THRESHOLDS
+            )
+              ? (FORECAST_FILL as [number, number, number, number])
+              : ([0, 0, 0, 0] as [number, number, number, number]),
+          getLineColor: (feature) =>
+            isForecastContourVisible(
+              feature.properties as { horizon_hours?: number; threshold?: number },
+              FORECAST_DEFAULT_HORIZONS,
+              FORECAST_DEFAULT_THRESHOLDS
+            )
+              ? (FORECAST_STROKE as [number, number, number, number])
+              : ([0, 0, 0, 0] as [number, number, number, number]),
+          getLineWidth: 2,
           lineWidthMinPixels: 1
         })
       );
     }
-
-    const frontFeatures = visibleFronts.map(frontFeature).filter((feature): feature is Feature => Boolean(feature));
-    if (frontFeatures.length > 0) {
-      deckLayers.push(
-        new GeoJsonLayer({
-          id: `fronts-${mapView.zoom.toFixed(2)}-${frontFeatures.length}`,
-          data: {
-            type: "FeatureCollection",
-            features: frontFeatures
-          },
-          pickable: false,
-          stroked: true,
-          filled: false,
-          getLineColor: (feature) => {
-            const properties = feature.properties as Record<string, number>;
-            return [properties.line_r, properties.line_g, properties.line_b, properties.line_a];
-          },
-          getLineWidth: (feature) => Number((feature.properties as Record<string, number>).line_width || 2),
-          lineWidthMinPixels: 1,
-          lineWidthMaxPixels: 6
-        })
-      );
-    }
-
-    if (selectedFrontFeatures.length > 0) {
-      deckLayers.push(
-        new GeoJsonLayer({
-          id: `selected-fronts-${selectedEventId}-${selectedFrontFeatures.length}`,
-          data: {
-            type: "FeatureCollection",
-            features: selectedFrontFeatures
-          },
-          pickable: false,
-          stroked: true,
-          filled: false,
-          getLineColor: SELECTED_FRONT_COLOR,
-          getLineWidth: (feature) => Math.max(4, Number((feature.properties as Record<string, number>).line_width || 2) + 2),
-          lineWidthMinPixels: 2,
-          lineWidthMaxPixels: 10
-        })
-      );
-    }
-
-    const runId = forecast.lastForecast?.run.id;
-    const contourUrl = `${apiPublicBaseUrl()}/tiles/forecast_contours/{z}/{x}/{y}.pbf${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`;
-
-    deckLayers.push(
-      new MVTLayer({
-        id: "forecast-contours",
-        data: contourUrl,
-        pickable: false,
-        getFillColor: (feature) =>
-          isForecastContourVisible(
-            feature.properties as { horizon_hours?: number; threshold?: number },
-            FORECAST_DEFAULT_HORIZONS,
-            FORECAST_DEFAULT_THRESHOLDS
-          )
-            ? (FORECAST_FILL as [number, number, number, number])
-            : ([0, 0, 0, 0] as [number, number, number, number]),
-        getLineColor: (feature) =>
-          isForecastContourVisible(
-            feature.properties as { horizon_hours?: number; threshold?: number },
-            FORECAST_DEFAULT_HORIZONS,
-            FORECAST_DEFAULT_THRESHOLDS
-          )
-            ? (FORECAST_STROKE as [number, number, number, number])
-            : ([0, 0, 0, 0] as [number, number, number, number]),
-        getLineWidth: 2,
-        lineWidthMinPixels: 1
-      })
-    );
 
     if (layersState.showRisk && riskQuery.data) {
       deckLayers.push(
@@ -421,6 +449,9 @@ export default function FireMap({
   }, [
     filters.clusterPoints,
     forecast.lastForecast?.run.id,
+    layersState.showFires,
+    layersState.showFronts,
+    layersState.showForecast,
     layersState.showRisk,
     mapView.zoom,
     normalizedEvents,
@@ -529,7 +560,11 @@ export default function FireMap({
       >
         <Map
           mapLib={maplibregl}
-          mapStyle={BASEMAP_DARK}
+          mapStyle={
+            layersState.basemap === 'light' ? BASEMAP_LIGHT :
+            layersState.basemap === 'satellite' ? BASEMAP_SATELLITE :
+            BASEMAP_DARK
+          }
           maxZoom={22}
           minZoom={1}
           reuseMaps
@@ -569,10 +604,11 @@ export default function FireMap({
         <Tooltip title="Map layers">
           <IconButton
             size="small"
+            onClick={(e) => setLayersPanelAnchor(e.currentTarget)}
             sx={{
-              bgcolor: "#161b22",
-              border: "1px solid rgba(255,255,255,0.1)",
-              color: "#9ca3af",
+              bgcolor: layersPanelAnchor ? "rgba(249,115,22,0.18)" : "#161b22",
+              border: `1px solid ${layersPanelAnchor ? "rgba(249,115,22,0.5)" : "rgba(255,255,255,0.1)"}`,
+              color: layersPanelAnchor ? "#f97316" : "#9ca3af",
               pointerEvents: "auto"
             }}
           >
@@ -580,6 +616,82 @@ export default function FireMap({
           </IconButton>
         </Tooltip>
       </Box>
+
+      <Popover
+        open={Boolean(layersPanelAnchor)}
+        anchorEl={layersPanelAnchor}
+        onClose={() => setLayersPanelAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{
+          paper: {
+            sx: {
+              mt: 0.5,
+              bgcolor: "rgba(13,17,23,0.96)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: 2,
+              backdropFilter: "blur(12px)",
+              minWidth: 220,
+              p: 1.5
+            }
+          }
+        }}
+      >
+        <Typography sx={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#6b7280", mb: 1 }}>
+          Data layers
+        </Typography>
+        <FormControlLabel
+          control={<Switch size="small" checked={layersState.showFires} onChange={(e) => setLayersState({ showFires: e.target.checked })} />}
+          label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Fire Events</Typography>}
+          sx={{ display: "flex", mx: 0, mb: 0.25 }}
+        />
+        <FormControlLabel
+          control={<Switch size="small" checked={layersState.showFronts} onChange={(e) => setLayersState({ showFronts: e.target.checked })} />}
+          label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Fire Fronts</Typography>}
+          sx={{ display: "flex", mx: 0, mb: 0.25 }}
+        />
+        <FormControlLabel
+          control={<Switch size="small" checked={layersState.showForecast} onChange={(e) => setLayersState({ showForecast: e.target.checked })} />}
+          label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Forecast Overlay</Typography>}
+          sx={{ display: "flex", mx: 0, mb: 0.25 }}
+        />
+        <FormControlLabel
+          control={<Switch size="small" checked={layersState.showRisk} onChange={(e) => setLayersState({ showRisk: e.target.checked })} disabled={!filters.clusterPoints} />}
+          label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Risk Index</Typography>}
+          sx={{ display: "flex", mx: 0 }}
+        />
+
+        <Divider sx={{ my: 1.5, borderColor: "rgba(255,255,255,0.08)" }} />
+
+        <Typography sx={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#6b7280", mb: 1 }}>
+          Basemap
+        </Typography>
+        <ToggleButtonGroup
+          exclusive
+          size="small"
+          value={layersState.basemap}
+          onChange={(_, value) => { if (value) setLayersState({ basemap: value }); }}
+          sx={{ width: "100%" }}
+        >
+          {(["dark", "light", "satellite"] as const).map((bm) => (
+            <ToggleButton
+              key={bm}
+              value={bm}
+              sx={{
+                flex: 1,
+                fontSize: 11,
+                fontWeight: 600,
+                textTransform: "capitalize",
+                color: "#9ca3af",
+                borderColor: "rgba(255,255,255,0.12)",
+                "&.Mui-selected": { bgcolor: "rgba(249,115,22,0.18)", color: "#f97316", borderColor: "rgba(249,115,22,0.4)" }
+              }}
+            >
+              {bm}
+            </ToggleButton>
+          ))}
+        </ToggleButtonGroup>
+      </Popover>
 
       <Box
         sx={{
