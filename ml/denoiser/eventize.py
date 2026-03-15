@@ -305,7 +305,7 @@ def _eventize_single_window(
         estimated AS (
             SELECT
                 g.*,
-                CASE WHEN ST_Area(ST_ConvexHull(g.point_geom)) > 0 THEN
+                CASE WHEN ST_Area(ST_ConvexHull(g.point_geom)) > 0 AND ST_NPoints(g.point_geom) >= 4 THEN
                     ST_Multi(
                         ST_CollectionExtract(
                             ST_MakeValid(ST_ConcaveHull(g.point_geom, :estimated_concave_percent, FALSE)),
@@ -502,6 +502,7 @@ def _eventize_single_window(
                 MAX(c.det_irwinid) FILTER (WHERE c.det_irwinid IS NOT NULL) AS det_irwinid,
                 MAX(c.det_sourceglobalid) FILTER (WHERE c.det_sourceglobalid IS NOT NULL) AS det_sourceglobalid,
                 ST_Collect(c.geom) AS front_geom,
+                ST_Collect(ST_Centroid(c.geom)) AS front_centroid_geom,
                 AVG(CASE WHEN c.front_static_like THEN 1.0 ELSE 0.0 END) AS static_front_ratio
             FROM component_rows c
             JOIN event_ids e ON e.component_anchor_id = c.component_anchor_id
@@ -511,10 +512,10 @@ def _eventize_single_window(
         estimated AS (
             SELECT
                 g.*,
-                CASE WHEN ST_Area(ST_ConvexHull(g.front_geom)) > 0 THEN
+                CASE WHEN ST_Area(ST_ConvexHull(g.front_centroid_geom)) > 0 AND ST_NPoints(g.front_centroid_geom) >= 4 THEN
                     ST_Multi(
                         ST_CollectionExtract(
-                            ST_MakeValid(ST_ConcaveHull(g.front_geom, :estimated_concave_percent, FALSE)),
+                            ST_MakeValid(ST_ConcaveHull(g.front_centroid_geom, :estimated_concave_percent, FALSE)),
                             3
                         )
                     )
