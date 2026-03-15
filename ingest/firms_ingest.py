@@ -727,8 +727,9 @@ def _run_denoiser_inference(
     # Build command based on invocation method
     if invoke_method == "python":
         # Use Python directly - works in containerized environments without uv
+        python_exec = getattr(config, "denoiser_python_executable", None) or sys.executable
         cmd = [
-            sys.executable,
+            python_exec,
             "-m",
             module_name,
         ]

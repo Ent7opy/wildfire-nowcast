@@ -129,10 +129,17 @@ class FIRMSIngestSettings(BaseSettings):
         default="uv", validation_alias="DENOISER_INVOKE_METHOD"
     )
     """How to invoke the denoiser: 'uv' (default), 'python', or 'module'.
-    
+
     - 'uv': Uses 'uv run --project ml -m ml.denoiser_inference' (requires uv in PATH)
-    - 'python': Uses 'python -m ml.denoiser_inference' (uses sys.executable)
+    - 'python': Uses 'python -m ml.denoiser_inference' (uses sys.executable or DENOISER_PYTHON_EXECUTABLE)
     - 'module': Directly imports and calls the module (no subprocess)
+    """
+    denoiser_python_executable: Optional[str] = Field(
+        default=None, validation_alias="DENOISER_PYTHON_EXECUTABLE"
+    )
+    """Override the Python executable used when DENOISER_INVOKE_METHOD=python.
+    Defaults to sys.executable if not set. Useful in Docker when the ML venv
+    has a different Python than the ingest venv (e.g., /app/.venv/bin/python3).
     """
 
     @field_validator("sources", mode="before")
