@@ -1,0 +1,7 @@
+# Railway config (API service). Reference PostGIS with ${{ PostGIS.DATABASE_URL }} etc.
+# See: https://docs.railway.app/deploy/config-as-code
+
+[deploy]
+# Run migrations before each deploy. Requires service root = repo root so scripts/ and api/ exist.
+# If your service root is api/, set Release Command in dashboard to: uv run alembic upgrade head
+preDeployCommand = "/bin/sh ./scripts/run_migrations.sh"

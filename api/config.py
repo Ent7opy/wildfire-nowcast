@@ -5,7 +5,7 @@ import subprocess
 from importlib import metadata
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,16 +47,37 @@ class AppSettings(BaseSettings):
     environment: str = Field(default="dev", validation_alias="APP_ENV")
     git_commit: str = Field(default_factory=_get_git_commit, validation_alias="GIT_COMMIT")
 
-    # Database settings
-    postgres_host: str = Field(default="localhost", validation_alias="POSTGRES_HOST")
-    postgres_port: int = Field(default=5432, validation_alias="POSTGRES_PORT")
-    postgres_user: str = Field(default="wildfire", validation_alias="POSTGRES_USER")
-    postgres_password: str = Field(default="wildfire", validation_alias="POSTGRES_PASSWORD")
-    postgres_db: str = Field(default="wildfire", validation_alias="POSTGRES_DB")
+    # Database settings. Accept POSTGRES_* (local/docker) or PG* / DATABASE_URL (e.g. Railway PostGIS).
+    database_url_override: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL", "DATABASE_PRIVATE_URL"),
+    )
+    postgres_host: str = Field(
+        default="localhost",
+        validation_alias=AliasChoices("POSTGRES_HOST", "PGHOST"),
+    )
+    postgres_port: int = Field(
+        default=5432,
+        validation_alias=AliasChoices("POSTGRES_PORT", "PGPORT"),
+    )
+    postgres_user: str = Field(
+        default="wildfire",
+        validation_alias=AliasChoices("POSTGRES_USER", "PGUSER"),
+    )
+    postgres_password: str = Field(
+        default="wildfire",
+        validation_alias=AliasChoices("POSTGRES_PASSWORD", "PGPASSWORD"),
+    )
+    postgres_db: str = Field(
+        default="wildfire",
+        validation_alias=AliasChoices("POSTGRES_DB", "PGDATABASE"),
+    )
 
     @property
     def database_url(self) -> str:
-        """Construct database URL from individual components."""
+        """Connection URL: DATABASE_URL/DATABASE_PRIVATE_URL if set, else built from POSTGRES_* / PG*."""
+        if self.database_url_override and self.database_url_override.strip():
+            return self.database_url_override.strip()
         return (
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
