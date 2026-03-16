@@ -7,7 +7,7 @@ region_name: "smoke_grid"
 bbox: [22.0, 40.0, 24.0, 42.0]
 start_time: "2025-07-01"
 end_time: "2025-08-31"
-horizons_hours: [24, 48, 72]
+horizons_hours: [2, 6, 12]
 interval_hours: 24
 min_detections: 10
 negative_ratio: 3.0

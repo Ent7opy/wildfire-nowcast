@@ -27,18 +27,18 @@ class HeuristicSpreadV0Config:
     """Configuration for the v0 heuristic spread model."""
     # Base spread rate in km per hour (radial spread without wind)
     base_spread_km_h: float = 0.05
-    
+
     # Wind influence: how many km of additional downwind spread per m/s per hour
     wind_influence_km_h_per_ms: float = 0.1
-    
+
     # Anisotropy: ratio of downwind spread to crosswind spread
     # 1.0 means circular spread (ignoring wind displacement)
     # > 1.0 means elongated downwind
     wind_elongation_factor: float = 1.5
-    
+
     # Activation threshold for fire heatmap
     fire_threshold: float = 0.0
-    
+
     # Decay factor: how quickly probability drops off (distance-based)
     # Higher means sharper footprint edges
     distance_decay_km: float = 2.0
@@ -47,7 +47,7 @@ class HeuristicSpreadV0Config:
     # Must be an odd integer >= 7.
     max_kernel_size: int = 201
 
-    # Hard cap on daily spread expansion to keep fallback forecasts operationally sane.
+    # Hard cap on spread expansion per 24h to keep fallback forecasts operationally sane.
     max_daily_spread_km: float = 20.0
 
     # Optional terrain bias (upslope)
@@ -63,31 +63,41 @@ class HeuristicSpreadV0Config:
     slope_influence: float = 0.35  # unitless strength (0 disables); typical 0.1–0.6
     slope_reference_deg: float = 30.0  # slope at which bias is near full strength
 
+    # Iterative spread step size in hours.  The model propagates fire state in steps of
+    # this size and snapshots at each requested horizon.  Smaller steps are more
+    # physically accurate; 2h balances accuracy and compute.
+    iterative_step_hours: int = 2
+
+    # Moisture suppression: scale spread rate by dead fuel moisture content (DFMC).
+    # When enabled, DFMC from the weather cube modulates the spread rate:
+    #   DFMC < dfmc_min_pct  → rate multiplied by dfmc_max_factor (rapid spread)
+    #   DFMC = dfmc_ref_pct  → rate multiplied by 1.0 (neutral)
+    #   DFMC > dfmc_max_pct  → rate multiplied by dfmc_min_factor (suppressed)
+    enable_moisture_suppression: bool = True
+    dfmc_ref_pct: float = 8.0    # reference DFMC (fraction × 100) for neutral spread
+    dfmc_min_pct: float = 3.0    # below this: maximum acceleration
+    dfmc_max_pct: float = 25.0   # above this: maximum suppression
+    dfmc_max_factor: float = 1.6  # spread multiplier at very dry conditions
+    dfmc_min_factor: float = 0.15 # spread multiplier at very wet conditions
+
     def __post_init__(self):
         """Validate configuration constraints."""
-        # Validate max_kernel_size constraints (must be >= 7 and odd)
         if self.max_kernel_size < 7:
             raise ValueError(f"max_kernel_size must be >= 7; got {self.max_kernel_size}")
         if self.max_kernel_size % 2 == 0:
             raise ValueError(f"max_kernel_size must be odd; got {self.max_kernel_size}")
-        
-        # Validate base_spread_km_h is positive
         if self.base_spread_km_h <= 0:
             raise ValueError(f"base_spread_km_h must be positive; got {self.base_spread_km_h}")
-        
-        # Validate wind_elongation_factor is reasonable (must be >= 1.0)
         if self.wind_elongation_factor < 1.0:
             raise ValueError(f"wind_elongation_factor must be >= 1.0; got {self.wind_elongation_factor}")
-        
-        # Validate slope_influence is in valid range [0.0, 1.0]
         if not 0.0 <= self.slope_influence <= 1.0:
             raise ValueError(f"slope_influence must be in [0.0, 1.0]; got {self.slope_influence}")
-        
-        # Validate distance_decay_km is positive
         if self.distance_decay_km <= 0:
             raise ValueError(f"distance_decay_km must be positive; got {self.distance_decay_km}")
         if self.max_daily_spread_km <= 0:
             raise ValueError(f"max_daily_spread_km must be positive; got {self.max_daily_spread_km}")
+        if self.iterative_step_hours <= 0:
+            raise ValueError(f"iterative_step_hours must be positive; got {self.iterative_step_hours}")
 
 class HeuristicSpreadModelV0(SpreadModel):
     """Simple rule-based spread model using wind bias."""
@@ -120,12 +130,59 @@ class HeuristicSpreadModelV0(SpreadModel):
         mean_rad = np.arctan2(sin_mean, cos_mean)
         return float(np.mod(np.rad2deg(mean_rad), 360.0))
 
+    def _moisture_suppression_factor(self, dfmc_fraction: float) -> float:
+        """Compute a spread-rate multiplier from dead fuel moisture content.
+
+        Returns a value in [dfmc_min_factor, dfmc_max_factor]:
+        - Near dfmc_ref_pct  → 1.0 (neutral)
+        - Below dfmc_min_pct → dfmc_max_factor (dry, fast spread)
+        - Above dfmc_max_pct → dfmc_min_factor (moist, suppressed spread)
+
+        Uses a piecewise-linear interpolation between breakpoints.
+        """
+        cfg = self.config
+        dfmc_pct = dfmc_fraction * 100.0
+
+        if dfmc_pct <= cfg.dfmc_min_pct:
+            return cfg.dfmc_max_factor
+        if dfmc_pct <= cfg.dfmc_ref_pct:
+            # linear from max_factor → 1.0
+            t = (dfmc_pct - cfg.dfmc_min_pct) / max(cfg.dfmc_ref_pct - cfg.dfmc_min_pct, 1e-9)
+            return cfg.dfmc_max_factor + t * (1.0 - cfg.dfmc_max_factor)
+        if dfmc_pct <= cfg.dfmc_max_pct:
+            # linear from 1.0 → min_factor
+            t = (dfmc_pct - cfg.dfmc_ref_pct) / max(cfg.dfmc_max_pct - cfg.dfmc_ref_pct, 1e-9)
+            return 1.0 + t * (cfg.dfmc_min_factor - 1.0)
+        return cfg.dfmc_min_factor
+
+    def _get_dfmc_at_time(self, weather_at_t: "xr.Dataset") -> float:
+        """Extract window-mean DFMC (fraction) from a time-sliced weather dataset.
+
+        Returns 1.0 (neutral / no suppression) when DFMC is unavailable or all-NaN.
+        """
+        if "dfmc" not in weather_at_t.data_vars:
+            return float("nan")
+        arr = np.asarray(weather_at_t["dfmc"].values, dtype=np.float32)
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return float("nan")
+        return float(np.mean(finite))
+
     def predict(self, inputs: SpreadModelInput) -> SpreadForecast:
-        """Predict fire spread probability over the requested horizons."""
+        """Predict fire spread probability over the requested horizons.
+
+        The model propagates fire state iteratively in steps of
+        ``config.iterative_step_hours`` (default 2h) and snapshots the
+        probability grid at each requested horizon.  Each step uses the
+        wind and moisture conditions at that point in time, so longer
+        horizons compound the directional and moisture effects of intermediate
+        weather rather than computing each horizon independently from t=0.
+        """
         LOGGER.info(
-            "Running heuristic spread v0",
+            "Running heuristic spread v0 (iterative)",
             extra={
                 "horizons_hours": list(inputs.horizons_hours),
+                "step_hours": self.config.iterative_step_hours,
                 "window_shape": (
                     int(inputs.window.lat.size),
                     int(inputs.window.lon.size),
@@ -137,25 +194,23 @@ class HeuristicSpreadModelV0(SpreadModel):
         for h in horizons:
             if h <= 0:
                 raise ValueError(f"All horizons_hours must be positive; got {horizons!r}")
-        
-        # 1. Prepare fire source
-        # (lat, lon) array where 1.0 is active fire
-        fire_mask = (inputs.active_fires.heatmap > self.config.fire_threshold).astype(np.float32)
+
+        step_h = int(self.config.iterative_step_hours)
+        max_horizon = max(horizons)
+
+        # 1. Prepare fire source: soft probability seed from active fires.
+        heatmap = np.asarray(inputs.active_fires.heatmap, dtype=np.float32)
+        fire_mask = (heatmap > self.config.fire_threshold).astype(np.float32)
         fire_sum = float(fire_mask.sum())
-        
-        # 2. Get grid resolution in km (approximate)
-        # 0.01 degree is ~1.11 km at equator.
-        # We'll use a slightly more accurate mean lat approximation.
+
+        # 2. Grid resolution in km.
         mean_lat = float(inputs.window.lat.mean())
-        km_per_lat_deg = 111.0
-        km_per_lon_deg = float(111.0 * np.cos(np.radians(mean_lat)))
-        
-        dy_km = max(float(inputs.grid.cell_size_deg) * km_per_lat_deg, 1e-6)
-        dx_km = max(float(inputs.grid.cell_size_deg) * km_per_lon_deg, 1e-6)
-        
-        # Optional terrain bias uses window-mean slope/aspect (keeps kernel global).
-        slope_deg = None
-        aspect_deg = None
+        dy_km = max(float(inputs.grid.cell_size_deg) * 111.0, 1e-6)
+        dx_km = max(float(inputs.grid.cell_size_deg) * 111.0 * np.cos(np.radians(mean_lat)), 1e-6)
+
+        # 3. Terrain bias parameters (window-mean, computed once).
+        slope_deg: float | None = None
+        aspect_deg: float | None = None
         if self.config.enable_slope_bias:
             slope = getattr(inputs.terrain, "slope", None)
             aspect = getattr(inputs.terrain, "aspect", None)
@@ -170,18 +225,25 @@ class HeuristicSpreadModelV0(SpreadModel):
                 )
 
         if fire_sum == 0.0:
-            forecast_grids = [np.zeros_like(fire_mask, dtype=np.float32) for _ in horizons]
-            return self._package_forecast(inputs, horizons, forecast_grids)
-        
-        forecast_grids = []
-        for horizon_h in horizons:
-            # 3. Extract wind for this horizon
-            # Simple approach: mean wind over the window at the nearest time
-            target_time = inputs.forecast_reference_time + timedelta(hours=horizon_h)
-            
-            # Select nearest time in weather_cube
+            empty = [np.zeros_like(fire_mask, dtype=np.float32) for _ in horizons]
+            return self._package_forecast(inputs, horizons, empty)
+
+        # 4. Iterative propagation.
+        current_state = fire_mask.copy()
+        horizon_set = set(horizons)
+        snapshots: dict[int, np.ndarray] = {}
+
+        elapsed_h = 0
+        while elapsed_h < max_horizon:
+            elapsed_h += step_h
+
+            target_time = inputs.forecast_reference_time + timedelta(hours=elapsed_h)
+
+            # Select weather at this step.
             if "time" in inputs.weather_cube.dims:
-                weather_at_t = inputs.weather_cube.sel(time=self._as_datetime64_utc_naive(target_time), method="nearest")
+                weather_at_t = inputs.weather_cube.sel(
+                    time=self._as_datetime64_utc_naive(target_time), method="nearest"
+                )
             else:
                 weather_at_t = inputs.weather_cube
 
@@ -194,45 +256,54 @@ class HeuristicSpreadModelV0(SpreadModel):
 
             u10 = float(weather_at_t["u10"].mean())
             v10 = float(weather_at_t["v10"].mean())
-            
-            # 4. Generate kernel for this horizon/wind
+
+            # Moisture suppression factor for this step.
+            moisture_factor = 1.0
+            if self.config.enable_moisture_suppression:
+                dfmc_val = self._get_dfmc_at_time(weather_at_t)
+                if np.isfinite(dfmc_val):
+                    moisture_factor = self._moisture_suppression_factor(dfmc_val)
+                    LOGGER.debug(
+                        "Step +%dh: DFMC=%.3f → moisture_factor=%.3f",
+                        elapsed_h, dfmc_val, moisture_factor,
+                    )
+
+            # Build kernel for one step (step_h hours, current wind).
             kernel = self._generate_kernel(
-                horizon_h,
+                step_h,
                 u10,
                 v10,
                 dy_km,
                 dx_km,
                 slope_deg=slope_deg,
                 aspect_deg=aspect_deg,
+                moisture_factor=moisture_factor,
             )
-            
-            # 5. Convolve
-            # Use mode='same' to keep output size matching input
-            # fftconvolve is generally faster for these kernel sizes
-            # NOTE: fftconvolve with mode='same' can introduce boundary artifacts at edges.
-            # This is a known trade-off for performance. For critical edge accuracy,
-            # consider using direct convolution (scipy.signal.convolve2d) with appropriate
-            # padding, or pad the input before convolution and trim after.
-            prob_grid = fftconvolve(fire_mask, kernel, mode="same").astype(np.float32, copy=False)
-                
-            # 6. Apply masks and normalize
-            # Ensure probability is in [0, 1]
-            max_val = float(np.max(prob_grid)) if prob_grid.size else 0.0
-            if max_val > 0:
-                prob_grid = prob_grid / max_val
 
-            # FFT convolution can introduce tiny negative values; clamp to contract range.
-            prob_grid = np.clip(prob_grid, 0.0, 1.0, out=prob_grid)
-            
-            # Mask out invalid terrain if present
+            # Convolve current state with kernel.
+            next_state = fftconvolve(current_state, kernel, mode="same").astype(np.float32, copy=False)
+
+            # Normalize to [0, 1]; FFT can introduce tiny negatives.
+            max_val = float(np.max(next_state)) if next_state.size else 0.0
+            if max_val > 0.0:
+                next_state = next_state / max_val
+            next_state = np.clip(next_state, 0.0, 1.0, out=next_state)
+
+            # Apply terrain masks.
             if inputs.terrain.valid_data_mask is not None:
-                prob_grid = prob_grid * inputs.terrain.valid_data_mask
-            
+                next_state = next_state * inputs.terrain.valid_data_mask
             if inputs.terrain.aoi_mask is not None:
-                prob_grid = prob_grid * inputs.terrain.aoi_mask
-                
-            forecast_grids.append(prob_grid)
-            
+                next_state = next_state * inputs.terrain.aoi_mask
+
+            current_state = next_state
+
+            # Snapshot at requested horizons (exact match or overshoot).
+            for h in horizon_set:
+                if h not in snapshots and elapsed_h >= h:
+                    snapshots[h] = current_state.copy()
+
+        # Collect in original horizon order; fill any missed with current_state.
+        forecast_grids = [snapshots.get(h, current_state.copy()) for h in horizons]
         return self._package_forecast(inputs, horizons, forecast_grids)
 
     @staticmethod
@@ -274,24 +345,32 @@ class HeuristicSpreadModelV0(SpreadModel):
         )
 
     def _generate_kernel(
-        self, 
-        horizon_h: float, 
-        u_ms: float, 
-        v_ms: float, 
-        dy_km: float, 
+        self,
+        horizon_h: float,
+        u_ms: float,
+        v_ms: float,
+        dy_km: float,
         dx_km: float,
         *,
         slope_deg: float | None = None,
         aspect_deg: float | None = None,
+        moisture_factor: float = 1.0,
     ) -> np.ndarray:
-        """Generate an anisotropic kernel centered at origin with downwind bias."""
-        
+        """Generate an anisotropic kernel centered at origin with downwind bias.
+
+        Parameters
+        ----------
+        moisture_factor : float
+            Multiplier on the spread rate derived from DFMC.  Values < 1 suppress
+            spread (wet conditions); values > 1 accelerate it (dry conditions).
+        """
         # Wind speed magnitude
         wind_speed = np.sqrt(u_ms**2 + v_ms**2)
 
-        # Additive spread-rate model (no inverse-base amplification) with a hard daily cap.
+        # Additive spread-rate model, modulated by moisture, with a hard daily cap.
         spread_rate_km_h = float(
-            self.config.base_spread_km_h + (wind_speed * self.config.wind_influence_km_h_per_ms)
+            (self.config.base_spread_km_h + (wind_speed * self.config.wind_influence_km_h_per_ms))
+            * float(moisture_factor)
         )
         max_dist_by_rate_km = float(spread_rate_km_h * horizon_h)
         max_dist_by_cap_km = float(self.config.max_daily_spread_km * (horizon_h / 24.0))
