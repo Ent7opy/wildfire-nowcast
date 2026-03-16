@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-# Run Alembic migrations. Use from repo root (e.g. Railway preDeployCommand).
-# If your service root is api/, use: uv run alembic upgrade head
+# Run Alembic migrations from repo root (e.g. Railway preDeployCommand).
+# Use explicit -c so Alembic finds script_location regardless of uv's cwd.
 cd "$(dirname "$0")/.."
-cd api && uv run alembic upgrade head
+uv run --project api alembic -c api/alembic.ini upgrade head
