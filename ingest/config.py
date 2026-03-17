@@ -142,7 +142,7 @@ class FIRMSIngestSettings(BaseSettings):
     has a different Python than the ingest venv (e.g., /app/.venv/bin/python3).
     """
     denoiser_subprocess_timeout_seconds: int = Field(
-        default=180,
+        default=600,
         validation_alias="DENOISER_SUBPROCESS_TIMEOUT_SECONDS",
     )
     """Hard timeout (seconds) for the denoiser subprocess. Prevents a stalled
