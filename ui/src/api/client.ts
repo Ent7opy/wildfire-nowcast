@@ -376,7 +376,7 @@ export interface ArchiveIngestStatusResponse {
 }
 
 export async function getArchiveIngestStatus(jobId: string): Promise<ArchiveIngestStatusResponse> {
-  return getJson<ArchiveIngestStatusResponse>(`/fires/archive/ingest/${jobId}`);
+  return getJson<ArchiveIngestStatusResponse>(`/fires/archive/ingest/${jobId}`, {});
 }
 
 export async function checkArchiveAvailability(

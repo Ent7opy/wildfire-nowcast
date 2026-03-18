@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import numpy as np
-import pytest
-
 from ingest.hrrr_ingest import (
     build_hrrr_urls,
     is_conus_bbox,
