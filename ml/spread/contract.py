@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, Sequence, TYPE_CHECKING
+from typing import Optional, Protocol, Sequence, TYPE_CHECKING
 
 import xarray as xr
 
@@ -18,9 +18,9 @@ if TYPE_CHECKING:
     from api.fires.service import FireHeatmapWindow
     from api.terrain.window import TerrainWindow
 
-# MVP horizons for v1 spread model.
+# 0-12h short-range spread horizons.
 # Tuple to keep this constant immutable and safe to reuse as a default.
-DEFAULT_HORIZONS_HOURS: tuple[int, ...] = (24, 48, 72)
+DEFAULT_HORIZONS_HOURS: tuple[int, ...] = (2, 6, 12)
 
 @dataclass(frozen=True, slots=True)
 class SpreadModelInput:
@@ -35,6 +35,11 @@ class SpreadModelInput:
     terrain: TerrainWindow
     forecast_reference_time: datetime
     horizons_hours: Sequence[int] = DEFAULT_HORIZONS_HOURS
+    # Fire state snapshots from prior time windows (6h and 12h before ref_time).
+    # Each is a 6-hour window of detections centered at the labelled lag.
+    # None when not available (e.g. insufficient history or first ingest).
+    fire_history_t6h: Optional[FireHeatmapWindow] = None
+    fire_history_t12h: Optional[FireHeatmapWindow] = None
 
 @dataclass(frozen=True, slots=True)
 class SpreadForecast:

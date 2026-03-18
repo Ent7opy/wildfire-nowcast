@@ -687,7 +687,9 @@ def _spatial_sanity_failure_reason(
         horizons = list(getattr(forecast, "horizons_hours", []) or [])
         if not horizons:
             return None
-        idx = horizons.index(24) if 24 in horizons else 0
+        # Prefer the longest available horizon for the sanity check; it has the
+        # most developed footprint and is most likely to expose out-of-distribution outputs.
+        idx = len(horizons) - 1
         horizon_h = int(horizons[idx])
         probs = np.asarray(forecast.probabilities.isel(time=idx).values, dtype=np.float32)
         if probs.shape != seeds.shape:
@@ -898,7 +900,7 @@ def _apply_mvp_footprint_guard(
     if not _env_bool(SPREAD_MVP_GUARD_ENABLED_ENV, default=True):
         return forecast
 
-    horizon_h = _env_int(SPREAD_MVP_GUARD_HORIZON_HOURS_ENV, default=24)
+    horizon_h = _env_int(SPREAD_MVP_GUARD_HORIZON_HOURS_ENV, default=12)
     prob_threshold = _env_float(SPREAD_MVP_GUARD_PROB_THRESHOLD_ENV, default=0.7)
     max_coverage = _env_float(SPREAD_MVP_GUARD_MAX_COVERAGE_ENV, default=0.60)
     max_seed_cells = _env_int(SPREAD_MVP_GUARD_MAX_SEED_CELLS_ENV, default=1)

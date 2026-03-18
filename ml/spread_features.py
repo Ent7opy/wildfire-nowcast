@@ -40,6 +40,11 @@ class SpreadInputs:
     # Metadata flags for error handling and observability
     weather_fallback_used: bool = False
     terrain_fallback_used: bool = False
+    # Fire state snapshots at prior time windows.
+    # fire_history_t6h: detections from [ref_time - 12h, ref_time - 6h]
+    # fire_history_t12h: detections from [ref_time - 18h, ref_time - 12h]
+    fire_history_t6h: FireHeatmapWindow | None = None
+    fire_history_t12h: FireHeatmapWindow | None = None
 
     def to_model_input(self) -> SpreadModelInput:
         """Convert to the canonical SpreadModelInput expected by models."""
@@ -51,6 +56,8 @@ class SpreadInputs:
             terrain=self.terrain,
             forecast_reference_time=self.forecast_reference_time,
             horizons_hours=self.horizons_hours,
+            fire_history_t6h=self.fire_history_t6h,
+            fire_history_t12h=self.fire_history_t12h,
         )
 
 
@@ -124,21 +131,35 @@ def _resolve_storage_path(path_value: str | Path) -> Path:
     return candidates[-1]
 
 
+def _is_conus_bbox(bbox: tuple[float, float, float, float]) -> bool:
+    """Return True if the bbox is fully within approximate CONUS bounds."""
+    min_lon, min_lat, max_lon, max_lat = bbox
+    return min_lon >= -125.0 and max_lon <= -66.0 and min_lat >= 22.0 and max_lat <= 50.0
+
+
 def _get_latest_weather_run(
     ref_time: datetime,
     bbox: tuple[float, float, float, float],
 ) -> dict | None:
-    """Find the latest completed weather run covering the AOI before or at ref_time."""
+    """Find the latest completed weather run covering the AOI before or at ref_time.
+
+    For CONUS bboxes, HRRR (model_name LIKE 'hrrr%') is preferred over GFS because
+    it has 3km resolution and hourly cycles.  Outside CONUS only GFS runs exist so
+    the preference has no effect.
+    """
     min_lon, min_lat, max_lon, max_lat = bbox
     stmt = sa.text(
         """
-        SELECT id, storage_path, run_time
+        SELECT id, storage_path, run_time, model
         FROM weather_runs
         WHERE status = 'completed'
           AND run_time <= :ref_time
           AND COALESCE(bbox_min_lon, -180.0) <= :min_lon AND COALESCE(bbox_max_lon, 180.0) >= :max_lon
           AND COALESCE(bbox_min_lat, -90.0) <= :min_lat AND COALESCE(bbox_max_lat, 90.0) >= :max_lat
-        ORDER BY run_time DESC, created_at DESC
+        ORDER BY
+          CASE WHEN model LIKE 'hrrr%' THEN 0 ELSE 1 END,
+          run_time DESC,
+          created_at DESC
         LIMIT 1
         """
     )
@@ -274,6 +295,8 @@ def _load_weather_cube(
         ds_final = _maybe_apply_weather_bias_correction(
             ds_final, weather_bias_corrector_path=weather_bias_corrector_path
         )
+        # Attach equilibrium DFMC derived from T/RH.
+        ds_final = _add_dfmc_to_weather(ds_final)
         # Mark as not using fallback when successfully loaded
         ds_final.attrs["weather_fallback_used"] = False
         ds_final.attrs["weather_run_id"] = run.get("id")
@@ -298,6 +321,58 @@ def _load_weather_cube(
                 pass
 
 
+def _compute_dfmc(t2m_k: np.ndarray, rh2m_pct: np.ndarray) -> np.ndarray:
+    """Nelson (1984) / NFDRS equilibrium dead fuel moisture content (10-hr).
+
+    Uses the NFDRS piecewise EMC formula.  Returns DFMC as a fraction in [0, 0.40].
+
+    Parameters
+    ----------
+    t2m_k : np.ndarray
+        Air temperature in Kelvin (GFS/HRRR native units).
+    rh2m_pct : np.ndarray
+        Relative humidity in percent [0, 100].
+    """
+    t_f = (t2m_k - 273.15) * 9.0 / 5.0 + 32.0  # Kelvin → Fahrenheit
+    h = np.clip(rh2m_pct, 0.0, 100.0)
+
+    # NFDRS piecewise EMC (percent)
+    low  = 0.03229 + 0.281073 * h - 0.000578 * h * t_f   # h < 10 %
+    mid  = 2.22749 + 0.160107 * h - 0.014784 * t_f        # 10 ≤ h < 50 %
+    high = 21.0606 + 0.005565 * h**2 - 0.00035 * h * t_f - 0.483199 * h  # h ≥ 50 %
+
+    emc_pct = np.where(h < 10.0, low, np.where(h < 50.0, mid, high))
+    emc_pct = np.clip(emc_pct, 0.0, 40.0)
+    return (emc_pct / 100.0).astype(np.float32)
+
+
+def _add_dfmc_to_weather(ds: xr.Dataset) -> xr.Dataset:
+    """Compute and attach equilibrium DFMC to a weather cube.
+
+    Requires ``t2m`` (K) and ``rh2m`` (%) variables.  When either is missing or
+    all-NaN (e.g. zero-wind fallback cube), a NaN field is attached so downstream
+    consumers can detect the gap rather than silently using stale values.
+    """
+    if "t2m" not in ds.data_vars or "rh2m" not in ds.data_vars:
+        LOGGER.warning("Cannot compute DFMC: t2m or rh2m missing from weather cube.")
+        shape = tuple(ds.sizes[d] for d in ds.dims if d in ("time", "lat", "lon"))
+        if shape:
+            ds = ds.assign(dfmc=(list(ds.dims), np.full(shape, np.nan, dtype=np.float32)))
+        return ds
+
+    t2m  = np.asarray(ds["t2m"].values,  dtype=np.float32)
+    rh2m = np.asarray(ds["rh2m"].values, dtype=np.float32)
+
+    if np.all(np.isnan(t2m)) or np.all(np.isnan(rh2m)):
+        LOGGER.debug("t2m/rh2m all-NaN (fallback cube); attaching NaN DFMC.")
+        dfmc = np.full_like(t2m, np.nan, dtype=np.float32)
+    else:
+        dfmc = _compute_dfmc(t2m, rh2m)
+
+    ds = ds.assign(dfmc=(ds["t2m"].dims, dfmc))
+    return ds
+
+
 def _create_fallback_weather(
     window: GridWindow,
     ref_time: datetime,
@@ -318,10 +393,12 @@ def _create_fallback_weather(
 
     return xr.Dataset(
         data_vars={
-            "u10": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
-            "v10": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
-            "t2m": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
+            "u10":  (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
+            "v10":  (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
+            "t2m":  (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
             "rh2m": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
+            # DFMC is NaN in fallback — callers should treat as unknown moisture.
+            "dfmc": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
         },
         coords=coords
     )
@@ -419,14 +496,23 @@ def build_spread_inputs(
         grid = get_region_grid_spec(region_name)
     window = get_grid_window_for_bbox(grid, bbox, clip=True)
 
-    # 2. Load fires
-    fire_start = forecast_reference_time - timedelta(hours=fire_lookback_hours)
+    # 2. Load fires — current state and two historical windows.
+    #
+    # fire_t0   : last 6 hours  (covers at least one full VIIRS overpass)
+    # fire_t6h  : 6-12 hours ago
+    # fire_t12h : 12-18 hours ago
+    #
+    # These windows are 6h wide and non-overlapping so that the model channels carry
+    # distinct temporal information.  The fire_lookback_hours parameter still controls
+    # how far back the t0 window starts (for backward compatibility with callers that
+    # rely on wider lookbacks).
+    fire_t0_start = forecast_reference_time - timedelta(hours=max(fire_lookback_hours, 6))
     try:
         fires = get_fire_cells_heatmap(
             region_name=region_name,
             grid=grid if region_name is None else None,
             bbox=bbox,
-            start_time=fire_start,
+            start_time=fire_t0_start,
             end_time=forecast_reference_time,
             weight_by_denoised_score=weight_by_denoised_score,
             mode="max" if weight_by_denoised_score else "presence",
@@ -440,11 +526,42 @@ def build_spread_inputs(
         )
         raise RuntimeError(
             f"Failed to load fire heatmap for region={region_name!r} bbox={bbox!r} "
-            f"start_time={fire_start!r} end_time={forecast_reference_time!r}"
+            f"start_time={fire_t0_start!r} end_time={forecast_reference_time!r}"
         ) from e
     if fires.grid != grid:
         raise ValueError("Fire heatmap grid does not match region grid spec.")
     _assert_same_window(expected=window, actual=fires.window, label="active_fires")
+
+    # Historical fire windows (best-effort — None on any query failure).
+    fire_history_t6h: FireHeatmapWindow | None = None
+    fire_history_t12h: FireHeatmapWindow | None = None
+    for lag_start_h, lag_end_h, attr_name in [
+        (12, 6,  "fire_history_t6h"),
+        (18, 12, "fire_history_t12h"),
+    ]:
+        t_start = forecast_reference_time - timedelta(hours=lag_start_h)
+        t_end   = forecast_reference_time - timedelta(hours=lag_end_h)
+        try:
+            hist = get_fire_cells_heatmap(
+                region_name=region_name,
+                grid=grid if region_name is None else None,
+                bbox=bbox,
+                start_time=t_start,
+                end_time=t_end,
+                weight_by_denoised_score=weight_by_denoised_score,
+                mode="max" if weight_by_denoised_score else "presence",
+                clip=True,
+            )
+            if attr_name == "fire_history_t6h":
+                fire_history_t6h = hist
+            else:
+                fire_history_t12h = hist
+        except Exception:
+            LOGGER.warning(
+                "Failed to load historical fire window %s (start=%s, end=%s); "
+                "fire history channel will be None.",
+                attr_name, t_start, t_end,
+            )
 
     # 3. Load terrain (optional - create empty terrain if region_name is None or terrain unavailable)
     terrain_fallback_used = False
@@ -536,4 +653,6 @@ def build_spread_inputs(
         horizons_hours=horizons_hours,
         weather_fallback_used=weather_fallback_used,
         terrain_fallback_used=terrain_fallback_used,
+        fire_history_t6h=fire_history_t6h,
+        fire_history_t12h=fire_history_t12h,
     )
