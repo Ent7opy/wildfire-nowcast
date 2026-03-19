@@ -214,7 +214,7 @@ export function clusterEventPoints(points: RenderEvent[], zoom: number): RenderE
     sample.detection_count = value.totalDetections;
     sample.end_time = value.latestTime;
     sample.event_score = value.maxSeverity;
-    sample.event_id = `cluster_${key.replace(':', '_')}`;
+    sample.event_id = `cluster_z${z}_${key.replace(':', '_')}`;
     sample.denoiser_decision = "pass";
     sample.review_required = false;
     sample.sensor = "Cluster";

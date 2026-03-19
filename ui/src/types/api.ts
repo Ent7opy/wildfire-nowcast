@@ -87,10 +87,21 @@ export interface FreshnessSource {
   last_seen_at?: string;
 }
 
+export interface ForecastGate {
+  can_run: boolean;
+  would_block_if_fail_closed: boolean;
+  policy: "fail_closed" | "best_effort";
+  reasons: string[];
+  missing_or_stale_sources: string[];
+  retry_hint?: string | null;
+  as_of?: string | null;
+}
+
 export interface DataFreshnessResponse {
   as_of?: string;
   overall_state?: string;
   sources?: Record<string, FreshnessSource>;
+  forecast_gate?: ForecastGate;
   stale_behavior?: Record<string, unknown>;
   idempotency_dashboard?: Record<string, unknown>;
 }

@@ -100,16 +100,17 @@ def test_run_spread_forecast_aoi_too_large(mock_grid):
         with pytest.raises(ValueError, match="AOI too large"):
             run_spread_forecast(request)
 
-def test_run_spread_forecast_not_implemented_cluster():
+def test_run_spread_forecast_invalid_cluster_id_raises_value_error():
+    """Malformed cluster IDs (missing zoom prefix) must raise ValueError, not NotImplementedError."""
     ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
     request = SpreadForecastRequest(
         region_name="test_region",
         bbox=(20.0, 40.0, 20.2, 40.2),
         forecast_reference_time=ref_time,
-        fire_cluster_id="cluster_123"
+        fire_cluster_id="cluster_123"  # old format: missing z prefix
     )
-    
-    with pytest.raises(NotImplementedError, match="fire_cluster_id is not yet supported"):
+
+    with pytest.raises(ValueError, match="unrecognised cluster_id format"):
         run_spread_forecast(request)
 
 def test_run_spread_forecast_default_model(mock_spread_inputs):
@@ -722,3 +723,58 @@ def test_spread_strict_weather_allows_fallback_when_disabled(monkeypatch, mock_s
     # Forecast is served; fallback is annotated but not blocked.
     assert out.probabilities.attrs["weather_fallback_used"] is True
     assert out.probabilities.attrs["confidence_level"] == "low"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_cluster_to_bbox
+# ---------------------------------------------------------------------------
+
+from ml.spread.service import _resolve_cluster_to_bbox
+
+
+class TestResolveClusterToBbox:
+    """_resolve_cluster_to_bbox must decode cluster IDs to geographic bboxes."""
+
+    def test_valid_id_at_zoom_5(self):
+        # cellDeg = max(0.08, 8/32) = 0.25 for z=5
+        # row=40, col=(-10): lat in [10.0, 10.25], lon in [-2.5, -2.25]
+        bbox = _resolve_cluster_to_bbox("cluster_z5_40_-10")
+        min_lon, min_lat, max_lon, max_lat = bbox
+        assert abs(min_lat - 10.0) < 1e-9
+        assert abs(max_lat - 10.25) < 1e-9
+        assert abs(min_lon - (-2.5)) < 1e-9
+        assert abs(max_lon - (-2.25)) < 1e-9
+
+    def test_cell_width_matches_formula(self):
+        for z in range(1, 11):
+            cell_deg = max(0.08, 8.0 / (2 ** z))
+            bbox = _resolve_cluster_to_bbox(f"cluster_z{z}_10_20")
+            min_lon, min_lat, max_lon, max_lat = bbox
+            assert abs((max_lat - min_lat) - cell_deg) < 1e-9, f"lat height mismatch at zoom {z}"
+            assert abs((max_lon - min_lon) - cell_deg) < 1e-9, f"lon width mismatch at zoom {z}"
+
+    def test_zoom_clamped_high(self):
+        # z=15 should be treated as z=10 → cellDeg=max(0.08, 8/1024)=0.08
+        bbox_clamped = _resolve_cluster_to_bbox("cluster_z15_10_20")
+        bbox_at10 = _resolve_cluster_to_bbox("cluster_z10_10_20")
+        assert bbox_clamped == bbox_at10
+
+    def test_zoom_clamped_low(self):
+        bbox_clamped = _resolve_cluster_to_bbox("cluster_z0_10_20")
+        bbox_at1 = _resolve_cluster_to_bbox("cluster_z1_10_20")
+        assert bbox_clamped == bbox_at1
+
+    def test_invalid_id_missing_zoom_raises(self):
+        with pytest.raises(ValueError, match="unrecognised cluster_id format"):
+            _resolve_cluster_to_bbox("cluster_10_20")
+
+    def test_invalid_id_wrong_prefix_raises(self):
+        with pytest.raises(ValueError, match="unrecognised cluster_id format"):
+            _resolve_cluster_to_bbox("event_z5_10_20")
+
+    def test_negative_row_col(self):
+        bbox = _resolve_cluster_to_bbox("cluster_z4_-5_-3")
+        min_lon, min_lat, max_lon, max_lat = bbox
+        cell_deg = max(0.08, 8.0 / 16)  # z=4 → cellDeg=0.5
+        assert abs(min_lat - (-5 * cell_deg)) < 1e-9
+        assert abs(min_lon - (-3 * cell_deg)) < 1e-9

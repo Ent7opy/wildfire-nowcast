@@ -54,10 +54,27 @@ def _stream_csv(data: list[dict[str, Any]], filename: str) -> StreamingResponse:
     return response
 
 
-def _json_response(data: Any, filename: str) -> Response:
-    # MVP: dump to JSON string. For large data, this should be streaming too.
-    content = json.dumps(data)
-    response = Response(content=content, media_type="application/json")
+def _stream_json(data: Any, filename: str) -> StreamingResponse:
+    """Stream JSON using a generator to avoid loading the full payload into memory.
+
+    For GeoJSON FeatureCollections the features array is streamed one feature at
+    a time so large exports never OOM.  All other data is serialised in a single
+    chunk (non-FeatureCollection objects are generally small).
+    """
+    def _iter() -> Generator[str, None, None]:
+        if isinstance(data, dict) and data.get("type") == "FeatureCollection":
+            yield '{"type":"FeatureCollection","features":['
+            features = data.get("features") or []
+            last_idx = len(features) - 1
+            for i, feature in enumerate(features):
+                yield json.dumps(feature)
+                if i < last_idx:
+                    yield ","
+            yield "]}"
+        else:
+            yield json.dumps(data)
+
+    response = StreamingResponse(_iter(), media_type="application/geo+json")
     response.headers["Content-Disposition"] = f"attachment; filename={filename}"
     return response
 
@@ -82,7 +99,7 @@ def export_aoi(aoi_id: UUID, format: str = Query("geojson", pattern="^(geojson)$
         }
     }
     
-    return _json_response(feature, f"aoi_{aoi_id}.geojson")
+    return _stream_json(feature, f"aoi_{aoi_id}.geojson")
 
 
 @exports_router.get("/fires/export")
@@ -133,7 +150,7 @@ def export_fires(
                 "properties": {k: str(v) if k == "acq_time" else v for k, v in props.items()}
             })
         fc = {"type": "FeatureCollection", "features": features}
-        return _json_response(fc, f"fires_{start_time}_{end_time}.geojson")
+        return _stream_json(fc, f"fires_{start_time}_{end_time}.geojson")
 
 
 @exports_router.get("/forecast/{run_id}/contours/export")
@@ -155,7 +172,7 @@ def export_forecast_contours(run_id: int, format: str = Query("geojson", pattern
         })
     
     fc = {"type": "FeatureCollection", "features": features}
-    return _json_response(fc, f"forecast_run_{run_id}_contours.geojson")
+    return _stream_json(fc, f"forecast_run_{run_id}_contours.geojson")
 
 
 @exports_router.get("/risk/export")
@@ -193,7 +210,7 @@ def export_risk(
     
     if format == "geojson":
         filename = f"risk_{min_lon}_{min_lat}_{max_lon}_{max_lat}.geojson"
-        return _json_response(risk_data, filename)
+        return _stream_json(risk_data, filename)
     
     if format == "csv":
         # Convert grid features to CSV rows

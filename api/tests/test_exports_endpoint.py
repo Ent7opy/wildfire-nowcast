@@ -37,7 +37,7 @@ def test_export_aoi_geojson(monkeypatch):
 
     response = client.get(f"/aois/{aoi_id}/export?format=geojson")
     assert response.status_code == 200
-    assert response.headers["content-type"] == "application/json"
+    assert response.headers["content-type"] == "application/geo+json"
     
     data = response.json()
     assert data["type"] == "Feature"

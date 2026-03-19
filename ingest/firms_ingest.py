@@ -57,6 +57,14 @@ _DENOISER_V2_RUNTIME_THRESHOLD_KEYS: tuple[str, ...] = (
 )
 
 
+class DenoiserTimeoutError(RuntimeError):
+    """Raised when the denoiser subprocess exceeds its configured timeout.
+
+    Callers should treat this as a fail-closed signal: do not insert the
+    batch without denoiser scores.
+    """
+
+
 @dataclass(frozen=True)
 class DenoiserRuntimePolicy:
     model_run_dir: str
@@ -537,6 +545,29 @@ def run_firms_ingest(
                 inserted,
                 skipped_duplicates,
             )
+        except DenoiserTimeoutError:
+            LOGGER.error(
+                "Denoiser timed out for source=%s batch=%s — rolling back inserted detections",
+                source,
+                batch_id,
+            )
+            try:
+                deleted = repository.delete_detections_for_batch(batch_id)
+                LOGGER.warning(
+                    "Rolled back %s detections for timed-out denoiser batch %s",
+                    deleted,
+                    batch_id,
+                )
+            except Exception:
+                LOGGER.exception("Failed to rollback detections for timed-out batch %s", batch_id)
+            repository.finalize_ingest_batch(
+                batch_id,
+                status="failed",
+                fetched=fetched_count,
+                inserted=0,
+                skipped=0,
+            )
+            return 1
         except Exception:  # pragma: no cover - defensive logging
             LOGGER.exception("Ingest failed for source=%s batch=%s", source, batch_id)
             persisted_after_cleanup = 0
@@ -835,11 +866,12 @@ def _run_denoiser_inference(
     except subprocess.TimeoutExpired as e:
         LOGGER.error(
             "Denoiser inference timed out after %ss for batch %s. "
+            "Batch will NOT be inserted (fail-closed). "
             "Increase DENOISER_SUBPROCESS_TIMEOUT_SECONDS if the model is large.",
             subprocess_timeout,
             batch_id,
         )
-        raise RuntimeError(
+        raise DenoiserTimeoutError(
             f"Denoiser inference timed out after {subprocess_timeout}s for batch {batch_id}"
         ) from e
     except subprocess.CalledProcessError as e:

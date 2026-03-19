@@ -62,6 +62,8 @@ export interface ForecastNotification {
 export interface ForecastRunMeta {
   weatherRunId: string | null;
   confidenceLevel: string | null;
+  fallbackUsed: boolean;
+  weatherBiasApplied: boolean | null;
 }
 
 export interface ForecastJobState {

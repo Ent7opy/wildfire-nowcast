@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -67,6 +68,47 @@ class WeatherFallbackBlockedError(RuntimeError):
     """
 
 
+def _resolve_cluster_to_bbox(
+    cluster_id: str,
+) -> tuple[float, float, float, float]:
+    """Decode a client-side cluster ID into a geographic bounding box.
+
+    The UI encodes cluster IDs as ``cluster_z{zoom}_{row}_{col}`` where:
+    - ``zoom``  — integer zoom level (1–10), clamped to [1, 10]
+    - ``row``   — floor(lat / cellDeg), may be negative
+    - ``col``   — floor(lon / cellDeg), may be negative
+    - ``cellDeg = max(0.08, 8 / 2**zoom)`` — mirrors the JS formula in layerUtils.ts
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        (min_lon, min_lat, max_lon, max_lat)
+
+    Raises
+    ------
+    ValueError
+        If the cluster_id does not match the expected format.
+    """
+    m = re.fullmatch(r"cluster_z(\d+)_(-?\d+)_(-?\d+)", cluster_id)
+    if not m:
+        raise ValueError(
+            f"Cannot resolve cluster bbox: unrecognised cluster_id format {cluster_id!r}. "
+            "Expected 'cluster_z<zoom>_<row>_<col>'."
+        )
+
+    zoom = max(1, min(int(m.group(1)), 10))
+    row = int(m.group(2))
+    col = int(m.group(3))
+    cell_deg = max(0.08, 8.0 / (2 ** zoom))
+
+    min_lat = row * cell_deg
+    max_lat = min_lat + cell_deg
+    min_lon = col * cell_deg
+    max_lon = min_lon + cell_deg
+
+    return (min_lon, min_lat, max_lon, max_lat)
+
+
 @dataclass(frozen=True, slots=True)
 class SpreadForecastRequest:
     """Request parameters for a spread forecast."""
@@ -108,8 +150,13 @@ def run_spread_forecast(
         The resulting probability grids and metadata.
     """
     if request.fire_cluster_id is not None:
-        # TODO: Implement cluster-to-bbox resolution once clustering logic exists.
-        raise NotImplementedError("Referencing fire_cluster_id is not yet supported.")
+        resolved_bbox = _resolve_cluster_to_bbox(request.fire_cluster_id)
+        LOGGER.info(
+            "Resolved fire_cluster_id %r to bbox %s",
+            request.fire_cluster_id,
+            resolved_bbox,
+        )
+        request = replace(request, bbox=resolved_bbox, fire_cluster_id=None)
 
     start_time = time.perf_counter()
     LOGGER.info(
@@ -134,7 +181,9 @@ def run_spread_forecast(
         build_spread_inputs = _build_spread_inputs
 
     # Resolve operational bias-correction + calibration artifacts.
-    # Only resolve if region_name is provided (location-based forecasts skip bias correction)
+    # Only resolve if region_name is provided (location-based forecasts skip bias correction).
+    # SCIENCE_DEBT SD-02: snap location-based queries to nearest region to avoid bypassing
+    # bias correction; see SCIENCE_DEBT.md for mitigation plan.
     weather_bias_corrector_path = None
     if request.region_name is not None:
         weather_bias_corrector_path = _resolve_weather_bias_corrector_path(request.region_name)

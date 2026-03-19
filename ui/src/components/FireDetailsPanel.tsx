@@ -781,6 +781,7 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
     : null;
   const isNearby = isSafetyMode && (safety.safetyTier === 'DANGER' || safety.safetyTier === 'WARNING');
   const frpHuman = intensity?.unit === "MW" ? frpHumanLabel(intensity.value) : null;
+  const runMeta = forecast.lastForecast?.runMeta ?? null;
 
   return (
     <Box
@@ -1014,11 +1015,29 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
             </Box>
           )}
 
-          {forecast.lastForecast?.runMeta && forecast.lastForecast.runMeta.weatherRunId === null && (
+          {runMeta?.weatherRunId === null && (
             <Box sx={{ mt: 0.8, px: 1.25, py: 1, border: "1px solid rgba(251,146,60,0.3)", bgcolor: "rgba(251,146,60,0.08)", borderRadius: 1.6, display: "flex", alignItems: "flex-start", gap: 0.85 }}>
               <WarningAmberIcon sx={{ fontSize: 14, color: "#fb923c", mt: 0.1 }} />
               <Typography sx={{ fontSize: 11, color: "#fdba74", fontWeight: 600, lineHeight: 1.5 }}>
                 Spread forecast assumed calm conditions — no weather data was available for this area and time. The symmetric shape reflects this, not actual wind direction.
+              </Typography>
+            </Box>
+          )}
+
+          {runMeta && (runMeta.confidenceLevel === "low" || runMeta.fallbackUsed) && (
+            <Box sx={{ mt: 0.8, px: 1.25, py: 1, border: "1px solid rgba(234,179,8,0.3)", bgcolor: "rgba(234,179,8,0.07)", borderRadius: 1.6, display: "flex", alignItems: "flex-start", gap: 0.85 }}>
+              <WarningAmberIcon sx={{ fontSize: 14, color: "#eab308", mt: 0.1 }} />
+              <Typography sx={{ fontSize: 11, color: "#fde047", fontWeight: 600, lineHeight: 1.5 }}>
+                Low-confidence forecast — stale or fallback inputs were used. Treat spread contours as indicative only.
+              </Typography>
+            </Box>
+          )}
+
+          {runMeta?.weatherBiasApplied === false && (
+            <Box sx={{ mt: 0.8, px: 1.25, py: 1, border: "1px solid rgba(148,163,184,0.2)", bgcolor: "rgba(148,163,184,0.06)", borderRadius: 1.6, display: "flex", alignItems: "flex-start", gap: 0.85 }}>
+              <WarningAmberIcon sx={{ fontSize: 14, color: "#94a3b8", mt: 0.1 }} />
+              <Typography sx={{ fontSize: 11, color: "#cbd5e1", fontWeight: 600, lineHeight: 1.5 }}>
+                Regional weather bias correction was not applied — forecast accuracy may be lower than usual for this location.
               </Typography>
             </Box>
           )}
