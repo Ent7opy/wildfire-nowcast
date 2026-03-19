@@ -19,7 +19,7 @@ export function useForecastPolling(): void {
     if (!jobId) {
       return;
     }
-    if (pollCount >= MAX_POLLS) {
+    const timer = setTimeout(() => {
       setForecastNotification({
         kind: "error",
         message: "Forecast timed out after 10 minutes.",
@@ -27,8 +27,9 @@ export function useForecastPolling(): void {
         ttlSeconds: 45
       });
       clearForecastJob();
-    }
-  }, [jobId, pollCount, clearForecastJob, setForecastNotification]);
+    }, MAX_POLLS * 2000);
+    return () => clearTimeout(timer);
+  }, [jobId, clearForecastJob, setForecastNotification]);
 
   const query = useQuery({
     queryKey: ["jit-forecast-status", jobId],

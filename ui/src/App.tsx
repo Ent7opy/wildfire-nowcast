@@ -149,7 +149,7 @@ export default function App(): JSX.Element {
   const { requestLocation } = useGeolocation();
 
   useForecastPolling();
-  useSafetyMetrics(visibleEvents);
+  useSafetyMetrics(isArchiveMode ? [] : visibleEvents);
 
   const filteredEvents = useMemo(() => {
     return visibleEvents.filter((event) => {
@@ -243,9 +243,10 @@ export default function App(): JSX.Element {
     // Try to centre on the actual events in the region first
     const matching = visibleEvents.filter((e) => matchesRegionFilter(e, regionFilter));
     const targetZoom = admin1 ? 6 : country ? 5 : 3;
-    if (matching.length > 0) {
-      const avgLat = matching.reduce((s, e) => s + (e.lat ?? 0), 0) / matching.length;
-      const avgLon = matching.reduce((s, e) => s + (e.lon ?? 0), 0) / matching.length;
+    const geoEvents = matching.filter((e) => e.lat != null && e.lon != null);
+    if (geoEvents.length > 0) {
+      const avgLat = geoEvents.reduce((s, e) => s + e.lat!, 0) / geoEvents.length;
+      const avgLon = geoEvents.reduce((s, e) => s + e.lon!, 0) / geoEvents.length;
       setMapView({ ...mapView, latitude: avgLat, longitude: avgLon, zoom: targetZoom, transitionDuration: 700 });
     } else if (continent && CONTINENT_VIEWPORTS[continent]) {
       const vp = CONTINENT_VIEWPORTS[continent];

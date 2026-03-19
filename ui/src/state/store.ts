@@ -266,19 +266,30 @@ export const useAppStore = create<AppStoreState>((set) => ({
   enterArchiveMode: () => {
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    set({ archive: { viewMode: 'archive', archiveDate: date, archiveTimeframe: currentTimeframe() }, selectedEvent: null, lastClick: null });
+    set((state) => ({
+      archive: { viewMode: 'archive', archiveDate: date, archiveTimeframe: currentTimeframe() },
+      selectedEvent: null,
+      lastClick: null,
+      forecast: { ...state.forecast, jobId: null, pollCount: 0, activeRequest: null, notification: null },
+      layers: { ...state.layers, showForecast: false }
+    }));
   },
 
   exitToLiveMode: () => {
-    set({ archive: DEFAULT_ARCHIVE_STATE });
+    set((state) => ({
+      archive: DEFAULT_ARCHIVE_STATE,
+      selectedEvent: null,
+      lastClick: null,
+      layers: { ...state.layers, showForecast: Boolean(state.forecast.lastForecast) }
+    }));
   },
 
   setArchiveDate: (date) => {
-    set((state) => ({ archive: { ...state.archive, archiveDate: date } }));
+    set((state) => ({ archive: { ...state.archive, archiveDate: date }, selectedEvent: null, lastClick: null }));
   },
 
   setArchiveTimeframe: (tf) => {
-    set((state) => ({ archive: { ...state.archive, archiveTimeframe: tf } }));
+    set((state) => ({ archive: { ...state.archive, archiveTimeframe: tf }, selectedEvent: null, lastClick: null }));
   },
 
   setViewMode: (mode) => {

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Alert, Box, Button, Collapse } from "@mui/material";
 
 import { useAppStore } from "../state/store";
@@ -9,13 +10,23 @@ export default function ForecastNotification(): JSX.Element | null {
   const setSelectedEvent = useAppStore((s) => s.setSelectedEvent);
   const setLastClick = useAppStore((s) => s.setLastClick);
 
+  useEffect(() => {
+    if (!notification || !(notification.ttlSeconds > 0)) return;
+    const remaining = notification.createdAt + notification.ttlSeconds * 1000 - Date.now();
+    if (remaining <= 0) {
+      setNotification(null);
+      return;
+    }
+    const timer = setTimeout(() => setNotification(null), remaining);
+    return () => clearTimeout(timer);
+  }, [notification, setNotification]);
+
   if (!notification) {
     return null;
   }
 
   const expired = notification.ttlSeconds > 0 && Date.now() - notification.createdAt > notification.ttlSeconds * 1000;
   if (expired) {
-    setNotification(null);
     return null;
   }
 
