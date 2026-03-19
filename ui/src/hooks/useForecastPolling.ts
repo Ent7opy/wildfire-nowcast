@@ -8,7 +8,6 @@ const MAX_POLLS = 300;
 
 export function useForecastPolling(): void {
   const jobId = useAppStore((s) => s.forecast.jobId);
-  const pollCount = useAppStore((s) => s.forecast.pollCount);
   const activeRequest = useAppStore((s) => s.forecast.activeRequest);
   const incrementPoll = useAppStore((s) => s.incrementForecastPoll);
   const completeForecastJob = useAppStore((s) => s.completeForecastJob);
