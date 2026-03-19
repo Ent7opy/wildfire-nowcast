@@ -376,6 +376,11 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"telemetry" | "news">("telemetry");
+
+  useEffect(() => {
+    setSubmitError(null);
+    setNewsExpanded(false);
+  }, [selectedEvent?.event_id]);
   const [newsExpanded, setNewsExpanded] = useState(false);
   const [resolvedGeocodes, setResolvedGeocodes] = useState<Record<string, ReverseGeocodeResponse>>({});
   const resolvedGeocodesRef = useRef<Record<string, ReverseGeocodeResponse>>({});
@@ -835,8 +840,8 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
           </Button>
         )}
 
-        {/* Analyst Mode / Safety Mode: forecast button (demoted in safety mode) */}
-        {!isSafetyMode && (
+        {/* Analyst Mode / Safety Mode: forecast button (demoted in safety mode; hidden in archive) */}
+        {!isSafetyMode && !isArchiveMode && (
           <Button
             variant="contained"
             disabled={button.disabled || forecastMutation.isPending || lat === null || lon === null}
@@ -1019,8 +1024,8 @@ export default function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProp
           )}
         </Stack>
 
-        {/* Safety Mode: forecast button demoted to bottom */}
-        {isSafetyMode && (
+        {/* Safety Mode: forecast button demoted to bottom; hidden in archive */}
+        {isSafetyMode && !isArchiveMode && (
           <Button
             variant="outlined"
             size="small"
