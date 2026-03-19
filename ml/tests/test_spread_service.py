@@ -10,6 +10,7 @@ from ml.spread.service import (
     MAX_AOI_CELLS,
     SpreadForecastRequest,
     WeatherFallbackBlockedError,
+    _resolve_cluster_to_bbox,
     run_spread_forecast,
 )
 from ml.spread.contract import SpreadForecast, SpreadModelInput
@@ -728,8 +729,6 @@ def test_spread_strict_weather_allows_fallback_when_disabled(monkeypatch, mock_s
 # ---------------------------------------------------------------------------
 # _resolve_cluster_to_bbox
 # ---------------------------------------------------------------------------
-
-from ml.spread.service import _resolve_cluster_to_bbox
 
 
 class TestResolveClusterToBbox:
