@@ -4,10 +4,9 @@
 [phases.setup]
 # gdal: required by rasterio / rioxarray / dem-stitcher
 # eccodes: required by cfgrib (GRIB weather data decoding)
-nixPkgs = ["python311", "gdal", "eccodes"]
+nixPkgs = ["python311", "uv", "gdal", "eccodes"]
 
 [phases.install]
 cmds = [
-    "pip install uv",
     "uv sync --project ingest --no-dev",
 ]
