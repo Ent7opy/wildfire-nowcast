@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   Box,
   CircularProgress,
@@ -83,12 +83,15 @@ function extractReply(payload: unknown): string | null {
   return typeof fallback === "string" && fallback.trim().length > 0 ? fallback.trim() : null;
 }
 
+const apiBase = String(import.meta.env.VITE_API_PUBLIC_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
+
 export default function AIChatAssistant(): JSX.Element {
   const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_MESSAGE]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [autoBriefing, setAutoBriefing] = useState<string | null>(null);
   const [isBriefing, setIsBriefing] = useState(false);
+  const [assistantConfigured, setAssistantConfigured] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const lastBriefedEventId = useRef<string | null>(null);
   const lastBriefedPrompt = useRef<string | null>(null);
@@ -104,10 +107,12 @@ export default function AIChatAssistant(): JSX.Element {
   const clearAssistantBriefingPrompt = useAppStore((s) => s.clearAssistantBriefingPrompt);
   const isSafetyMode = safety.enabled;
 
-  const geminiApiBaseUrl = String(import.meta.env.VITE_GEMINI_API_BASE_URL || "https://generativelanguage.googleapis.com/v1beta").trim();
-  const geminiModel = String(import.meta.env.VITE_GEMINI_MODEL || "gemini-2.5-flash").trim();
-  const geminiApiKey = String(import.meta.env.VITE_GEMINI_API_KEY || "").trim();
-  const assistantConfigured = geminiModel.length > 0 && geminiApiKey.length > 0;
+  useEffect(() => {
+    fetch(`${apiBase}/assistant/config`)
+      .then((r) => r.json())
+      .then((data: { configured: boolean }) => setAssistantConfigured(data.configured))
+      .catch(() => setAssistantConfigured(false));
+  }, []);
 
   const eventContext = useMemo(() => compactEventContext(selectedEvent), [selectedEvent]);
   const timeRange = useMemo(() => computeTimeRange(filters), [filters]);
@@ -159,33 +164,30 @@ export default function AIChatAssistant(): JSX.Element {
     [activePreset, assistantViewContext, eventContext, filters, forecast, layers, mapView, timeRange]
   );
 
-  const triggerBriefing = async (prompt: string): Promise<void> => {
+  const triggerBriefing = useCallback(async (prompt: string): Promise<void> => {
     if (!assistantConfigured || isBriefing) return;
     setIsBriefing(true);
     setAutoBriefing(null);
     try {
       const systemPrompt = isSafetyMode ? SAFETY_ASSISTANT_SYSTEM_PROMPT : EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT;
-      const response = await fetch(
-        `${geminiApiBaseUrl}/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: systemPrompt }] },
-            contents: [{
-              role: "user",
-              parts: [{
-                text: [
-                  "Use the following wildfire dashboard context as the source of truth.",
-                  `DASHBOARD_CONTEXT_JSON: ${JSON.stringify(viewingContext)}`,
-                  `BRIEFING_REQUEST: ${prompt}`
-                ].join("\n")
-              }]
-            }],
-            generationConfig: { temperature: 0.4 }
-          })
-        }
-      );
+      const response = await fetch(`${apiBase}/assistant/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{
+            role: "user",
+            parts: [{
+              text: [
+                "Use the following wildfire dashboard context as the source of truth.",
+                `DASHBOARD_CONTEXT_JSON: ${JSON.stringify(viewingContext)}`,
+                `BRIEFING_REQUEST: ${prompt}`
+              ].join("\n")
+            }]
+          }],
+          generationConfig: { temperature: 0.4 }
+        })
+      });
       if (!response.ok) throw new Error(`briefing call failed with ${response.status}`);
       const payload = (await response.json()) as unknown;
       const reply = extractReply(payload);
@@ -195,7 +197,7 @@ export default function AIChatAssistant(): JSX.Element {
     } finally {
       setIsBriefing(false);
     }
-  };
+  }, [assistantConfigured, isBriefing, isSafetyMode, viewingContext]);
 
   // Auto-briefing when a new event is selected
   useEffect(() => {
@@ -238,40 +240,31 @@ export default function AIChatAssistant(): JSX.Element {
     setIsSending(true);
 
     try {
-      const response = await fetch(
-        `${geminiApiBaseUrl}/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(geminiApiKey)}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{ text: EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT }]
-            },
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  {
-                    text: [
-                      "Use the following wildfire dashboard context as the source of truth for this answer.",
-                      "If a field is missing or null, state uncertainty explicitly.",
-                      "",
-                      `DASHBOARD_CONTEXT_JSON: ${JSON.stringify(viewingContext)}`,
-                      "",
-                      `USER_QUESTION: ${prompt}`
-                    ].join("\n")
-                  }
-                ]
-              }
-            ],
-            generationConfig: {
-              temperature: 0.5
+      const response = await fetch(`${apiBase}/assistant/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT }] },
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: [
+                    "Use the following wildfire dashboard context as the source of truth for this answer.",
+                    "If a field is missing or null, state uncertainty explicitly.",
+                    "",
+                    `DASHBOARD_CONTEXT_JSON: ${JSON.stringify(viewingContext)}`,
+                    "",
+                    `USER_QUESTION: ${prompt}`
+                  ].join("\n")
+                }
+              ]
             }
-          })
-        }
-      );
+          ],
+          generationConfig: { temperature: 0.5 }
+        })
+      });
 
       if (!response.ok) {
         throw new Error(`assistant call failed with ${response.status}`);
@@ -338,7 +331,7 @@ export default function AIChatAssistant(): JSX.Element {
       {!assistantConfigured && (
         <Box sx={{ px: 2, py: 1.1, borderBottom: "1px solid rgba(245,158,11,0.25)", bgcolor: "rgba(245,158,11,0.1)" }}>
           <Typography sx={{ fontSize: 11, color: "#fbbf24" }}>
-            Gemini is not configured. Set `VITE_GEMINI_API_KEY` (and optionally `VITE_GEMINI_MODEL`).
+            Assistant not configured. Set `GEMINI_API_KEY` on the API server.
           </Typography>
         </Box>
       )}

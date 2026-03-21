@@ -9,7 +9,7 @@ from redis.asyncio import Redis
 
 from api.config import settings
 from api.errors import ErrorResponse
-from api.routes import archive_router, internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router
+from api.routes import archive_router, assistant_router, internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +90,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 app.include_router(archive_router)
+app.include_router(assistant_router)
 app.include_router(internal_router)
 app.include_router(fires_router)
 app.include_router(forecast_router)

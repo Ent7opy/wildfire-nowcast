@@ -182,6 +182,14 @@ class AppSettings(BaseSettings):
         default="en", validation_alias="GEOCODING_ACCEPT_LANGUAGE"
     )
 
+    # Gemini assistant (server-side; never exposed to the browser)
+    gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_MODEL")
+    gemini_api_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta",
+        validation_alias="GEMINI_API_BASE_URL",
+    )
+
     @property
     def data_status_critical_sources_set(self) -> set[str]:
         return {

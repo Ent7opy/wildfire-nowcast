@@ -39,6 +39,9 @@ services:
       GEOCODING_CACHE_PRECISION: ${GEOCODING_CACHE_PRECISION:-2}
       GEOCODING_ZOOM: ${GEOCODING_ZOOM:-6}
       GEOCODING_ACCEPT_LANGUAGE: ${GEOCODING_ACCEPT_LANGUAGE:-en}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_API_BASE_URL: ${GEMINI_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
     depends_on:
       db:
         condition: service_healthy
@@ -61,9 +64,6 @@ services:
       VITE_API_PUBLIC_BASE_URL: http://localhost:8000
       VITE_VECTOR_TILES_PUBLIC_BASE_URL: http://localhost:7800
       VITE_FORECAST_REGION_NAME: smoke_grid
-      VITE_GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      VITE_GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
-      VITE_GEMINI_API_BASE_URL: ${GEMINI_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
       CHOKIDAR_USEPOLLING: "true"
     depends_on:
       - api
