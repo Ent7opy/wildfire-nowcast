@@ -15,6 +15,10 @@
 #   FIRMS_INCREMENTAL_LOOKBACK_MINUTES=30
 #   FIRMS_WATERMARK_GRACE_MINUTES=90
 
+[build]
+builder = "nixpacks"
+# nixpacks.toml at repo root handles Python + system deps (gdal, eccodes)
+
 [deploy]
 startCommand = """uv run --project ingest -m ingest.orchestrator \
   --loop \
