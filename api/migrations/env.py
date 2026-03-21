@@ -9,7 +9,7 @@ from sqlalchemy import pool
 from alembic import context
 
 # Add the project root to sys.path so we can import 'api'
-root_path = Path(__file__).resolve().parent.parent.parent
+root_path = Path(__file__).resolve().parent.parent
 sys.path.append(str(root_path))
 
 # Import our settings to get the database URL
