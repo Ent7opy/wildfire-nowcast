@@ -8,12 +8,12 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# Add the project root to sys.path so we can import 'api'
+# Add the api directory to sys.path so we can import 'config'
 root_path = Path(__file__).resolve().parent.parent
 sys.path.append(str(root_path))
 
 # Import our settings to get the database URL
-from api.config import settings  # noqa: E402
+from config import settings  # noqa: E402
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
