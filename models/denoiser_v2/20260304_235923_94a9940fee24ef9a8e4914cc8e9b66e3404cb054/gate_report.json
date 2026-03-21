@@ -1,0 +1,62 @@
+{
+  "run_id": "20260304_235923_94a9940fee24ef9a8e4914cc8e9b66e3404cb054",
+  "pass": false,
+  "gate_scope": "covered",
+  "coverage_mask_source": "db_mask",
+  "coverage_authority_profile": "wfigs_us",
+  "coverage_data_freshness": {
+    "authority_profile": "wfigs_us",
+    "available": true,
+    "fresh": true,
+    "age_hours": 105.8896833538889,
+    "run_id": "wfigs_2025_ytd_perimeters_20260228145847",
+    "source_last_edit": "2026-02-28T14:05:32.513000+00:00",
+    "finished_at": "2026-02-28T14:58:47.387475+00:00"
+  },
+  "coverage_run_id": "wfigs_2025_ytd_perimeters_20260228145847",
+  "thresholds": {
+    "event_recall_min": 0.92,
+    "event_precision_min": 0.75,
+    "global_f1_min": 0.85,
+    "roc_auc_min": 0.95,
+    "latency_per_10k_max_seconds": 300.0,
+    "min_event_positives": 50,
+    "min_event_negatives": 50,
+    "sensor_bias_pct_max": 5.0
+  },
+  "results": {
+    "event_recall": {
+      "value": 0.92,
+      "pass": true
+    },
+    "event_precision": {
+      "value": 0.20725907384230288,
+      "pass": false
+    },
+    "global_f1": {
+      "value": 0.3383043922369765,
+      "pass": false
+    },
+    "roc_auc": {
+      "value": 0.9418047175361545,
+      "pass": false
+    },
+    "latency_per_10k_seconds": {
+      "value": 0.017609414977318168,
+      "pass": true
+    },
+    "min_event_positives": {
+      "value": 900,
+      "pass": true
+    },
+    "min_event_negatives": {
+      "value": 16242,
+      "pass": true
+    },
+    "sensor_bias_pct": {
+      "value": null,
+      "pass": true
+    }
+  },
+  "evaluated_at": "2026-03-04T23:59:23.928934+00:00"
+}

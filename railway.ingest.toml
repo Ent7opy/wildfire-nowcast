@@ -1,0 +1,29 @@
+# Railway config for the ingest scheduler service.
+# In Railway dashboard: set "Config Path" to railway.ingest.toml for this service.
+# Required env vars (set in Railway service variables):
+#   DATABASE_URL        — reference your PostGIS plugin: ${{ PostGIS.DATABASE_URL }}
+#   FIRMS_MAP_KEY       — NASA FIRMS API key
+#   DENOISER_MODEL_RUN_DIR — /app/models/denoiser_v2/20260304_235923_94a9940fee24ef9a8e4914cc8e9b66e3404cb054
+#
+# Optional (defaults shown):
+#   DENOISER_ENABLED=true
+#   DENOISER_REQUIRED=false
+#   DENOISER_PIPELINE_VERSION=v2
+#   DENOISER_THRESHOLD_PROFILE=env
+#   DENOISER_SUBPROCESS_TIMEOUT_SECONDS=900
+#   FIRMS_INITIAL_LOOKBACK_MINUTES=360
+#   FIRMS_INCREMENTAL_LOOKBACK_MINUTES=30
+#   FIRMS_WATERMARK_GRACE_MINUTES=90
+
+[deploy]
+startCommand = """uv run --project ingest -m ingest.orchestrator \
+  --loop \
+  --jobs firms,perimeters \
+  --enforce-freshness \
+  --max-retries 3 \
+  --retry-backoff-seconds 20 \
+  --firms-interval-minutes 30 \
+  --weather-interval-minutes 180 \
+  --perimeters-interval-minutes 1440"""
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

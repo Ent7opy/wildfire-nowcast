@@ -124,7 +124,11 @@ data/dem/global_base/
 data/terrain/bulgaria/
 data/weather/gfs_0p25/
 output.nc
-models/
+models/*
+!models/denoiser_v2/
+models/denoiser_v2/*
+!models/denoiser_v2/20260304_235923_94a9940fee24ef9a8e4914cc8e9b66e3404cb054/
+!models/denoiser_v2/20260304_235923_94a9940fee24ef9a8e4914cc8e9b66e3404cb054/**
 reports/
 
 # Temporary files
