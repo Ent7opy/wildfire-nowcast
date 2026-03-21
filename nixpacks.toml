@@ -4,9 +4,10 @@
 [phases.setup]
 # gdal: required by rasterio / rioxarray / dem-stitcher
 # eccodes: required by cfgrib (GRIB weather data decoding)
-nixPkgs = ["python311", "uv", "gdal", "eccodes"]
+nixPkgs = ["python311", "gdal", "eccodes", "curl"]
 
 [phases.install]
 cmds = [
+    "curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh",
     "uv sync --project ingest --no-dev",
 ]
