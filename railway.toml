@@ -2,6 +2,5 @@
 # See: https://docs.railway.app/deploy/config-as-code
 
 [deploy]
-# Run migrations before each deploy. Requires service root = repo root so scripts/ and api/ exist.
-# If your service root is api/, set Release Command in dashboard to: uv run alembic upgrade head
-preDeployCommand = "/bin/sh ./scripts/run_migrations.sh"
+# Service root is /api, so run alembic directly (scripts/ is not available here).
+preDeployCommand = "uv run alembic upgrade head"
