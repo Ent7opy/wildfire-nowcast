@@ -1,0 +1,33 @@
+# API service
+# Uses python:3.11-slim (Debian Bookworm) so the GNU C++ runtime and
+# GDAL/eccodes are available as standard apt packages — avoiding the
+# libstdc++ / Nix store path issues that plague nixpacks for workloads
+# that import numpy, pandas, rasterio, or onnxruntime.
+
+FROM python:3.11-slim
+
+# System deps
+# libgdal-dev   : GDAL shared libs (rasterio, rioxarray)
+# libeccodes0   : ecCodes runtime (cfgrib GRIB decoding via ml/)
+# libgeos-dev   : GEOS (Shapely)
+# libproj-dev   : PROJ (coordinate transforms)
+# curl          : uv installer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        libgdal-dev \
+        gdal-bin \
+        libeccodes0 \
+        libgeos-dev \
+        libproj-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
+
+WORKDIR /app
+COPY . .
+
+# Install API production deps (ml/ is imported directly from filesystem)
+RUN uv sync --project api --no-dev
+
+CMD ["uv", "run", "--project", "api", "python", "-m", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

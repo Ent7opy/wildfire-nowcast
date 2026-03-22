@@ -4,9 +4,8 @@
 # See: https://docs.railway.app/deploy/config-as-code
 
 [build]
-builder = "nixpacks"
-# Separate nixpacks config from the ingest service's nixpacks.toml
-nixpacksConfigPath = "nixpacks.api.toml"
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.api"
 
 [deploy]
 # Run from repo root — alembic.ini lives in api/
