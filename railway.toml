@@ -12,4 +12,4 @@ dockerfilePath = "Dockerfile.api"
 preDeployCommand = "uv run --project api alembic -c api/alembic.ini upgrade head"
 # python -m uvicorn ensures CWD (repo root) is in sys.path so `import ml` resolves.
 # Railway injects $PORT dynamically — must not hardcode 8000.
-startCommand = "uv run --project api python -m uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+startCommand = "sh -c 'uv run --project api python -m uvicorn api.main:app --host 0.0.0.0 --port $PORT'"
