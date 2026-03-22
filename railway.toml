@@ -4,3 +4,5 @@
 [deploy]
 # Service root is /api, so run alembic directly (scripts/ is not available here).
 preDeployCommand = "uv run alembic upgrade head"
+# Railway injects $PORT dynamically — must not hardcode 8000.
+startCommand = "uv run uvicorn api.main:app --host 0.0.0.0 --port $PORT"
