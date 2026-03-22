@@ -1,8 +1,16 @@
-# Railway config (API service). Reference PostGIS with ${{ PostGIS.DATABASE_URL }} etc.
+# Railway config (API service).
+# Service root MUST be repo root (/) so ml/ is on the filesystem alongside api/.
+# api/forecast/model_catalog.py imports from ml.spread.factory at startup.
 # See: https://docs.railway.app/deploy/config-as-code
 
+[build]
+builder = "nixpacks"
+# Separate nixpacks config from the ingest service's nixpacks.toml
+nixpacksConfigPath = "nixpacks.api.toml"
+
 [deploy]
-# Service root is /api, so run alembic directly (scripts/ is not available here).
-preDeployCommand = "uv run alembic upgrade head"
+# Run from repo root — alembic.ini lives in api/
+preDeployCommand = "uv run --project api alembic -c api/alembic.ini upgrade head"
+# python -m uvicorn ensures CWD (repo root) is in sys.path so `import ml` resolves.
 # Railway injects $PORT dynamically — must not hardcode 8000.
-startCommand = "uv run uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+startCommand = "uv run --project api python -m uvicorn api.main:app --host 0.0.0.0 --port $PORT"
