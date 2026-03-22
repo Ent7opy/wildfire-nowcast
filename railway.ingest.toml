@@ -16,8 +16,8 @@
 #   FIRMS_WATERMARK_GRACE_MINUTES=90
 
 [build]
-builder = "nixpacks"
-# nixpacks.toml at repo root handles Python + system deps (gdal, eccodes)
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.ingest"
 
 [deploy]
 startCommand = """uv run --project ingest -m ingest.orchestrator \

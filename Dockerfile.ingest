@@ -1,0 +1,34 @@
+# Ingest scheduler service
+# Uses python:3.11-slim (Debian Bookworm) so the GNU C++ runtime,
+# GDAL 3.6, and eccodes are all available as standard apt packages —
+# avoiding the libstdc++ / Nix store path issues that plague nixpacks
+# for numpy/rasterio/cfgrib heavy workloads.
+
+FROM python:3.11-slim
+
+# ── System dependencies ────────────────────────────────────────────────────────
+# libgdal-dev   : GDAL 3.6 shared libs + headers (rasterio, rioxarray, dem-stitcher)
+# libeccodes-dev: ecCodes shared libs + headers (cfgrib GRIB decoding)
+# libgeos-dev   : GEOS (Shapely geometry engine)
+# libproj-dev   : PROJ (coordinate transformations)
+# curl          : uv installer
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        libgdal-dev \
+        libeccodes-dev \
+        libgeos-dev \
+        libproj-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── uv ────────────────────────────────────────────────────────────────────────
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
+
+# ── App ───────────────────────────────────────────────────────────────────────
+WORKDIR /app
+COPY . .
+
+# Install only ingest production deps into its own venv
+RUN uv sync --project ingest --no-dev
+
+# Default entrypoint — overridden by railway.ingest.toml startCommand
+CMD ["uv", "run", "--project", "ingest", "-m", "ingest.orchestrator", "--loop"]
