@@ -75,9 +75,16 @@ class AppSettings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """Connection URL: DATABASE_URL/DATABASE_PRIVATE_URL if set, else built from POSTGRES_* / PG*."""
+        """Connection URL: DATABASE_URL/DATABASE_PRIVATE_URL if set, else built from POSTGRES_* / PG*.
+
+        Railway's PostGIS plugin emits postgres:// but SQLAlchemy 1.4+ requires postgresql://.
+        """
         if self.database_url_override and self.database_url_override.strip():
-            return self.database_url_override.strip()
+            url = self.database_url_override.strip()
+            # SQLAlchemy 1.4+ dropped the legacy 'postgres' dialect alias.
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql://", 1)
+            return url
         return (
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
