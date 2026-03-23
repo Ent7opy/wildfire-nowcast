@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_limiter import FastAPILimiter
+from fastapi_limiter.depends import RateLimiter
 from redis.asyncio import Redis
 
 from api.config import settings
@@ -53,6 +54,10 @@ async def startup():
         # Store None to indicate rate limiter is not available
         app.state.redis = None
         app.state.limiter_disabled = True
+        # Patch RateLimiter so routes don't crash when Redis is unavailable
+        async def _noop_rate_limiter(self, *args, **kwargs):
+            return None
+        RateLimiter.__call__ = _noop_rate_limiter
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
