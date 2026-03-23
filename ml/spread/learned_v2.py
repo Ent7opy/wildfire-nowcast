@@ -14,8 +14,19 @@ import xarray as xr
 from ml.calibration import SpreadProbabilityCalibrator
 from ml.spread.contract import SpreadForecast, SpreadModel, SpreadModelInput
 from ml.spread.hindcast_dataset import V2_TENSOR_CHANNELS
+from ml.spread.runtime_contract import (
+    ContractViolationError,
+    load_contract,
+    validate_channel_alignment,
+)
 
 LOGGER = logging.getLogger(__name__)
+
+# Exhaustive set of channels this inference builder knows how to produce.
+# If a channel appears in channel_names but is absent here, _build_feature_tensor
+# would silently fail with a KeyError — instead we raise a ContractViolationError
+# at model-init time so the failure is loud and attributable.
+_PRODUCIBLE_CHANNELS: frozenset[str] = frozenset(V2_TENSOR_CHANNELS)
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -63,6 +74,23 @@ class LearnedSpreadModelV2(SpreadModel):
             channels = payload.get("channels")
             if isinstance(channels, list) and channels:
                 self.channel_names = [str(c) for c in channels]
+
+        # Contract validation: if runtime_contract.json is present, verify that
+        # the resolved channel list matches what the model was trained on.
+        try:
+            contract = load_contract(run_dir / "runtime_contract.json")
+            validate_channel_alignment(self.channel_names, contract.channels)
+        except FileNotFoundError:
+            pass  # contract file is optional for models exported before this check was added
+
+        # Guard: every channel in channel_names must be producible by this builder.
+        unproducible = [c for c in self.channel_names if c not in _PRODUCIBLE_CHANNELS]
+        if unproducible:
+            raise ContractViolationError(
+                f"STOP: model requires channels this inference builder cannot produce: {unproducible}. "
+                "Add them to _build_feature_tensor and _PRODUCIBLE_CHANNELS, or retrain with "
+                "CANONICAL_V2_CHANNELS."
+            )
 
         onnx_path = run_dir / self.onnx_filename
         if not onnx_path.exists():

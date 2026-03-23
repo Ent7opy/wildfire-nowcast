@@ -15,32 +15,14 @@ from sqlalchemy.engine import Engine
 from api.db import get_engine
 from api.fires.service import get_fire_cells_heatmap
 from ml.spread.region_key import deterministic_region_bucket
+from ml.spread.runtime_contract import CANONICAL_V2_CHANNELS, CANONICAL_V3_CHANNELS
 from ml.spread_features import build_spread_inputs
 
 LOGGER = logging.getLogger(__name__)
 
-# Fixed channel order for v2 tensor training/inference.
-V2_TENSOR_CHANNELS: tuple[str, ...] = (
-    "fire_t0",
-    "fire_t-6h",
-    "fire_t-12h",
-    "u10",
-    "v10",
-    "t2m",
-    "rh2m",
-    "precip_24h",
-    "slope_deg",
-    "aspect_sin",
-    "aspect_cos",
-    "elevation_m",
-    "ruggedness",
-    "tpi",
-    "ndvi",
-    "lfmc",
-    "dfmc",
-    "region_id_embedding_input",
-)
-V3_TENSOR_CHANNELS: tuple[str, ...] = V2_TENSOR_CHANNELS
+# Channel order is owned by runtime_contract.py — do not redefine locally.
+V2_TENSOR_CHANNELS: tuple[str, ...] = CANONICAL_V2_CHANNELS
+V3_TENSOR_CHANNELS: tuple[str, ...] = CANONICAL_V3_CHANNELS
 
 
 def sample_fire_reference_times(
