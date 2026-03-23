@@ -295,6 +295,11 @@ def run_spread_forecast(
         forecast,
         shadow_summary=shadow_summary,
     )
+    forecast = _annotate_lineage_info(
+        forecast,
+        weather_cube=inputs_package.weather_cube,
+        terrain_fallback_used=inputs_package.terrain_fallback_used,
+    )
 
     # 4b. Calibrate probabilities (default behavior).
     # - If the model already has an embedded calibrator, we treat it as authoritative.
@@ -646,6 +651,66 @@ def _annotate_confidence_info(
     except Exception:  # pragma: no cover
         pass
 
+    return forecast
+
+
+def _annotate_lineage_info(
+    forecast: SpreadForecast,
+    *,
+    weather_cube: Any,
+    terrain_fallback_used: bool,
+) -> SpreadForecast:
+    """Attach authoritative data-lineage attributes to the forecast output.
+
+    These attrs are the machine-readable counterpart to ``docs/spread_data_sources.md``
+    and must be persisted with every forecast run for traceability.
+    """
+    weather_attrs = dict(getattr(weather_cube, "attrs", {}) or {})
+    weather_fallback = bool(weather_attrs.get("weather_fallback_used", False))
+
+    # Derive weather source label from run metadata, falling back to "fallback_zeros".
+    if weather_fallback:
+        weather_source = "fallback_zeros"
+    else:
+        # weather_run_id is the DB identifier; model name is not stored separately in attrs yet.
+        weather_source = "noaa_gfs_025deg"
+
+    # Detect whether the source doc exists so consumers can flag undeclared lineage.
+    try:
+        from pathlib import Path
+        _doc = Path(__file__).parents[2] / "docs" / "spread_data_sources.md"
+        sources_declared = _doc.exists()
+    except Exception:
+        sources_declared = False
+
+    try:
+        attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+        attrs.update(
+            {
+                "lineage_fires_source": "nasa_firms_viirs_nrt",
+                "lineage_weather_source": weather_source,
+                "lineage_weather_run_id": weather_attrs.get("weather_run_id"),
+                "lineage_terrain_source": "fallback_zeros" if terrain_fallback_used else "dem_derived",
+                "lineage_fuels_ndvi_source": "esa_worldcover_10m",
+                "lineage_fuels_lfmc_source": "ecmwf_ecland_lfmc",
+                "lineage_fuels_dfmc_source": "nfdrs_nelson1984",
+                "lineage_data_sources_declared": sources_declared,
+            }
+        )
+        forecast.probabilities.attrs = attrs
+    except Exception:  # pragma: no cover
+        pass
+
+    LOGGER.info(
+        "Spread forecast lineage",
+        extra={
+            "lineage_fires_source": "nasa_firms_viirs_nrt",
+            "lineage_weather_source": weather_source,
+            "lineage_weather_run_id": weather_attrs.get("weather_run_id"),
+            "lineage_terrain_source": "fallback_zeros" if terrain_fallback_used else "dem_derived",
+            "lineage_data_sources_declared": sources_declared,
+        },
+    )
     return forecast
 
 

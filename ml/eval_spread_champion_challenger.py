@@ -397,6 +397,30 @@ def _build_stage_governance(
             }
         )
 
+    # STOP-SRC-001: every eval config must declare authoritative sources for all
+    # four spread input categories.  Per docs/spread_data_sources.md §5, absence of
+    # any required key is a hard stop — undeclared provenance cannot be promoted.
+    _REQUIRED_SOURCE_KEYS = ("fires", "weather", "terrain", "fuels")
+    declared_sources = dict(config.get("data_sources") or {})
+    missing_source_keys = [k for k in _REQUIRED_SOURCE_KEYS if not declared_sources.get(k)]
+    if missing_source_keys:
+        hard_stops.append(
+            {
+                "id": "STOP-SRC-001",
+                "message": (
+                    "data_sources declaration is missing required input source(s): "
+                    + ", ".join(missing_source_keys)
+                    + ". See docs/spread_data_sources.md §5 for required keys and example values."
+                ),
+                "mitigation": (
+                    "Add a data_sources block to the eval config with keys: "
+                    + ", ".join(_REQUIRED_SOURCE_KEYS)
+                    + "."
+                ),
+                "target_stage": maturity_stage,
+            }
+        )
+
     challenger_cfg = dict(config.get("challenger", {}) or {})
     challenger_name = challenger_cfg.get("model_name")
     challenger_params = challenger_cfg.get("model_params")
