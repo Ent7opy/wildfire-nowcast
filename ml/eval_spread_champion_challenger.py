@@ -21,7 +21,7 @@ from scipy import stats
 from sklearn.metrics import average_precision_score
 
 from api.db import get_engine
-from api.fires.service import get_fire_cells_heatmap
+from api.fires.service import get_fire_cells_heatmap, get_region_grid_spec
 from ml.spread.factory import get_spread_model, normalize_model_selection
 from ml.spread.hindcast_dataset import sample_fire_reference_times
 from ml.spread.runtime_contract import (
@@ -30,7 +30,7 @@ from ml.spread.runtime_contract import (
     load_contract,
     validate_channel_alignment,
 )
-from ml.spread_features import build_spread_inputs
+from ml.spread_features import assert_grid_alignment, build_spread_inputs
 
 LOGGER = logging.getLogger(__name__)
 
@@ -571,6 +571,12 @@ def _collect_comparison_arrays(config: dict[str, Any]) -> dict[int, dict[str, An
 
     champion = get_spread_model(champ_name, champ_params)
     challenger = get_spread_model(chall_name, chall_params)
+
+    # Pre-flight: validate grid alignment before sampling reference times.
+    # Fail fast before any DB queries if the region grid diverges from the
+    # canonical analysis-grid contract (CRS=EPSG:4326, cell_size=0.01°).
+    preflight_grid = get_region_grid_spec(region_name)
+    assert_grid_alignment(preflight_grid)
 
     engine = get_engine()
     ref_times = sample_fire_reference_times(

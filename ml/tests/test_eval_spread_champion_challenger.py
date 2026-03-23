@@ -1,5 +1,9 @@
-import numpy as np
+from unittest.mock import patch
 
+import numpy as np
+import pytest
+
+from api.core.grid import GridSpec
 from ml.eval_spread_champion_challenger import (
     _build_stage_governance,
     compute_recommendation,
@@ -134,3 +138,41 @@ def test_stage_governance_requires_calibrator_for_v3_promotion(tmp_path):
     }
     out_with_cal = _build_stage_governance(config=config_with_cal, decision=decision, summary_rows=[])
     assert not any(s["id"] == "STOP-CAL-001" for s in out_with_cal["hard_stops"])
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight grid alignment hard-stop tests
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_CONFIG = {
+    "region_name": "test_region",
+    "bbox": [-120.0, 35.0, -119.0, 36.0],
+    "start_time": "2025-01-01T00:00:00Z",
+    "end_time": "2025-06-01T00:00:00Z",
+    "horizons_hours": [24, 48],
+    "champion": {"model_name": "HeuristicSpreadModelV0", "model_params": None},
+    "challenger": {"model_name": "HeuristicSpreadModelV0", "model_params": None},
+}
+
+
+@pytest.mark.parametrize(
+    "grid_spec,expected_stop",
+    [
+        (
+            GridSpec(crs="EPSG:3857", cell_size_deg=0.01, origin_lat=35.0, origin_lon=-120.0, n_lat=100, n_lon=100),
+            "STOP-GEO-CRS",
+        ),
+        (
+            GridSpec(crs="EPSG:4326", cell_size_deg=0.05, origin_lat=35.0, origin_lon=-120.0, n_lat=20, n_lon=20),
+            "STOP-GEO-RES",
+        ),
+    ],
+)
+@patch("ml.eval_spread_champion_challenger.get_region_grid_spec")
+def test_collect_comparison_arrays_preflight_raises_on_grid_mismatch(mock_get_spec, grid_spec, expected_stop):
+    """Pre-flight must raise the matching STOP code before any DB queries when the region grid is misaligned."""
+    from ml.eval_spread_champion_challenger import _collect_comparison_arrays
+
+    mock_get_spec.return_value = grid_spec
+    with pytest.raises(ValueError, match=expected_stop):
+        _collect_comparison_arrays(_PREFLIGHT_CONFIG)

@@ -13,6 +13,7 @@ from api.fires.service import FireHeatmapWindow
 from api.terrain.window import TerrainWindow
 from ml.spread_features import (
     SpreadInputs,
+    assert_grid_alignment,
     _create_fallback_weather,
     _load_weather_cube,
     build_spread_inputs,
@@ -319,3 +320,63 @@ def test_build_spread_inputs_with_region_name_none(mock_get_fire_heatmap, mock_g
 
     assert "u10" in inputs.weather_cube.data_vars
     assert "v10" in inputs.weather_cube.data_vars
+
+
+# ---------------------------------------------------------------------------
+# Grid alignment hard-stop tests (STOP-GEO-CRS / STOP-GEO-RES)
+# ---------------------------------------------------------------------------
+
+def test_assert_grid_alignment_passes_for_canonical_grid():
+    """Canonical grid (EPSG:4326, 0.01°) must not raise."""
+    grid = GridSpec(crs="EPSG:4326", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=10, n_lon=10)
+    assert_grid_alignment(grid)  # must not raise
+
+
+def test_assert_grid_alignment_raises_stop_geo_crs():
+    """STOP-GEO-CRS: any CRS other than EPSG:4326 is a hard stop."""
+    grid = GridSpec(crs="EPSG:3857", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=10, n_lon=10)
+    with pytest.raises(ValueError, match="STOP-GEO-CRS"):
+        assert_grid_alignment(grid)
+
+
+def test_assert_grid_alignment_raises_stop_geo_res():
+    """STOP-GEO-RES: a cell size other than 0.01° is a hard stop."""
+    grid = GridSpec(crs="EPSG:4326", cell_size_deg=0.025, origin_lat=35.0, origin_lon=5.0, n_lat=10, n_lon=10)
+    with pytest.raises(ValueError, match="STOP-GEO-RES"):
+        assert_grid_alignment(grid)
+
+
+@patch("ml.spread_features.get_region_grid_spec")
+@patch("ml.spread_features.get_grid_window_for_bbox")
+def test_build_spread_inputs_hard_stop_on_misaligned_crs(mock_get_window, mock_get_spec):
+    """build_spread_inputs must raise STOP-GEO-CRS when the region grid has the wrong CRS."""
+    bad_grid = GridSpec(crs="EPSG:3857", cell_size_deg=0.01, origin_lat=35.0, origin_lon=5.0, n_lat=100, n_lon=100)
+    lat = np.linspace(35.005, 35.095, 10)
+    lon = np.linspace(5.005, 5.095, 10)
+    mock_get_spec.return_value = bad_grid
+    mock_get_window.return_value = GridWindow(i0=0, i1=10, j0=0, j1=10, lat=lat, lon=lon)
+
+    with pytest.raises(ValueError, match="STOP-GEO-CRS"):
+        build_spread_inputs(
+            region_name="test_region",
+            bbox=(5.0, 35.0, 5.1, 35.1),
+            forecast_reference_time=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
+
+
+@patch("ml.spread_features.get_region_grid_spec")
+@patch("ml.spread_features.get_grid_window_for_bbox")
+def test_build_spread_inputs_hard_stop_on_misaligned_cell_size(mock_get_window, mock_get_spec):
+    """build_spread_inputs must raise STOP-GEO-RES when the region grid has the wrong cell size."""
+    bad_grid = GridSpec(crs="EPSG:4326", cell_size_deg=0.05, origin_lat=35.0, origin_lon=5.0, n_lat=20, n_lon=20)
+    lat = np.linspace(35.025, 35.225, 5)
+    lon = np.linspace(5.025, 5.225, 5)
+    mock_get_spec.return_value = bad_grid
+    mock_get_window.return_value = GridWindow(i0=0, i1=5, j0=0, j1=5, lat=lat, lon=lon)
+
+    with pytest.raises(ValueError, match="STOP-GEO-RES"):
+        build_spread_inputs(
+            region_name="test_region",
+            bbox=(5.0, 35.0, 5.25, 35.25),
+            forecast_reference_time=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
