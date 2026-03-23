@@ -24,6 +24,12 @@ from api.db import get_engine
 from api.fires.service import get_fire_cells_heatmap
 from ml.spread.factory import get_spread_model, normalize_model_selection
 from ml.spread.hindcast_dataset import sample_fire_reference_times
+from ml.spread.runtime_contract import (
+    CANONICAL_CHANNELS_BY_MODEL,
+    ContractViolationError,
+    load_contract,
+    validate_channel_alignment,
+)
 from ml.spread_features import build_spread_inputs
 
 LOGGER = logging.getLogger(__name__)
@@ -409,6 +415,49 @@ def _build_stage_governance(
                 "target_stage": maturity_stage,
             }
         )
+
+    # STOP-CONTRACT-001: challenger feature schema must exactly match the canonical
+    # channel list for spatial models. A mismatch means train/infer channels diverged
+    # and the metric comparison is scientifically invalid.
+    if challenger_name in CANONICAL_CHANNELS_BY_MODEL:
+        canonical = CANONICAL_CHANNELS_BY_MODEL[challenger_name]
+        challenger_model_run_dir = (challenger_params or {}).get("model_run_dir")
+        contract_stop: dict[str, Any] | None = None
+        if not challenger_model_run_dir:
+            contract_stop = {
+                "id": "STOP-CONTRACT-001",
+                "message": (
+                    f"challenger {challenger_name!r} has no model_run_dir in model_params; "
+                    "cannot verify feature contract."
+                ),
+                "mitigation": "Set challenger.model_params.model_run_dir to the trained model artifact directory.",
+                "target_stage": maturity_stage,
+            }
+        else:
+            run_dir = Path(challenger_model_run_dir)
+            try:
+                try:
+                    infer_channels = load_contract(run_dir / "runtime_contract.json").channels
+                except FileNotFoundError:
+                    payload = json.loads((run_dir / "feature_schema.json").read_text(encoding="utf-8"))
+                    raw = payload.get("channels")
+                    if not isinstance(raw, list) or not raw:
+                        raise KeyError("channels key missing or empty in feature_schema.json")
+                    infer_channels = tuple(str(c) for c in raw)
+                validate_channel_alignment(infer_channels, canonical)
+            except (ContractViolationError, FileNotFoundError, KeyError, ValueError) as exc:
+                contract_stop = {
+                    "id": "STOP-CONTRACT-001",
+                    "message": str(exc),
+                    "mitigation": (
+                        "Re-export the challenger model so its feature_schema.json / "
+                        "runtime_contract.json matches CANONICAL_V2_CHANNELS, or update "
+                        "CANONICAL_V2_CHANNELS and retrain."
+                    ),
+                    "target_stage": maturity_stage,
+                }
+        if contract_stop is not None:
+            hard_stops.append(contract_stop)
 
     weighted_bss = float(decision.get("weighted_bss_improvement", 0.0) or 0.0)
     if weighted_bss <= 0.0:
