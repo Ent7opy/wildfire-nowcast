@@ -201,7 +201,7 @@ where `h` = relative humidity (%), `T_F` = temperature (°F). Output in %, then 
 
 Every spread champion–challenger evaluation config must include a `data_sources` block that
 explicitly declares the source for each input category. The gate enforces this with
-**STOP-SRC-001** when any required key is absent.
+**STOP-SOURCE-001** when any required key is absent.
 
 ### Required keys
 
@@ -222,7 +222,7 @@ data_sources:
   fuels: "esa_worldcover_10m_ndvi+ecmwf_ecland_lfmc+nfdrs_dfmc"
 ```
 
-Absence of this block or any required key triggers **STOP-SRC-001** and sets `gate_report.pass`
+Absence of this block or any required key triggers **STOP-SOURCE-001** and sets `gate_report.pass`
 to `false`.
 
 ---
