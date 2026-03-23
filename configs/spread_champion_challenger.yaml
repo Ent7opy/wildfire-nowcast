@@ -31,5 +31,13 @@ gate:
   max_pr_auc_drop: 0.01
   max_iou_drop: 0.02
 
+# Authoritative data-source declaration (required — absence triggers STOP-SRC-001 in gate).
+# See docs/spread_data_sources.md §5 for accepted values and quality criteria.
+data_sources:
+  fires: "nasa_firms_viirs_nrt"
+  weather: "noaa_gfs_025deg"
+  terrain: "srtm30_dem_derived"
+  fuels: "esa_worldcover_10m_ndvi+ecmwf_ecland_lfmc+nfdrs_dfmc"
+
 plots:
   enabled: true
