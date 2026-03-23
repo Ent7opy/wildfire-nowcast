@@ -45,6 +45,9 @@ SPREAD_MVP_GUARD_HORIZON_HOURS_ENV = "SPREAD_MVP_GUARD_HORIZON_HOURS"
 SPREAD_MVP_GUARD_PROB_THRESHOLD_ENV = "SPREAD_MVP_GUARD_PROB_THRESHOLD"
 SPREAD_MVP_GUARD_MAX_COVERAGE_ENV = "SPREAD_MVP_GUARD_MAX_COVERAGE"
 SPREAD_MVP_GUARD_MAX_SEED_CELLS_ENV = "SPREAD_MVP_GUARD_MAX_SEED_CELLS"
+# Science-grade weather strictness: hard-stop on zero-wind fallback when true.
+# Set to true for science_grade maturity deployments; default false (mvp_operational).
+SPREAD_STRICT_WEATHER_ENV = "SPREAD_STRICT_WEATHER"
 
 # Performance limit: avoid OOM/high latency for very large areas in synchronous calls.
 # 200x200 = 40,000 cells. At 0.01 degree, this is roughly 220km x 220km.
@@ -53,6 +56,15 @@ MAX_AOI_CELLS = 40000
 
 class ForecastInputFallbackError(RuntimeError):
     """Raised when strict mode forbids fallback input data."""
+
+
+class WeatherFallbackBlockedError(RuntimeError):
+    """Raised when SPREAD_STRICT_WEATHER=true and zero-wind weather fallback was used.
+
+    This is the science_grade hard-stop: do not serve a forecast built on fabricated
+    wind inputs.  Set SPREAD_STRICT_WEATHER=false (default) for mvp_operational deployments
+    where the warning path is acceptable.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,13 +158,18 @@ def run_spread_forecast(
         weather_bias_corrector_path=weather_bias_corrector_path,
     )
 
+    weather_fallback_reason = getattr(inputs_package.weather_cube, "attrs", {}).get("weather_fallback_reason")
+    _enforce_strict_weather(
+        weather_fallback_used=inputs_package.weather_fallback_used,
+        weather_fallback_reason=weather_fallback_reason,
+    )
     _enforce_no_fallback_if_strict(
         request=request,
         weather_fallback_used=inputs_package.weather_fallback_used,
-        weather_fallback_reason=getattr(inputs_package.weather_cube, "attrs", {}).get("weather_fallback_reason"),
+        weather_fallback_reason=weather_fallback_reason,
         terrain_fallback_used=inputs_package.terrain_fallback_used,
     )
-    
+
     # Check AOI size limit
     n_cells = inputs_package.window.lat.size * inputs_package.window.lon.size
     LOGGER.info(
@@ -459,6 +476,33 @@ def _enforce_no_fallback_if_strict(
     if reasons:
         raise ForecastInputFallbackError(
             "Strict forecast inputs mode rejected this request: " + "; ".join(reasons)
+        )
+
+
+def _enforce_strict_weather(
+    *,
+    weather_fallback_used: bool,
+    weather_fallback_reason: str | None,
+) -> None:
+    """Hard-stop if SPREAD_STRICT_WEATHER=true and zero-wind fallback was used.
+
+    This is the science_grade enforcement gate.  Set SPREAD_STRICT_WEATHER=true on
+    science_grade deployments; leave false (default) for mvp_operational.
+
+    Raises
+    ------
+    WeatherFallbackBlockedError
+        STOP: zero-wind weather fallback is not permitted in strict-weather mode.
+    """
+    if not _env_bool(SPREAD_STRICT_WEATHER_ENV, default=False):
+        return
+    if weather_fallback_used:
+        reason = weather_fallback_reason or "unknown"
+        raise WeatherFallbackBlockedError(
+            f"STOP: SPREAD_STRICT_WEATHER=true rejects zero-wind weather fallback "
+            f"(reason: {reason}). "
+            "Ensure a valid weather run is available or disable strict-weather mode "
+            "for mvp_operational deployments."
         )
 
 
