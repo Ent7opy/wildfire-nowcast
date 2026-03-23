@@ -81,7 +81,10 @@ class LearnedSpreadModelV2(SpreadModel):
             contract = load_contract(run_dir / "runtime_contract.json")
             validate_channel_alignment(self.channel_names, contract.channels)
         except FileNotFoundError:
-            pass  # contract file is optional for models exported before this check was added
+            LOGGER.warning(
+                "runtime_contract.json not found in %s; skipping contract validation (pre-contract model artifact).",
+                run_dir,
+            )
 
         # Guard: every channel in channel_names must be producible by this builder.
         unproducible = [c for c in self.channel_names if c not in _PRODUCIBLE_CHANNELS]

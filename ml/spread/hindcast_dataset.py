@@ -191,9 +191,7 @@ def _flatten_features(
     dfmc = _horizon_weighted_weather_mean(inputs.weather_cube, "dfmc", horizons_hours, (ny, nx))
 
     horizon_dfs: list[pd.DataFrame] = []
-    for h_idx, horizon_h in enumerate(horizons_hours):
-        _ = h_idx
-
+    for horizon_h in horizons_hours:
         target_time = ref_time + timedelta(hours=horizon_h)
         target_start = target_time - timedelta(hours=3)
         target_end = target_time + timedelta(hours=3)
@@ -451,8 +449,7 @@ def build_hindcast_dataset(
         return merged
 
     tensor_cases = []
-    for (_, h), chunk in merged.groupby(["ref_time", "horizon_h"], sort=True):
-        _ = h
+    for _, chunk in merged.groupby(["ref_time", "horizon_h"], sort=True):
         tensor_cases.append(_to_tensor_case(chunk, channel_names=tensor_channels))
     return tensor_cases
 

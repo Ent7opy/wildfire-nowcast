@@ -205,7 +205,7 @@ def run_spread_forecast(
             model = HeuristicSpreadModelV0()
     
     model_name = model.__class__.__name__
-    LOGGER.info(f"Using spread model: {model_name}")
+    LOGGER.info("Using spread model", extra={"model_name": model_name})
 
     # 3. Predict (champion)
     model_input = inputs_package.to_model_input()
