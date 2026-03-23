@@ -399,6 +399,24 @@ def list_batches_with_unscored_likelihood(limit: int = 5) -> list[int]:
     return [int(row) for row in rows if row is not None]
 
 
+def list_batches_with_undenoised_detections(limit: int = 5) -> list[int]:
+    """Return recent ingest batch IDs containing rows with NULL denoiser_decision."""
+    stmt = text(
+        """
+        SELECT ingest_batch_id
+        FROM fire_detections
+        WHERE ingest_batch_id IS NOT NULL
+          AND denoiser_decision IS NULL
+        GROUP BY ingest_batch_id
+        ORDER BY ingest_batch_id DESC
+        LIMIT :limit
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, {"limit": max(1, int(limit))}).scalars().all()
+    return [int(row) for row in rows if row is not None]
+
+
 def delete_detections_for_batch(
     batch_id: int,
     *,

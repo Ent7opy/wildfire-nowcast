@@ -564,6 +564,13 @@ def run_firms_ingest(
     if config.firms_reconcile_unscored_batches:
         _reconcile_unscored_batches(max_batches=int(config.firms_reconcile_max_batches))
 
+    if config.denoiser_enabled and not is_archive_mode:
+        _reconcile_undenoised_batches(
+            max_batches=int(config.firms_reconcile_max_batches),
+            config=config,
+            runtime_policy=denoiser_policy,
+        )
+
     return 0
 
 
@@ -677,6 +684,29 @@ def _reconcile_unscored_batches(max_batches: int = 5) -> None:
             _update_all_scoring_atomic(batch_id)
         except Exception:
             LOGGER.exception("Failed to reconcile unscored batch %s", batch_id)
+
+
+def _reconcile_undenoised_batches(
+    max_batches: int,
+    config: "FIRMSIngestSettings",
+    runtime_policy: "DenoiserRuntimePolicy | None" = None,
+) -> None:
+    """Best-effort denoiser backfill for batches ingested without denoiser scoring."""
+    candidate_batch_ids = repository.list_batches_with_undenoised_detections(
+        limit=max(1, max_batches)
+    )
+    if not candidate_batch_ids:
+        return
+    LOGGER.info(
+        "Denoiser backfill: %s batch(es) with NULL denoiser_decision: %s",
+        len(candidate_batch_ids),
+        candidate_batch_ids,
+    )
+    for batch_id in candidate_batch_ids:
+        try:
+            _run_denoiser_inference(batch_id, config, runtime_policy=runtime_policy)
+        except Exception:
+            LOGGER.exception("Failed denoiser backfill for batch %s", batch_id)
 
 
 def _effective_denoiser_thresholds(
