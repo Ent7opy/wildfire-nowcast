@@ -27,8 +27,11 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin s
 WORKDIR /app
 COPY . .
 
-# Install only ingest production deps into its own venv
+# Install ingest production deps (includes xgboost for denoiser inference)
 RUN uv sync --project ingest --no-dev
+
+# Make ml/ and api/ packages importable by the denoiser subprocess
+ENV PYTHONPATH=/app
 
 # Default entrypoint — overridden by railway.ingest.toml startCommand
 CMD ["uv", "run", "--project", "ingest", "-m", "ingest.orchestrator", "--loop"]
