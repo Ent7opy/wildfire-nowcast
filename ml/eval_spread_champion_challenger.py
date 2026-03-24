@@ -21,12 +21,21 @@ from scipy import stats
 from sklearn.metrics import average_precision_score
 
 from api.db import get_engine
-from api.fires.service import get_fire_cells_heatmap
+from api.fires.service import get_fire_cells_heatmap, get_region_grid_spec
 from ml.spread.factory import get_spread_model, normalize_model_selection
 from ml.spread.hindcast_dataset import sample_fire_reference_times
-from ml.spread_features import build_spread_inputs
+from ml.spread.runtime_contract import (
+    CANONICAL_CHANNELS_BY_MODEL,
+    ContractViolationError,
+    load_contract,
+    validate_channel_alignment,
+)
+from ml.spread_features import assert_grid_alignment, build_spread_inputs
 
 LOGGER = logging.getLogger(__name__)
+
+# Model families that accept a calibrator and require freshness validation at gate time.
+_CAL_FRESHNESS_MODELS: frozenset[str] = frozenset({"LearnedSpreadModelV2", "LearnedSpreadModelV3"})
 
 
 def expected_calibration_error(
@@ -373,11 +382,98 @@ def _calibrator_artifact_present(model_params: dict[str, Any] | None) -> bool:
     return False
 
 
+def _read_metadata_created_at(run_dir: Path) -> datetime | None:
+    """Return the ``created_at`` timestamp from *run_dir*/metadata.json, or None.
+
+    Both model training runs (``train_spread_v2.py``) and calibration runs
+    (``ml/calibration.py``) write a ``metadata.json`` that includes a
+    ``created_at`` ISO-8601 string.  Returns a timezone-aware UTC datetime, or
+    ``None`` if the file is absent, malformed, or the field is missing.
+    """
+    try:
+        payload = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+        raw = payload.get("created_at")
+        if not raw:
+            return None
+        dt = datetime.fromisoformat(str(raw))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _check_calibrator_freshness(
+    model_params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compare calibrator training date against model training date.
+
+    Returns a dict with keys:
+      - ``stale``: True when the calibrator predates the model
+      - ``model_created_at``: ISO string or None
+      - ``calibrator_created_at``: ISO string or None
+      - ``reason``: human-readable explanation (non-empty only when stale or
+        when dates could not be read)
+      - ``unreadable``: True when one or both dates could not be determined
+    """
+    params = dict(model_params or {})
+    model_run_dir_raw = params.get("model_run_dir")
+    cal_run_dir_raw = params.get("calibrator_run_dir")
+
+    result: dict[str, Any] = {
+        "stale": False,
+        "unreadable": False,
+        "model_created_at": None,
+        "calibrator_created_at": None,
+        "reason": "",
+    }
+
+    if not model_run_dir_raw or not cal_run_dir_raw:
+        return result  # absence handled by STOP-CAL-001 / STOP-CONTRACT-001
+
+    model_dir = Path(str(model_run_dir_raw))
+    cal_dir = Path(str(cal_run_dir_raw))
+    if cal_dir.is_file():
+        cal_dir = cal_dir.parent
+
+    model_ts = _read_metadata_created_at(model_dir)
+    cal_ts = _read_metadata_created_at(cal_dir)
+
+    result["model_created_at"] = model_ts.isoformat() if model_ts else None
+    result["calibrator_created_at"] = cal_ts.isoformat() if cal_ts else None
+
+    if model_ts is None or cal_ts is None:
+        missing = []
+        if model_ts is None:
+            missing.append(f"model ({model_dir / 'metadata.json'})")
+        if cal_ts is None:
+            missing.append(f"calibrator ({cal_dir / 'metadata.json'})")
+        result["unreadable"] = True
+        result["reason"] = (
+            "Cannot verify calibrator freshness: metadata.json missing or unreadable for "
+            + " and ".join(missing)
+            + "."
+        )
+        return result
+
+    if cal_ts < model_ts:
+        result["stale"] = True
+        result["reason"] = (
+            f"Calibrator was trained at {cal_ts.isoformat()} but the model was trained at "
+            f"{model_ts.isoformat()}. The calibrator predates the model — it was fitted on "
+            "a different (older) model's outputs and its probability mappings are invalid "
+            "for this model."
+        )
+
+    return result
+
+
 def _build_stage_governance(
     *,
     config: dict[str, Any],
     decision: dict[str, Any],
     summary_rows: list[dict[str, Any]],
+    geo_alignment_error: str | None = None,
 ) -> dict[str, Any]:
     gate_cfg = dict(config.get("gate", {}) or {})
     maturity_stage = str(gate_cfg.get("maturity_stage", "mvp_operational"))
@@ -397,6 +493,47 @@ def _build_stage_governance(
             }
         )
 
+    # STOP-GEO-001: the eval region grid must pass the canonical analysis-grid
+    # contract (CRS=EPSG:4326, cell_size=0.01°).  A mismatched CRS or resolution
+    # means train-time features were computed at a different spatial frame than
+    # the eval inputs, making metric comparisons scientifically invalid.
+    if geo_alignment_error is not None:
+        hard_stops.append(
+            {
+                "id": "STOP-GEO-001",
+                "message": geo_alignment_error,
+                "mitigation": (
+                    "Re-project the eval region grid to EPSG:4326 at 0.01° cell size "
+                    "(DEFAULT_CRS / DEFAULT_CELL_SIZE_DEG) before running champion-challenger eval."
+                ),
+                "target_stage": maturity_stage,
+            }
+        )
+
+    # STOP-SOURCE-001: every eval config must declare authoritative sources for all
+    # four spread input categories.  Per docs/spread_data_sources.md §5, absence of
+    # any required key is a hard stop — undeclared provenance cannot be promoted.
+    _REQUIRED_SOURCE_KEYS = ("fires", "weather", "terrain", "fuels")
+    declared_sources = dict(config.get("data_sources") or {})
+    missing_source_keys = [k for k in _REQUIRED_SOURCE_KEYS if not declared_sources.get(k)]
+    if missing_source_keys:
+        hard_stops.append(
+            {
+                "id": "STOP-SOURCE-001",
+                "message": (
+                    "data_sources declaration is missing required input source(s): "
+                    + ", ".join(missing_source_keys)
+                    + ". See docs/spread_data_sources.md §5 for required keys and example values."
+                ),
+                "mitigation": (
+                    "Add a data_sources block to the eval config with keys: "
+                    + ", ".join(_REQUIRED_SOURCE_KEYS)
+                    + "."
+                ),
+                "target_stage": maturity_stage,
+            }
+        )
+
     challenger_cfg = dict(config.get("challenger", {}) or {})
     challenger_name = challenger_cfg.get("model_name")
     challenger_params = challenger_cfg.get("model_params")
@@ -409,6 +546,87 @@ def _build_stage_governance(
                 "target_stage": maturity_stage,
             }
         )
+
+    # STOP-CAL-002 / WARN-CAL-FRESH-001: calibrator must have been trained *after* the
+    # model it calibrates.  A calibrator that predates the model was fitted on a different
+    # model's raw outputs — its isotonic/Platt mappings do not apply to the current model.
+    # At science_grade this is a hard stop; at mvp_operational it is a stage warning.
+    if challenger_name in _CAL_FRESHNESS_MODELS and _calibrator_artifact_present(challenger_params):
+        freshness = _check_calibrator_freshness(challenger_params)
+        if freshness["stale"] or freshness["unreadable"]:
+            if maturity_stage == "science_grade":
+                hard_stops.append(
+                    {
+                        "id": "STOP-CAL-002",
+                        "message": freshness["reason"],
+                        "mitigation": (
+                            "Re-run calibration training against the current model's hindcast outputs "
+                            "to produce a fresh calibrator artifact, then update calibrator_run_dir."
+                        ),
+                        "target_stage": maturity_stage,
+                        "calibrator_created_at": freshness["calibrator_created_at"],
+                        "model_created_at": freshness["model_created_at"],
+                    }
+                )
+            else:
+                stage_warnings.append(
+                    {
+                        "id": "WARN-CAL-FRESH-001",
+                        "tracking_id": "spread-science-debt-calibrator-freshness",
+                        "warning": freshness["reason"],
+                        "mitigation": (
+                            "Re-run calibration training against the current model's hindcast outputs "
+                            "to produce a fresh calibrator artifact, then update calibrator_run_dir. "
+                            "This will become a hard stop (STOP-CAL-002) at science_grade."
+                        ),
+                        "target_stage": "science_grade",
+                        "calibrator_created_at": freshness["calibrator_created_at"],
+                        "model_created_at": freshness["model_created_at"],
+                    }
+                )
+
+    # STOP-CONTRACT-001: challenger feature schema must exactly match the canonical
+    # channel list for spatial models. A mismatch means train/infer channels diverged
+    # and the metric comparison is scientifically invalid.
+    if challenger_name in CANONICAL_CHANNELS_BY_MODEL:
+        canonical = CANONICAL_CHANNELS_BY_MODEL[challenger_name]
+        challenger_model_run_dir = (challenger_params or {}).get("model_run_dir")
+        contract_stop: dict[str, Any] | None = None
+        if not challenger_model_run_dir:
+            contract_stop = {
+                "id": "STOP-CONTRACT-001",
+                "message": (
+                    f"challenger {challenger_name!r} has no model_run_dir in model_params; "
+                    "cannot verify feature contract."
+                ),
+                "mitigation": "Set challenger.model_params.model_run_dir to the trained model artifact directory.",
+                "target_stage": maturity_stage,
+            }
+        else:
+            run_dir = Path(challenger_model_run_dir)
+            try:
+                try:
+                    infer_channels = load_contract(run_dir / "runtime_contract.json").channels
+                except FileNotFoundError:
+                    payload = json.loads((run_dir / "feature_schema.json").read_text(encoding="utf-8"))
+                    raw = payload.get("channels")
+                    if not isinstance(raw, list) or not raw:
+                        raise KeyError("channels key missing or empty in feature_schema.json")
+                    infer_channels = tuple(str(c) for c in raw)
+                validate_channel_alignment(infer_channels, canonical)
+            except (ContractViolationError, FileNotFoundError, KeyError, ValueError) as exc:
+                contract_stop = {
+                    "id": "STOP-CONTRACT-001",
+                    "message": str(exc),
+                    "mitigation": (
+                        "Re-export the challenger model so its feature_schema.json / "
+                        "runtime_contract.json matches CANONICAL_V2_CHANNELS, or update "
+                        "CANONICAL_V2_CHANNELS and retrain."
+                    ),
+                    "target_stage": maturity_stage,
+                }
+        if contract_stop is not None:
+            hard_stops.append(contract_stop)
 
     weighted_bss = float(decision.get("weighted_bss_improvement", 0.0) or 0.0)
     if weighted_bss <= 0.0:
@@ -438,18 +656,21 @@ def _build_stage_governance(
             [
                 {
                     "debt_id": "SCI-DEBT-EXT-GT",
+                    "tracking_id": "spread-science-debt-ext-ground-truth",
                     "description": "External ground-truth verification is not yet enforced in MVP gate.",
                     "target_stage": "science_grade",
                     "exit_criteria": "Validated against authoritative external ground-truth dataset.",
                 },
                 {
                     "debt_id": "SCI-DEBT-DM-SAL",
+                    "tracking_id": "spread-science-debt-dm-sal-governance",
                     "description": "Science-grade DM significance and SAL threshold governance is deferred.",
                     "target_stage": "science_grade",
                     "exit_criteria": "DM significance and SAL thresholds enforced in promotion policy.",
                 },
                 {
                     "debt_id": "SCI-DEBT-DRIFT",
+                    "tracking_id": "spread-science-debt-drift-monitoring",
                     "description": "Reliability/calibration drift monitoring controls are not yet mandatory.",
                     "target_stage": "science_grade",
                     "exit_criteria": "Drift monitors and alert thresholds are operational in production.",
@@ -498,6 +719,12 @@ def _collect_comparison_arrays(config: dict[str, Any]) -> dict[int, dict[str, An
 
     champion = get_spread_model(champ_name, champ_params)
     challenger = get_spread_model(chall_name, chall_params)
+
+    # Pre-flight: validate grid alignment before sampling reference times.
+    # Fail fast before any DB queries if the region grid diverges from the
+    # canonical analysis-grid contract (CRS=EPSG:4326, cell_size=0.01°).
+    preflight_grid = get_region_grid_spec(region_name)
+    assert_grid_alignment(preflight_grid)
 
     engine = get_engine()
     ref_times = sample_fire_reference_times(
@@ -630,20 +857,34 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
     out_dir = out_root / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    arrays = _collect_comparison_arrays(config)
-    rows = []
-    for h in sorted(arrays):
-        row = summarize_comparison_for_horizon(
-            horizon_hours=h,
-            y_true=arrays[h]["y_true"],
-            y_prob_champion=arrays[h]["champion"],
-            y_prob_challenger=arrays[h]["challenger"],
-            y_true_cases=arrays[h]["y_true_cases"],
-            champion_cases=arrays[h]["champion_cases"],
-            challenger_cases=arrays[h]["challenger_cases"],
-            ece_bins=int(config.get("ece_bins", 10)),
-        )
-        rows.append(row)
+    # Pre-flight geo alignment check — run before any DB queries so that a CRS
+    # or resolution mismatch lands in hard_stops rather than crashing the eval.
+    geo_alignment_error: str | None = None
+    try:
+        preflight_grid = get_region_grid_spec(str(config["region_name"]))
+        assert_grid_alignment(preflight_grid)
+    except ValueError as exc:
+        geo_alignment_error = str(exc)
+
+    if geo_alignment_error is None:
+        arrays = _collect_comparison_arrays(config)
+        rows = []
+        for h in sorted(arrays):
+            row = summarize_comparison_for_horizon(
+                horizon_hours=h,
+                y_true=arrays[h]["y_true"],
+                y_prob_champion=arrays[h]["champion"],
+                y_prob_challenger=arrays[h]["challenger"],
+                y_true_cases=arrays[h]["y_true_cases"],
+                champion_cases=arrays[h]["champion_cases"],
+                challenger_cases=arrays[h]["challenger_cases"],
+                ece_bins=int(config.get("ece_bins", 10)),
+            )
+            rows.append(row)
+    else:
+        LOGGER.error("STOP-GEO-001: %s — skipping eval data collection.", geo_alignment_error)
+        arrays = {}
+        rows = []
 
     gate_cfg = config.get("gate", {}) or {}
     decision = compute_recommendation(
@@ -655,7 +896,12 @@ def run_eval(config: dict[str, Any], *, out_root: Path) -> Path:
         max_pr_auc_drop=float(gate_cfg.get("max_pr_auc_drop", 0.01)),
         max_iou_drop=float(gate_cfg.get("max_iou_drop", 0.02)),
     )
-    stage_governance = _build_stage_governance(config=config, decision=decision, summary_rows=rows)
+    stage_governance = _build_stage_governance(
+        config=config,
+        decision=decision,
+        summary_rows=rows,
+        geo_alignment_error=geo_alignment_error,
+    )
 
     pd.DataFrame(rows).sort_values("horizon_hours").to_csv(out_dir / "summary.csv", index=False)
     payload = {

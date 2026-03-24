@@ -12,7 +12,7 @@ import numpy as np
 import sqlalchemy as sa
 import xarray as xr
 
-from api.core.grid import GridSpec, GridWindow, get_grid_window_for_bbox
+from api.core.grid import DEFAULT_CELL_SIZE_DEG, DEFAULT_CRS, GridSpec, GridWindow, get_grid_window_for_bbox
 from api.db import get_engine
 from api.fires.service import FireHeatmapWindow, get_fire_cells_heatmap, get_region_grid_spec
 from api.terrain.window import TerrainWindow, load_terrain_window
@@ -96,6 +96,30 @@ def _assert_same_window(*, expected: GridWindow, actual: GridWindow, label: str)
             f"{label} window does not match requested AOI window. "
             f"expected={(expected.i0, expected.i1, expected.j0, expected.j1)} "
             f"actual={(actual.i0, actual.i1, actual.j0, actual.j1)}"
+        )
+
+
+def assert_grid_alignment(grid: GridSpec) -> None:
+    """Hard stop if the grid CRS or cell size diverges from the analysis-grid contract.
+
+    STOP-GEO-CRS: CRS must be EPSG:4326.  Any other projection breaks pixel-level
+    lat/lon alignment between fire, weather, and terrain layers.
+
+    STOP-GEO-RES: Cell size must match DEFAULT_CELL_SIZE_DEG (0.01°).  A mismatched
+    resolution means train-time features are computed at a different spatial scale than
+    inference, invalidating learned spatial relationships.
+    """
+    if grid.crs != DEFAULT_CRS:
+        raise ValueError(
+            f"STOP-GEO-CRS: analysis grid CRS={grid.crs!r} does not match the required "
+            f"CRS {DEFAULT_CRS!r}. Re-project the grid to EPSG:4326 before assembling "
+            f"spread inputs."
+        )
+    if abs(grid.cell_size_deg - DEFAULT_CELL_SIZE_DEG) > 1e-9:
+        raise ValueError(
+            f"STOP-GEO-RES: analysis grid cell_size_deg={grid.cell_size_deg!r} does not "
+            f"match the training grid cell size {DEFAULT_CELL_SIZE_DEG!r}. Regridding to "
+            f"a different resolution is not supported — use the canonical 0.01° grid."
         )
 
 
@@ -495,6 +519,9 @@ def build_spread_inputs(
     else:
         grid = get_region_grid_spec(region_name)
     window = get_grid_window_for_bbox(grid, bbox, clip=True)
+
+    # STOP-GEO-CRS / STOP-GEO-RES: grid must match the canonical analysis grid contract.
+    assert_grid_alignment(grid)
 
     # 2. Load fires — current state and two historical windows.
     #

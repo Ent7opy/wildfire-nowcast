@@ -9,6 +9,7 @@ from ml.spread.service import (
     ForecastInputFallbackError,
     MAX_AOI_CELLS,
     SpreadForecastRequest,
+    WeatherFallbackBlockedError,
     run_spread_forecast,
 )
 from ml.spread.contract import SpreadForecast, SpreadModelInput
@@ -655,3 +656,69 @@ def test_run_spread_forecast_cpu_latency_p95_40k_cells(monkeypatch):
 
     p95 = float(np.percentile(np.asarray(latencies, dtype=np.float64), 95))
     assert p95 <= 1.5
+
+
+# ---------------------------------------------------------------------------
+# SPREAD_STRICT_WEATHER tests
+# ---------------------------------------------------------------------------
+
+def test_spread_strict_weather_blocks_on_fallback(monkeypatch, mock_spread_inputs):
+    """science_grade mode: SPREAD_STRICT_WEATHER=true must hard-stop on zero-wind fallback."""
+    monkeypatch.setenv("SPREAD_STRICT_WEATHER", "true")
+    # Ensure the generic strict-inputs gate is off so only the new flag is tested.
+    monkeypatch.delenv("STRICT_FORECAST_INPUTS", raising=False)
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    mock_spread_inputs.weather_fallback_used = True
+    mock_spread_inputs.weather_cube.attrs = {"weather_fallback_reason": "no_weather_run_found"}
+
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        strict_inputs=False,  # generic gate off
+    )
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        with pytest.raises(WeatherFallbackBlockedError, match="STOP"):
+            run_spread_forecast(request)
+
+
+def test_spread_strict_weather_allows_fallback_when_disabled(monkeypatch, mock_spread_inputs):
+    """mvp_operational mode: SPREAD_STRICT_WEATHER=false (default) permits fallback with warning."""
+    import xarray as xr
+
+    monkeypatch.setenv("SPREAD_STRICT_WEATHER", "false")
+    monkeypatch.delenv("STRICT_FORECAST_INPUTS", raising=False)
+
+    ref_time = datetime(2025, 12, 26, 12, 0, tzinfo=timezone.utc)
+    mock_spread_inputs.weather_fallback_used = True
+    mock_spread_inputs.weather_cube.attrs = {"weather_fallback_reason": "no_weather_run_found"}
+
+    forecast = SpreadForecast(
+        probabilities=xr.DataArray(
+            np.full((1, 2, 2), 0.2, dtype=np.float32),
+            dims=("time", "lat", "lon"),
+            coords={"time": [0], "lat": [0.0, 1.0], "lon": [0.0, 1.0], "lead_time_hours": ("time", [24])},
+        ),
+        forecast_reference_time=ref_time,
+        horizons_hours=[24],
+        model_name="dummy",
+        model_version="x",
+    )
+    model = MagicMock()
+    model.predict.return_value = forecast
+
+    request = SpreadForecastRequest(
+        region_name="test_region",
+        bbox=(20.0, 40.0, 20.2, 40.2),
+        forecast_reference_time=ref_time,
+        strict_inputs=False,
+    )
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        out = run_spread_forecast(request, model=model)
+
+    # Forecast is served; fallback is annotated but not blocked.
+    assert out.probabilities.attrs["weather_fallback_used"] is True
+    assert out.probabilities.attrs["confidence_level"] == "low"

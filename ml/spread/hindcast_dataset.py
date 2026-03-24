@@ -15,32 +15,14 @@ from sqlalchemy.engine import Engine
 from api.db import get_engine
 from api.fires.service import get_fire_cells_heatmap
 from ml.spread.region_key import deterministic_region_bucket
+from ml.spread.runtime_contract import CANONICAL_V2_CHANNELS, CANONICAL_V3_CHANNELS
 from ml.spread_features import build_spread_inputs
 
 LOGGER = logging.getLogger(__name__)
 
-# Fixed channel order for v2 tensor training/inference.
-V2_TENSOR_CHANNELS: tuple[str, ...] = (
-    "fire_t0",
-    "fire_t-6h",
-    "fire_t-12h",
-    "u10",
-    "v10",
-    "t2m",
-    "rh2m",
-    "precip_24h",
-    "slope_deg",
-    "aspect_sin",
-    "aspect_cos",
-    "elevation_m",
-    "ruggedness",
-    "tpi",
-    "ndvi",
-    "lfmc",
-    "dfmc",
-    "region_id_embedding_input",
-)
-V3_TENSOR_CHANNELS: tuple[str, ...] = V2_TENSOR_CHANNELS
+# Channel order is owned by runtime_contract.py — do not redefine locally.
+V2_TENSOR_CHANNELS: tuple[str, ...] = CANONICAL_V2_CHANNELS
+V3_TENSOR_CHANNELS: tuple[str, ...] = CANONICAL_V3_CHANNELS
 
 
 def sample_fire_reference_times(
@@ -209,9 +191,7 @@ def _flatten_features(
     dfmc = _horizon_weighted_weather_mean(inputs.weather_cube, "dfmc", horizons_hours, (ny, nx))
 
     horizon_dfs: list[pd.DataFrame] = []
-    for h_idx, horizon_h in enumerate(horizons_hours):
-        _ = h_idx
-
+    for horizon_h in horizons_hours:
         target_time = ref_time + timedelta(hours=horizon_h)
         target_start = target_time - timedelta(hours=3)
         target_end = target_time + timedelta(hours=3)
@@ -469,8 +449,7 @@ def build_hindcast_dataset(
         return merged
 
     tensor_cases = []
-    for (_, h), chunk in merged.groupby(["ref_time", "horizon_h"], sort=True):
-        _ = h
+    for _, chunk in merged.groupby(["ref_time", "horizon_h"], sort=True):
         tensor_cases.append(_to_tensor_case(chunk, channel_names=tensor_channels))
     return tensor_cases
 

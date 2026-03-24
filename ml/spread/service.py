@@ -45,6 +45,9 @@ SPREAD_MVP_GUARD_HORIZON_HOURS_ENV = "SPREAD_MVP_GUARD_HORIZON_HOURS"
 SPREAD_MVP_GUARD_PROB_THRESHOLD_ENV = "SPREAD_MVP_GUARD_PROB_THRESHOLD"
 SPREAD_MVP_GUARD_MAX_COVERAGE_ENV = "SPREAD_MVP_GUARD_MAX_COVERAGE"
 SPREAD_MVP_GUARD_MAX_SEED_CELLS_ENV = "SPREAD_MVP_GUARD_MAX_SEED_CELLS"
+# Science-grade weather strictness: hard-stop on zero-wind fallback when true.
+# Set to true for science_grade maturity deployments; default false (mvp_operational).
+SPREAD_STRICT_WEATHER_ENV = "SPREAD_STRICT_WEATHER"
 
 # Performance limit: avoid OOM/high latency for very large areas in synchronous calls.
 # 200x200 = 40,000 cells. At 0.01 degree, this is roughly 220km x 220km.
@@ -53,6 +56,15 @@ MAX_AOI_CELLS = 40000
 
 class ForecastInputFallbackError(RuntimeError):
     """Raised when strict mode forbids fallback input data."""
+
+
+class WeatherFallbackBlockedError(RuntimeError):
+    """Raised when SPREAD_STRICT_WEATHER=true and zero-wind weather fallback was used.
+
+    This is the science_grade hard-stop: do not serve a forecast built on fabricated
+    wind inputs.  Set SPREAD_STRICT_WEATHER=false (default) for mvp_operational deployments
+    where the warning path is acceptable.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,13 +158,18 @@ def run_spread_forecast(
         weather_bias_corrector_path=weather_bias_corrector_path,
     )
 
+    weather_fallback_reason = getattr(inputs_package.weather_cube, "attrs", {}).get("weather_fallback_reason")
+    _enforce_strict_weather(
+        weather_fallback_used=inputs_package.weather_fallback_used,
+        weather_fallback_reason=weather_fallback_reason,
+    )
     _enforce_no_fallback_if_strict(
         request=request,
         weather_fallback_used=inputs_package.weather_fallback_used,
-        weather_fallback_reason=getattr(inputs_package.weather_cube, "attrs", {}).get("weather_fallback_reason"),
+        weather_fallback_reason=weather_fallback_reason,
         terrain_fallback_used=inputs_package.terrain_fallback_used,
     )
-    
+
     # Check AOI size limit
     n_cells = inputs_package.window.lat.size * inputs_package.window.lon.size
     LOGGER.info(
@@ -188,7 +205,7 @@ def run_spread_forecast(
             model = HeuristicSpreadModelV0()
     
     model_name = model.__class__.__name__
-    LOGGER.info(f"Using spread model: {model_name}")
+    LOGGER.info("Using spread model", extra={"model_name": model_name})
 
     # 3. Predict (champion)
     model_input = inputs_package.to_model_input()
@@ -294,6 +311,11 @@ def run_spread_forecast(
     forecast = _annotate_shadow_info(
         forecast,
         shadow_summary=shadow_summary,
+    )
+    forecast = _annotate_lineage_info(
+        forecast,
+        weather_cube=inputs_package.weather_cube,
+        terrain_fallback_used=inputs_package.terrain_fallback_used,
     )
 
     # 4b. Calibrate probabilities (default behavior).
@@ -454,6 +476,33 @@ def _enforce_no_fallback_if_strict(
     if reasons:
         raise ForecastInputFallbackError(
             "Strict forecast inputs mode rejected this request: " + "; ".join(reasons)
+        )
+
+
+def _enforce_strict_weather(
+    *,
+    weather_fallback_used: bool,
+    weather_fallback_reason: str | None,
+) -> None:
+    """Hard-stop if SPREAD_STRICT_WEATHER=true and zero-wind fallback was used.
+
+    This is the science_grade enforcement gate.  Set SPREAD_STRICT_WEATHER=true on
+    science_grade deployments; leave false (default) for mvp_operational.
+
+    Raises
+    ------
+    WeatherFallbackBlockedError
+        STOP: zero-wind weather fallback is not permitted in strict-weather mode.
+    """
+    if not _env_bool(SPREAD_STRICT_WEATHER_ENV, default=False):
+        return
+    if weather_fallback_used:
+        reason = weather_fallback_reason or "unknown"
+        raise WeatherFallbackBlockedError(
+            f"STOP: SPREAD_STRICT_WEATHER=true rejects zero-wind weather fallback "
+            f"(reason: {reason}). "
+            "Ensure a valid weather run is available or disable strict-weather mode "
+            "for mvp_operational deployments."
         )
 
 
@@ -646,6 +695,66 @@ def _annotate_confidence_info(
     except Exception:  # pragma: no cover
         pass
 
+    return forecast
+
+
+def _annotate_lineage_info(
+    forecast: SpreadForecast,
+    *,
+    weather_cube: Any,
+    terrain_fallback_used: bool,
+) -> SpreadForecast:
+    """Attach authoritative data-lineage attributes to the forecast output.
+
+    These attrs are the machine-readable counterpart to ``docs/spread_data_sources.md``
+    and must be persisted with every forecast run for traceability.
+    """
+    weather_attrs = dict(getattr(weather_cube, "attrs", {}) or {})
+    weather_fallback = bool(weather_attrs.get("weather_fallback_used", False))
+
+    # Derive weather source label from run metadata, falling back to "fallback_zeros".
+    if weather_fallback:
+        weather_source = "fallback_zeros"
+    else:
+        # weather_run_id is the DB identifier; model name is not stored separately in attrs yet.
+        weather_source = "noaa_gfs_025deg"
+
+    # Detect whether the source doc exists so consumers can flag undeclared lineage.
+    try:
+        from pathlib import Path
+        _doc = Path(__file__).parents[2] / "docs" / "spread_data_sources.md"
+        sources_declared = _doc.exists()
+    except Exception:
+        sources_declared = False
+
+    try:
+        attrs = dict(getattr(forecast.probabilities, "attrs", {}) or {})
+        attrs.update(
+            {
+                "lineage_fires_source": "nasa_firms_viirs_nrt",
+                "lineage_weather_source": weather_source,
+                "lineage_weather_run_id": weather_attrs.get("weather_run_id"),
+                "lineage_terrain_source": "fallback_zeros" if terrain_fallback_used else "dem_derived",
+                "lineage_fuels_ndvi_source": "esa_worldcover_10m",
+                "lineage_fuels_lfmc_source": "ecmwf_ecland_lfmc",
+                "lineage_fuels_dfmc_source": "nfdrs_nelson1984",
+                "lineage_data_sources_declared": sources_declared,
+            }
+        )
+        forecast.probabilities.attrs = attrs
+    except Exception:  # pragma: no cover
+        pass
+
+    LOGGER.info(
+        "Spread forecast lineage",
+        extra={
+            "lineage_fires_source": "nasa_firms_viirs_nrt",
+            "lineage_weather_source": weather_source,
+            "lineage_weather_run_id": weather_attrs.get("weather_run_id"),
+            "lineage_terrain_source": "fallback_zeros" if terrain_fallback_used else "dem_derived",
+            "lineage_data_sources_declared": sources_declared,
+        },
+    )
     return forecast
 
 
