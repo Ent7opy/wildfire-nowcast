@@ -50,24 +50,3 @@ global-uncorrected only if no region is within a configurable distance threshold
 
 **Target stage:** `science_grade`
 
----
-
-## Closed Items
-
-### SD-03 — Denoiser timeout inserts unscored records ✅ CLOSED
-**Resolved by:** P0.2 (`DenoiserTimeoutError` + fail-closed batch rollback)
-**Commit:** See implementation in `ingest/firms_ingest.py`
-
-Previously, a subprocess timeout could leave FIRMS detections inserted without denoiser
-scores, silently degrading output quality. The batch is now rolled back on timeout and
-marked `status=failed`.
-
----
-
-### SD-04 — Fire cluster ID references not resolved ✅ CLOSED
-**Resolved by:** P1.1 (`_resolve_cluster_to_bbox` in `ml/spread/service.py`)
-**Commit:** See implementation in `ml/spread/service.py` and `ui/src/map/layerUtils.ts`
-
-`run_spread_forecast()` raised `NotImplementedError` for `fire_cluster_id` requests.
-Client-side clusters now encode zoom in the ID (`cluster_z{z}_{row}_{col}`) and the
-service decodes this to a geographic bbox before running the forecast.
