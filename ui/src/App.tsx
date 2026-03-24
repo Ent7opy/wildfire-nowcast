@@ -149,7 +149,11 @@ export default function App(): JSX.Element {
   const { requestLocation } = useGeolocation();
 
   useForecastPolling();
-  useSafetyMetrics(isArchiveMode ? [] : visibleEvents);
+  const safetyEvents = useMemo(
+    () => (isArchiveMode ? [] : visibleEvents),
+    [isArchiveMode, visibleEvents]
+  );
+  useSafetyMetrics(safetyEvents);
 
   const filteredEvents = useMemo(() => {
     return visibleEvents.filter((event) => {
