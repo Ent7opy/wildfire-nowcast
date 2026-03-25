@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 from urllib.parse import urlencode
 
+import cfgrib
 import httpx
 import numpy as np
 import xarray as xr
@@ -133,62 +134,150 @@ def _response_snippet(response: httpx.Response, limit: int = 400) -> str:
     return text[:limit] if text else ""
 
 
+# Alternative cfgrib backend_kwargs tried in order when the default open fails
+# with a multi-level ambiguity error.  Each entry is passed as backend_kwargs to
+# xr.open_dataset(..., engine="cfgrib").  Bounded at MAX_GRIB_RETRIES to prevent
+# infinite loops on genuinely corrupt files.
+_GRIB_RETRY_BACKEND_KWARGS: list[dict] = [
+    # Attempt 1 — squeeze=False avoids dimension-collapse conflicts on some files
+    {"indexpath": "", "squeeze": False},
+]
+MAX_GRIB_RETRIES = len(_GRIB_RETRY_BACKEND_KWARGS)
+
+
+def _is_multilevel_grib_error(message: str) -> bool:
+    """Return True if the error string is the known cfgrib multi-level ambiguity."""
+    return (
+        "multiple values for unique key" in message
+        or "multiple values for key 'typeOfLevel'" in message
+    )
+
+
 def _validate_grib_file(path: Path) -> None:
     """Validate GRIB file integrity by attempting to open it with cfgrib.
-    
+
     This function performs basic validation to detect corrupted or partial
     downloads before they are processed further.
-    
-    Args:
-        path: Path to the GRIB file to validate
-        
+
     Raises:
         ValueError: If the file is corrupted or cannot be read as GRIB
         FileNotFoundError: If the file does not exist
     """
     if not path.exists():
         raise FileNotFoundError(f"GRIB file not found: {path}")
-    
-    # Check file is non-empty
+
     file_size = path.stat().st_size
     if file_size == 0:
         raise ValueError(f"GRIB file is empty: {path}")
-    
-    # Minimum GRIB2 file size (GRIB header + some data + End section)
-    # A valid GRIB2 file needs at least ~100 bytes
+
     MIN_GRIB_SIZE = 100
     if file_size < MIN_GRIB_SIZE:
         raise ValueError(
             f"GRIB file too small ({file_size} bytes, min {MIN_GRIB_SIZE}): {path}"
         )
-    
-    # Try to open with cfgrib to verify it's a valid GRIB file
+
+    # 1 primary + MAX_GRIB_RETRIES xr retries + 1 cfgrib.open_datasets fallback
+    _TOTAL_ATTEMPTS = 1 + MAX_GRIB_RETRIES + 1
+
+    primary_reason = ""
+    last_retry_exc: Exception | None = None
+
+    # --- Primary attempt (no filter_by_keys — works for single-level files) ---
     try:
-        # Open with backend to validate without loading full dataset
         ds = xr.open_dataset(
             path,
             engine="cfgrib",
             backend_kwargs={"indexpath": ""},
         )
-        # Verify we can access at least one variable
         if len(ds.data_vars) == 0:
             raise ValueError(f"GRIB file contains no data variables: {path}")
         ds.close()
-    except Exception as exc:
-        # Full-field GRIB archives can contain many level groups in one file.
-        # This yields a known cfgrib "multiple values for unique key" error
-        # when opened without filter_by_keys, but the downstream per-variable
-        # loader uses filter_by_keys and can parse the file correctly.
-        message = str(exc)
-        if "multiple values for unique key" in message or "multiple values for key 'typeOfLevel'" in message:
-            LOGGER.debug(
-                "GRIB validation accepted multi-level archive file: %s",
+        LOGGER.debug("GRIB file validated: %s (%d bytes)", path, file_size)
+        return
+    except ValueError:
+        raise  # re-raise our own structural errors unchanged
+    except Exception as primary_exc:
+        primary_reason = str(primary_exc)
+        if not _is_multilevel_grib_error(primary_reason):
+            raise ValueError(
+                f"GRIB file validation failed for {path}: {primary_reason}"
+            ) from primary_exc
+        LOGGER.warning(
+            "GRIB primary validation failed (multi-level file detected): %s — %s; "
+            "attempting %d alternative backend option(s)",
+            path,
+            primary_reason,
+            _TOTAL_ATTEMPTS - 1,
+        )
+
+    # --- Retry loop with alternative backend kwargs ---
+    for attempt, retry_bkw in enumerate(_GRIB_RETRY_BACKEND_KWARGS, start=1):
+        try:
+            ds = xr.open_dataset(path, engine="cfgrib", backend_kwargs=retry_bkw)
+            if len(ds.data_vars) == 0:
+                raise ValueError(
+                    f"GRIB file contains no data variables (retry {attempt}): {path}"
+                )
+            ds.close()
+            LOGGER.info(
+                "GRIB multi-level validation succeeded on retry %d/%d: %s (%d bytes)",
+                attempt,
+                MAX_GRIB_RETRIES,
                 path,
+                file_size,
             )
             return
-        raise ValueError(f"GRIB file validation failed for {path}: {exc}") from exc
-    
-    LOGGER.debug("GRIB file validated: %s (%d bytes)", path, file_size)
+        except ValueError:
+            raise
+        except Exception as retry_exc:
+            last_retry_exc = retry_exc
+            LOGGER.warning(
+                "GRIB validation retry %d/%d failed: %s — %s",
+                attempt,
+                MAX_GRIB_RETRIES,
+                path,
+                retry_exc,
+            )
+
+    # --- Final fallback: cfgrib.open_datasets() handles multi-level natively ---
+    try:
+        datasets = cfgrib.open_datasets(path, indexpath="")
+        if not datasets:
+            raise ValueError(f"GRIB file produced no dataset groups: {path}")
+        total_vars = sum(len(ds.data_vars) for ds in datasets)
+        for ds in datasets:
+            ds.close()
+        if total_vars == 0:
+            raise ValueError(
+                f"GRIB file has no data variables across all groups: {path}"
+            )
+        LOGGER.info(
+            "GRIB multi-level validation succeeded via cfgrib.open_datasets: "
+            "%s (%d dataset group(s), %d total var(s), %d bytes)",
+            path,
+            len(datasets),
+            total_vars,
+            file_size,
+        )
+        return
+    except ValueError:
+        raise
+    except Exception as fallback_exc:
+        LOGGER.error(
+            "GRIB file failed all %d validation attempt(s): %s — "
+            "primary error: %s; last retry error: %s; fallback error: %s",
+            _TOTAL_ATTEMPTS,
+            path,
+            primary_reason,
+            last_retry_exc,
+            fallback_exc,
+        )
+        raise ValueError(
+            f"GRIB file failed all validation attempts for {path}. "
+            f"Primary error: {primary_reason}. "
+            f"Last retry error: {last_retry_exc}. "
+            f"Fallback error: {fallback_exc}"
+        ) from fallback_exc
 
 
 def _extract_error_context(exc: Exception) -> dict:

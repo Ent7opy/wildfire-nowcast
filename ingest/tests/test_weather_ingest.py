@@ -1,3 +1,4 @@
+import logging
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,17 +99,104 @@ def test_ingest_weather_for_bbox_respects_bbox_overrides():
     assert captured.get("bbox") == requested_bbox
 
 
-def test_validate_grib_file_allows_multilevel_archive_layout():
-    """Validation should not reject full archive GRIB files solely on level multiplicity."""
+def test_validate_grib_file_multilevel_succeeds_via_cfgrib_fallback(caplog):
+    """Multi-level GRIB: primary attempt fails, cfgrib.open_datasets fallback validates."""
+    mock_ds = MagicMock()
+    mock_ds.data_vars = {"u10": MagicMock(), "v10": MagicMock()}
+
     with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
         tmp.write(b"x" * 256)
         tmp.flush()
 
-        with patch(
-            "ingest.weather_ingest.xr.open_dataset",
-            side_effect=ValueError("multiple values for unique key"),
+        with (
+            patch(
+                "ingest.weather_ingest.xr.open_dataset",
+                side_effect=Exception("multiple values for unique key — typeOfLevel"),
+            ),
+            patch("cfgrib.open_datasets", return_value=[mock_ds]) as mock_open_datasets,
+            caplog.at_level(logging.WARNING, logger="weather_ingest"),
         ):
             _validate_grib_file(Path(tmp.name))
+
+        mock_open_datasets.assert_called_once()
+        # The specific failure reason must appear in the warning log — no silent pass.
+        assert any(
+            "multiple values for unique key" in r.message for r in caplog.records
+        ), "Expected failure reason logged; got: " + str([r.message for r in caplog.records])
+
+
+def test_validate_grib_file_multilevel_retry_succeeds(caplog):
+    """Multi-level GRIB: primary fails, first xr retry (squeeze=False) succeeds."""
+    call_count = 0
+
+    def _selective_fail(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Primary attempt — no squeeze kwarg
+            raise Exception("multiple values for unique key")
+        # Retry attempt with squeeze=False — succeed
+        mock_ds = MagicMock()
+        mock_ds.data_vars = {"u10": MagicMock()}
+        mock_ds.__enter__ = lambda s: s
+        mock_ds.__exit__ = MagicMock(return_value=False)
+        return mock_ds
+
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with (
+            patch("ingest.weather_ingest.xr.open_dataset", side_effect=_selective_fail),
+            caplog.at_level(logging.WARNING, logger="weather_ingest"),
+        ):
+            _validate_grib_file(Path(tmp.name))
+
+    assert any(
+        "multi-level file detected" in r.message for r in caplog.records
+    ), "Expected multi-level warning; got: " + str([r.message for r in caplog.records])
+
+
+def test_validate_grib_file_all_retries_fail_raises_with_reason():
+    """All cfgrib backend attempts fail → ValueError with specific failure reason."""
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with (
+            patch(
+                "ingest.weather_ingest.xr.open_dataset",
+                side_effect=Exception("multiple values for unique key — corrupt index"),
+            ),
+            patch(
+                "cfgrib.open_datasets",
+                side_effect=Exception("cfgrib fallback also failed"),
+            ),
+            pytest.raises(ValueError, match="multiple values for unique key"),
+        ):
+            _validate_grib_file(Path(tmp.name))
+
+
+def test_validate_grib_file_non_multilevel_error_raises_immediately():
+    """Non-multi-level errors must raise immediately without retrying."""
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        open_calls = []
+
+        def _track_and_fail(*args, **kwargs):
+            open_calls.append(kwargs)
+            raise Exception("unexpected GRIB structure: missing section 3")
+
+        with (
+            patch("ingest.weather_ingest.xr.open_dataset", side_effect=_track_and_fail),
+            pytest.raises(ValueError, match="missing section 3"),
+        ):
+            _validate_grib_file(Path(tmp.name))
+
+    # Should only have been called once — no retries for non-multi-level errors.
+    assert len(open_calls) == 1, f"Expected 1 call, got {len(open_calls)}"
 
 
 def test_download_grib_files_preserves_connect_error_without_attribute_error(tmp_path):
