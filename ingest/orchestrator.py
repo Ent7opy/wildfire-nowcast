@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -504,8 +505,14 @@ def _run_lfmc(args: argparse.Namespace) -> int:
     try:
         ingest_lfmc_ecland_for_bbox(bbox=bbox, timeout_seconds=args.lfmc_timeout_seconds)
     except Exception as exc:
+        tracking_id = uuid.uuid4().hex[:12]
         LOGGER.warning(
-            "LFMC ingest failed (timeout_seconds=%s): %s — pipeline continues",
+            "[tracking_id=%s] LFMC ingest failed (timeout_seconds=%s): %s "
+            "— skipping job, next cycle will retry. "
+            "Fuel data may be stale until successful ingest. "
+            "Mitigation: next-cycle retry (mvp_operational); "
+            "target: science_grade auto-alerting.",
+            tracking_id,
             args.lfmc_timeout_seconds,
             exc,
         )

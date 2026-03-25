@@ -266,6 +266,50 @@ def _fetch_latest_terrain_status(conn) -> dict[str, Any]:
     }
 
 
+def _fetch_latest_lfmc_status(conn) -> dict[str, Any]:
+    latest = conn.execute(
+        text(
+            """
+            SELECT id, run_time, status, provider, created_at
+            FROM fuel_moisture_runs
+            WHERE status = 'completed'
+            ORDER BY run_time DESC, id DESC
+            LIMIT 1
+            """
+        )
+    ).mappings().first()
+
+    counts = conn.execute(
+        text(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'completed') AS completed_runs,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed_runs,
+                MAX(created_at) FILTER (WHERE status = 'failed') AS last_failure_at
+            FROM fuel_moisture_runs
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+            """
+        )
+    ).mappings().first()
+
+    latest_row = latest or {}
+    counts_row = counts or {}
+    run_time = _as_utc(latest_row.get("run_time"))
+    last_failure = _as_utc(counts_row.get("last_failure_at"))
+
+    return {
+        "last_seen_at": run_time,
+        "idempotency": {
+            "latest_run_id": latest_row.get("id"),
+            "latest_provider": latest_row.get("provider"),
+            "latest_run_time": run_time.isoformat() if run_time else None,
+            "completed_runs_last_24h": int(counts_row.get("completed_runs") or 0),
+            "failed_runs_last_24h": int(counts_row.get("failed_runs") or 0),
+            "last_failure_at": last_failure.isoformat() if last_failure else None,
+        },
+    }
+
+
 def _fetch_latest_perimeters_status(conn) -> dict[str, Any]:
     stats = conn.execute(
         text(
@@ -312,6 +356,7 @@ def build_data_status_snapshot(
         weather = _fetch_latest_weather_status(conn)
         terrain = _fetch_latest_terrain_status(conn)
         perimeters = _fetch_latest_perimeters_status(conn)
+        lfmc = _fetch_latest_lfmc_status(conn)
 
     sources = {
         "firms": _source_status(
@@ -336,6 +381,12 @@ def build_data_status_snapshot(
             name="perimeters",
             last_seen_at=perimeters["last_seen_at"],
             threshold_minutes=settings.data_stale_perimeters_minutes,
+            now=now_utc,
+        ),
+        "lfmc": _source_status(
+            name="lfmc",
+            last_seen_at=lfmc["last_seen_at"],
+            threshold_minutes=settings.data_stale_lfmc_minutes,
             now=now_utc,
         ),
     }
@@ -422,5 +473,6 @@ def build_data_status_snapshot(
             "weather": weather["idempotency"],
             "terrain": terrain["idempotency"],
             "perimeters": perimeters["idempotency"],
+            "lfmc": lfmc["idempotency"],
         }
     return snapshot

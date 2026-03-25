@@ -147,6 +147,9 @@ class AppSettings(BaseSettings):
     data_stale_perimeters_minutes: int = Field(
         default=4320, validation_alias="DATA_STALE_PERIMETERS_MINUTES"
     )
+    data_stale_lfmc_minutes: int = Field(
+        default=480, validation_alias="DATA_STALE_LFMC_MINUTES"
+    )
     data_status_critical_sources: str = Field(
         default="firms,weather",
         validation_alias="DATA_STATUS_CRITICAL_SOURCES",

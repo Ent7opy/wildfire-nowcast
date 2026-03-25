@@ -204,7 +204,7 @@ def ingest_lfmc_ecland_for_bbox(
     run_time: datetime | None = None,
     output_dir: Path | None = None,
     poll_seconds: int = 300,
-    timeout_seconds: int = 7200,
+    timeout_seconds: int = 1800,
 ) -> dict[str, Any]:
     resolved_time = (run_time or datetime.now(timezone.utc)).astimezone(timezone.utc)
     api_url = _require_api_url()
@@ -262,7 +262,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--run-time", type=str, default=None, help="ISO8601 reference time (default: current UTC hour).")
     parser.add_argument("--output-dir", type=Path, default=Path("data/fuels/lfmc_ecland"))
     parser.add_argument("--poll-seconds", type=int, default=300, help="Job polling interval in seconds.")
-    parser.add_argument("--timeout-seconds", type=int, default=7200, help="Max end-to-end job wait time.")
+    parser.add_argument("--timeout-seconds", type=int, default=1800, help="Max end-to-end job wait time (seconds).")
     return parser.parse_args()
 
 
