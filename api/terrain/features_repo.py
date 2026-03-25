@@ -33,6 +33,7 @@ class TerrainFeaturesMetadataCreate:
     aspect_min: float | None = None
     aspect_max: float | None = None
     coverage_fraction: float | None = None
+    terrain_fallback_used: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -71,6 +72,7 @@ def _row_to_features(row: dict) -> TerrainFeaturesMetadata:
         coverage_fraction=(
             float(row["coverage_fraction"]) if row.get("coverage_fraction") is not None else None
         ),
+        terrain_fallback_used=bool(row.get("terrain_fallback_used", False)),
         created_at=row["created_at"],
     )
 
@@ -101,7 +103,8 @@ def insert_terrain_features_metadata(
             slope_max,
             aspect_min,
             aspect_max,
-            coverage_fraction
+            coverage_fraction,
+            terrain_fallback_used
         )
         VALUES (
             :region_name,
@@ -123,7 +126,8 @@ def insert_terrain_features_metadata(
             :slope_max,
             :aspect_min,
             :aspect_max,
-            :coverage_fraction
+            :coverage_fraction,
+            :terrain_fallback_used
         )
         RETURNING
             id,
@@ -146,6 +150,7 @@ def insert_terrain_features_metadata(
             aspect_min,
             aspect_max,
             coverage_fraction,
+            terrain_fallback_used,
             created_at,
             ST_XMin(bbox) AS bbox_min_lon,
             ST_YMin(bbox) AS bbox_min_lat,
@@ -182,6 +187,7 @@ def insert_terrain_features_metadata(
                 "aspect_min": metadata.aspect_min,
                 "aspect_max": metadata.aspect_max,
                 "coverage_fraction": metadata.coverage_fraction,
+                "terrain_fallback_used": metadata.terrain_fallback_used,
             },
         )
         row = result.mappings().one()
@@ -215,6 +221,7 @@ def get_latest_terrain_features_metadata_for_region(
             aspect_min,
             aspect_max,
             coverage_fraction,
+            terrain_fallback_used,
             created_at,
             ST_XMin(bbox) AS bbox_min_lon,
             ST_YMin(bbox) AS bbox_min_lat,

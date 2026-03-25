@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Sequence
 
 from sqlalchemy import text
 
@@ -128,6 +129,64 @@ def insert_terrain_metadata(metadata: TerrainMetadataCreate) -> TerrainMetadata:
         )
         row = result.mappings().one()
     return _row_to_metadata(row)
+
+
+_FALLBACK_LADDER_LIMIT = 50  # guard against regions with many historical DEM versions
+
+
+def get_all_dem_metadata_for_region(region_name: str) -> list[TerrainMetadata]:
+    """Fetch DEM metadata rows for a region, ordered finest-first (resolution_m ASC).
+
+    Returns at most ``_FALLBACK_LADDER_LIMIT`` rows — enough to walk a realistic
+    resolution ladder without unbounded memory use on regions with deep history.
+    """
+    stmt = text(
+        """
+        SELECT
+            id,
+            region_name,
+            dem_source,
+            crs_epsg,
+            resolution_m,
+            raster_path,
+            cell_size_deg,
+            origin_lat,
+            origin_lon,
+            grid_n_lat,
+            grid_n_lon,
+            created_at,
+            ST_XMin(bbox) AS bbox_min_lon,
+            ST_YMin(bbox) AS bbox_min_lat,
+            ST_XMax(bbox) AS bbox_max_lon,
+            ST_YMax(bbox) AS bbox_max_lat
+        FROM terrain_metadata
+        WHERE region_name = :region_name
+        ORDER BY resolution_m ASC, created_at DESC
+        LIMIT :limit
+        """
+    )
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"region_name": region_name, "limit": _FALLBACK_LADDER_LIMIT})
+        rows = result.mappings().all()
+    return [_row_to_metadata(row) for row in rows]
+
+
+def find_fallback_dem(
+    region_names: Sequence[str],
+    skip_path: Path,
+) -> "TerrainMetadata | None":
+    """Walk the resolution ladder across the given region names and return the first
+    DEM metadata whose raster file exists on disk, skipping ``skip_path``.
+
+    Regions are tried in order; within each region rows are finest-first.
+    Returns ``None`` if no usable file is found.
+    """
+    for rname in region_names:
+        for md in get_all_dem_metadata_for_region(rname):
+            p = Path(md.raster_path)
+            if p != skip_path and p.exists():
+                return md
+    return None
 
 
 def get_latest_dem_metadata_for_region(region_name: str) -> Optional[TerrainMetadata]:

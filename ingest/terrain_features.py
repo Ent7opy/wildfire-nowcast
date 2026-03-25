@@ -25,7 +25,7 @@ from api.terrain.features_repo import (  # noqa: E402
     TerrainFeaturesMetadataCreate,
     insert_terrain_features_metadata,
 )
-from api.terrain.repo import get_latest_dem_metadata_for_region  # noqa: E402
+from api.terrain.repo import find_fallback_dem, get_latest_dem_metadata_for_region  # noqa: E402
 from api.terrain.validate import validate_raster_matches_grid, validate_terrain_stack  # noqa: E402
 
 logging.basicConfig(
@@ -196,22 +196,162 @@ def _convert_to_cog(in_path: Path) -> Path:
     return out_path
 
 
+
+def _write_flat_terrain_stub(
+    *,
+    settings: TerrainFeaturesSettings,
+    dem_metadata: object,
+    slope_path: Path,
+    aspect_path: Path,
+    reason: str,
+) -> None:
+    """Write zero slope/aspect GeoTIFFs and register a fallback terrain_features_metadata row.
+
+    The row is marked ``terrain_fallback_used=True`` so downstream consumers can detect it.
+    """
+    grid_spec = grid_spec_from_metadata(dem_metadata)
+    n_lat = int(grid_spec.n_lat)
+    n_lon = int(grid_spec.n_lon)
+
+    # Build a north-up transform matching the DEM grid exactly.
+    from rasterio.transform import from_bounds
+
+    min_lon, min_lat, max_lon, max_lat = dem_metadata.bbox
+    transform = from_bounds(min_lon, min_lat, max_lon, max_lat, n_lon, n_lat)
+
+    flat_profile = {
+        "driver": "GTiff",
+        "crs": f"EPSG:{CANONICAL_EPSG}",
+        "transform": transform,
+        "width": n_lon,
+        "height": n_lat,
+        "count": 1,
+        "dtype": "float32",
+        "nodata": float(settings.nodata_value),
+    }
+    flat_data = np.zeros((n_lat, n_lon), dtype=np.float32)
+
+    _write_aligned_geotiff(
+        out_path=slope_path,
+        data=flat_data,
+        profile=flat_profile,
+        nodata_value=settings.nodata_value,
+    )
+    _write_aligned_geotiff(
+        out_path=aspect_path,
+        data=flat_data,
+        profile=flat_profile,
+        nodata_value=settings.nodata_value,
+    )
+
+    log_event(
+        LOGGER,
+        "terrain_features.flat_stub",
+        "Wrote flat-terrain stub (slope=0, aspect=0)",
+        region=settings.region_name,
+        reason=reason,
+        bbox=list(dem_metadata.bbox),
+        slope_path=str(slope_path),
+        aspect_path=str(aspect_path),
+    )
+
+    inserted = insert_terrain_features_metadata(
+        TerrainFeaturesMetadataCreate(
+            region_name=settings.region_name,
+            source_dem_metadata_id=int(dem_metadata.id),
+            slope_path=str(slope_path),
+            aspect_path=str(aspect_path),
+            crs_epsg=CANONICAL_EPSG,
+            cell_size_deg=float(grid_spec.cell_size_deg),
+            origin_lat=float(grid_spec.origin_lat),
+            origin_lon=float(grid_spec.origin_lon),
+            grid_n_lat=n_lat,
+            grid_n_lon=n_lon,
+            bbox=dem_metadata.bbox,
+            slope_min=0.0,
+            slope_max=0.0,
+            aspect_min=0.0,
+            aspect_max=0.0,
+            coverage_fraction=0.0,
+            nodata_value=float(settings.nodata_value),
+            terrain_fallback_used=True,
+        )
+    )
+    LOGGER.warning(
+        "Flat-terrain stub registered as terrain_features_metadata id=%s "
+        "(terrain_fallback_used=True). Reason: %s. "
+        "Mitigation: run DEM ingest for region '%s' to replace stub with real data.",
+        inserted.id,
+        reason,
+        settings.region_name,
+    )
+    print(f"Slope (flat stub) written to: {slope_path}")
+    print(f"Aspect (flat stub) written to: {aspect_path}")
+    print(f"Inserted terrain_features_metadata id={inserted.id} [terrain_fallback_used=True]")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     settings, emit_cog = _apply_cli_overrides(TerrainFeaturesSettings(), args)
 
     dem_metadata = get_latest_dem_metadata_for_region(settings.region_name)
     if dem_metadata is None:
-        raise ValueError(f"No DEM metadata found for region '{settings.region_name}'.")
+        LOGGER.warning(
+            "No DEM metadata found for region '%s'. "
+            "Cannot compute terrain features or write a stub (no source_dem_metadata_id). "
+            "Mitigation: run DEM ingest for this region first.",
+            settings.region_name,
+        )
+        return
 
     dem_path = Path(dem_metadata.raster_path)
-    if not dem_path.exists():
-        raise FileNotFoundError(f"DEM raster not found at {dem_path}")
-
     out_dir = settings.resolved_output_dir / settings.region_name
     slope_path = out_dir / f"slope_{settings.region_name}_epsg{CANONICAL_EPSG}_0p01deg.tif"
     aspect_path = out_dir / f"aspect_{settings.region_name}_epsg{CANONICAL_EPSG}_0p01deg.tif"
 
+    if not dem_path.exists():
+        # Resolution-ladder fallback: try any other registered DEM whose file exists.
+        fallback_md = find_fallback_dem([settings.region_name], skip_path=dem_path)
+        if fallback_md is not None:
+            LOGGER.warning(
+                "Primary DEM raster missing at %s for region '%s' (bbox=%s). "
+                "Falling back to lower-resolution DEM: %s (%.0f m). "
+                "Mitigation: re-ingest the missing DEM tile.",
+                dem_path,
+                settings.region_name,
+                list(dem_metadata.bbox),
+                fallback_md.raster_path,
+                fallback_md.resolution_m,
+            )
+            dem_metadata = fallback_md
+            dem_path = Path(fallback_md.raster_path)
+        else:
+            # No usable DEM on disk — write flat-terrain stub and exit without crash.
+            LOGGER.warning(
+                "DEM raster missing at %s for region '%s' (bbox=%s) "
+                "and no lower-resolution fallback found. "
+                "Writing flat-terrain stub (slope=0, aspect=0, terrain_fallback_used=True). "
+                "Mitigation: run DEM ingest for region '%s'.",
+                dem_path,
+                settings.region_name,
+                list(dem_metadata.bbox),
+                settings.region_name,
+            )
+            if not settings.recompute and slope_path.exists() and aspect_path.exists():
+                LOGGER.info(
+                    "Flat stub already exists; skipping (use --recompute to override)."
+                )
+                return
+            _write_flat_terrain_stub(
+                settings=settings,
+                dem_metadata=dem_metadata,
+                slope_path=slope_path,
+                aspect_path=aspect_path,
+                reason=f"dem_file_missing:{dem_path}",
+            )
+            return
+
+    # ── happy path: real DEM on disk ─────────────────────────────────────────
     if not settings.recompute and slope_path.exists() and aspect_path.exists():
         LOGGER.info("Slope/aspect already exist. Skipping (use --recompute to override).")
         print(f"Slope: {slope_path}")
