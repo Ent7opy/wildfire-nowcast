@@ -113,7 +113,7 @@ def main() -> None:
     print("GFS APCP spot-check validation")
     print(f"  Cycle : {_VALIDATION_CYCLE} {_VALIDATION_HH}Z")
     print(f"  Bbox  : {_BBOX}")
-    print(f"  Steps : f003 (0-3h period) + f006 (0-6h running total)")
+    print("  Steps : f003 (0-3h period) + f006 (0-6h running total)")
     print("=" * 70)
 
     with tempfile.TemporaryDirectory(prefix="gfs_spot_") as tmpdir:
