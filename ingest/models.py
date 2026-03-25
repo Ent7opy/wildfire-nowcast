@@ -37,6 +37,7 @@ class DetectionRecord:
     track: float | None
     raw_properties: Mapping[str, Any]
     ingest_batch_id: int
+    is_archive: bool = False
 
     @property
     def dedupe_hash(self) -> str:
@@ -59,6 +60,7 @@ class DetectionRecord:
             "raw_properties": dict(self.raw_properties),
             "ingest_batch_id": self.ingest_batch_id,
             "dedupe_hash": self.dedupe_hash,
+            "is_archive": self.is_archive,
         }
 
 

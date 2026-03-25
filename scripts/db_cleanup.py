@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,7 +21,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Default retention for most time-series tables (days).
-DEFAULT_RETENTION_DAYS = 14
+DEFAULT_RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "14"))
+
+# Archive-ingested data has a shorter TTL (default 3 days).
+DEFAULT_ARCHIVE_RETENTION_DAYS = int(os.environ.get("ARCHIVE_RETENTION_DAYS", "3"))
 
 # Per-table cleanup config: (table_name, time_column, retention_days).
 #
@@ -34,7 +38,8 @@ DEFAULT_RETENTION_DAYS = 14
 #   (e.g. denoiser_labels_v2 rows with null fire_detection_id).
 TABLE_CONFIG: list[tuple[str, str, int]] = [
     # ---- fire detection pipeline (CASCADE ordering) -------------------------
-    ("fire_detections",        "acq_time",                DEFAULT_RETENTION_DAYS),
+    # NOTE: fire_detections is handled separately by _cleanup_fire_detections()
+    # (two-tier retention: archive vs NRT).  It must run first to respect CASCADE.
     ("denoiser_labels_v2",     "labeled_at",              DEFAULT_RETENTION_DAYS),
     ("fire_event_memberships", "linked_at",               DEFAULT_RETENTION_DAYS),
     ("fire_events",            "start_time",              DEFAULT_RETENTION_DAYS),
@@ -61,22 +66,26 @@ DELETE_BATCH_SIZE = 10_000
 BATCHED_TABLES = {"fire_detections"}
 
 
-def _count_eligible(session, table: str, time_col: str, cutoff: datetime) -> int:
+def _count_eligible(
+    session, table: str, time_col: str, cutoff: datetime, *, extra_where: str = ""
+) -> int:
     """Return the number of rows that would be deleted."""
     row = session.execute(
-        text(f"SELECT COUNT(*) FROM {table} WHERE {time_col} < :cutoff"),
+        text(f"SELECT COUNT(*) FROM {table} WHERE {time_col} < :cutoff{extra_where}"),
         {"cutoff": cutoff},
     ).scalar()
     return row or 0
 
 
-def _delete_batch(session, table: str, time_col: str, cutoff: datetime) -> int:
+def _delete_batch(
+    session, table: str, time_col: str, cutoff: datetime, *, extra_where: str = ""
+) -> int:
     """Delete one batch of rows. Returns actual deleted count."""
     result = session.execute(
         text(
             f"DELETE FROM {table}"
             f" WHERE id IN ("
-            f"   SELECT id FROM {table} WHERE {time_col} < :cutoff LIMIT :batch_size"
+            f"   SELECT id FROM {table} WHERE {time_col} < :cutoff{extra_where} LIMIT :batch_size"
             f")"
         ),
         {"cutoff": cutoff, "batch_size": DELETE_BATCH_SIZE},
@@ -84,12 +93,14 @@ def _delete_batch(session, table: str, time_col: str, cutoff: datetime) -> int:
     return result.rowcount
 
 
-def _delete_batched(session, table: str, time_col: str, cutoff: datetime) -> int:
+def _delete_batched(
+    session, table: str, time_col: str, cutoff: datetime, *, extra_where: str = ""
+) -> int:
     """Delete all eligible rows in batches. Returns total deleted count."""
     total = 0
     while True:
         try:
-            deleted = _delete_batch(session, table, time_col, cutoff)
+            deleted = _delete_batch(session, table, time_col, cutoff, extra_where=extra_where)
             session.commit()
         except Exception as exc:
             session.rollback()
@@ -195,6 +206,53 @@ def purge_orphan_forecast_files(repo_root: Path, *, dry_run: bool) -> int:
     return len(orphans)
 
 
+def _cleanup_fire_detections(
+    session,
+    now: datetime,
+    *,
+    dry_run: bool,
+    prefix: str,
+) -> int:
+    """Delete fire_detections with two-tier retention: archive (short) then NRT (standard).
+
+    Archive rows (is_archive=true) are deleted first with ARCHIVE_RETENTION_DAYS,
+    then NRT rows (is_archive=false) with DEFAULT_RETENTION_DAYS.  Both use batched
+    deletes.  Must run before other fire-pipeline tables to respect CASCADE ordering.
+
+    Returns total number of deleted rows (0 when dry_run).
+    """
+    # extra_where fragments are hardcoded literals — never from external input.
+    tiers: list[tuple[str, int, str]] = [
+        ("archive", DEFAULT_ARCHIVE_RETENTION_DAYS, " AND is_archive = true"),
+        ("NRT",     DEFAULT_RETENTION_DAYS,         " AND is_archive = false"),
+    ]
+
+    total_deleted = 0
+    for tier_label, retention_days, extra_where in tiers:
+        cutoff = now - timedelta(days=retention_days)
+        label = _cutoff_label(retention_days, cutoff)
+
+        if dry_run:
+            planned = _count_eligible(
+                session, "fire_detections", "acq_time", cutoff, extra_where=extra_where
+            )
+            logger.info(
+                f"{prefix}fire_detections ({tier_label}): {planned} rows would be deleted"
+                f" (cutoff={label})"
+            )
+            continue
+
+        deleted = _delete_batched(
+            session, "fire_detections", "acq_time", cutoff, extra_where=extra_where
+        )
+        logger.info(
+            f"fire_detections ({tier_label}): deleted {deleted} rows (cutoff={label})"
+        )
+        total_deleted += deleted
+
+    return total_deleted
+
+
 def cleanup(dry_run: bool = False) -> None:
     """Delete records beyond per-table retention windows, purge orphaned raster files, then VACUUM."""
     now = datetime.now(timezone.utc)
@@ -205,6 +263,11 @@ def cleanup(dry_run: bool = False) -> None:
     vacuumed_tables: list[str] = []
 
     with SessionLocal() as session:
+        # fire_detections first (CASCADE ordering) with two-tier archive/NRT retention.
+        fd_deleted = _cleanup_fire_detections(session, now, dry_run=dry_run, prefix=prefix)
+        if fd_deleted > 0:
+            vacuumed_tables.append("fire_detections")
+
         for table, time_col, retention_days in TABLE_CONFIG:
             cutoff = now - timedelta(days=retention_days)
             label = _cutoff_label(retention_days, cutoff)
