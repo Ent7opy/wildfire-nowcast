@@ -1,10 +1,11 @@
-"""Scheduler/orchestrator for FIRMS, weather, terrain, perimeter, and industrial ingestion."""
+"""Scheduler/orchestrator for FIRMS, weather, terrain, perimeter, industrial, and drift-monitor ingestion."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -31,7 +32,8 @@ JOB_WEATHER = "weather"
 JOB_TERRAIN = "terrain"
 JOB_PERIMETERS = "perimeters"
 JOB_INDUSTRIAL = "industrial"
-JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL)
+JOB_DENOISER_DRIFT = "denoiser_drift"
+JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 # Watermarks whose source name ends with _NRT are near-real-time feeds.
@@ -106,8 +108,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=",".join(JOB_ORDER),
         help=(
-            "Comma-separated job list. Supported: firms,weather,terrain,perimeters,industrial. "
-            "Execution order is fixed as firms->weather->terrain->perimeters->industrial."
+            "Comma-separated job list. Supported: firms,weather,terrain,perimeters,industrial,denoiser_drift. "
+            "Execution order is fixed as firms->weather->terrain->perimeters->industrial->denoiser_drift."
         ),
     )
     parser.add_argument(
@@ -181,6 +183,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1440.0,
         help="Industrial source ingest interval in minutes (loop mode).",
+    )
+    parser.add_argument(
+        "--denoiser-drift-interval-minutes",
+        type=float,
+        default=1440.0,
+        help="Denoiser drift monitor run interval in minutes (loop mode).",
     )
 
     parser.add_argument(
@@ -355,6 +363,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--terrain-interval-minutes", args.terrain_interval_minutes),
         ("--perimeters-interval-minutes", args.perimeters_interval_minutes),
         ("--industrial-interval-minutes", args.industrial_interval_minutes),
+        ("--denoiser-drift-interval-minutes", args.denoiser_drift_interval_minutes),
     )
     for flag, value in interval_flags:
         if value <= 0:
@@ -463,6 +472,67 @@ def _run_industrial(args: argparse.Namespace) -> int:
     return int(run_industrial_ingest(_build_industrial_argv(args)))
 
 
+def _run_denoiser_drift(args: argparse.Namespace) -> int:
+    """Run drift monitor (alert-only; never auto-rollbacks from orchestrator)."""
+    # Lazy import: avoids pulling api.db into module scope at startup.
+    from ingest.denoiser_drift_monitor import monitor_denoiser_drift
+
+    psi_warn = float(os.getenv("DENOISER_DRIFT_PSI_WARN_THRESHOLD", "0.2"))
+    psi_hard = float(os.getenv("DENOISER_DRIFT_PSI_HARD_THRESHOLD", "0.35"))
+    mean_delta_warn = float(os.getenv("DENOISER_DRIFT_MEAN_DELTA_WARN_THRESHOLD", "0.10"))
+    mean_delta_hard = float(os.getenv("DENOISER_DRIFT_MEAN_DELTA_HARD_THRESHOLD", "0.20"))
+    window_hours = int(os.getenv("DENOISER_DRIFT_WINDOW_HOURS", "24"))
+    baseline_days = int(os.getenv("DENOISER_DRIFT_BASELINE_DAYS", "7"))
+    min_samples = int(os.getenv("DENOISER_DRIFT_MIN_SAMPLES", "500"))
+
+    summary = monitor_denoiser_drift(
+        window_hours=window_hours,
+        baseline_days=baseline_days,
+        min_samples=min_samples,
+        psi_warn_threshold=psi_warn,
+        psi_hard_threshold=psi_hard,
+        mean_delta_warn_threshold=mean_delta_warn,
+        mean_delta_hard_threshold=mean_delta_hard,
+        allow_rollback=False,  # orchestrator is alert-only; rollback is a manual ops decision
+    )
+
+    metrics = summary.get("metrics", {})
+    psi_entry = metrics.get("psi_score", {})
+    mean_entry = metrics.get("score_mean_delta", {})
+    psi_severity = psi_entry.get("severity", "ok")
+    mean_severity = mean_entry.get("severity", "ok")
+    hard_violation = psi_severity == "hard" or mean_severity == "hard"
+    warn_violation = psi_severity == "warn" or mean_severity == "warn"
+    psi_val = psi_entry.get("value") or 0.0
+    mean_val = mean_entry.get("value") or 0.0
+
+    if hard_violation:
+        LOGGER.error(
+            "BLOCKER: denoiser drift hard violation — "
+            "psi=%.4f (hard_threshold=%.2f) score_mean_delta=%.4f (hard_threshold=%.2f) "
+            "— manual review required; rollback via `make model-rollback FAMILY=denoiser`",
+            psi_val,
+            psi_hard,
+            mean_val,
+            mean_delta_hard,
+        )
+        return 1  # surfaces as job failure in dashboard; no rollback triggered
+    if warn_violation:
+        LOGGER.warning(
+            "Denoiser drift WARNING: psi=%.4f score_mean_delta=%.4f "
+            "— approaching threshold, monitor closely [target: science_grade]",
+            psi_val,
+            mean_val,
+        )
+    else:
+        LOGGER.info(
+            "Denoiser drift OK: psi=%.4f score_mean_delta=%.4f",
+            psi_val,
+            mean_val,
+        )
+    return 0
+
+
 def _run_with_logging(name: str, runner: Callable[[], int]) -> int:
     started = time.monotonic()
     LOGGER.info("Job started: %s", name)
@@ -489,6 +559,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_TERRAIN: lambda: _run_terrain(args),
         JOB_PERIMETERS: lambda: _run_perimeters(args),
         JOB_INDUSTRIAL: lambda: _run_industrial(args),
+        JOB_DENOISER_DRIFT: lambda: _run_denoiser_drift(args),
     }
 
     intervals_seconds = {
@@ -497,6 +568,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_TERRAIN: args.terrain_interval_minutes * 60.0,
         JOB_PERIMETERS: args.perimeters_interval_minutes * 60.0,
         JOB_INDUSTRIAL: args.industrial_interval_minutes * 60.0,
+        JOB_DENOISER_DRIFT: args.denoiser_drift_interval_minutes * 60.0,
     }
 
     return [
