@@ -181,13 +181,14 @@ services:
     command: >
       uv run --project ingest -m ingest.orchestrator
       --loop
-      --jobs firms,perimeters
+      --jobs firms,perimeters,cleanup
       --enforce-freshness
       --max-retries 3
       --retry-backoff-seconds 20
       --firms-interval-minutes 30
       --weather-interval-minutes 180
       --perimeters-interval-minutes 1440
+      --cleanup-interval-minutes 1440
       --dashboard-path /app/data/ingest/orchestrator_dashboard.json
     restart: unless-stopped
     volumes:
