@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 from urllib.parse import urlencode
 
-import cfgrib
 import httpx
 import numpy as np
 import xarray as xr
@@ -240,7 +239,11 @@ def _validate_grib_file(path: Path) -> None:
             )
 
     # --- Final fallback: cfgrib.open_datasets() handles multi-level natively ---
+    # Lazy import: cfgrib requires the ecCodes system library which is only
+    # present in the ingest environment, not in api or ml.
     try:
+        import cfgrib  # noqa: PLC0415
+
         datasets = cfgrib.open_datasets(path, indexpath="")
         if not datasets:
             raise ValueError(f"GRIB file produced no dataset groups: {path}")
