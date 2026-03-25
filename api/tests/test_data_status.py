@@ -46,6 +46,8 @@ _FRESH_DEFAULTS: dict[str, dict[str, Any]] = {
     "lfmc": {"last_seen_at_offset": 60, "idempotency": {"completed_runs_last_24h": 3, "failed_runs_last_24h": 0}},
 }
 
+_WEATHER_VARIABLES = ("wind", "temperature", "humidity", "precipitation")
+
 _FETCH_FUNCTIONS = {
     "firms": "api.data_status._fetch_latest_firms_status",
     "weather": "api.data_status._fetch_latest_weather_status",
@@ -66,13 +68,27 @@ def _stub_all_sources(
         offset = override.get("last_seen_at_offset", defaults["last_seen_at_offset"])
         last_seen_at = override.get("last_seen_at", now - timedelta(minutes=offset))
         idempotency = override.get("idempotency", defaults["idempotency"])
-        monkeypatch.setattr(
-            _FETCH_FUNCTIONS[source],
-            lambda _conn, ls=last_seen_at, idem=idempotency: {
-                "last_seen_at": ls,
-                "idempotency": idem,
-            },
-        )
+
+        if source == "weather":
+            # Per-variable last_seen defaults: same as aggregate unless overridden.
+            default_vars = {v: last_seen_at for v in _WEATHER_VARIABLES}
+            variables_last_seen = override.get("variables_last_seen", default_vars)
+            monkeypatch.setattr(
+                _FETCH_FUNCTIONS[source],
+                lambda _conn, ls=last_seen_at, idem=idempotency, vls=variables_last_seen: {
+                    "last_seen_at": ls,
+                    "variables_last_seen": vls,
+                    "idempotency": idem,
+                },
+            )
+        else:
+            monkeypatch.setattr(
+                _FETCH_FUNCTIONS[source],
+                lambda _conn, ls=last_seen_at, idem=idempotency: {
+                    "last_seen_at": ls,
+                    "idempotency": idem,
+                },
+            )
 
 
 def test_build_data_status_snapshot_marks_stale_and_critical(monkeypatch):
@@ -159,3 +175,102 @@ def test_fetch_latest_firms_status_prefers_watermark_acq_time():
 
     assert payload["last_seen_at"] == now - timedelta(hours=6)
     assert payload["idempotency"]["latest_watermark_acq_time"] == (now - timedelta(hours=6)).isoformat()
+
+
+def test_weather_per_variable_staleness(monkeypatch):
+    """Per-variable staleness is reported independently; any stale variable flags the weather source."""
+    now = datetime(2026, 2, 11, 12, 0, tzinfo=timezone.utc)
+    threshold = 360  # DATA_STALE_WEATHER_MINUTES default
+
+    fresh_ts = now - timedelta(minutes=30)
+    stale_ts = now - timedelta(minutes=threshold + 60)
+
+    _stub_all_sources(
+        monkeypatch,
+        now,
+        weather={
+            "last_seen_at_offset": 30,  # aggregate appears fresh
+            "variables_last_seen": {
+                "wind": fresh_ts,
+                "temperature": fresh_ts,
+                "humidity": fresh_ts,
+                "precipitation": stale_ts,  # precipitation run is old
+            },
+            "idempotency": {"completed_runs_last_24h": 4},
+        },
+    )
+
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine(), include_internal=True)
+
+    weather = snapshot["sources"]["weather"]
+
+    # Per-variable status present for all four canonical variables.
+    assert set(weather["variables"].keys()) == {"wind", "temperature", "humidity", "precipitation"}
+
+    assert weather["variables"]["wind"]["state"] == "fresh"
+    assert weather["variables"]["temperature"]["state"] == "fresh"
+    assert weather["variables"]["humidity"]["state"] == "fresh"
+    assert weather["variables"]["precipitation"]["state"] == "stale"
+    assert weather["variables"]["precipitation"]["is_stale"] is True
+
+    # Aggregate weather is flagged stale because precipitation is stale.
+    assert weather["any_variable_stale"] is True
+    assert weather["is_stale"] is True
+    assert weather["state"] == "stale"
+
+    # Overall snapshot is degraded/critical.
+    assert snapshot["overall_state"] in {"degraded", "critical"}
+
+
+def test_weather_all_variables_fresh(monkeypatch):
+    """When all variables are within threshold, weather source stays fresh."""
+    now = datetime(2026, 2, 11, 12, 0, tzinfo=timezone.utc)
+    fresh_ts = now - timedelta(minutes=30)
+
+    _stub_all_sources(
+        monkeypatch,
+        now,
+        weather={
+            "last_seen_at_offset": 30,
+            "variables_last_seen": {v: fresh_ts for v in _WEATHER_VARIABLES},
+            "idempotency": {"completed_runs_last_24h": 4},
+        },
+    )
+
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine(), include_internal=True)
+
+    weather = snapshot["sources"]["weather"]
+    assert weather["state"] == "fresh"
+    assert weather["any_variable_stale"] is False
+    assert weather["is_stale"] is False
+    for var in _WEATHER_VARIABLES:
+        assert weather["variables"][var]["state"] == "fresh"
+
+
+def test_weather_missing_variable_flags_stale(monkeypatch):
+    """A variable with no data (None) is reported as missing and flags the weather source stale."""
+    now = datetime(2026, 2, 11, 12, 0, tzinfo=timezone.utc)
+    fresh_ts = now - timedelta(minutes=30)
+
+    _stub_all_sources(
+        monkeypatch,
+        now,
+        weather={
+            "last_seen_at_offset": 30,
+            "variables_last_seen": {
+                "wind": fresh_ts,
+                "temperature": fresh_ts,
+                "humidity": fresh_ts,
+                "precipitation": None,  # never ingested
+            },
+            "idempotency": {"completed_runs_last_24h": 4},
+        },
+    )
+
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine(), include_internal=True)
+
+    weather = snapshot["sources"]["weather"]
+    assert weather["variables"]["precipitation"]["state"] == "missing"
+    assert weather["variables"]["precipitation"]["is_stale"] is True
+    assert weather["any_variable_stale"] is True
+    assert weather["is_stale"] is True
