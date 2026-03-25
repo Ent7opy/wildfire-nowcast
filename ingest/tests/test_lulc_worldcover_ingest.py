@@ -9,9 +9,6 @@ from __future__ import annotations
 import json
 import logging
 
-import pytest
-
-
 # ── _format_tile_id ──────────────────────────────────────────────────────────
 
 class TestFormatTileId:
