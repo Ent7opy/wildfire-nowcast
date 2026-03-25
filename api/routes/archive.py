@@ -8,7 +8,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+
+from api.deps import no_cache
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -147,6 +149,7 @@ async def check_archive_availability(date: str, timeframe: str) -> ArchiveAvaila
     "/fires/archive/ingest",
     response_model=ArchiveIngestResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(no_cache)],
 )
 async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestResponse:
     """Trigger a background FIRMS re-ingest for a historical date/timeframe."""

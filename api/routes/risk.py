@@ -3,14 +3,15 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from api.deps import cache_300
 from api.risk.grid import compute_risk_grid
 
 risk_router = APIRouter(prefix="/risk", tags=["risk"])
 
 
-@risk_router.get("")
+@risk_router.get("", dependencies=[Depends(cache_300)])
 async def get_risk(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
     min_lat: float = Query(..., description="Minimum latitude (south boundary)"),

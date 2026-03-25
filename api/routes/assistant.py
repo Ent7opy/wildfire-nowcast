@@ -1,7 +1,9 @@
 """Assistant proxy router — forwards chat requests to Gemini server-side."""
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from api.deps import no_cache
 from pydantic import BaseModel
 
 from api.config import settings
@@ -22,7 +24,7 @@ async def get_assistant_config() -> AssistantConfigResponse:
     )
 
 
-@assistant_router.post("/chat")
+@assistant_router.post("/chat", dependencies=[Depends(no_cache)])
 async def proxy_chat(body: dict) -> dict:
     """Proxy a Gemini generateContent request, injecting the server-side API key."""
     if not settings.gemini_api_key:

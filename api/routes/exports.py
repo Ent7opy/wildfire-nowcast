@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel
 
+from api.deps import no_cache
 from api.aois import repo as aois_repo
 from api.exports import repo as jobs_repo
 from api.exports.worker import queue, export_task
@@ -366,7 +367,7 @@ class ExportJobResponse(BaseModel):
     "/exports",
     response_model=ExportJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(RateLimiter(times=10, seconds=60))]
+    dependencies=[Depends(RateLimiter(times=10, seconds=60)), Depends(no_cache)]
 )
 def create_export_job(job_request: ExportJobRequest):
     """Enqueue an async export job."""

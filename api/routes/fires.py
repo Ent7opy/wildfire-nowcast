@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi_limiter.depends import RateLimiter
 
+from api.deps import cache_60
 from api.fires.repo import (
     validate_bbox,
     list_fire_detections_bbox_time,
@@ -120,7 +121,7 @@ async def get_fires(
     )
 
 
-@fires_router.get("/detections", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
+@fires_router.get("/detections", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
 async def get_detections(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
     min_lat: float = Query(..., description="Minimum latitude (south boundary)"),
@@ -158,7 +159,7 @@ async def get_detections(
     )
 
 
-@fires_router.get("/events", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
+@fires_router.get("/events", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
 async def get_events(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
     min_lat: float = Query(..., description="Minimum latitude (south boundary)"),
@@ -192,7 +193,7 @@ async def get_events(
     return {"count": len(events), "events": events}
 
 
-@fires_router.get("/fronts", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
+@fires_router.get("/fronts", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
 async def get_fronts(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
     min_lat: float = Query(..., description="Minimum latitude (south boundary)"),

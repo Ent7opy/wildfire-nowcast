@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 from sqlalchemy import JSON, bindparam, create_engine, text
 from sqlalchemy.engine import Connection, Engine
@@ -415,6 +415,38 @@ def list_batches_with_undenoised_detections(limit: int = 5) -> list[int]:
     with get_engine().begin() as conn:
         rows = conn.execute(stmt, {"limit": max(1, int(limit))}).scalars().all()
     return [int(row) for row in rows if row is not None]
+
+
+def list_all_watermarks() -> list[dict[str, Any]]:
+    """Return all rows from ingest_watermarks for startup validation."""
+    stmt = text(
+        """
+        SELECT source, area_key, last_acq_time_utc
+        FROM ingest_watermarks
+        ORDER BY source, area_key
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    result = []
+    for row in rows:
+        payload = dict(row)
+        payload["last_acq_time_utc"] = _as_utc(payload.get("last_acq_time_utc"))
+        result.append(payload)
+    return result
+
+
+def reset_ingest_watermark(*, source: str, area_key: str) -> None:
+    """Reset a watermark's last_acq_time_utc to NULL (triggers bootstrap on next ingest)."""
+    stmt = text(
+        """
+        UPDATE ingest_watermarks
+        SET last_acq_time_utc = NULL, updated_at = NOW()
+        WHERE source = :source AND area_key = :area_key
+        """
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {"source": source, "area_key": area_key})
 
 
 def delete_detections_for_batch(
