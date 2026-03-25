@@ -117,8 +117,86 @@ def _cutoff_label(retention_days: int, cutoff: datetime) -> str:
     return f"{cutoff.date()} ({retention_days}d)"
 
 
+def _query_known_forecast_storage_paths() -> set[str]:
+    """Return the set of storage_path values currently in spread_forecast_rasters."""
+    stmt = text("SELECT storage_path FROM spread_forecast_rasters")
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).fetchall()
+    return {row[0] for row in rows}
+
+
+def find_orphan_forecast_files(
+    forecasts_dir: Path, repo_root: Path, known_paths: set[str]
+) -> list[Path]:
+    """Return .tif files under forecasts_dir whose repo-relative path is not in known_paths.
+
+    Args:
+        forecasts_dir: Absolute path to the forecasts directory (e.g. REPO_ROOT/data/forecasts).
+        repo_root: Repository root used to compute repo-relative paths (must be an ancestor of
+            forecasts_dir).
+        known_paths: Set of repo-relative storage_path values from spread_forecast_rasters.
+
+    Returns:
+        List of absolute Paths for orphaned .tif files.
+    """
+    if not forecasts_dir.exists():
+        return []
+
+    orphans = []
+    for tif in forecasts_dir.rglob("*.tif"):
+        try:
+            rel = str(tif.relative_to(repo_root))
+        except ValueError:
+            # Should not happen, but skip rather than crash
+            logger.warning("Could not relativize path %s against %s", tif, repo_root)
+            continue
+        if rel not in known_paths:
+            orphans.append(tif)
+    return orphans
+
+
+def purge_orphan_forecast_files(repo_root: Path, *, dry_run: bool) -> int:
+    """Delete raster files under data/forecasts/ that have no DB row in spread_forecast_rasters.
+
+    Also removes empty run directories left behind after file deletion.
+
+    Returns:
+        Number of orphaned files found (and deleted when not dry_run).
+    """
+    forecasts_dir = repo_root / "data" / "forecasts"
+    if not forecasts_dir.exists():
+        logger.info("data/forecasts/ does not exist — nothing to clean.")
+        return 0
+
+    known_paths = _query_known_forecast_storage_paths()
+    orphans = find_orphan_forecast_files(forecasts_dir, repo_root, known_paths)
+
+    if not orphans:
+        logger.info("No orphaned forecast raster files found.")
+        return 0
+
+    action = "Would remove" if dry_run else "Removing"
+    for path in orphans:
+        logger.info("%s orphaned raster: %s", action, path)
+        if not dry_run:
+            path.unlink(missing_ok=True)
+
+    if not dry_run:
+        # Clean up empty run directories (run_{id}/ dirs left after file removal)
+        for run_dir in forecasts_dir.rglob("run_*"):
+            if run_dir.is_dir():
+                try:
+                    run_dir.rmdir()  # Only succeeds if directory is empty
+                    logger.info("Removed empty run directory: %s", run_dir)
+                except OSError:
+                    pass  # Directory still has files — leave it
+
+    logger.info("%s %d orphaned forecast raster file(s).", action, len(orphans))
+    return len(orphans)
+
+
 def cleanup(dry_run: bool = False) -> None:
-    """Delete records beyond per-table retention windows, then VACUUM."""
+    """Delete records beyond per-table retention windows, purge orphaned raster files, then VACUUM."""
     now = datetime.now(timezone.utc)
     engine = get_engine()
     prefix = "[DRY RUN] " if dry_run else ""
@@ -157,6 +235,11 @@ def cleanup(dry_run: bool = False) -> None:
             )
             if deleted > 0:
                 vacuumed_tables.append(table)
+
+    # Clean up orphaned raster files on disk (CASCADE already handled DB child rows).
+    # Runs in both live and dry-run modes — purge_orphan_forecast_files respects dry_run.
+    logger.info("%sPurging orphaned spread forecast raster files …", prefix)
+    purge_orphan_forecast_files(REPO_ROOT, dry_run=dry_run)
 
     if dry_run:
         logger.info(f"{prefix}Dry-run complete — no rows were mutated.")
