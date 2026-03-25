@@ -1,5 +1,6 @@
 import argparse
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from ingest.orchestrator import (
@@ -12,6 +13,7 @@ from ingest.orchestrator import (
     _run_denoiser_drift,
     run_once,
     run_scheduler,
+    validate_and_reset_watermarks,
 )
 
 
@@ -322,6 +324,143 @@ class TestDriftJob(unittest.TestCase):
         exit_code = run_once(jobs, stop_on_error=False)
         self.assertEqual(1, exit_code)
         self.assertEqual(["drift"], calls)
+
+
+class TestWatermarkValidation(unittest.TestCase):
+    _NOW = datetime(2026, 3, 25, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _wm(self, source: str, area_key: str, ts: datetime | None) -> dict:
+        return {"source": source, "area_key": area_key, "last_acq_time_utc": ts}
+
+    def _run(self, watermarks: list) -> tuple[int, list]:
+        resets: list[tuple[str, str]] = []
+        count = validate_and_reset_watermarks(
+            now_utc=self._NOW,
+            list_fn=lambda: watermarks,
+            reset_fn=lambda s, a: resets.append((s, a)),
+        )
+        return count, resets
+
+    # --- Corrupt: future timestamp ---
+
+    def test_future_watermark_is_reset(self):
+        future_ts = self._NOW + timedelta(hours=2)
+        count, resets = self._run([self._wm("VIIRS_SNPP_NRT", "world", future_ts)])
+        self.assertEqual(1, count)
+        self.assertEqual([("VIIRS_SNPP_NRT", "world")], resets)
+
+    def test_future_watermark_non_nrt_is_also_reset(self):
+        """Future timestamps are invalid regardless of source type."""
+        future_ts = self._NOW + timedelta(hours=1)
+        count, resets = self._run([self._wm("VIIRS_SNPP_SP", "world", future_ts)])
+        self.assertEqual(1, count)
+        self.assertEqual([("VIIRS_SNPP_SP", "world")], resets)
+
+    def test_within_clock_skew_tolerance_is_not_reset(self):
+        """A timestamp just inside the 5-minute grace window must not be reset."""
+        almost_future = self._NOW + timedelta(seconds=299)
+        count, resets = self._run([self._wm("VIIRS_SNPP_NRT", "world", almost_future)])
+        self.assertEqual(0, count)
+        self.assertEqual([], resets)
+
+    # --- Corrupt: NRT staleness ---
+
+    def test_nrt_watermark_older_than_30_days_is_reset(self):
+        stale_ts = self._NOW - timedelta(days=31)
+        count, resets = self._run([self._wm("VIIRS_SNPP_NRT", "world", stale_ts)])
+        self.assertEqual(1, count)
+        self.assertEqual([("VIIRS_SNPP_NRT", "world")], resets)
+
+    def test_viirs_noaa20_nrt_staleness_is_detected(self):
+        stale_ts = self._NOW - timedelta(days=45)
+        count, resets = self._run([self._wm("VIIRS_NOAA20_NRT", "-130,30,-60,60", stale_ts)])
+        self.assertEqual(1, count)
+        self.assertEqual([("VIIRS_NOAA20_NRT", "-130,30,-60,60")], resets)
+
+    def test_non_nrt_watermark_older_than_30_days_is_not_reset(self):
+        """Batch/archive sources are not subject to the NRT staleness limit."""
+        stale_ts = self._NOW - timedelta(days=31)
+        count, resets = self._run([self._wm("VIIRS_SNPP_SP", "world", stale_ts)])
+        self.assertEqual(0, count)
+        self.assertEqual([], resets)
+
+    def test_nrt_watermark_exactly_30_days_old_is_not_reset(self):
+        """Boundary: exactly 30 days is still within the limit."""
+        boundary_ts = self._NOW - timedelta(days=30)
+        count, resets = self._run([self._wm("VIIRS_SNPP_NRT", "world", boundary_ts)])
+        self.assertEqual(0, count)
+        self.assertEqual([], resets)
+
+    # --- Valid: should not be touched ---
+
+    def test_null_watermark_is_not_reset(self):
+        """NULL is valid — already in bootstrap mode."""
+        count, resets = self._run([self._wm("VIIRS_SNPP_NRT", "world", None)])
+        self.assertEqual(0, count)
+        self.assertEqual([], resets)
+
+    def test_sane_recent_watermark_is_not_reset(self):
+        good_ts = self._NOW - timedelta(hours=1)
+        count, resets = self._run([self._wm("VIIRS_SNPP_NRT", "world", good_ts)])
+        self.assertEqual(0, count)
+        self.assertEqual([], resets)
+
+    # --- Mixed batch ---
+
+    def test_multiple_watermarks_only_corrupt_ones_reset(self):
+        watermarks = [
+            self._wm("VIIRS_SNPP_NRT", "world", self._NOW - timedelta(hours=1)),      # valid
+            self._wm("VIIRS_NOAA20_NRT", "world", self._NOW + timedelta(hours=2)),    # future
+            self._wm("VIIRS_SNPP_NRT", "-130,30,-60,60", self._NOW - timedelta(days=45)),  # stale NRT
+            self._wm("VIIRS_SNPP_SP", "world", self._NOW - timedelta(days=60)),        # old but not NRT
+        ]
+        count, resets = self._run(watermarks)
+        self.assertEqual(2, count)
+        self.assertIn(("VIIRS_NOAA20_NRT", "world"), resets)
+        self.assertIn(("VIIRS_SNPP_NRT", "-130,30,-60,60"), resets)
+        self.assertNotIn(("VIIRS_SNPP_NRT", "world"), resets)
+        self.assertNotIn(("VIIRS_SNPP_SP", "world"), resets)
+
+    # --- Error resilience ---
+
+    def test_db_error_during_list_returns_zero_and_does_not_raise(self):
+        def _fail():
+            raise RuntimeError("db connection refused")
+
+        count = validate_and_reset_watermarks(
+            now_utc=self._NOW,
+            list_fn=_fail,
+            reset_fn=lambda s, a: None,
+        )
+        self.assertEqual(0, count)
+
+    def test_reset_failure_is_not_counted_but_does_not_abort_remaining(self):
+        """If the DB reset for one watermark fails, the others still get processed."""
+        future_ts = self._NOW + timedelta(hours=2)
+        also_future_ts = self._NOW + timedelta(hours=3)
+        succeeded: list[str] = []
+
+        def _reset(s: str, a: str) -> None:
+            if s == "VIIRS_SNPP_NRT":
+                raise RuntimeError("transient error")
+            succeeded.append(s)
+
+        count = validate_and_reset_watermarks(
+            now_utc=self._NOW,
+            list_fn=lambda: [
+                self._wm("VIIRS_SNPP_NRT", "world", future_ts),
+                self._wm("VIIRS_NOAA20_NRT", "world", also_future_ts),
+            ],
+            reset_fn=_reset,
+        )
+        # Only NOAA20 reset succeeded
+        self.assertEqual(1, count)
+        self.assertEqual(["VIIRS_NOAA20_NRT"], succeeded)
+
+    def test_empty_watermarks_returns_zero(self):
+        count, resets = self._run([])
+        self.assertEqual(0, count)
+        self.assertEqual([], resets)
 
 
 if __name__ == "__main__":
