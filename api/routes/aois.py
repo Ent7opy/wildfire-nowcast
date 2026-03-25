@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from api.deps import no_cache
 from pydantic import BaseModel
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
@@ -95,7 +97,7 @@ def _validate_geometry(geojson: dict[str, Any]) -> None:
         )
 
 
-@aois_router.post("", response_model=AOIResponse, status_code=status.HTTP_201_CREATED)
+@aois_router.post("", response_model=AOIResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(no_cache)])
 def create_aoi(request: CreateAOIRequest):
     """Create a new Area of Interest."""
     _validate_geometry(request.geometry)

@@ -17,6 +17,7 @@ from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, ConfigDict
 
 from api.config import settings
+from api.deps import no_cache
 from api.fires.repo import get_fire_front_by_id, validate_bbox
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
@@ -198,7 +199,7 @@ async def get_forecast(
     "/jit",
     response_model=JitForecastResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(RateLimiter(times=10, seconds=60))],
+    dependencies=[Depends(RateLimiter(times=10, seconds=60)), Depends(no_cache)],
 )
 def create_jit_forecast(request: JitForecastRequest):
     """Enqueue a JIT forecast pipeline for arbitrary bbox.
@@ -307,7 +308,7 @@ def create_jit_forecast(request: JitForecastRequest):
     "/jit/from-front",
     response_model=JitForecastFromFrontResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(RateLimiter(times=10, seconds=60))],
+    dependencies=[Depends(RateLimiter(times=10, seconds=60)), Depends(no_cache)],
 )
 def create_jit_forecast_from_front(request: JitForecastFromFrontRequest):
     """Enqueue JIT forecast pipeline from an existing fire front geometry."""
@@ -683,7 +684,7 @@ def _parse_iso8601_datetime(value: str) -> datetime:
     return parsed
 
 
-@forecast_router.post("/generate")
+@forecast_router.post("/generate", dependencies=[Depends(no_cache)])
 def generate_forecast_endpoint(request: GenerateForecastRequest):
     """Generate a spread forecast on-the-fly for a given bbox and persist it.
 
