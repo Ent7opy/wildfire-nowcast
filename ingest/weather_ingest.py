@@ -66,6 +66,9 @@ SHORT_NAME_MAP = {
 ANALYSIS_CRS = DEFAULT_CRS
 ANALYSIS_CELL_SIZE_DEG = DEFAULT_CELL_SIZE_DEG
 
+# GFS APCP accumulation resets every 6 hours (hard-coded in GFS v16 pgrb2 output).
+GFS_ACCUMULATION_BUCKET_HOURS = 6
+
 
 def build_grid_spec(settings: WeatherIngestSettings) -> GridSpec:
     """Build the canonical analysis grid snapped to 0.01°."""
@@ -563,6 +566,89 @@ def _open_variable_dataset(
         raise
 
 
+def _derive_per_step_precip(tp: xr.DataArray) -> xr.DataArray:
+    """Convert GFS APCP raw GRIB values to per-step precipitation.
+
+    GFS APCP GRIB metadata this function relies on:
+      - ``stepType``: "accum" (confirmed via cfgrib ``filter_by_keys`` shortName="tp").
+      - Accumulation bucket: **6 hours**, hard-coded in GFS v16 operational pgrb2 output.
+      - ``stepRange`` examples for 3h steps: "0-3", "0-6", "6-9", "6-12".
+        The 6h bucket resets at lead-times 6, 12, 18, 24 … hours from the cycle start.
+        Within each bucket, values are cumulative from the bucket start.
+      - ``stepRange`` examples for 6h steps: "0-6", "6-12", "12-18".
+        At 6h cadence the only value in each bucket IS the full-bucket total;
+        no differencing is required.
+
+    Derivation logic (inferred step size from ``lead_time_hours`` spacing):
+
+    For **step_hours >= 6** (default GFS operational cadence):
+        Each downloaded GRIB file covers exactly one 6h bucket.  The APCP value
+        already equals the per-6h-period precipitation.  Values are returned
+        unchanged (clipping only).
+
+    For **step_hours < 6** (e.g. 3h, 1h):
+        At a lead time that is an exact multiple of 6 (the "bucket-end" step),
+        the GRIB value is a running total from the bucket start.  Subtracting
+        the immediately preceding step yields the final sub-step contribution::
+
+            period(3-6h) = raw_f006 - raw_f003  (raw_f006 = 0-6h running total)
+            period(9-12h) = raw_f012 - raw_f009 (raw_f012 = 6-12h running total)
+
+        All other steps within a bucket are period amounts (not running totals)
+        and are used as-is.
+
+    Negative values produced by floating-point differencing are clipped to 0.
+
+    Returns a DataArray with:
+      - ``units``: "kg m**-2"  (= mm liquid water equivalent, raw GFS convention)
+      - ``step_type``: "per_step"
+      - ``source_step_type``: "accum"
+      - ``accumulation_bucket_hours``: 6
+    """
+    lead_times = tp.coords["lead_time_hours"].values.astype(int)
+
+    # Infer step size from the first gap in lead_time_hours.
+    step_hours = GFS_ACCUMULATION_BUCKET_HOURS
+    if len(lead_times) > 1:
+        step_hours = int(lead_times[1] - lead_times[0])
+
+    if step_hours >= GFS_ACCUMULATION_BUCKET_HOURS:
+        # Each file already carries a full 6h-period amount.
+        # clip() creates the only copy needed — no prior copy required.
+        per_step = tp.clip(min=0.0)
+    else:
+        # Bucket-end steps (lead_time % 6 == 0, > 0) contain a running total from
+        # the bucket start; all other steps are already period amounts.
+        bucket_end_idx = np.where(
+            (lead_times % GFS_ACCUMULATION_BUCKET_HOURS == 0) & (lead_times > 0)
+        )[0]
+
+        # Single float copy; selectively update in-place with vectorized indexing.
+        per_step_values = np.array(tp.values, dtype=float)
+        per_step_values[lead_times == 0] = 0.0
+        if bucket_end_idx.size > 0:
+            per_step_values[bucket_end_idx] = (
+                tp.values[bucket_end_idx] - tp.values[bucket_end_idx - 1]
+            )
+        np.clip(per_step_values, 0.0, None, out=per_step_values)
+        per_step = tp.copy(data=per_step_values)
+
+    per_step.attrs.update(
+        {
+            "long_name": "total precipitation per time step",
+            "units": "kg m**-2",
+            "step_type": "per_step",
+            "source_step_type": "accum",
+            "accumulation_bucket_hours": GFS_ACCUMULATION_BUCKET_HOURS,
+            "gfs_grib_note": (
+                "GFS APCP (stepType=accum) resets every 6h. "
+                "For sub-6h steps, bucket-end values are differenced to yield per-step amounts."
+            ),
+        }
+    )
+    return per_step
+
+
 def build_weather_dataset(
     grib_paths: list[Path],
     run_time: datetime,
@@ -602,6 +688,12 @@ def build_weather_dataset(
     ds = ds.assign_coords(forecast_reference_time=run_time64)
     lead_time = (ds["time"].values - run_time64) / np.timedelta64(1, "h")
     ds = ds.assign_coords(lead_time_hours=("time", lead_time.astype(int)))
+
+    # Convert raw cumulative GFS APCP to per-step precipitation.
+    # Must run after lead_time_hours is assigned (used to infer step size and bucket boundaries).
+    if include_precip and "tp" in ds:
+        ds["tp"] = _derive_per_step_precip(ds["tp"])
+
     return ds
 
 
