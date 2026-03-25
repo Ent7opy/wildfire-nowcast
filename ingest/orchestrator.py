@@ -9,7 +9,7 @@ import signal
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -33,6 +33,13 @@ JOB_PERIMETERS = "perimeters"
 JOB_INDUSTRIAL = "industrial"
 JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
+
+# Watermarks whose source name ends with _NRT are near-real-time feeds.
+# A stale NRT watermark (>30 days old) indicates the ingest pipeline has been
+# halted long enough that the upstream NRT archive window has expired; resetting
+# to NULL triggers safe bootstrap mode on the next ingest cycle.
+_WATERMARK_FUTURE_TOLERANCE_SECONDS: float = 300.0  # 5 min clock-skew grace
+_WATERMARK_NRT_MAX_AGE_DAYS: int = 30
 
 
 @dataclass
@@ -502,6 +509,108 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
     ]
 
 
+def _is_nrt_source(source: str) -> bool:
+    """Return True for near-real-time sources (source name ends with _NRT)."""
+    return source.upper().endswith("_NRT")
+
+
+def validate_and_reset_watermarks(
+    *,
+    now_utc: datetime | None = None,
+    list_fn: Callable[[], list[dict[str, Any]]] | None = None,
+    reset_fn: Callable[[str, str], None] | None = None,
+) -> int:
+    """Validate all DB watermarks at startup; reset corrupt ones to NULL.
+
+    A watermark is corrupt when:
+    - ``last_acq_time_utc`` is in the future beyond clock-skew tolerance, OR
+    - ``last_acq_time_utc`` is older than 30 days for NRT sources (upstream
+      archive window has expired, so the watermark cannot safely anchor ingest).
+
+    Corrupt watermarks are reset to NULL, which triggers bootstrap mode
+    (6-hour initial lookback) on the next FIRMS ingest cycle.
+
+    Returns the number of watermarks that were reset.
+    """
+    if now_utc is None:
+        now_utc = _utc_now()
+    if list_fn is None:
+        from ingest.repository import list_all_watermarks
+
+        list_fn = list_all_watermarks
+    if reset_fn is None:
+        from ingest.repository import reset_ingest_watermark
+
+        reset_fn = lambda s, a: reset_ingest_watermark(source=s, area_key=a)  # noqa: E731
+
+    try:
+        watermarks = list_fn()
+    except Exception as exc:
+        LOGGER.warning(
+            "Startup watermark validation skipped — could not load watermarks: %s", exc
+        )
+        return 0
+
+    future_cutoff = now_utc + timedelta(seconds=_WATERMARK_FUTURE_TOLERANCE_SECONDS)
+    stale_cutoff = now_utc - timedelta(days=_WATERMARK_NRT_MAX_AGE_DAYS)
+    reset_count = 0
+
+    for wm in watermarks:
+        source: str = wm["source"]
+        area_key: str = wm["area_key"]
+        ts: datetime | None = wm.get("last_acq_time_utc")
+
+        if ts is None:
+            continue  # NULL is valid — already in bootstrap mode
+
+        reason: str | None = None
+        if ts > future_cutoff:
+            reason = (
+                f"timestamp is in the future "
+                f"(last_acq_time_utc={ts.isoformat()}, "
+                f"now={now_utc.isoformat()}, "
+                f"tolerance={_WATERMARK_FUTURE_TOLERANCE_SECONDS:.0f}s)"
+            )
+        elif _is_nrt_source(source) and ts < stale_cutoff:
+            reason = (
+                f"NRT watermark exceeds {_WATERMARK_NRT_MAX_AGE_DAYS}-day staleness limit "
+                f"(last_acq_time_utc={ts.isoformat()}, now={now_utc.isoformat()})"
+            )
+
+        if reason is None:
+            continue
+
+        LOGGER.warning(
+            "Corrupt watermark detected — resetting to NULL: "
+            "source=%s area_key=%s before=%s reason=[%s] reset_to=NULL",
+            source,
+            area_key,
+            ts.isoformat(),
+            reason,
+        )
+        try:
+            reset_fn(source, area_key)
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to reset watermark: source=%s area_key=%s error=%s",
+                source,
+                area_key,
+                exc,
+            )
+            continue
+        reset_count += 1
+
+    if reset_count:
+        LOGGER.warning(
+            "Startup watermark validation complete: %d corrupt watermark(s) reset to NULL",
+            reset_count,
+        )
+    else:
+        LOGGER.info("Startup watermark validation complete: all %d watermark(s) sane", len(watermarks))
+
+    return reset_count
+
+
 def _safe_data_status_snapshot() -> dict[str, Any] | None:
     try:
         from api.data_status import build_data_status_snapshot
@@ -734,6 +843,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     jobs = build_jobs(args)
     dashboard_path = Path(args.dashboard_path)
+
+    validate_and_reset_watermarks()
 
     if not args.loop:
         exit_code = run_once(
