@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from api.config import settings
 from api.data_status import build_data_status_snapshot
+from api.db_health import build_db_size_snapshot
 from api.model_registry import list_active_models
 from api.terrain.features_repo import list_terrain_coverage_inventory
 from api.fires.repo import (
@@ -229,6 +230,41 @@ async def denoiser_review_queue(limit: int = 200, status: str = "open") -> dict:
     except Exception as exc:  # pragma: no cover - defensive fallback
         return {"as_of": as_of, "rows": [], "error": str(exc)}
     return {"as_of": as_of, "rows": rows}
+
+
+@internal_router.get("/internal/health/db-size")
+async def db_size_health() -> dict:
+    """Return per-table row counts, total DB size, and retention/cleanup policy status.
+
+    Row counts are approximate (pg_stat_user_tables.n_live_tup, refreshed by
+    autovacuum) — suitable for capacity alerting without a sequential scan.
+    Cleanup timing is derived from the orchestrator dashboard JSON so callers
+    see the same last-run/next-run values the orchestrator reports.
+
+    All numeric leaf fields (size_bytes, row_count, interval_minutes, *_days)
+    are raw numbers so monitors can compare thresholds without string parsing.
+    """
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        return build_db_size_snapshot()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {
+            "as_of": as_of,
+            "database": {"size_bytes": None, "size_pretty": None},
+            "tables": {},
+            "retention_policy": {
+                "default_retention_days": None,
+                "archive_retention_days": None,
+            },
+            "cleanup": {
+                "last_run_at": None,
+                "last_outcome": None,
+                "next_run_at": None,
+                "interval_minutes": None,
+                "source": "error",
+            },
+            "error": str(exc),
+        }
 
 
 @internal_router.post("/internal/denoiser/review-queue/{event_id}/resolve")

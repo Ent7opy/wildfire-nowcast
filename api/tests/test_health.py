@@ -246,3 +246,108 @@ def test_denoiser_review_queue_endpoints(monkeypatch) -> None:
     payload = resolve_resp.json()
     assert payload["event_id"] == "evt_1"
     assert payload["updated"] == 2
+
+
+# ---------------------------------------------------------------------------
+# /internal/health/db-size
+# ---------------------------------------------------------------------------
+
+
+def _make_db_size_snapshot(**overrides) -> dict:
+    base = {
+        "as_of": "2026-03-25T12:00:00+00:00",
+        "database": {"size_bytes": 524288000, "size_pretty": "500 MB"},
+        "tables": {
+            "fire_detections": {"row_count": 150000, "retention": {"archive_days": 3, "nrt_days": 14}},
+            "ingest_batches": {"row_count": 2000, "retention": 30},
+        },
+        "retention_policy": {"default_retention_days": 14, "archive_retention_days": 3},
+        "cleanup": {
+            "last_run_at": "2026-03-25T06:00:00+00:00",
+            "last_outcome": "success",
+            "next_run_at": "2026-03-26T06:00:00+00:00",
+            "interval_minutes": 1440.0,
+            "source": "orchestrator_dashboard",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_db_size_health_returns_snapshot(monkeypatch) -> None:
+    expected = _make_db_size_snapshot()
+    monkeypatch.setattr("api.routes.internal.build_db_size_snapshot", lambda **_: expected)
+
+    response = client.get("/internal/health/db-size")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == expected
+
+
+def test_db_size_health_has_required_numeric_fields(monkeypatch) -> None:
+    """Monitors need raw numeric fields — verify they are present and typed."""
+    expected = _make_db_size_snapshot()
+    monkeypatch.setattr("api.routes.internal.build_db_size_snapshot", lambda **_: expected)
+
+    body = client.get("/internal/health/db-size").json()
+
+    assert isinstance(body["database"]["size_bytes"], int)
+    assert isinstance(body["database"]["size_pretty"], str)
+    assert isinstance(body["cleanup"]["interval_minutes"], float)
+    assert isinstance(body["retention_policy"]["default_retention_days"], int)
+    assert isinstance(body["retention_policy"]["archive_retention_days"], int)
+    for _table, stats in body["tables"].items():
+        assert "row_count" in stats
+        assert isinstance(stats["row_count"], int)
+
+
+def test_db_size_health_cleanup_timing_fields(monkeypatch) -> None:
+    """last_run_at and next_run_at must be present (may be null on first deploy)."""
+    expected = _make_db_size_snapshot()
+    monkeypatch.setattr("api.routes.internal.build_db_size_snapshot", lambda **_: expected)
+
+    body = client.get("/internal/health/db-size").json()
+    cleanup = body["cleanup"]
+
+    assert "last_run_at" in cleanup
+    assert "next_run_at" in cleanup
+    assert "source" in cleanup
+
+
+def test_db_size_health_null_cleanup_when_dashboard_missing(monkeypatch) -> None:
+    """If orchestrator dashboard is absent, nulls with source explanation are returned."""
+    expected = _make_db_size_snapshot(
+        cleanup={
+            "last_run_at": None,
+            "last_outcome": None,
+            "next_run_at": None,
+            "interval_minutes": 1440.0,
+            "source": "dashboard_unavailable",
+            "source_detail": "/data/ingest/orchestrator_dashboard.json",
+        }
+    )
+    monkeypatch.setattr("api.routes.internal.build_db_size_snapshot", lambda **_: expected)
+
+    body = client.get("/internal/health/db-size").json()
+    cleanup = body["cleanup"]
+
+    assert cleanup["last_run_at"] is None
+    assert cleanup["next_run_at"] is None
+    assert cleanup["source"] == "dashboard_unavailable"
+
+
+def test_db_size_health_fallback_on_db_error(monkeypatch) -> None:
+    """Endpoint must return a structured fallback dict, not a 500, on DB errors."""
+
+    def _raise(**_):
+        raise RuntimeError("DB is down")
+
+    monkeypatch.setattr("api.routes.internal.build_db_size_snapshot", _raise)
+
+    response = client.get("/internal/health/db-size")
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body
+    assert body["database"]["size_bytes"] is None
+    assert body["tables"] == {}
+    assert body["cleanup"]["source"] == "error"
