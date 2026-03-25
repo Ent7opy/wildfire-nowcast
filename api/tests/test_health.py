@@ -142,6 +142,93 @@ def test_denoiser_industrial_coverage_endpoint(monkeypatch) -> None:
     assert body["coverage"] == payload
 
 
+def test_terrain_coverage_inventory_endpoint(monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    preprocessed_at = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FakeRow:
+        region_name = "us_west"
+        bbox = (-125.0, 32.0, -114.0, 49.0)
+        cell_size_deg = 0.01
+        crs_epsg = 4326
+        grid_n_lat = 1700
+        grid_n_lon = 1100
+        terrain_fallback_used = False
+        coverage_fraction = 0.97
+        created_at = preprocessed_at.replace(tzinfo=None)  # stored as naive UTC
+        slope_path = "data/terrain/us_west/slope_us_west_epsg4326_0p01deg.tif"
+        aspect_path = "data/terrain/us_west/aspect_us_west_epsg4326_0p01deg.tif"
+
+    monkeypatch.setattr(
+        "api.routes.internal.list_terrain_coverage_inventory",
+        lambda: [_FakeRow()],
+    )
+
+    response = client.get("/internal/health/terrain-coverage")
+    assert response.status_code == 200
+    body = response.json()
+    assert "as_of" in body
+    assert "stale_threshold_minutes" in body
+    assert body["region_count"] == 1
+
+    region = body["regions"][0]
+    assert region["region_name"] == "us_west"
+    assert region["bbox"] == {"min_lon": -125.0, "min_lat": 32.0, "max_lon": -114.0, "max_lat": 49.0}
+    assert region["resolution_deg"] == 0.01
+    assert region["crs_epsg"] == 4326
+    assert region["grid"] == {"n_lat": 1700, "n_lon": 1100}
+    assert region["terrain_fallback_used"] is False
+    assert region["coverage_fraction"] == 0.97
+    assert region["preprocessed_at"] == "2026-03-20T12:00:00+00:00"
+    assert "age_minutes" in region
+    assert isinstance(region["is_stale"], bool)
+    assert region["slope_path"] == "data/terrain/us_west/slope_us_west_epsg4326_0p01deg.tif"
+    assert region["aspect_path"] == "data/terrain/us_west/aspect_us_west_epsg4326_0p01deg.tif"
+
+
+def test_terrain_coverage_inventory_fallback_region(monkeypatch) -> None:
+    """Fallback (flat-terrain stub) regions are included and flagged."""
+    from datetime import datetime
+
+    class _FallbackRow:
+        region_name = "remote_stub"
+        bbox = (-110.0, 35.0, -100.0, 45.0)
+        cell_size_deg = 0.01
+        crs_epsg = 4326
+        grid_n_lat = 1000
+        grid_n_lon = 1000
+        terrain_fallback_used = True
+        coverage_fraction = None
+        created_at = datetime(2026, 3, 1, 0, 0, 0)
+        slope_path = "data/terrain/remote_stub/slope_remote_stub_epsg4326_0p01deg.tif"
+        aspect_path = "data/terrain/remote_stub/aspect_remote_stub_epsg4326_0p01deg.tif"
+
+    monkeypatch.setattr(
+        "api.routes.internal.list_terrain_coverage_inventory",
+        lambda: [_FallbackRow()],
+    )
+
+    response = client.get("/internal/health/terrain-coverage")
+    assert response.status_code == 200
+    region = response.json()["regions"][0]
+    assert region["terrain_fallback_used"] is True
+    assert region["coverage_fraction"] is None
+    assert region["is_stale"] is True  # 24+ days old, well past threshold
+
+
+def test_terrain_coverage_inventory_empty(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "api.routes.internal.list_terrain_coverage_inventory",
+        lambda: [],
+    )
+    response = client.get("/internal/health/terrain-coverage")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["region_count"] == 0
+    assert body["regions"] == []
+
+
 def test_denoiser_review_queue_endpoints(monkeypatch) -> None:
     rows = [{"id": 1, "event_id": "evt_1", "status": "open"}]
     monkeypatch.setattr("api.routes.internal.list_denoiser_review_queue", lambda limit=200, status="open": rows)
