@@ -312,6 +312,10 @@ def _load_weather_cube(
             lead_time_hours=("time", list(horizons_hours)),
         )
 
+        # Rename ingest-native 'tp' → contract-expected 'precip_24h'.
+        if "tp" in ds_final.data_vars and "precip_24h" not in ds_final.data_vars:
+            ds_final = ds_final.rename({"tp": "precip_24h"})
+
         # Ensure the caller doesn't hold an open file handle.
         ds_final = ds_final.load()
 
@@ -421,6 +425,8 @@ def _create_fallback_weather(
             "v10":  (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
             "t2m":  (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
             "rh2m": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
+            # Zero precipitation assumed in fallback (conservative: no rain).
+            "precip_24h": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
             # DFMC is NaN in fallback — callers should treat as unknown moisture.
             "dfmc": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
         },
