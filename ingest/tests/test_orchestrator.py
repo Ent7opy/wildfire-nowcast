@@ -1,10 +1,15 @@
 import argparse
 import unittest
+from unittest.mock import patch
 
 from ingest.orchestrator import (
+    JOB_DENOISER_DRIFT,
+    JOB_INDUSTRIAL,
+    JOB_ORDER,
     ScheduledJob,
     _build_industrial_argv,
     _build_weather_argv,
+    _run_denoiser_drift,
     run_once,
     run_scheduler,
 )
@@ -241,6 +246,82 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         self.assertEqual(0, calls["count"])
+
+
+class TestDriftJob(unittest.TestCase):
+    def test_denoiser_drift_in_job_order(self):
+        self.assertIn(JOB_DENOISER_DRIFT, JOB_ORDER)
+        # Must come after industrial (ingest jobs run before monitoring)
+        self.assertGreater(JOB_ORDER.index(JOB_DENOISER_DRIFT), JOB_ORDER.index(JOB_INDUSTRIAL))
+
+    def test_run_denoiser_drift_ok_returns_zero(self):
+        summary = {
+            "metrics": {
+                "psi_score": {"value": 0.05, "severity": "ok"},
+                "score_mean_delta": {"value": 0.02, "severity": "ok"},
+            }
+        }
+        args = argparse.Namespace()
+        with patch("ingest.denoiser_drift_monitor.monitor_denoiser_drift", return_value=summary):
+            code = _run_denoiser_drift(args)
+        self.assertEqual(0, code)
+
+    def test_run_denoiser_drift_warn_returns_zero(self):
+        summary = {
+            "metrics": {
+                "psi_score": {"value": 0.25, "severity": "warn"},
+                "score_mean_delta": {"value": 0.05, "severity": "ok"},
+            }
+        }
+        args = argparse.Namespace()
+        with patch("ingest.denoiser_drift_monitor.monitor_denoiser_drift", return_value=summary):
+            code = _run_denoiser_drift(args)
+        self.assertEqual(0, code)
+
+    def test_run_denoiser_drift_hard_violation_returns_one_and_logs_blocker(self):
+        summary = {
+            "metrics": {
+                "psi_score": {"value": 0.42, "severity": "hard"},
+                "score_mean_delta": {"value": 0.22, "severity": "hard"},
+            }
+        }
+        args = argparse.Namespace()
+        with patch("ingest.denoiser_drift_monitor.monitor_denoiser_drift", return_value=summary):
+            with self.assertLogs("ingest_orchestrator", level="ERROR") as log_ctx:
+                code = _run_denoiser_drift(args)
+        self.assertEqual(1, code)
+        self.assertTrue(
+            any("BLOCKER" in line for line in log_ctx.output),
+            f"Expected BLOCKER in logs, got: {log_ctx.output}",
+        )
+
+    def test_run_denoiser_drift_hard_violation_does_not_rollback(self):
+        """allow_rollback must be False when called from orchestrator."""
+        summary = {
+            "metrics": {
+                "psi_score": {"value": 0.50, "severity": "hard"},
+                "score_mean_delta": {"value": 0.25, "severity": "hard"},
+            }
+        }
+        args = argparse.Namespace()
+        with patch("ingest.denoiser_drift_monitor.monitor_denoiser_drift", return_value=summary) as mock_monitor:
+            with self.assertLogs("ingest_orchestrator", level="ERROR"):
+                _run_denoiser_drift(args)
+        _call_kwargs = mock_monitor.call_args.kwargs
+        self.assertFalse(_call_kwargs.get("allow_rollback"), "orchestrator must never auto-rollback")
+
+    def test_drift_job_failure_surfaces_in_run_once_metrics(self):
+        """A hard-violation (exit=1) is tracked as a failure in orchestrator metrics."""
+        calls: list[str] = []
+
+        def _drift_hard() -> int:
+            calls.append("drift")
+            return 1
+
+        jobs = [ScheduledJob(name="denoiser_drift", interval_seconds=60.0, runner=_drift_hard)]
+        exit_code = run_once(jobs, stop_on_error=False)
+        self.assertEqual(1, exit_code)
+        self.assertEqual(["drift"], calls)
 
 
 if __name__ == "__main__":
