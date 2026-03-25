@@ -537,8 +537,12 @@ class TestFuelJobs(unittest.TestCase):
 
         self.assertEqual(1, code)
         self.assertTrue(
-            any("pipeline continues" in line for line in log_ctx.output),
-            f"Expected 'pipeline continues' in warning log, got: {log_ctx.output}",
+            any("tracking_id=" in line for line in log_ctx.output),
+            f"Expected 'tracking_id=' in warning log, got: {log_ctx.output}",
+        )
+        self.assertTrue(
+            any("next cycle will retry" in line for line in log_ctx.output),
+            f"Expected 'next cycle will retry' in warning log, got: {log_ctx.output}",
         )
 
     def test_run_lfmc_api_error_returns_one(self):
