@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -140,14 +138,6 @@ class TestTerrainFeaturesFlatStub:
         inserted = MagicMock()
         inserted.id = 99
         mock_insert.return_value = inserted
-
-        settings_patch = {
-            "region_name": "test_region",
-            "data_dir": tmp_path,
-            "output_dir": tmp_path,
-            "recompute": False,
-            "nodata_value": -9999.0,
-        }
 
         with (
             patch("ingest.terrain_features.TerrainFeaturesSettings") as mock_settings_cls,
