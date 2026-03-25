@@ -8,12 +8,16 @@ from ingest.orchestrator import (
     JOB_CLEANUP,
     JOB_DENOISER_DRIFT,
     JOB_INDUSTRIAL,
+    JOB_LFMC,
+    JOB_LULC,
     JOB_ORDER,
+    JOB_WEATHER,
     ScheduledJob,
     _build_industrial_argv,
     _build_weather_argv,
     _run_cleanup,
     _run_denoiser_drift,
+    _run_lfmc,
     run_once,
     run_scheduler,
     validate_and_reset_watermarks,
@@ -498,6 +502,102 @@ class TestWatermarkValidation(unittest.TestCase):
         count, resets = self._run([])
         self.assertEqual(0, count)
         self.assertEqual([], resets)
+
+
+class TestFuelJobs(unittest.TestCase):
+    """Tests for LFMC and LULC orchestrator integration."""
+
+    def test_lfmc_in_job_order(self):
+        self.assertIn(JOB_LFMC, JOB_ORDER)
+
+    def test_lulc_in_job_order(self):
+        self.assertIn(JOB_LULC, JOB_ORDER)
+
+    def test_lfmc_after_weather(self):
+        self.assertGreater(JOB_ORDER.index(JOB_LFMC), JOB_ORDER.index(JOB_WEATHER))
+
+    def test_lulc_after_weather(self):
+        self.assertGreater(JOB_ORDER.index(JOB_LULC), JOB_ORDER.index(JOB_WEATHER))
+
+    def test_lfmc_before_lulc(self):
+        self.assertLess(JOB_ORDER.index(JOB_LFMC), JOB_ORDER.index(JOB_LULC))
+
+    def test_run_lfmc_timeout_returns_one_and_logs_warning(self):
+        """A TimeoutError from the LFMC API must return exit_code=1 with a warning log."""
+        args = argparse.Namespace(
+            lfmc_bbox=None,
+            lfmc_timeout_seconds=30.0,
+        )
+        with patch(
+            "ingest.lfmc_ecland_ingest.ingest_lfmc_ecland_for_bbox",
+            side_effect=TimeoutError("LFMC ecLand job timed out"),
+        ):
+            with self.assertLogs("ingest_orchestrator", level="WARNING") as log_ctx:
+                code = _run_lfmc(args)
+
+        self.assertEqual(1, code)
+        self.assertTrue(
+            any("pipeline continues" in line for line in log_ctx.output),
+            f"Expected 'pipeline continues' in warning log, got: {log_ctx.output}",
+        )
+
+    def test_run_lfmc_api_error_returns_one(self):
+        """Any LFMC exception (e.g. missing API URL) returns exit_code=1."""
+        args = argparse.Namespace(
+            lfmc_bbox=None,
+            lfmc_timeout_seconds=30.0,
+        )
+        with patch(
+            "ingest.lfmc_ecland_ingest.ingest_lfmc_ecland_for_bbox",
+            side_effect=RuntimeError("LFMC_ECLAND_API_URL is not set"),
+        ):
+            with self.assertLogs("ingest_orchestrator", level="WARNING"):
+                code = _run_lfmc(args)
+
+        self.assertEqual(1, code)
+
+    def test_lfmc_failure_does_not_stop_subsequent_jobs(self):
+        """LFMC timeout/failure must not block downstream jobs in run_once."""
+        calls: list[str] = []
+
+        def _lfmc_timeout() -> int:
+            calls.append("lfmc")
+            return 1  # simulates _run_lfmc returning 1 after timeout
+
+        def _downstream() -> int:
+            calls.append("downstream")
+            return 0
+
+        jobs = [
+            ScheduledJob(name="lfmc", interval_seconds=21600.0, runner=_lfmc_timeout),
+            ScheduledJob(name="terrain", interval_seconds=86400.0, runner=_downstream),
+        ]
+        exit_code = run_once(jobs, stop_on_error=False)
+
+        # Pipeline completes; overall exit is 1 (has failure) but downstream ran
+        self.assertEqual(1, exit_code)
+        self.assertEqual(["lfmc", "downstream"], calls)
+
+    def test_lfmc_failure_with_stop_on_error_halts_pipeline(self):
+        """stop_on_error=True must stop after LFMC failure (existing semantics, not LFMC-specific)."""
+        calls: list[str] = []
+
+        def _lfmc_timeout() -> int:
+            calls.append("lfmc")
+            return 1
+
+        def _downstream() -> int:  # pragma: no cover
+            calls.append("downstream")
+            return 0
+
+        jobs = [
+            ScheduledJob(name="lfmc", interval_seconds=21600.0, runner=_lfmc_timeout),
+            ScheduledJob(name="terrain", interval_seconds=86400.0, runner=_downstream),
+        ]
+        exit_code = run_once(jobs, stop_on_error=True)
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(["lfmc"], calls)  # downstream did not run
 
 
 if __name__ == "__main__":

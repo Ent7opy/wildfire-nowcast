@@ -29,12 +29,14 @@ LOGGER = logging.getLogger("ingest_orchestrator")
 
 JOB_FIRMS = "firms"
 JOB_WEATHER = "weather"
+JOB_LFMC = "lfmc"
+JOB_LULC = "lulc"
 JOB_TERRAIN = "terrain"
 JOB_PERIMETERS = "perimeters"
 JOB_INDUSTRIAL = "industrial"
 JOB_DENOISER_DRIFT = "denoiser_drift"
 JOB_CLEANUP = "cleanup"
-JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP)
+JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 # Watermarks whose source name ends with _NRT are near-real-time feeds.
@@ -43,6 +45,7 @@ DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard
 # to NULL triggers safe bootstrap mode on the next ingest cycle.
 _WATERMARK_FUTURE_TOLERANCE_SECONDS: float = 300.0  # 5 min clock-skew grace
 _WATERMARK_NRT_MAX_AGE_DAYS: int = 30
+_DEFAULT_CONUS_BBOX: tuple[float, float, float, float] = (-179.5, 18.0, -66.0, 72.0)
 
 
 @dataclass
@@ -190,6 +193,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1440.0,
         help="Denoiser drift monitor run interval in minutes (loop mode).",
+    )
+    parser.add_argument(
+        "--lfmc-interval-minutes",
+        type=float,
+        default=360.0,
+        help="LFMC ecLand ingest interval in minutes (loop mode). 4x/day matches API job delay.",
+    )
+    parser.add_argument(
+        "--lulc-interval-minutes",
+        type=float,
+        default=10080.0,
+        help="LULC WorldCover backfill interval in minutes (loop mode). Weekly; tiles are static.",
     )
     parser.add_argument(
         "--cleanup-interval-minutes",
@@ -347,6 +362,60 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Run industrial ingest in dry-run mode.",
     )
 
+    parser.add_argument(
+        "--lfmc-bbox",
+        type=float,
+        nargs=4,
+        metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
+        help="Override LFMC ingest bbox. Defaults to CONUS (-179.5 18.0 -66.0 72.0).",
+    )
+    parser.add_argument(
+        "--lfmc-timeout-seconds",
+        type=int,
+        default=1800,
+        help=(
+            "Max seconds to wait for an LFMC API job to complete before giving up. "
+            "Capped well below the FIRMS/weather interval to avoid blocking the pipeline."
+        ),
+    )
+
+    parser.add_argument(
+        "--lulc-bbox",
+        type=float,
+        nargs=4,
+        metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
+        help="Override LULC WorldCover backfill bbox. Defaults to CONUS (-179.5 18.0 -66.0 72.0).",
+    )
+    parser.add_argument(
+        "--lulc-lookback-days",
+        type=int,
+        default=7,
+        help="Backfill fire_detections this many days back on each LULC run.",
+    )
+    parser.add_argument(
+        "--lulc-version",
+        type=str,
+        default="v200",
+        help="ESA WorldCover product version.",
+    )
+    parser.add_argument(
+        "--lulc-year",
+        type=int,
+        default=2021,
+        help="ESA WorldCover reference year.",
+    )
+    parser.add_argument(
+        "--lulc-force",
+        action="store_true",
+        help="Recompute LULC classes even for detections that are already classified.",
+    )
+    parser.add_argument(
+        "--lulc-cache-dir",
+        type=str,
+        default=None,
+        help="Local cache dir for ESA WorldCover tiles. Defaults to data/lulc/worldcover/v200_2021_tiles.",
+    )
+
     args = parser.parse_args(argv)
     _validate_args(args)
     return args
@@ -367,6 +436,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     interval_flags = (
         ("--firms-interval-minutes", args.firms_interval_minutes),
         ("--weather-interval-minutes", args.weather_interval_minutes),
+        ("--lfmc-interval-minutes", args.lfmc_interval_minutes),
+        ("--lulc-interval-minutes", args.lulc_interval_minutes),
         ("--terrain-interval-minutes", args.terrain_interval_minutes),
         ("--perimeters-interval-minutes", args.perimeters_interval_minutes),
         ("--industrial-interval-minutes", args.industrial_interval_minutes),
@@ -417,6 +488,54 @@ def _run_firms(args: argparse.Namespace) -> int:
 
 def _run_weather(args: argparse.Namespace) -> int:
     return int(run_weather_ingest(_build_weather_argv(args)))
+
+
+def _run_lfmc(args: argparse.Namespace) -> int:
+    """Run LFMC ecLand ingest.
+
+    Timeout is enforced via ``--lfmc-timeout-seconds`` (default 1800s) to prevent
+    a stalled or slow API job from blocking terrain/perimeters/industrial downstream.
+    FIRMS and weather have already completed before this job starts (JOB_ORDER).
+    """
+    # Lazy import: lfmc_ecland_ingest pulls httpx/xarray/sqlalchemy at module scope.
+    from ingest.lfmc_ecland_ingest import ingest_lfmc_ecland_for_bbox
+
+    bbox: tuple[float, float, float, float] = tuple(args.lfmc_bbox) if args.lfmc_bbox else _DEFAULT_CONUS_BBOX  # type: ignore[assignment]
+    try:
+        ingest_lfmc_ecland_for_bbox(bbox=bbox, timeout_seconds=args.lfmc_timeout_seconds)
+    except Exception as exc:
+        LOGGER.warning(
+            "LFMC ingest failed (timeout_seconds=%s): %s — pipeline continues",
+            args.lfmc_timeout_seconds,
+            exc,
+        )
+        return 1
+    return 0
+
+
+def _run_lulc(args: argparse.Namespace) -> int:
+    """Backfill fire_detections with ESA WorldCover landcover classes."""
+    # Lazy import: lulc_worldcover_ingest pulls numpy/rasterio/sqlalchemy at module scope.
+    from ingest.lulc_worldcover_ingest import backfill_worldcover
+
+    bbox: tuple[float, float, float, float] = tuple(args.lulc_bbox) if args.lulc_bbox else _DEFAULT_CONUS_BBOX  # type: ignore[assignment]
+    now = _utc_now()
+    cache_dir = Path(args.lulc_cache_dir) if args.lulc_cache_dir else Path("data/lulc/worldcover/v200_2021_tiles")
+
+    result = backfill_worldcover(
+        start_time=now - timedelta(days=args.lulc_lookback_days),
+        end_time=now,
+        bbox=bbox,
+        version=args.lulc_version,
+        year=args.lulc_year,
+        force=args.lulc_force,
+        max_tiles=0,
+        query_batch_size=50000,
+        update_batch_size=5000,
+        cache_dir=cache_dir,
+    )
+    LOGGER.info("LULC WorldCover backfill complete: %s", result)
+    return 0
 
 
 def _run_terrain(args: argparse.Namespace) -> int:
@@ -578,6 +697,8 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
     runners: dict[str, Callable[[], int]] = {
         JOB_FIRMS: lambda: _run_firms(args),
         JOB_WEATHER: lambda: _run_weather(args),
+        JOB_LFMC: lambda: _run_lfmc(args),
+        JOB_LULC: lambda: _run_lulc(args),
         JOB_TERRAIN: lambda: _run_terrain(args),
         JOB_PERIMETERS: lambda: _run_perimeters(args),
         JOB_INDUSTRIAL: lambda: _run_industrial(args),
@@ -588,6 +709,8 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
     intervals_seconds = {
         JOB_FIRMS: args.firms_interval_minutes * 60.0,
         JOB_WEATHER: args.weather_interval_minutes * 60.0,
+        JOB_LFMC: args.lfmc_interval_minutes * 60.0,
+        JOB_LULC: args.lulc_interval_minutes * 60.0,
         JOB_TERRAIN: args.terrain_interval_minutes * 60.0,
         JOB_PERIMETERS: args.perimeters_interval_minutes * 60.0,
         JOB_INDUSTRIAL: args.industrial_interval_minutes * 60.0,

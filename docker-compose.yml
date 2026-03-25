@@ -181,13 +181,15 @@ services:
     command: >
       uv run --project ingest -m ingest.orchestrator
       --loop
-      --jobs firms,perimeters,cleanup
+      --jobs firms,perimeters,lfmc,lulc,cleanup
       --enforce-freshness
       --max-retries 3
       --retry-backoff-seconds 20
       --firms-interval-minutes 30
       --weather-interval-minutes 180
       --perimeters-interval-minutes 1440
+      --lfmc-interval-minutes 360
+      --lulc-interval-minutes 10080
       --cleanup-interval-minutes 1440
       --dashboard-path /app/data/ingest/orchestrator_dashboard.json
     restart: unless-stopped
@@ -216,6 +218,10 @@ services:
       # Bootstrap batches can reach ~10k rows (full day of VIIRS globally filtered to
       # FIRMS_INITIAL_LOOKBACK_MINUTES). 180s is not enough; 900s gives safe headroom.
       DENOISER_SUBPROCESS_TIMEOUT_SECONDS: ${DENOISER_SUBPROCESS_TIMEOUT_SECONDS:-900}
+      # LFMC ecLand: set LFMC_ECLAND_API_URL to enable; LFMC_ECLAND_API_TOKEN is optional bearer.
+      # If LFMC_ECLAND_API_URL is unset the job will fail gracefully without blocking FIRMS/weather.
+      LFMC_ECLAND_API_URL: ${LFMC_ECLAND_API_URL:-}
+      LFMC_ECLAND_API_TOKEN: ${LFMC_ECLAND_API_TOKEN:-}
       FIRMS_MAP_KEY: ${FIRMS_MAP_KEY}
       FIRMS_DAY_RANGE: ${FIRMS_DAY_RANGE:-1}
       FIRMS_INITIAL_LOOKBACK_MINUTES: ${FIRMS_INITIAL_LOOKBACK_MINUTES:-360}
