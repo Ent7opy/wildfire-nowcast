@@ -447,6 +447,9 @@ def run_firms_ingest(
             )
             fetched_count = len(csv_rows)
             detections, validation = parse_detection_rows(csv_rows, source, batch_id)
+            if is_archive_mode:
+                for det in detections:
+                    det.is_archive = True
             parsed_count = len(detections)
             max_detected_acq_utc = _max_detection_time_utc(detections)
             if is_bootstrap:

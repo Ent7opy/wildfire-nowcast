@@ -248,7 +248,8 @@ def insert_detections(
             track,
             raw_properties,
             ingest_batch_id,
-            dedupe_hash
+            dedupe_hash,
+            is_archive
         )
         VALUES (
             ST_SetSRID(ST_MakePoint(:lon, :lat), 4326),
@@ -266,7 +267,8 @@ def insert_detections(
             :track,
             :raw_properties,
             :ingest_batch_id,
-            :dedupe_hash
+            :dedupe_hash,
+            :is_archive
         )
         ON CONFLICT (source, dedupe_hash) DO NOTHING
         """
