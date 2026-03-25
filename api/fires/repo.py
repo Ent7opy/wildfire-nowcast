@@ -353,6 +353,7 @@ def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> 
 
         # Large global repairs/backfills can make geospatial clustering too slow.
         # Assign neutral persistence for throughput and keep strict completeness gates.
+        # SCIENCE_DEBT SD-01: replace with chunked computation to reach science_grade.
         if (
             (not _DISABLE_NEUTRAL_FALLBACK)
             and _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD > 0
@@ -522,6 +523,7 @@ def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
         # Large global repairs/backfills can make per-detection weather lookup
         # prohibitively slow. Use neutral weather score to keep ingestion fail-closed
         # gates enforceable while preserving throughput.
+        # SCIENCE_DEBT SD-01: replace with chunked computation to reach science_grade.
         if (
             (not _DISABLE_NEUTRAL_FALLBACK)
             and _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD > 0

@@ -43,13 +43,16 @@ export function useForecastPolling(): void {
       return;
     }
 
-    const status = query.data.status;
+    const { status } = query.data;
     if (status === "completed") {
-      const runId = String(query.data.result?.run_id || "");
+      const result = query.data.result;
+      const runId = String(result?.run_id || "");
       if (runId) {
-        const weatherRunId = (query.data.result?.weather_run_id as string | null | undefined) ?? null;
-        const confidenceLevel = (query.data.result?.confidence_level as string | null | undefined) ?? null;
-        completeForecastJob(runId, { weatherRunId, confidenceLevel });
+        const weatherRunId = (result?.weather_run_id as string | null | undefined) ?? null;
+        const confidenceLevel = (result?.confidence_level as string | null | undefined) ?? null;
+        const fallbackUsed = Boolean(result?.fallback_used ?? false);
+        const weatherBiasApplied = (result?.weather_bias_corrected as boolean | null | undefined) ?? null;
+        completeForecastJob(runId, { weatherRunId, confidenceLevel, fallbackUsed, weatherBiasApplied });
         setForecastNotification({
           kind: "ready",
           message: `Forecast for the fire event from ${activeRequest?.locationLabel || "the selected area"} is ready!`,

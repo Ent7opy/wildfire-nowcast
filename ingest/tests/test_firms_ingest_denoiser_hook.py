@@ -1,7 +1,8 @@
+import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
-from ingest.firms_ingest import _run_denoiser_inference
+from ingest.firms_ingest import DenoiserTimeoutError, _run_denoiser_inference
 
 class TestFirmsIngestDenoiserHook(unittest.TestCase):
     def setUp(self):
@@ -60,13 +61,38 @@ class TestFirmsIngestDenoiserHook(unittest.TestCase):
 
     @patch("subprocess.run")
     def test_run_denoiser_inference_error(self, mock_run):
-        import subprocess
         mock_run.side_effect = subprocess.CalledProcessError(1, "cmd", stderr="error")
 
         with self.assertRaises(RuntimeError) as cm:
             _run_denoiser_inference(batch_id=1, config=self.config)
-        
+
         self.assertIn("Denoiser inference failed for batch 1", str(cm.exception))
+
+    @patch("subprocess.run")
+    def test_run_denoiser_inference_timeout_raises_denoiser_timeout_error(self, mock_run):
+        self.config.denoiser_subprocess_timeout_seconds = 30
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="uv run -m ml.denoiser_inference", timeout=30)
+
+        with self.assertRaises(DenoiserTimeoutError) as cm:
+            _run_denoiser_inference(batch_id=42, config=self.config)
+
+        self.assertIn("timed out after 30s", str(cm.exception))
+        self.assertIn("batch 42", str(cm.exception))
+
+    @patch("subprocess.run")
+    def test_run_denoiser_inference_timeout_is_not_generic_runtime_error(self, mock_run):
+        """DenoiserTimeoutError must be distinguishable from generic RuntimeError."""
+        self.config.denoiser_subprocess_timeout_seconds = 60
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="uv", timeout=60)
+
+        raised = None
+        try:
+            _run_denoiser_inference(batch_id=5, config=self.config)
+        except DenoiserTimeoutError as e:
+            raised = e
+
+        self.assertIsNotNone(raised, "Expected DenoiserTimeoutError to be raised")
+        self.assertIsInstance(raised, RuntimeError, "DenoiserTimeoutError must be a RuntimeError subclass")
 
     def test_run_denoiser_inference_skipped_if_no_dir(self):
         self.config.denoiser_model_run_dir = None

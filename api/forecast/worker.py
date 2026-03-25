@@ -491,6 +491,8 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 "cache_source": None,
                 "confidence_level": extra_meta.get("confidence_level"),
                 "staleness_hours": extra_meta.get("staleness_hours"),
+                "fallback_used": bool(extra_meta.get("fallback_used", False)),
+                "weather_bias_corrected": extra_meta.get("weather_bias_corrected"),
                 "shadow_evaluated": bool(extra_meta.get("shadow_evaluated", False)),
                 "shadow_metrics_summary": extra_meta.get("shadow_metrics_summary"),
             }
