@@ -194,6 +194,46 @@ def insert_terrain_features_metadata(
     return _row_to_features(row)
 
 
+def list_terrain_coverage_inventory() -> list[TerrainFeaturesMetadata]:
+    """Return the latest terrain_features_metadata row for each distinct region."""
+    stmt = text(
+        """
+        SELECT DISTINCT ON (region_name)
+            id,
+            region_name,
+            source_dem_metadata_id,
+            slope_path,
+            aspect_path,
+            crs_epsg,
+            cell_size_deg,
+            origin_lat,
+            origin_lon,
+            grid_n_lat,
+            grid_n_lon,
+            slope_units,
+            aspect_units,
+            aspect_convention,
+            nodata_value,
+            slope_min,
+            slope_max,
+            aspect_min,
+            aspect_max,
+            coverage_fraction,
+            terrain_fallback_used,
+            created_at,
+            ST_XMin(bbox) AS bbox_min_lon,
+            ST_YMin(bbox) AS bbox_min_lat,
+            ST_XMax(bbox) AS bbox_max_lon,
+            ST_YMax(bbox) AS bbox_max_lat
+        FROM terrain_features_metadata
+        ORDER BY region_name, created_at DESC
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    return [_row_to_features(row) for row in rows]
+
+
 def get_latest_terrain_features_metadata_for_region(
     region_name: str,
 ) -> Optional[TerrainFeaturesMetadata]:

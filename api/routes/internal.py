@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from api.config import settings
 from api.data_status import build_data_status_snapshot
 from api.model_registry import list_active_models
+from api.terrain.features_repo import list_terrain_coverage_inventory
 from api.fires.repo import (
     get_latest_denoiser_gate_report,
     get_latest_denoiser_coverage_status,
@@ -106,6 +107,54 @@ async def version() -> dict:
         "version": settings.version,
         "git_commit": settings.git_commit,
         "environment": settings.environment,
+    }
+
+
+@internal_router.get("/internal/health/terrain-coverage")
+async def terrain_coverage_inventory() -> dict:
+    """Return DEM coverage inventory: regions with preprocessed terrain, bboxes, resolution, staleness.
+
+    Operators use this to determine where forecasts will use real terrain vs the D1 flat-terrain fallback.
+    Staleness is computed against DATA_STALE_TERRAIN_MINUTES (default 10080 = 7 days).
+    """
+    as_of = datetime.now(timezone.utc)
+    try:
+        rows = list_terrain_coverage_inventory()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of.isoformat(), "regions": [], "error": str(exc)}
+
+    regions = []
+    for row in rows:
+        created_at_utc = row.created_at.replace(tzinfo=timezone.utc)
+        age_minutes = (as_of - created_at_utc).total_seconds() / 60.0
+        is_stale = age_minutes > settings.data_stale_terrain_minutes
+        regions.append(
+            {
+                "region_name": row.region_name,
+                "bbox": {
+                    "min_lon": row.bbox[0],
+                    "min_lat": row.bbox[1],
+                    "max_lon": row.bbox[2],
+                    "max_lat": row.bbox[3],
+                },
+                "resolution_deg": row.cell_size_deg,
+                "crs_epsg": row.crs_epsg,
+                "grid": {"n_lat": row.grid_n_lat, "n_lon": row.grid_n_lon},
+                "terrain_fallback_used": row.terrain_fallback_used,
+                "coverage_fraction": row.coverage_fraction,
+                "preprocessed_at": created_at_utc.isoformat(),
+                "age_minutes": round(age_minutes, 1),
+                "is_stale": is_stale,
+                "slope_path": row.slope_path,
+                "aspect_path": row.aspect_path,
+            }
+        )
+
+    return {
+        "as_of": as_of.isoformat(),
+        "stale_threshold_minutes": settings.data_stale_terrain_minutes,
+        "region_count": len(regions),
+        "regions": regions,
     }
 
 

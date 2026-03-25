@@ -1,4 +1,4 @@
-"""Scheduler/orchestrator for FIRMS, weather, terrain, perimeter, industrial, and drift-monitor ingestion."""
+"""Scheduler/orchestrator for FIRMS, weather, terrain, perimeter, industrial, drift-monitor, and cleanup ingestion."""
 
 from __future__ import annotations
 
@@ -35,7 +35,8 @@ JOB_TERRAIN = "terrain"
 JOB_PERIMETERS = "perimeters"
 JOB_INDUSTRIAL = "industrial"
 JOB_DENOISER_DRIFT = "denoiser_drift"
-JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT)
+JOB_CLEANUP = "cleanup"
+JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 # Watermarks whose source name ends with _NRT are near-real-time feeds.
@@ -111,8 +112,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=",".join(JOB_ORDER),
         help=(
-            "Comma-separated job list. Supported: firms,weather,lfmc,lulc,terrain,perimeters,industrial,denoiser_drift. "
-            "Execution order is fixed as firms->weather->lfmc->lulc->terrain->perimeters->industrial->denoiser_drift."
+            f"Comma-separated job list. Supported: {','.join(JOB_ORDER)}. "
+            f"Execution order is fixed as {'->'.join(JOB_ORDER)}."
         ),
     )
     parser.add_argument(
@@ -204,6 +205,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=10080.0,
         help="LULC WorldCover backfill interval in minutes (loop mode). Weekly; tiles are static.",
+    )
+    parser.add_argument(
+        "--cleanup-interval-minutes",
+        type=float,
+        default=1440.0,
+        help="Database cleanup run interval in minutes (loop mode).",
     )
 
     parser.add_argument(
@@ -435,6 +442,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--perimeters-interval-minutes", args.perimeters_interval_minutes),
         ("--industrial-interval-minutes", args.industrial_interval_minutes),
         ("--denoiser-drift-interval-minutes", args.denoiser_drift_interval_minutes),
+        ("--cleanup-interval-minutes", args.cleanup_interval_minutes),
     )
     for flag, value in interval_flags:
         if value <= 0:
@@ -652,6 +660,20 @@ def _run_denoiser_drift(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_cleanup(args: argparse.Namespace) -> int:
+    """Run database cleanup.
+
+    Performs real cleanup by default. Set CLEANUP_DRY_RUN=true to count eligible
+    rows without deleting (operator dry-run only; scheduled path always deletes).
+    """
+    # Lazy import: avoids pulling api.db into module scope at startup.
+    from scripts.db_cleanup import cleanup  # noqa: PLC0415
+
+    dry_run = os.getenv("CLEANUP_DRY_RUN", "false").lower() in ("1", "true", "yes")
+    cleanup(dry_run=dry_run)
+    return 0
+
+
 def _run_with_logging(name: str, runner: Callable[[], int]) -> int:
     started = time.monotonic()
     LOGGER.info("Job started: %s", name)
@@ -681,6 +703,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_PERIMETERS: lambda: _run_perimeters(args),
         JOB_INDUSTRIAL: lambda: _run_industrial(args),
         JOB_DENOISER_DRIFT: lambda: _run_denoiser_drift(args),
+        JOB_CLEANUP: lambda: _run_cleanup(args),
     }
 
     intervals_seconds = {
@@ -692,6 +715,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_PERIMETERS: args.perimeters_interval_minutes * 60.0,
         JOB_INDUSTRIAL: args.industrial_interval_minutes * 60.0,
         JOB_DENOISER_DRIFT: args.denoiser_drift_interval_minutes * 60.0,
+        JOB_CLEANUP: args.cleanup_interval_minutes * 60.0,
     }
 
     return [

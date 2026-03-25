@@ -181,7 +181,7 @@ services:
     command: >
       uv run --project ingest -m ingest.orchestrator
       --loop
-      --jobs firms,perimeters,lfmc,lulc
+      --jobs firms,perimeters,lfmc,lulc,cleanup
       --enforce-freshness
       --max-retries 3
       --retry-backoff-seconds 20
@@ -190,6 +190,7 @@ services:
       --perimeters-interval-minutes 1440
       --lfmc-interval-minutes 360
       --lulc-interval-minutes 10080
+      --cleanup-interval-minutes 1440
       --dashboard-path /app/data/ingest/orchestrator_dashboard.json
     restart: unless-stopped
     volumes:

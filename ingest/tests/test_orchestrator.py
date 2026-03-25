@@ -1,9 +1,11 @@
 import argparse
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from ingest.orchestrator import (
+    JOB_CLEANUP,
     JOB_DENOISER_DRIFT,
     JOB_INDUSTRIAL,
     JOB_LFMC,
@@ -13,6 +15,7 @@ from ingest.orchestrator import (
     ScheduledJob,
     _build_industrial_argv,
     _build_weather_argv,
+    _run_cleanup,
     _run_denoiser_drift,
     _run_lfmc,
     run_once,
@@ -328,6 +331,40 @@ class TestDriftJob(unittest.TestCase):
         exit_code = run_once(jobs, stop_on_error=False)
         self.assertEqual(1, exit_code)
         self.assertEqual(["drift"], calls)
+
+
+class TestCleanupJob(unittest.TestCase):
+    def test_cleanup_in_job_order(self):
+        self.assertIn(JOB_CLEANUP, JOB_ORDER)
+        # Cleanup runs last — after all ingest and monitoring jobs.
+        self.assertGreater(JOB_ORDER.index(JOB_CLEANUP), JOB_ORDER.index(JOB_DENOISER_DRIFT))
+
+    def test_run_cleanup_returns_zero_on_success(self):
+        args = argparse.Namespace()
+        with patch("scripts.db_cleanup.cleanup") as mock_cleanup:
+            code = _run_cleanup(args)
+        self.assertEqual(0, code)
+        mock_cleanup.assert_called_once_with(dry_run=False)
+
+    def test_run_cleanup_respects_dry_run_env(self):
+        args = argparse.Namespace()
+        with patch.dict(os.environ, {"CLEANUP_DRY_RUN": "true"}):
+            with patch("scripts.db_cleanup.cleanup") as mock_cleanup:
+                code = _run_cleanup(args)
+        self.assertEqual(0, code)
+        mock_cleanup.assert_called_once_with(dry_run=True)
+
+    def test_cleanup_job_failure_surfaces_in_run_once_metrics(self):
+        calls: list[str] = []
+
+        def _fail() -> int:
+            calls.append("cleanup")
+            return 1
+
+        jobs = [ScheduledJob(name=JOB_CLEANUP, interval_seconds=86400.0, runner=_fail)]
+        exit_code = run_once(jobs, stop_on_error=False)
+        self.assertEqual(1, exit_code)
+        self.assertEqual(["cleanup"], calls)
 
 
 class TestWatermarkValidation(unittest.TestCase):
