@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.db_cleanup import find_orphan_forecast_files
+from scripts.db_cleanup import find_orphan_forecast_files  # noqa: E402
 
 
 def _make_forecast_file(repo_root: Path, region: str, run_id: int, horizon: int) -> Path:
