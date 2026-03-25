@@ -173,20 +173,31 @@ def _fetch_latest_firms_status(conn) -> dict[str, Any]:
 
 
 def _fetch_latest_weather_status(conn) -> dict[str, Any]:
+    # Single pass over completed runs: latest row fields + per-variable MAX timestamps.
     latest = conn.execute(
         text(
             """
             SELECT
-                id,
-                model,
-                run_time,
-                created_at,
-                horizon_hours,
-                step_hours
+                (array_agg(id            ORDER BY run_time DESC, id DESC))[1] AS id,
+                (array_agg(model         ORDER BY run_time DESC, id DESC))[1] AS model,
+                (array_agg(run_time      ORDER BY run_time DESC, id DESC))[1] AS run_time,
+                (array_agg(horizon_hours ORDER BY run_time DESC, id DESC))[1] AS horizon_hours,
+                (array_agg(step_hours    ORDER BY run_time DESC, id DESC))[1] AS step_hours,
+                MAX(run_time) FILTER (
+                    WHERE metadata->'variables' @> '"u10"'::jsonb
+                       OR metadata->'variables' @> '"v10"'::jsonb
+                ) AS latest_wind,
+                MAX(run_time) FILTER (
+                    WHERE metadata->'variables' @> '"t2m"'::jsonb
+                ) AS latest_temperature,
+                MAX(run_time) FILTER (
+                    WHERE metadata->'variables' @> '"rh2m"'::jsonb
+                ) AS latest_humidity,
+                MAX(run_time) FILTER (
+                    WHERE metadata->'variables' @> '"tp"'::jsonb
+                ) AS latest_precipitation
             FROM weather_runs
             WHERE status = 'completed'
-            ORDER BY run_time DESC, id DESC
-            LIMIT 1
             """
         )
     ).mappings().first()
@@ -212,16 +223,23 @@ def _fetch_latest_weather_status(conn) -> dict[str, Any]:
         else None
     )
 
+    row = latest or {}
     return {
-        "last_seen_at": _as_utc((latest or {}).get("run_time")),
+        "last_seen_at": _as_utc(row.get("run_time")),
+        "variables_last_seen": {
+            "wind": _as_utc(row.get("latest_wind")),
+            "temperature": _as_utc(row.get("latest_temperature")),
+            "humidity": _as_utc(row.get("latest_humidity")),
+            "precipitation": _as_utc(row.get("latest_precipitation")),
+        },
         "idempotency": {
-            "latest_run_id": (latest or {}).get("id"),
-            "latest_model": (latest or {}).get("model"),
-            "latest_run_time": _as_utc((latest or {}).get("run_time")).isoformat()
-            if (latest or {}).get("run_time")
+            "latest_run_id": row.get("id"),
+            "latest_model": row.get("model"),
+            "latest_run_time": _as_utc(row.get("run_time")).isoformat()
+            if row.get("run_time")
             else None,
-            "horizon_hours": (latest or {}).get("horizon_hours"),
-            "step_hours": (latest or {}).get("step_hours"),
+            "horizon_hours": row.get("horizon_hours"),
+            "step_hours": row.get("step_hours"),
             "completed_runs_last_24h": total_runs_24h,
             "unique_run_times_last_24h": unique_runs_24h,
             "duplicate_run_ratio_last_24h": round(duplicate_ratio_24h, 4)
@@ -358,6 +376,35 @@ def build_data_status_snapshot(
         perimeters = _fetch_latest_perimeters_status(conn)
         lfmc = _fetch_latest_lfmc_status(conn)
 
+    weather_status = _source_status(
+        name="weather",
+        last_seen_at=weather["last_seen_at"],
+        threshold_minutes=settings.data_stale_weather_minutes,
+        now=now_utc,
+    )
+    # Per-variable breakdown — fall back to aggregate last_seen_at when absent (e.g. in tests).
+    variables_last_seen: dict[str, Any] = weather.get("variables_last_seen") or {
+        var: weather["last_seen_at"]
+        for var in ("wind", "temperature", "humidity", "precipitation")
+    }
+    weather_variable_status = {
+        var_name: _source_status(
+            name=f"weather.{var_name}",
+            last_seen_at=last_seen_at,
+            threshold_minutes=settings.data_stale_weather_minutes,
+            now=now_utc,
+        )
+        for var_name, last_seen_at in variables_last_seen.items()
+    }
+    any_variable_stale = any(v["is_stale"] for v in weather_variable_status.values())
+    weather_status["variables"] = weather_variable_status
+    weather_status["any_variable_stale"] = any_variable_stale
+    # Escalate aggregate state when a specific variable is stale but the latest run appeared fresh.
+    if any_variable_stale:
+        weather_status["is_stale"] = True
+        if weather_status["state"] == "fresh":
+            weather_status["state"] = "stale"
+
     sources = {
         "firms": _source_status(
             name="firms",
@@ -365,12 +412,7 @@ def build_data_status_snapshot(
             threshold_minutes=settings.data_stale_firms_minutes,
             now=now_utc,
         ),
-        "weather": _source_status(
-            name="weather",
-            last_seen_at=weather["last_seen_at"],
-            threshold_minutes=settings.data_stale_weather_minutes,
-            now=now_utc,
-        ),
+        "weather": weather_status,
         "terrain": _source_status(
             name="terrain",
             last_seen_at=terrain["last_seen_at"],
