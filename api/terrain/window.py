@@ -13,6 +13,7 @@ windows using rasterio and then flip rows once to match the analysis convention.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,8 @@ from rasterio.windows import Window
 from api.core.grid import GridSpec, GridWindow, get_grid_window_for_bbox
 from api.terrain import features_repo, repo
 from api.terrain.validate import validate_terrain_stack
+
+_LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover
     from shapely.geometry.base import BaseGeometry
@@ -43,6 +46,7 @@ class TerrainWindow:
     valid_data_mask: np.ndarray | None = None  # (lat, lon) True where data is valid
     aoi_mask: np.ndarray | None = None  # (lat, lon) True where inside AOI polygon
     generated_at: datetime = field(default_factory=datetime.utcnow)
+    terrain_fallback_used: bool = False  # True when real DEM was unavailable
 
 
 def _grid_spec_from_features_metadata(
@@ -136,15 +140,35 @@ def _load_terrain_window_from_features_md(
     if not aspect_path.exists():
         raise FileNotFoundError(f"Aspect raster not found at {aspect_path}")
 
-    # Fail fast if slope/aspect (and optional DEM) are not exactly aligned to the grid.
+    # Resolve optional DEM path; fall back gracefully if the raster file is missing.
     dem_path: Path | None = None
+    dem_fallback = False
     if include_dem:
         dem_md = repo.get_latest_dem_metadata_for_region(region_name)
         if dem_md is None:
-            raise ValueError(f"No DEM metadata found for region '{region_name}'.")
-        dem_path = _resolve_artifact_path(Path(dem_md.raster_path))
-        if not dem_path.exists():
-            raise FileNotFoundError(f"DEM raster not found at {dem_path}")
+            _LOGGER.warning(
+                "No DEM metadata found for region '%s' (bbox=%s). "
+                "Elevation will be None and terrain_fallback_used=True. "
+                "Mitigation: run DEM ingest for this region.",
+                region_name,
+                bbox,
+            )
+            dem_fallback = True
+        else:
+            candidate = _resolve_artifact_path(Path(dem_md.raster_path))
+            if not candidate.exists():
+                _LOGGER.warning(
+                    "DEM raster missing at %s for region '%s' (bbox=%s). "
+                    "Elevation will be None and terrain_fallback_used=True. "
+                    "Mitigation: re-ingest the missing DEM tile.",
+                    candidate,
+                    region_name,
+                    bbox,
+                )
+                dem_fallback = True
+            else:
+                dem_path = candidate
+
     validate_terrain_stack(dem_path, slope_path, aspect_path, grid, strict=True)
 
     slope, slope_valid = _read_window_as_analysis_array(slope_path, grid, win)
@@ -152,7 +176,7 @@ def _load_terrain_window_from_features_md(
     valid = slope_valid & aspect_valid
 
     elevation = None
-    if include_dem:
+    if include_dem and not dem_fallback:
         assert dem_path is not None  # for type checkers
         elevation, dem_valid = _read_window_as_analysis_array(dem_path, grid, win)
         valid = valid & dem_valid
@@ -166,6 +190,7 @@ def _load_terrain_window_from_features_md(
             aspect=aspect,
             elevation=elevation,
             valid_data_mask=valid_mask,
+            terrain_fallback_used=dem_fallback,
         ),
         grid,
         slope_path,

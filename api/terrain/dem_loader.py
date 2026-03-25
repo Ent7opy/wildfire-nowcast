@@ -5,16 +5,20 @@ Conventions and alignment: see `docs/terrain_grid.md`.
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Tuple
 
+import numpy as np
 import rioxarray  # type: ignore
 from xarray import DataArray
 
 from api.core.grid import DEFAULT_CELL_SIZE_DEG, GridSpec
-from api.terrain.repo import TerrainMetadata, get_latest_dem_metadata_for_region
+from api.terrain.repo import TerrainMetadata, find_fallback_dem, get_latest_dem_metadata_for_region
 from api.terrain.validate import validate_raster_matches_grid
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _ensure_xy(da: DataArray) -> DataArray:
@@ -67,13 +71,36 @@ def grid_spec_from_metadata(metadata: TerrainMetadata) -> GridSpec:
     )
 
 
+def _flat_dem_stub(
+    bbox: Tuple[float, float, float, float],
+    cell_size_deg: float = DEFAULT_CELL_SIZE_DEG,
+) -> DataArray:
+    """Return a zero-elevation DataArray for bbox with terrain_fallback_used=True in attrs."""
+    import xarray as xr
+
+    min_lon, min_lat, max_lon, max_lat = bbox
+    lats = np.arange(min_lat + cell_size_deg / 2, max_lat, cell_size_deg)
+    lons = np.arange(min_lon + cell_size_deg / 2, max_lon, cell_size_deg)
+    data = np.zeros((len(lats), len(lons)), dtype=np.float32)
+    da = xr.DataArray(data, dims=("lat", "lon"), coords={"lat": lats, "lon": lons})
+    da.attrs["terrain_fallback_used"] = True
+    da.attrs["fallback_reason"] = "dem_file_missing"
+    return da
+
+
 def load_dem_for_bbox(
     region_name: str, bbox: Tuple[float, float, float, float]
 ) -> DataArray:
-    """Load the latest DEM for a region and clip to bbox (lon/lat)."""
+    """Load the latest DEM for a region and clip to bbox (lon/lat).
+
+    Fallback chain when the primary DEM file is missing on disk:
+    1. Try any other registered DEM for the region (resolution ladder, finest first).
+    2. Try 'global_base' region.
+    3. Return a flat-terrain stub (elevation=0) with ``terrain_fallback_used=True`` in
+       ``.attrs``.  A WARNING is logged so operators know to ingest the missing tile.
+    """
     metadata = get_latest_dem_metadata_for_region(region_name)
     if metadata is None:
-        # Fallback to global_base if specific region is not found
         metadata = get_latest_dem_metadata_for_region("global_base")
 
     if metadata is None:
@@ -81,7 +108,30 @@ def load_dem_for_bbox(
 
     raster_path = Path(metadata.raster_path)
     if not raster_path.exists():
-        raise FileNotFoundError(f"DEM raster not found at {raster_path}")
+        fallback_md = find_fallback_dem([region_name, "global_base"], skip_path=raster_path)
+        if fallback_md is not None:
+            _LOGGER.warning(
+                "DEM raster missing at %s for region '%s' (bbox=%s). "
+                "Falling back to lower-resolution DEM: %s (%.0f m). "
+                "Mitigation: re-ingest the missing tile.",
+                raster_path,
+                region_name,
+                bbox,
+                fallback_md.raster_path,
+                fallback_md.resolution_m,
+            )
+            raster_path = Path(fallback_md.raster_path)
+            metadata = fallback_md
+        else:
+            _LOGGER.warning(
+                "DEM raster missing at %s for region '%s' (bbox=%s) and no lower-resolution "
+                "fallback found. Returning flat-terrain stub (elevation=0, terrain_fallback_used=True). "
+                "Mitigation: run DEM ingest for this region.",
+                raster_path,
+                region_name,
+                bbox,
+            )
+            return _flat_dem_stub(bbox)
 
     # Fail fast if the raster is misaligned with the stored grid.
     grid = grid_spec_from_metadata(metadata)
