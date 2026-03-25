@@ -8,10 +8,11 @@ for a target space-time window.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 from urllib.request import urlopen
@@ -21,6 +22,7 @@ import rasterio
 from sqlalchemy import text
 
 from api.db import get_engine
+from ingest import repository
 
 LOGGER = logging.getLogger("lulc_worldcover_ingest")
 
@@ -96,7 +98,8 @@ def _ensure_columns() -> None:
         """
         ALTER TABLE fire_detections
             ADD COLUMN IF NOT EXISTS landcover_class integer,
-            ADD COLUMN IF NOT EXISTS landcover_label text
+            ADD COLUMN IF NOT EXISTS landcover_label text,
+            ADD COLUMN IF NOT EXISTS lulc_version text
         """
     )
     with get_engine().begin() as conn:
@@ -109,8 +112,13 @@ def _list_tile_work(
     end_time: datetime,
     bbox: tuple[float, float, float, float],
     force: bool,
+    source_version: str,
 ) -> list[TileWorkItem]:
     min_lon, min_lat, max_lon, max_lat = bbox
+    # A row needs (re)processing when:
+    #   force=True — always recompute
+    #   landcover_class IS NULL — never been classified
+    #   lulc_version IS DISTINCT FROM source_version — classified by a different release
     stmt = text(
         """
         WITH candidates AS (
@@ -121,7 +129,8 @@ def _list_tile_work(
             WHERE acq_time BETWEEN :start_time AND :end_time
               AND lon BETWEEN :min_lon AND :max_lon
               AND lat BETWEEN :min_lat AND :max_lat
-              AND (:force OR landcover_class IS NULL)
+              AND (:force OR landcover_class IS NULL
+                   OR lulc_version IS DISTINCT FROM :source_version)
         )
         SELECT
             tile_lat0,
@@ -140,6 +149,7 @@ def _list_tile_work(
         "max_lon": float(max_lon),
         "max_lat": float(max_lat),
         "force": bool(force),
+        "source_version": source_version,
     }
     with get_engine().begin() as conn:
         rows = conn.execute(stmt, params).mappings().all()
@@ -211,7 +221,8 @@ def _backfill_tile(
           AND lon < :tile_max_lon
           AND lat >= :tile_min_lat
           AND lat < :tile_max_lat
-          AND (:force OR landcover_class IS NULL)
+          AND (:force OR landcover_class IS NULL
+               OR lulc_version IS DISTINCT FROM :source_version)
         ORDER BY id
         """
     )
@@ -223,6 +234,7 @@ def _backfill_tile(
             landcover_class = :landcover_class,
             landcover_label = :landcover_label,
             landcover_score = :landcover_score,
+            lulc_version = :lulc_version,
             raw_properties = COALESCE(raw_properties, '{}'::jsonb)
                 || jsonb_build_object(
                     'landcover_class', :landcover_class,
@@ -246,6 +258,7 @@ def _backfill_tile(
         "tile_min_lat": item.tile_min_lat,
         "tile_max_lat": item.tile_max_lat,
         "force": bool(force),
+        "source_version": source_version,
     }
 
     rows_seen = 0
@@ -282,6 +295,7 @@ def _backfill_tile(
                         "landcover_class": int(lc),
                         "landcover_label": label,
                         "landcover_score": score,
+                        "lulc_version": source_version,
                         "landcover_source": source_tag,
                         "landcover_version": source_version,
                     }
@@ -292,6 +306,57 @@ def _backfill_tile(
                 rows_updated += len(update_batch)
 
     return rows_seen, rows_updated
+
+
+_CACHE_MANIFEST_FILENAME = "manifest.json"
+
+
+def _write_cache_manifest(*, cache_dir: Path, version: str, year: int) -> None:
+    """Write (or overwrite) a manifest.json in cache_dir recording version/year.
+
+    Operators can read this file to detect whether on-disk tiles were produced
+    by a different WorldCover release than the currently configured one.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "worldcover_version": version,
+        "worldcover_year": year,
+        "lulc_version": f"{version}_{year}",
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    manifest_path = cache_dir / _CACHE_MANIFEST_FILENAME
+    tmp = manifest_path.with_suffix(manifest_path.suffix + ".part")
+    tmp.write_text(json.dumps(manifest, indent=2))
+    tmp.replace(manifest_path)
+    LOGGER.info("Cache manifest written: %s (lulc_version=%s_%s)", manifest_path, version, year)
+
+
+def _check_cache_manifest(*, cache_dir: Path, version: str, year: int) -> None:
+    """Log a WARNING if the cache manifest records a different WorldCover release.
+
+    Does not raise — operators must decide whether to wipe and re-download.
+    """
+    manifest_path = cache_dir / _CACHE_MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception:
+        return
+    cached_version = manifest.get("worldcover_version")
+    cached_year = manifest.get("worldcover_year")
+    if cached_version != version or cached_year != year:
+        LOGGER.warning(
+            "Cache manifest mismatch: on-disk tiles are %s_%s but requested %s_%s. "
+            "Delete %s to force a clean re-download. "
+            "Mitigation: run with --force and remove stale tile files, "
+            "then re-run LULC ingest (target: science_grade).",
+            cached_version,
+            cached_year,
+            version,
+            year,
+            cache_dir,
+        )
 
 
 def backfill_worldcover(
@@ -309,95 +374,137 @@ def backfill_worldcover(
 ) -> dict[str, int]:
     _ensure_columns()
 
+    source_version = f"{version}_{year}"
+
     work = _list_tile_work(
         start_time=start_time,
         end_time=end_time,
         bbox=bbox,
         force=force,
+        source_version=source_version,
     )
     if max_tiles > 0:
         work = work[:max_tiles]
 
-    LOGGER.info("WorldCover worklist: %s tiles", len(work))
+    _check_cache_manifest(cache_dir=cache_dir, version=version, year=year)
+    LOGGER.info("WorldCover worklist: %s tiles (version=%s)", len(work), source_version)
+
+    batch_id = repository.create_ingest_batch(
+        "lulc_worldcover",
+        f"{_WORLDCOVER_S3_BASE}/{version}/{year}/map/",
+        str(bbox),
+        (end_time - start_time).days,
+        metadata_extra={
+            "lulc_version": source_version,
+            "worldcover_version": version,
+            "worldcover_year": year,
+            "force": force,
+            "tiles_in_worklist": len(work),
+        },
+    )
 
     rows_seen_total = 0
     rows_updated_total = 0
     tiles_processed = 0
 
-    for idx, item in enumerate(work, start=1):
-        rel_key = _tile_path(version=version, year=year, tile_id=item.tile_id)
-        url = f"{_WORLDCOVER_S3_BASE}/{rel_key}"
-        local_path = cache_dir / Path(rel_key).name
+    try:
+        for idx, item in enumerate(work, start=1):
+            rel_key = _tile_path(version=version, year=year, tile_id=item.tile_id)
+            url = f"{_WORLDCOVER_S3_BASE}/{rel_key}"
+            local_path = cache_dir / Path(rel_key).name
 
-        try:
-            _download_tile(url=url, local_path=local_path)
-        except Exception as exc:
-            LOGGER.warning("Skipping tile %s (download failed): %s", item.tile_id, exc)
-            continue
+            try:
+                _download_tile(url=url, local_path=local_path)
+            except Exception as exc:
+                LOGGER.warning("Skipping tile %s (download failed): %s", item.tile_id, exc)
+                continue
 
-        tile_seen, tile_updated = _backfill_tile(
-            item=item,
-            tile_path=local_path,
-            start_time=start_time,
-            end_time=end_time,
-            bbox=bbox,
-            force=force,
-            query_batch_size=query_batch_size,
-            update_batch_size=update_batch_size,
-            source_tag="esa_worldcover",
-            source_version=f"{version}_{year}",
+            tile_seen, tile_updated = _backfill_tile(
+                item=item,
+                tile_path=local_path,
+                start_time=start_time,
+                end_time=end_time,
+                bbox=bbox,
+                force=force,
+                query_batch_size=query_batch_size,
+                update_batch_size=update_batch_size,
+                source_tag="esa_worldcover",
+                source_version=source_version,
+            )
+            rows_seen_total += tile_seen
+            rows_updated_total += tile_updated
+            tiles_processed += 1
+
+            LOGGER.info(
+                "Tile %s (%s/%s) detections=%s updated=%s",
+                item.tile_id,
+                idx,
+                len(work),
+                tile_seen,
+                tile_updated,
+            )
+
+        with get_engine().begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE acq_time BETWEEN :start_time AND :end_time
+                              AND lon BETWEEN :min_lon AND :max_lon
+                              AND lat BETWEEN :min_lat AND :max_lat
+                              AND landcover_class = 40
+                        ) AS cropland_rows,
+                        COUNT(*) FILTER (
+                            WHERE acq_time BETWEEN :start_time AND :end_time
+                              AND lon BETWEEN :min_lon AND :max_lon
+                              AND lat BETWEEN :min_lat AND :max_lat
+                              AND landcover_class IS NOT NULL
+                        ) AS classified_rows
+                    FROM fire_detections
+                    """
+                ),
+                {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "min_lon": float(bbox[0]),
+                    "min_lat": float(bbox[1]),
+                    "max_lon": float(bbox[2]),
+                    "max_lat": float(bbox[3]),
+                },
+            ).mappings().first()
+
+        if tiles_processed > 0:
+            _write_cache_manifest(cache_dir=cache_dir, version=version, year=year)
+
+        result = {
+            "tiles_requested": len(work),
+            "tiles_processed": tiles_processed,
+            "rows_seen": int(rows_seen_total),
+            "rows_updated": int(rows_updated_total),
+            "classified_rows": int(row["classified_rows"] or 0),
+            "cropland_rows": int(row["cropland_rows"] or 0),
+        }
+
+    except Exception:
+        repository.finalize_ingest_batch(
+            batch_id,
+            status="failed",
+            fetched=int(rows_seen_total),
+            inserted=int(rows_updated_total),
+            skipped=0,
         )
-        rows_seen_total += tile_seen
-        rows_updated_total += tile_updated
-        tiles_processed += 1
+        raise
 
-        LOGGER.info(
-            "Tile %s (%s/%s) detections=%s updated=%s",
-            item.tile_id,
-            idx,
-            len(work),
-            tile_seen,
-            tile_updated,
-        )
+    repository.finalize_ingest_batch(
+        batch_id,
+        status="success",
+        fetched=int(rows_seen_total),
+        inserted=int(rows_updated_total),
+        skipped=0,
+    )
 
-    with get_engine().begin() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    COUNT(*) FILTER (
-                        WHERE acq_time BETWEEN :start_time AND :end_time
-                          AND lon BETWEEN :min_lon AND :max_lon
-                          AND lat BETWEEN :min_lat AND :max_lat
-                          AND landcover_class = 40
-                    ) AS cropland_rows,
-                    COUNT(*) FILTER (
-                        WHERE acq_time BETWEEN :start_time AND :end_time
-                          AND lon BETWEEN :min_lon AND :max_lon
-                          AND lat BETWEEN :min_lat AND :max_lat
-                          AND landcover_class IS NOT NULL
-                    ) AS classified_rows
-                FROM fire_detections
-                """
-            ),
-            {
-                "start_time": start_time,
-                "end_time": end_time,
-                "min_lon": float(bbox[0]),
-                "min_lat": float(bbox[1]),
-                "max_lon": float(bbox[2]),
-                "max_lat": float(bbox[3]),
-            },
-        ).mappings().first()
-
-    return {
-        "tiles_requested": len(work),
-        "tiles_processed": tiles_processed,
-        "rows_seen": int(rows_seen_total),
-        "rows_updated": int(rows_updated_total),
-        "classified_rows": int(row["classified_rows"] or 0),
-        "cropland_rows": int(row["cropland_rows"] or 0),
-    }
+    return result
 
 
 def _parse_args() -> argparse.Namespace:
