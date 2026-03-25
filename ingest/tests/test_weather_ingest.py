@@ -6,10 +6,13 @@ from unittest.mock import MagicMock, patch
 import tempfile
 
 import httpx
+import numpy as np
 import pytest
+import xarray as xr
 
 from ingest.config import WeatherIngestSettings
 from ingest.weather_ingest import (
+    _derive_per_step_precip,
     _validate_grib_file,
     download_grib_files,
     ingest_weather_for_bbox,
@@ -400,6 +403,90 @@ class TestWeatherIngestPatchMode(unittest.TestCase):
         # Verify default parameters are preserved
         self.assertEqual(call_kwargs["horizon_hours"], 72)
         self.assertEqual(call_kwargs["step_hours"], 3)
+
+
+# ---------------------------------------------------------------------------
+# Tests for _derive_per_step_precip
+# ---------------------------------------------------------------------------
+
+
+def _make_tp(lead_times: list[int], values_1d: list[float]) -> xr.DataArray:
+    """Build a minimal (time, lat, lon) DataArray mimicking loaded GFS APCP."""
+    arr = np.array(values_1d, dtype=float)[:, np.newaxis, np.newaxis]
+    return xr.DataArray(
+        arr,
+        dims=["time", "lat", "lon"],
+        coords={"lead_time_hours": ("time", lead_times)},
+    )
+
+
+def test_derive_per_step_precip_6h_steps_no_differencing():
+    """For 6h steps, each GFS APCP value is already a per-6h-period amount.
+
+    GFS pgrb2 stepRange for 6h cadence: "0-6", "6-12", "12-18" — each file
+    contains a fresh 6h bucket total.  No differencing should be applied.
+    """
+    # lt=0: 0mm | lt=6: 3mm (0-6h bucket) | lt=12: 5mm (6-12h bucket) | lt=18: 2mm
+    tp = _make_tp([0, 6, 12, 18], [0.0, 3.0, 5.0, 2.0])
+    result = _derive_per_step_precip(tp)
+
+    np.testing.assert_array_equal(
+        result.values[:, 0, 0], [0.0, 3.0, 5.0, 2.0],
+        err_msg="6h-step APCP must not be differenced",
+    )
+    assert result.attrs["step_type"] == "per_step"
+    assert result.attrs["source_step_type"] == "accum"
+    assert result.attrs["units"] == "kg m**-2"
+    assert result.attrs["accumulation_bucket_hours"] == 6
+
+
+def test_derive_per_step_precip_3h_steps_diffs_at_6h_boundaries():
+    """For 3h steps, bucket-end values (lead_time % 6 == 0, > 0) are differenced.
+
+    GFS pgrb2 stepRange for 3h cadence (two-step illustration):
+      f003: stepRange="0-3"  → 0-3h period (2 mm, used as-is)
+      f006: stepRange="0-6"  → 0-6h running total (5 mm → diff: 5-2=3 mm for 3-6h)
+      f009: stepRange="6-9"  → 6-9h period after reset (1 mm, used as-is)
+      f012: stepRange="6-12" → 6-12h running total (4 mm → diff: 4-1=3 mm for 9-12h)
+    """
+    tp = _make_tp([0, 3, 6, 9, 12], [0.0, 2.0, 5.0, 1.0, 4.0])
+    result = _derive_per_step_precip(tp)
+    v = result.values[:, 0, 0]
+
+    assert v[0] == pytest.approx(0.0), "lt=0: analysis time must be 0"
+    assert v[1] == pytest.approx(2.0), "lt=3h: 0-3h period amount unchanged"
+    assert v[2] == pytest.approx(3.0), "lt=6h: 5-2=3mm (3-6h period)"
+    assert v[3] == pytest.approx(1.0), "lt=9h: fresh after 6h reset, unchanged"
+    assert v[4] == pytest.approx(3.0), "lt=12h: 4-1=3mm (9-12h period)"
+
+
+def test_derive_per_step_precip_clips_negative_fp_noise():
+    """Floating-point differencing must never produce negative precipitation."""
+    # f003=1.0, f006=1.0+eps → diff ≈ 0 but could be negative due to FP
+    eps = 1e-12
+    tp = _make_tp([0, 3, 6], [0.0, 1.0, 1.0 + eps])
+    result = _derive_per_step_precip(tp)
+    assert (result.values >= 0).all(), "No negative precipitation values after clipping"
+
+
+def test_derive_per_step_precip_single_timestep():
+    """Single-step datasets (only lt=0) should not error and return 0."""
+    tp = _make_tp([0], [0.0])
+    result = _derive_per_step_precip(tp)
+    assert result.values[0, 0, 0] == pytest.approx(0.0)
+
+
+def test_derive_per_step_precip_preserves_spatial_dims():
+    """Spatial (lat, lon) dimensions must be preserved exactly."""
+    arr = np.array([[[0.0, 1.0], [2.0, 3.0]], [[4.0, 5.0], [6.0, 7.0]]])
+    tp = xr.DataArray(
+        arr,
+        dims=["time", "lat", "lon"],
+        coords={"lead_time_hours": ("time", [0, 6])},
+    )
+    result = _derive_per_step_precip(tp)
+    assert result.shape == arr.shape
+    assert result.dims == ("time", "lat", "lon")
 
 
 if __name__ == "__main__":
