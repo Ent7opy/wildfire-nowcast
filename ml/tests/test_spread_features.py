@@ -73,8 +73,10 @@ def test_fallback_weather_creation(mock_window):
     assert dict(ds.sizes) == {"time": 2, "lat": 10, "lon": 10}
     assert "u10" in ds.data_vars
     assert "v10" in ds.data_vars
+    assert "precip_24h" in ds.data_vars
     assert (ds.u10.values == 0).all()
     assert (ds.v10.values == 0).all()
+    assert (ds.precip_24h.values == 0).all()
     assert np.isnan(ds.t2m.values).all()
 
     # Check coords
@@ -258,6 +260,43 @@ def test_load_weather_cube_remaps_host_absolute_storage_path(
     opened_path = Path(mock_open.call_args[0][0])
     assert opened_path == mapped_path
     assert out.attrs.get("weather_fallback_used") is False
+
+
+@patch("ml.spread_features.Path.exists", return_value=True)
+@patch("ml.spread_features._get_latest_weather_run")
+@patch("xarray.open_dataset")
+def test_load_weather_cube_renames_tp_to_precip_24h(mock_open, mock_get_run, _mock_exists, mock_window):
+    """Weather ingest stores 'tp'; spread contract expects 'precip_24h'. Verify rename."""
+    ref_time = datetime(2025, 12, 26, 12, 0, 0, tzinfo=timezone.utc)
+    mock_get_run.return_value = {"id": 456, "storage_path": "fake.nc", "run_time": ref_time}
+
+    target_times = [
+        np.datetime64("2025-12-27T12:00:00", "ns"),
+        np.datetime64("2025-12-28T12:00:00", "ns"),
+    ]
+
+    w_ds = xr.Dataset(
+        data_vars={
+            "u10": (("time", "lat", "lon"), np.ones((2, 10, 10), dtype=np.float32)),
+            "v10": (("time", "lat", "lon"), np.ones((2, 10, 10), dtype=np.float32)),
+            "t2m": (("time", "lat", "lon"), np.full((2, 10, 10), 290.0, dtype=np.float32)),
+            "rh2m": (("time", "lat", "lon"), np.full((2, 10, 10), 50.0, dtype=np.float32)),
+            "tp": (("time", "lat", "lon"), np.full((2, 10, 10), 2.5, dtype=np.float32)),
+        },
+        coords={"time": target_times, "lat": mock_window.lat, "lon": mock_window.lon},
+    )
+    mock_open.return_value = w_ds
+
+    out = _load_weather_cube(
+        ref_time=ref_time,
+        window=mock_window,
+        horizons_hours=[24, 48],
+        bbox=(0, 0, 1, 1),
+    )
+
+    assert "precip_24h" in out.data_vars, "tp should be renamed to precip_24h"
+    assert "tp" not in out.data_vars, "original tp variable should be gone after rename"
+    assert float(out["precip_24h"].values[0, 0, 0]) == pytest.approx(2.5)
 
 
 @patch("ml.spread_features._get_latest_weather_run")
