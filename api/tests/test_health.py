@@ -336,6 +336,50 @@ def test_db_size_health_null_cleanup_when_dashboard_missing(monkeypatch) -> None
     assert cleanup["source"] == "dashboard_unavailable"
 
 
+# ---------------------------------------------------------------------------
+# /internal/health/dashboard
+# ---------------------------------------------------------------------------
+
+
+def _make_consolidated_mocks(monkeypatch) -> None:
+    """Wire up all three helpers used by the consolidated dashboard endpoint."""
+    raw_dashboard = {
+        "generated_at": "2026-03-26T06:00:00+00:00",
+        "metrics": {
+            "firms": {
+                "attempts": 10, "successes": 9, "failures": 1, "retries": 0, "skipped_fresh": 0,
+                "last_exit_code": 0, "last_outcome": "success",
+                "last_started_at": "2026-03-26T05:59:00+00:00",
+                "last_finished_at": "2026-03-26T06:00:00+00:00",
+                "last_success_at": "2026-03-26T06:00:00+00:00",
+                "last_failure_at": "2026-03-25T12:00:00+00:00",
+            },
+            "cleanup": {
+                "attempts": 1, "successes": 1, "failures": 0, "retries": 0, "skipped_fresh": 0,
+                "last_exit_code": 0, "last_outcome": "success",
+                "last_started_at": "2026-03-26T05:00:00+00:00",
+                "last_finished_at": "2026-03-26T05:01:00+00:00",
+                "last_success_at": "2026-03-26T05:01:00+00:00",
+                "last_failure_at": None,
+            },
+        },
+    }
+    monkeypatch.setattr("api.routes.internal.read_orchestrator_dashboard", lambda: raw_dashboard)
+    monkeypatch.setattr(
+        "api.routes.internal.build_data_status_snapshot",
+        lambda include_internal=False: {
+            "overall_state": "healthy",
+            "forecast_inputs_ready": True,
+            "sources": {"firms": {"state": "fresh", "age_minutes": 15.0}},
+            "idempotency_dashboard": {},
+        },
+    )
+    monkeypatch.setattr(
+        "api.routes.internal.build_db_size_snapshot",
+        lambda **_: _make_db_size_snapshot(),
+    )
+
+
 def test_db_size_health_fallback_on_db_error(monkeypatch) -> None:
     """Endpoint must return a structured fallback dict, not a 500, on DB errors."""
 
@@ -351,3 +395,84 @@ def test_db_size_health_fallback_on_db_error(monkeypatch) -> None:
     assert body["database"]["size_bytes"] is None
     assert body["tables"] == {}
     assert body["cleanup"]["source"] == "error"
+
+
+def test_consolidated_dashboard_top_level_keys(monkeypatch) -> None:
+    """Response must contain all four operational sections."""
+    _make_consolidated_mocks(monkeypatch)
+    response = client.get("/internal/health/dashboard")
+    assert response.status_code == 200
+    body = response.json()
+    assert "as_of" in body
+    assert "orchestrator" in body
+    assert "data_freshness" in body
+    assert "db_size" in body
+    assert "cleanup" in body
+
+
+def test_consolidated_dashboard_orchestrator_section(monkeypatch) -> None:
+    """orchestrator section must expose generated_at and per-job metrics."""
+    _make_consolidated_mocks(monkeypatch)
+    body = client.get("/internal/health/dashboard").json()
+
+    orch = body["orchestrator"]
+    assert orch["generated_at"] == "2026-03-26T06:00:00+00:00"
+    assert "firms" in orch["jobs"]
+
+    firms = orch["jobs"]["firms"]
+    assert firms["last_success_at"] == "2026-03-26T06:00:00+00:00"
+    assert firms["last_failure_at"] == "2026-03-25T12:00:00+00:00"
+    assert firms["last_outcome"] == "success"
+
+
+def test_consolidated_dashboard_data_freshness_section(monkeypatch) -> None:
+    """data_freshness section must surface overall_state and per-source entries."""
+    _make_consolidated_mocks(monkeypatch)
+    body = client.get("/internal/health/dashboard").json()
+
+    df = body["data_freshness"]
+    assert df["overall_state"] == "healthy"
+    assert df["forecast_inputs_ready"] is True
+    assert "firms" in df["sources"]
+
+
+def test_consolidated_dashboard_db_size_section(monkeypatch) -> None:
+    """db_size section must include database sizes and per-table row counts."""
+    _make_consolidated_mocks(monkeypatch)
+    body = client.get("/internal/health/dashboard").json()
+
+    db = body["db_size"]
+    assert db["database"]["size_bytes"] == 524288000
+    assert "fire_detections" in db["tables"]
+    assert "default_retention_days" in db["retention_policy"]
+
+
+def test_consolidated_dashboard_cleanup_section(monkeypatch) -> None:
+    """cleanup section must mirror db-size cleanup fields."""
+    _make_consolidated_mocks(monkeypatch)
+    body = client.get("/internal/health/dashboard").json()
+
+    cleanup = body["cleanup"]
+    assert cleanup["last_run_at"] == "2026-03-25T06:00:00+00:00"
+    assert cleanup["last_outcome"] == "success"
+    assert cleanup["next_run_at"] == "2026-03-26T06:00:00+00:00"
+    assert cleanup["source"] == "orchestrator_dashboard"
+
+
+def test_consolidated_dashboard_no_dashboard_file(monkeypatch) -> None:
+    """When orchestrator dashboard file is absent, jobs section is None but other sections still populate."""
+    monkeypatch.setattr("api.routes.internal.read_orchestrator_dashboard", lambda: None)
+    monkeypatch.setattr(
+        "api.routes.internal.build_data_status_snapshot",
+        lambda include_internal=False: {"overall_state": "healthy", "forecast_inputs_ready": True, "sources": {}},
+    )
+    monkeypatch.setattr(
+        "api.routes.internal.build_db_size_snapshot",
+        lambda **_: _make_db_size_snapshot(),
+    )
+
+    body = client.get("/internal/health/dashboard").json()
+    assert body["orchestrator"]["generated_at"] is None
+    assert body["orchestrator"]["jobs"] is None
+    assert body["data_freshness"]["overall_state"] == "healthy"
+    assert body["db_size"]["database"]["size_bytes"] == 524288000

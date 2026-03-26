@@ -257,6 +257,66 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(0, calls["count"])
 
 
+class TestJobMetricsSuccessFailureTimestamps(unittest.TestCase):
+    """last_success_at and last_failure_at must be set independently of last_finished_at."""
+
+    def test_last_success_at_set_on_success(self):
+        calls = {"count": 0}
+
+        def _ok() -> int:
+            calls["count"] += 1
+            return 0
+
+        from ingest.orchestrator import JobMetrics, _run_job_with_retries
+
+        metric = JobMetrics()
+        job = ScheduledJob(name="firms", interval_seconds=60.0, runner=_ok)
+        _run_job_with_retries(job=job, metric=metric, max_retries=0, retry_backoff_seconds=0.0, sleep_fn=lambda _: None)
+
+        self.assertEqual("success", metric.last_outcome)
+        self.assertIsNotNone(metric.last_success_at)
+        self.assertEqual(metric.last_success_at, metric.last_finished_at)
+        self.assertIsNone(metric.last_failure_at)
+
+    def test_last_failure_at_set_on_failure(self):
+        def _fail() -> int:
+            return 1
+
+        from ingest.orchestrator import JobMetrics, _run_job_with_retries
+
+        metric = JobMetrics()
+        job = ScheduledJob(name="firms", interval_seconds=60.0, runner=_fail)
+        _run_job_with_retries(job=job, metric=metric, max_retries=0, retry_backoff_seconds=0.0, sleep_fn=lambda _: None)
+
+        self.assertEqual("failed", metric.last_outcome)
+        self.assertIsNotNone(metric.last_failure_at)
+        self.assertEqual(metric.last_failure_at, metric.last_finished_at)
+        self.assertIsNone(metric.last_success_at)
+
+    def test_last_success_at_preserved_after_subsequent_failure(self):
+        """Once a job has succeeded, last_success_at must survive a later failure."""
+        call_count = {"n": 0}
+
+        def _first_ok_then_fail() -> int:
+            call_count["n"] += 1
+            return 0 if call_count["n"] == 1 else 1
+
+        from ingest.orchestrator import JobMetrics, _run_job_with_retries
+
+        metric = JobMetrics()
+        job = ScheduledJob(name="firms", interval_seconds=60.0, runner=_first_ok_then_fail)
+
+        # First run: success
+        _run_job_with_retries(job=job, metric=metric, max_retries=0, retry_backoff_seconds=0.0, sleep_fn=lambda _: None)
+        saved_success_at = metric.last_success_at
+        self.assertIsNotNone(saved_success_at)
+
+        # Second run: failure
+        _run_job_with_retries(job=job, metric=metric, max_retries=0, retry_backoff_seconds=0.0, sleep_fn=lambda _: None)
+        self.assertEqual(saved_success_at, metric.last_success_at)
+        self.assertIsNotNone(metric.last_failure_at)
+
+
 class TestDriftJob(unittest.TestCase):
     def test_denoiser_drift_in_job_order(self):
         self.assertIn(JOB_DENOISER_DRIFT, JOB_ORDER)

@@ -70,6 +70,8 @@ class JobMetrics:
     last_outcome: str | None = None
     last_started_at: str | None = None
     last_finished_at: str | None = None
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
 
 
 class ShutdownFlag:
@@ -905,11 +907,13 @@ def _run_job_with_retries(
         if code == 0:
             metric.successes += 1
             metric.last_outcome = "success"
+            metric.last_success_at = metric.last_finished_at
             return 0
 
         if attempts > max_retries:
             metric.failures += 1
             metric.last_outcome = "failed"
+            metric.last_failure_at = metric.last_finished_at
             return 1
 
         metric.retries += 1
