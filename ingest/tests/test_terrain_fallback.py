@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -211,3 +213,117 @@ class TestFlatDemStubShape:
             coords={"lat": [39.5], "lon": [-120.5, -120.0]},
         )
         assert real.attrs.get("terrain_fallback_used") is not True
+
+
+# ── terrain_features: orphaned file cleanup on validation failure ─────────────
+
+def _make_test_dem(tmp_path: Path) -> tuple[Path, object]:
+    """Create a minimal 50×50 GeoTIFF DEM and matching metadata mock."""
+    import rasterio
+    from rasterio.transform import from_bounds
+
+    dem_tif = tmp_path / "dem.tif"
+    transform = from_bounds(-120.5, 39.5, -120.0, 40.0, 50, 50)
+    with rasterio.open(
+        dem_tif,
+        "w",
+        driver="GTiff",
+        height=50,
+        width=50,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=transform,
+    ) as dst:
+        dst.write(np.full((50, 50), 500.0, dtype=np.float32), 1)
+
+    return dem_tif, _make_dem_metadata(raster_path=str(dem_tif))
+
+
+def _make_test_grid() -> object:
+    from api.core.grid import GridSpec
+
+    return GridSpec(
+        crs="EPSG:4326",
+        cell_size_deg=0.01,
+        origin_lat=39.5,
+        origin_lon=-120.5,
+        n_lat=50,
+        n_lon=50,
+    )
+
+
+def _make_test_settings(tmp_path: Path) -> object:
+    settings_obj = MagicMock()
+    settings_obj.region_name = "test_region"
+    settings_obj.resolved_output_dir = tmp_path
+    settings_obj.recompute = True
+    settings_obj.nodata_value = -9999.0
+    return settings_obj
+
+
+class TestTerrainFeaturesValidationCleanup:
+    """Verify that slope/aspect files are removed when validate_terrain_stack raises."""
+
+    @patch("ingest.terrain_features.insert_terrain_features_metadata")
+    @patch("ingest.terrain_features.validate_terrain_stack", side_effect=ValueError("grid mismatch"))
+    @patch("ingest.terrain_features.validate_raster_matches_grid")
+    @patch("ingest.terrain_features.get_latest_dem_metadata_for_region")
+    def test_orphaned_files_cleaned_up_on_validation_failure(
+        self, mock_get_md, mock_validate_raster, mock_validate_stack, mock_insert, tmp_path, caplog
+    ):
+        """When validate_terrain_stack raises, the written slope/aspect files must be deleted."""
+        from ingest.terrain_features import main
+
+        dem_tif, md = _make_test_dem(tmp_path)
+        mock_get_md.return_value = md
+
+        with (
+            patch("ingest.terrain_features.TerrainFeaturesSettings") as mock_settings_cls,
+            patch("ingest.terrain_features.grid_spec_from_metadata", return_value=_make_test_grid()),
+            caplog.at_level("WARNING", logger="terrain_features"),
+        ):
+            mock_settings_cls.return_value = _make_test_settings(tmp_path)
+            with pytest.raises(ValueError, match="grid mismatch"):
+                main([])
+
+        out_dir = tmp_path / "test_region"
+        slope_path = out_dir / "slope_test_region_epsg4326_0p01deg.tif"
+        aspect_path = out_dir / "aspect_test_region_epsg4326_0p01deg.tif"
+
+        assert not slope_path.exists(), "slope file should have been removed after validation failure"
+        assert not aspect_path.exists(), "aspect file should have been removed after validation failure"
+        assert any("terrain_features.cleanup" in r.message or "Removed orphaned" in r.message for r in caplog.records)
+        mock_insert.assert_not_called()
+
+    @patch("ingest.terrain_features.insert_terrain_features_metadata")
+    @patch("ingest.terrain_features.validate_terrain_stack")
+    @patch("ingest.terrain_features.validate_raster_matches_grid")
+    @patch("ingest.terrain_features.get_latest_dem_metadata_for_region")
+    def test_files_retained_on_successful_validation(
+        self, mock_get_md, mock_validate_raster, mock_validate_stack, mock_insert, tmp_path
+    ):
+        """Happy path: slope/aspect files must still exist after successful validation."""
+        from ingest.terrain_features import main
+
+        dem_tif, md = _make_test_dem(tmp_path)
+        mock_get_md.return_value = md
+
+        inserted = MagicMock()
+        inserted.id = 42
+        mock_insert.return_value = inserted
+
+        with (
+            patch("ingest.terrain_features.TerrainFeaturesSettings") as mock_settings_cls,
+            patch("ingest.terrain_features.grid_spec_from_metadata", return_value=_make_test_grid()),
+        ):
+            mock_settings_cls.return_value = _make_test_settings(tmp_path)
+            main([])
+
+        out_dir = tmp_path / "test_region"
+        slope_path = out_dir / "slope_test_region_epsg4326_0p01deg.tif"
+        aspect_path = out_dir / "aspect_test_region_epsg4326_0p01deg.tif"
+
+        assert slope_path.exists(), "slope file must remain on successful validation"
+        assert aspect_path.exists(), "aspect file must remain on successful validation"
+        mock_insert.assert_called_once()

@@ -386,24 +386,45 @@ def main(argv: list[str] | None = None) -> None:
         slope_out = np.where(np.isfinite(slope_out), slope_out, settings.nodata_value)
         aspect_out = np.where(np.isfinite(aspect_out), aspect_out, settings.nodata_value)
 
-        _write_aligned_geotiff(
-            out_path=slope_path,
-            data=slope_out,
-            profile=src.profile,
-            nodata_value=settings.nodata_value,
-        )
-        _write_aligned_geotiff(
-            out_path=aspect_path,
-            data=aspect_out,
-            profile=src.profile,
-            nodata_value=settings.nodata_value,
-        )
+        _artifacts: list[Path] = []
+        try:
+            _write_aligned_geotiff(
+                out_path=slope_path,
+                data=slope_out,
+                profile=src.profile,
+                nodata_value=settings.nodata_value,
+            )
+            _artifacts.append(slope_path)
+            _write_aligned_geotiff(
+                out_path=aspect_path,
+                data=aspect_out,
+                profile=src.profile,
+                nodata_value=settings.nodata_value,
+            )
+            _artifacts.append(aspect_path)
 
-        final_slope_path = _convert_to_cog(slope_path) if emit_cog else slope_path
-        final_aspect_path = _convert_to_cog(aspect_path) if emit_cog else aspect_path
+            final_slope_path = _convert_to_cog(slope_path) if emit_cog else slope_path
+            final_aspect_path = _convert_to_cog(aspect_path) if emit_cog else aspect_path
+            if emit_cog:
+                _artifacts.extend([final_slope_path, final_aspect_path])
 
-        # Fail fast if outputs are misaligned with DEM/grid.
-        validate_terrain_stack(dem_path, final_slope_path, final_aspect_path, grid_spec, strict=True)
+            # Fail fast if outputs are misaligned with DEM/grid.
+            validate_terrain_stack(dem_path, final_slope_path, final_aspect_path, grid_spec, strict=True)
+        except Exception:
+            for p in _artifacts:
+                try:
+                    p.unlink()
+                    log_event(
+                        LOGGER,
+                        "terrain_features.cleanup",
+                        "Removed orphaned terrain artifact after validation failure",
+                        level="warning",
+                        path=str(p),
+                        region=settings.region_name,
+                    )
+                except FileNotFoundError:
+                    pass
+            raise
 
         s_min, s_max, s_mean, coverage = _compute_stats(slope_out, settings.nodata_value)
         a_min, a_max, _a_mean, _a_cov = _compute_stats(aspect_out, settings.nodata_value)
