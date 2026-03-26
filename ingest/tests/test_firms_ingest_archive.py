@@ -10,7 +10,7 @@ import unittest
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from ingest.firms_client import FirmsValidationSummary
 from ingest.firms_ingest import run_firms_ingest
