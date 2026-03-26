@@ -24,7 +24,7 @@ from ml.spread.hindcast_dataset import (
     V2_TENSOR_CHANNELS,
     build_hindcast_tensor_dataset,
 )
-from ml.spread.runtime_contract import SpreadRuntimeContract, write_contract
+from ml.spread.runtime_contract import CANONICAL_CHANNEL_METADATA, SpreadRuntimeContract, write_contract
 
 LOGGER = logging.getLogger("train_spread_v2")
 
@@ -434,7 +434,13 @@ def train_spread_v2(config: dict[str, Any]) -> Path:
         json.dumps(feature_schema, indent=2) + "\n",
         encoding="utf-8",
     )
-    write_contract(run_dir / "runtime_contract.json", SpreadRuntimeContract(channels=tuple(channel_names)))
+    write_contract(
+        run_dir / "runtime_contract.json",
+        SpreadRuntimeContract(
+            channels=tuple(channel_names),
+            channel_metadata=CANONICAL_CHANNEL_METADATA,
+        ),
+    )
     (run_dir / "config_resolved.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
     metadata = {

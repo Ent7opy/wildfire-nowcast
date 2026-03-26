@@ -14,7 +14,9 @@ from api.terrain.window import TerrainWindow
 from ml.spread_features import (
     SpreadInputs,
     assert_grid_alignment,
+    _add_lfmc_to_weather,
     _create_fallback_weather,
+    _load_lfmc_raster_for_window,
     _load_weather_cube,
     build_spread_inputs,
 )
@@ -419,3 +421,159 @@ def test_build_spread_inputs_hard_stop_on_misaligned_cell_size(mock_get_window, 
             bbox=(5.0, 35.0, 5.25, 35.25),
             forecast_reference_time=datetime(2025, 1, 1, tzinfo=timezone.utc),
         )
+
+
+# ---------------------------------------------------------------------------
+# LFMC loading and fallback tests
+# ---------------------------------------------------------------------------
+
+def _make_weather_with_dfmc(window: GridWindow, horizons: list[int] = None) -> xr.Dataset:
+    """Helper: weather cube that includes DFMC but not LFMC."""
+    if horizons is None:
+        horizons = [6, 12]
+    nt, ny, nx = len(horizons), len(window.lat), len(window.lon)
+    shape = (nt, ny, nx)
+    t2m = np.full(shape, 300.0, dtype=np.float32)
+    rh2m = np.full(shape, 40.0, dtype=np.float32)
+    # Compute expected DFMC via the NFDRS piecewise formula (for assertions).
+    # Use a simple value: at 300K / 40% RH dfmc should be non-zero.
+    dfmc = np.full(shape, 0.10, dtype=np.float32)
+    return xr.Dataset(
+        data_vars={
+            "u10": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
+            "v10": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
+            "t2m": (("time", "lat", "lon"), t2m),
+            "rh2m": (("time", "lat", "lon"), rh2m),
+            "precip_24h": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
+            "dfmc": (("time", "lat", "lon"), dfmc),
+        },
+        coords={
+            "time": [np.datetime64(f"2026-03-01T{h:02d}:00:00", "ns") for h in range(nt)],
+            "lat": window.lat,
+            "lon": window.lon,
+        },
+    )
+
+
+def test_add_lfmc_to_weather_uses_real_lfmc_when_available(mock_window, tmp_path):
+    """When a fresh LFMC file is found, _add_lfmc_to_weather should attach real values."""
+    ref_time = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+    bbox = (5.0, 35.0, 5.2, 35.2)
+    ds = _make_weather_with_dfmc(mock_window)
+
+    # Write a synthetic LFMC NetCDF with distinct values (e.g. 0.75).
+    lfmc_vals = np.full((len(mock_window.lat), len(mock_window.lon)), 0.75, dtype=np.float32)
+    lfmc_ds = xr.Dataset(
+        {"lfmc": (("lat", "lon"), lfmc_vals)},
+        coords={"lat": mock_window.lat, "lon": mock_window.lon},
+    )
+    nc_path = tmp_path / "lfmc.nc"
+    lfmc_ds.to_netcdf(nc_path)
+
+    fake_run = {"id": 42, "storage_path": str(nc_path), "run_time": ref_time}
+
+    with patch("ml.spread_features._get_latest_lfmc_run", return_value=fake_run):
+        out_ds, fallback_used = _add_lfmc_to_weather(ds, mock_window, ref_time, bbox)
+
+    assert not fallback_used
+    assert "lfmc" in out_ds.data_vars
+    assert float(out_ds["lfmc"].values[0, 0, 0]) == pytest.approx(0.75)
+    assert out_ds.attrs.get("lfmc_fallback_used") is False
+
+
+def test_add_lfmc_to_weather_falls_back_to_dfmc_when_no_run(mock_window):
+    """When no LFMC run is found, the DFMC values should be copied into the lfmc channel."""
+    ref_time = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+    bbox = (5.0, 35.0, 5.2, 35.2)
+    ds = _make_weather_with_dfmc(mock_window)
+
+    with patch("ml.spread_features._get_latest_lfmc_run", return_value=None):
+        out_ds, fallback_used = _add_lfmc_to_weather(ds, mock_window, ref_time, bbox)
+
+    assert fallback_used
+    assert "lfmc" in out_ds.data_vars
+    # LFMC channel should mirror DFMC when fallback is used.
+    assert np.allclose(out_ds["lfmc"].values, out_ds["dfmc"].values)
+    assert out_ds.attrs.get("lfmc_fallback_used") is True
+
+
+def test_add_lfmc_to_weather_falls_back_when_file_missing(mock_window, tmp_path):
+    """When the LFMC run file is absent, fall back to DFMC and flag it."""
+    ref_time = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+    bbox = (5.0, 35.0, 5.2, 35.2)
+    ds = _make_weather_with_dfmc(mock_window)
+
+    missing_path = tmp_path / "nonexistent_lfmc.nc"
+    fake_run = {"id": 99, "storage_path": str(missing_path), "run_time": ref_time}
+
+    with patch("ml.spread_features._get_latest_lfmc_run", return_value=fake_run):
+        out_ds, fallback_used = _add_lfmc_to_weather(ds, mock_window, ref_time, bbox)
+
+    assert fallback_used
+    assert "lfmc" in out_ds.data_vars
+    assert out_ds.attrs.get("lfmc_fallback_used") is True
+
+
+def test_load_lfmc_raster_for_window_aligns_to_window(mock_window, tmp_path):
+    """_load_lfmc_raster_for_window should align and return a (lat, lon) float32 array."""
+    # Write LFMC NetCDF on a slightly wider grid to test alignment.
+    wider_lat = np.linspace(34.0, 36.5, 50)
+    wider_lon = np.linspace(4.0, 6.5, 50)
+    data = np.random.default_rng(0).random((len(wider_lat), len(wider_lon))).astype(np.float32)
+    ds = xr.Dataset(
+        {"lfmc": (("lat", "lon"), data)},
+        coords={"lat": wider_lat, "lon": wider_lon},
+    )
+    nc_path = tmp_path / "lfmc_wide.nc"
+    ds.to_netcdf(nc_path)
+
+    result = _load_lfmc_raster_for_window(nc_path, mock_window)
+
+    assert result is not None
+    assert result.shape == (len(mock_window.lat), len(mock_window.lon))
+    assert result.dtype == np.float32
+
+
+def test_load_lfmc_raster_returns_none_on_missing_variable(mock_window, tmp_path):
+    """Return None when the NetCDF doesn't contain the 'lfmc' variable."""
+    ds = xr.Dataset(
+        {"other_var": (("lat", "lon"), np.zeros((10, 10), dtype=np.float32))},
+        coords={"lat": mock_window.lat, "lon": mock_window.lon},
+    )
+    nc_path = tmp_path / "bad_lfmc.nc"
+    ds.to_netcdf(nc_path)
+
+    result = _load_lfmc_raster_for_window(nc_path, mock_window)
+    assert result is None
+
+
+def test_fallback_weather_includes_lfmc_nan(mock_window):
+    """_create_fallback_weather must include an lfmc NaN field."""
+    ref_time = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+    ds = _create_fallback_weather(mock_window, ref_time, [6, 12])
+
+    assert "lfmc" in ds.data_vars
+    assert np.isnan(ds["lfmc"].values).all()
+
+
+@patch("ml.spread_features._get_latest_weather_run")
+@patch("ml.spread_features._get_latest_lfmc_run")
+@patch("ml.spread_features.get_fire_cells_heatmap")
+def test_build_spread_inputs_propagates_lfmc_fallback_flag(
+    mock_fires, mock_lfmc_run, mock_weather_run, mock_grid, mock_window
+):
+    """SpreadInputs.lfmc_fallback_used must reflect LFMC unavailability."""
+    mock_weather_run.return_value = None  # triggers weather fallback (all-NaN)
+    mock_lfmc_run.return_value = None     # no LFMC run → fallback
+    mock_fires.return_value = FireHeatmapWindow(mock_grid, mock_window, np.zeros((10, 10)))
+
+    with (
+        patch("ml.spread_features.get_region_grid_spec", return_value=mock_grid),
+        patch("ml.spread_features.get_grid_window_for_bbox", return_value=mock_window),
+        patch("ml.spread_features.load_terrain_window") as mock_terrain,
+    ):
+        mock_terrain.return_value = TerrainWindow(mock_window, np.zeros((10, 10)), np.zeros((10, 10)))
+        ref_time = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+        inputs = build_spread_inputs("region", (5.055, 35.055, 5.145, 35.145), ref_time)
+
+    assert inputs.lfmc_fallback_used is True

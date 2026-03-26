@@ -16,7 +16,7 @@ Usage at inference time:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -25,6 +25,29 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Canonical channel definitions
 # ---------------------------------------------------------------------------
+
+#: Per-channel metadata recorded in the runtime contract for documentation and
+#: downstream tooling.  The ``lfmc`` entry captures the fallback strategy so that
+#: calibration pipelines know when to distrust live-fuel moisture observations.
+CANONICAL_CHANNEL_METADATA: dict[str, dict[str, str]] = {
+    "lfmc": {
+        "description": (
+            "Live fuel moisture content from ECMWF ecLand reanalysis (kg/kg or %). "
+            "Sourced from fuel_moisture_runs (provider=ecmwf_ecland_lfmc). "
+            "When unavailable or stale (per DATA_STALE_LFMC_MINUTES), the DFMC "
+            "heuristic is substituted and lfmc_fallback_used=True is set on SpreadInputs."
+        ),
+        "fallback_channel": "dfmc",
+        "fallback_flag": "lfmc_fallback_used",
+    },
+    "dfmc": {
+        "description": (
+            "Dead fuel moisture content (10-hr, fraction in [0, 0.40]) computed from "
+            "the Nelson (1984) NFDRS equilibrium formula using T2m and RH2m. "
+            "Always present; NaN only when weather is unavailable."
+        ),
+    },
+}
 
 #: Authoritative channel list and order for v2/v3 spatial spread models.
 #: This tuple is imported by both hindcast_dataset.py (training) and
@@ -66,18 +89,32 @@ CANONICAL_CHANNELS_BY_MODEL: dict[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True)
 class SpreadRuntimeContract:
-    """Immutable specification of the feature tensor a model was trained on."""
+    """Immutable specification of the feature tensor a model was trained on.
+
+    ``channel_metadata`` is optional documentation attached at write time.
+    It does not affect channel validation — only ``channels``, ``dtype``, and
+    ``layout`` are load-bearing.  The ``lfmc`` entry describes the fallback
+    strategy used when live-fuel observations are unavailable at inference time.
+    """
 
     channels: tuple[str, ...]
     dtype: str = "float32"
     layout: str = "CHW"  # channel-first spatial tensor
+    channel_metadata: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def n_channels(self) -> int:
         return len(self.channels)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"channels": list(self.channels), "dtype": self.dtype, "layout": self.layout}
+        d: dict[str, Any] = {
+            "channels": list(self.channels),
+            "dtype": self.dtype,
+            "layout": self.layout,
+        }
+        if self.channel_metadata:
+            d["channel_metadata"] = self.channel_metadata
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "SpreadRuntimeContract":
@@ -85,6 +122,7 @@ class SpreadRuntimeContract:
             channels=tuple(d["channels"]),
             dtype=d.get("dtype", "float32"),
             layout=d.get("layout", "CHW"),
+            channel_metadata=d.get("channel_metadata", {}),
         )
 
 
