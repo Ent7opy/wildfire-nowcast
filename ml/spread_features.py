@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,9 @@ class SpreadInputs:
     # Metadata flags for error handling and observability
     weather_fallback_used: bool = False
     terrain_fallback_used: bool = False
+    # True when real LFMC data was unavailable/stale and the DFMC heuristic was
+    # substituted for the lfmc channel.  Propagate to forecasts for calibration.
+    lfmc_fallback_used: bool = False
     # Fire state snapshots at prior time windows.
     # fire_history_t6h: detections from [ref_time - 12h, ref_time - 6h]
     # fire_history_t12h: detections from [ref_time - 18h, ref_time - 12h]
@@ -325,6 +329,8 @@ def _load_weather_cube(
         )
         # Attach equilibrium DFMC derived from T/RH.
         ds_final = _add_dfmc_to_weather(ds_final)
+        # Attach LFMC from ecLand (or DFMC fallback if unavailable/stale).
+        ds_final, _ = _add_lfmc_to_weather(ds_final, window, ref_time, bbox)
         # Mark as not using fallback when successfully loaded
         ds_final.attrs["weather_fallback_used"] = False
         ds_final.attrs["weather_run_id"] = run.get("id")
@@ -401,6 +407,212 @@ def _add_dfmc_to_weather(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+# ---------------------------------------------------------------------------
+# LFMC loading
+# ---------------------------------------------------------------------------
+
+#: Provider tag that identifies ECMWF ecLand LFMC runs in fuel_moisture_runs.
+#: Must match ``LFMC_PROVIDER`` in ``ingest/lfmc_ecland_ingest.py`` — the ingest
+#: module is not imported here because it calls ``logging.basicConfig`` at import time.
+_LFMC_PROVIDER = "ecmwf_ecland_lfmc"
+
+#: Environment variable that mirrors the API config staleness threshold.
+#: "Unavailable" for the spread model includes stale/out-of-coverage cases
+#: per the same rules used by the data-freshness API (C2 stale signaling).
+_LFMC_STALE_MINUTES_ENV = "DATA_STALE_LFMC_MINUTES"
+_LFMC_STALE_MINUTES_DEFAULT = 480  # 8 hours, matches api.config default
+
+
+def _get_lfmc_stale_minutes() -> int:
+    raw = os.getenv(_LFMC_STALE_MINUTES_ENV, "").strip()
+    try:
+        return max(1, int(raw))
+    except (ValueError, TypeError):
+        return _LFMC_STALE_MINUTES_DEFAULT
+
+
+def _get_latest_lfmc_run(
+    ref_time: datetime,
+    bbox: tuple[float, float, float, float],
+    *,
+    stale_minutes: int | None = None,
+) -> dict | None:
+    """Find the most recent fresh LFMC run covering the AOI at or before ref_time.
+
+    A run is considered stale (and therefore equivalent to unavailable) when its
+    run_time is older than ``stale_minutes`` before ``ref_time``.  This aligns with
+    the C2 data-freshness signal defined by ``DATA_STALE_LFMC_MINUTES``.
+    """
+    if stale_minutes is None:
+        stale_minutes = _get_lfmc_stale_minutes()
+    min_lon, min_lat, max_lon, max_lat = bbox
+    earliest_valid = ref_time - timedelta(minutes=stale_minutes)
+    stmt = sa.text(
+        """
+        SELECT id, storage_path, run_time
+        FROM fuel_moisture_runs
+        WHERE status = 'completed'
+          AND provider = :provider
+          AND run_time >= :earliest_valid
+          AND run_time <= :ref_time
+          AND COALESCE(bbox_min_lon, -180.0) <= :min_lon
+          AND COALESCE(bbox_max_lon,  180.0) >= :max_lon
+          AND COALESCE(bbox_min_lat,  -90.0) <= :min_lat
+          AND COALESCE(bbox_max_lat,   90.0) >= :max_lat
+        ORDER BY run_time DESC, id DESC
+        LIMIT 1
+        """
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(
+            stmt,
+            {
+                "provider": _LFMC_PROVIDER,
+                "earliest_valid": earliest_valid,
+                "ref_time": ref_time,
+                "min_lon": min_lon,
+                "max_lon": max_lon,
+                "min_lat": min_lat,
+                "max_lat": max_lat,
+            },
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def _load_lfmc_raster_for_window(path: Path, window: GridWindow) -> np.ndarray | None:
+    """Load and align an LFMC raster to the analysis window.
+
+    Returns a float32 array of shape (lat, lon) aligned to the window grid,
+    or None when loading or alignment fails.
+    """
+    try:
+        with xr.open_dataset(path) as ds:
+            if "lfmc" not in ds.data_vars:
+                LOGGER.warning("LFMC file %s missing 'lfmc' variable.", path)
+                return None
+            da = ds["lfmc"]
+            # Squeeze time dimension — LFMC is a single-snapshot product.
+            if "time" in da.dims:
+                da = da.isel(time=0)
+            # Detect coordinate names (ingest may write lat/lon or latitude/longitude).
+            lat_coord = "lat" if "lat" in da.coords else "latitude"
+            lon_coord = "lon" if "lon" in da.coords else "longitude"
+            if lat_coord not in da.coords or lon_coord not in da.coords:
+                LOGGER.warning("LFMC file %s missing spatial coords.", path)
+                return None
+            try:
+                aligned = da.sel(
+                    {lat_coord: window.lat, lon_coord: window.lon},
+                    method="nearest",
+                )
+            except Exception:
+                LOGGER.warning("Cannot align LFMC raster to analysis window from %s.", path)
+                return None
+            arr = np.asarray(aligned.values, dtype=np.float32)
+            if arr.shape != (len(window.lat), len(window.lon)):
+                LOGGER.warning(
+                    "LFMC raster shape %s does not match window (%d, %d).",
+                    arr.shape,
+                    len(window.lat),
+                    len(window.lon),
+                )
+                return None
+            return arr
+    except Exception:
+        LOGGER.exception("Failed to load LFMC raster from %s.", path)
+        return None
+
+
+def _add_lfmc_to_weather(
+    ds: xr.Dataset,
+    window: GridWindow,
+    ref_time: datetime,
+    bbox: tuple[float, float, float, float],
+) -> tuple[xr.Dataset, bool]:
+    """Attach the ``lfmc`` variable to the weather cube.
+
+    Attempts to load real LFMC from the most recent completed ECMWF ecLand run.
+    When real LFMC is unavailable or stale (per ``DATA_STALE_LFMC_MINUTES``), falls
+    back to the DFMC heuristic already present in the cube and sets the
+    ``lfmc_fallback_used`` attribute.
+
+    Returns
+    -------
+    (updated_ds, lfmc_fallback_used)
+        ``lfmc_fallback_used`` is True whenever the DFMC heuristic was substituted
+        for real LFMC.  Callers should propagate this flag for downstream calibration
+        and debugging.
+    """
+    stale_minutes = _get_lfmc_stale_minutes()
+    run = None
+    try:
+        run = _get_latest_lfmc_run(ref_time, bbox, stale_minutes=stale_minutes)
+    except Exception:
+        LOGGER.exception(
+            "Error querying LFMC runs for ref_time=%s bbox=%s; will use fallback.",
+            ref_time,
+            bbox,
+        )
+
+    lfmc_arr: np.ndarray | None = None
+
+    if run is not None:
+        raw_path = str(run["storage_path"])
+        path = _resolve_storage_path(raw_path)
+        # Attempt to load; _load_lfmc_raster_for_window handles file-not-found gracefully.
+        lfmc_arr = _load_lfmc_raster_for_window(path, window)
+        if lfmc_arr is None:
+            LOGGER.warning(
+                "LFMC run %s raster unavailable at %s (raw=%s); using fallback.",
+                run["id"],
+                path,
+                raw_path,
+            )
+    else:
+        LOGGER.warning(
+            "No fresh LFMC run found for ref_time=%s bbox=%s "
+            "(stale_threshold=%d min); using DFMC heuristic as fallback.",
+            ref_time,
+            bbox,
+            stale_minutes,
+        )
+
+    if lfmc_arr is not None:
+        # Broadcast the 2-D spatial snapshot over the time dimension.
+        nt = ds.sizes.get("time", 1)
+        lfmc_3d = np.broadcast_to(
+            lfmc_arr[np.newaxis, :, :], (nt, len(window.lat), len(window.lon))
+        ).astype(np.float32)
+        ref_var = "u10" if "u10" in ds else next(iter(ds.data_vars), None)
+        dims = ds[ref_var].dims if ref_var else ("time", "lat", "lon")
+        ds = ds.assign(lfmc=(dims, lfmc_3d))
+        ds.attrs["lfmc_fallback_used"] = False
+        return ds, False
+
+    # Fallback: substitute DFMC as a proxy for the lfmc channel.
+    # DFMC (dead fuel moisture from T/RH) is the best real-data-derived moisture
+    # signal available when live-fuel observations are absent.
+    if "dfmc" in ds.data_vars:
+        ds = ds.assign(lfmc=(ds["dfmc"].dims, ds["dfmc"].values.copy()))
+        LOGGER.warning(
+            "lfmc_fallback_used=True for ref_time=%s: DFMC heuristic substituted. "
+            "Downstream calibration should account for this.",
+            ref_time,
+        )
+    else:
+        # Defensive: DFMC absent (e.g. fallback weather cube with NaN T/RH).
+        shape = tuple(ds.sizes[d] for d in ("time", "lat", "lon") if d in ds.dims)
+        fill = np.full(shape, np.nan, dtype=np.float32) if shape else np.array([], dtype=np.float32)
+        ds = ds.assign(lfmc=(list(ds.dims), fill))
+        LOGGER.warning(
+            "lfmc_fallback_used=True for ref_time=%s: both LFMC and DFMC unavailable; "
+            "lfmc channel set to NaN.",
+            ref_time,
+        )
+    ds.attrs["lfmc_fallback_used"] = True
+    return ds, True
+
+
 def _create_fallback_weather(
     window: GridWindow,
     ref_time: datetime,
@@ -427,8 +639,9 @@ def _create_fallback_weather(
             "rh2m": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
             # Zero precipitation assumed in fallback (conservative: no rain).
             "precip_24h": (("time", "lat", "lon"), np.zeros(shape, dtype=np.float32)),
-            # DFMC is NaN in fallback — callers should treat as unknown moisture.
+            # DFMC and LFMC are NaN in fallback — callers should treat as unknown moisture.
             "dfmc": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
+            "lfmc": (("time", "lat", "lon"), np.full(shape, np.nan, dtype=np.float32)),
         },
         coords=coords
     )
@@ -676,6 +889,9 @@ def build_spread_inputs(
             getattr(weather, "attrs", {}).get("weather_fallback_reason", "unknown"),
         )
 
+    # Check if LFMC fallback was used (set by _add_lfmc_to_weather via weather cube attrs).
+    lfmc_fallback_used = bool(getattr(weather, "attrs", {}).get("lfmc_fallback_used", True))
+
     return SpreadInputs(
         grid=grid,
         window=window,
@@ -686,6 +902,7 @@ def build_spread_inputs(
         horizons_hours=horizons_hours,
         weather_fallback_used=weather_fallback_used,
         terrain_fallback_used=terrain_fallback_used,
+        lfmc_fallback_used=lfmc_fallback_used,
         fire_history_t6h=fire_history_t6h,
         fire_history_t12h=fire_history_t12h,
     )
