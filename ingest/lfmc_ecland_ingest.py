@@ -111,11 +111,17 @@ def _create_run_record(
     return int(row["id"])
 
 
-def _finalize_run_record(*, run_id: int, status: str, storage_path: str) -> None:
+def _finalize_run_record(
+    *,
+    run_id: int,
+    status: str,
+    storage_path: str,
+    coverage_fraction: float | None = None,
+) -> None:
     stmt = sa.text(
         """
         UPDATE fuel_moisture_runs
-        SET status = :status, storage_path = :storage_path
+        SET status = :status, storage_path = :storage_path, coverage_fraction = :coverage_fraction
         WHERE id = :run_id
         """
     )
@@ -126,6 +132,7 @@ def _finalize_run_record(*, run_id: int, status: str, storage_path: str) -> None
                 "run_id": int(run_id),
                 "status": str(status),
                 "storage_path": str(storage_path),
+                "coverage_fraction": coverage_fraction,
             },
         )
 
@@ -214,6 +221,7 @@ def ingest_lfmc_ecland_for_bbox(
     out_name = f"lfmc_ecland_{resolved_time:%Y%m%dT%HZ}_bbox_{bbox[0]:.4f}_{bbox[1]:.4f}_{bbox[2]:.4f}_{bbox[3]:.4f}.nc"
     out_path = out_root / out_name
     run_id = _create_run_record(run_time=resolved_time, bbox=bbox, storage_path=f"pending://{out_name}")
+    coverage_fraction: float | None = None
 
     try:
         with httpx.Client(timeout=120.0) as client:
@@ -231,11 +239,20 @@ def ingest_lfmc_ecland_for_bbox(
         try:
             if "lfmc" not in ds.data_vars:
                 raise RuntimeError("Downloaded LFMC file does not contain variable 'lfmc'.")
+            arr = ds["lfmc"]
+            total = int(arr.size)
+            valid = int(arr.notnull().sum())
+            coverage_fraction = float(valid) / float(total) if total > 0 else None
         finally:
             ds.close()
-        _finalize_run_record(run_id=run_id, status="completed", storage_path=str(out_path))
+        _finalize_run_record(
+            run_id=run_id,
+            status="completed",
+            storage_path=str(out_path),
+            coverage_fraction=coverage_fraction,
+        )
     except Exception:
-        _finalize_run_record(run_id=run_id, status="failed", storage_path=str(out_path))
+        _finalize_run_record(run_id=run_id, status="failed", storage_path=str(out_path), coverage_fraction=None)
         raise
 
     result = {

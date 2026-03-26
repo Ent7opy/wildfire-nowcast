@@ -288,7 +288,7 @@ def _fetch_latest_lfmc_status(conn) -> dict[str, Any]:
     latest = conn.execute(
         text(
             """
-            SELECT id, run_time, status, provider, created_at
+            SELECT id, run_time, status, provider, created_at, coverage_fraction
             FROM fuel_moisture_runs
             WHERE status = 'completed'
             ORDER BY run_time DESC, id DESC
@@ -314,9 +314,12 @@ def _fetch_latest_lfmc_status(conn) -> dict[str, Any]:
     counts_row = counts or {}
     run_time = _as_utc(latest_row.get("run_time"))
     last_failure = _as_utc(counts_row.get("last_failure_at"))
+    raw_cf = latest_row.get("coverage_fraction")
+    coverage_fraction: float | None = round(float(raw_cf), 4) if raw_cf is not None else None
 
     return {
         "last_seen_at": run_time,
+        "coverage_fraction": coverage_fraction,
         "idempotency": {
             "latest_run_id": latest_row.get("id"),
             "latest_provider": latest_row.get("provider"),
@@ -324,6 +327,51 @@ def _fetch_latest_lfmc_status(conn) -> dict[str, Any]:
             "completed_runs_last_24h": int(counts_row.get("completed_runs") or 0),
             "failed_runs_last_24h": int(counts_row.get("failed_runs") or 0),
             "last_failure_at": last_failure.isoformat() if last_failure else None,
+        },
+    }
+
+
+def _fetch_latest_lulc_status(conn) -> dict[str, Any]:
+    """Return LULC freshness derived from fire_detections.
+
+    ``last_seen_at`` is the MAX ``created_at`` of any fire detection that has
+    been LULC-classified (``lulc_version IS NOT NULL``).  It is a lower-bound
+    on when the LULC backfill last ran — the actual ingest time is always at
+    least as recent.
+
+    ``coverage_ratio_last_7d`` is the fraction of recent detections that carry
+    a ``lulc_version`` label, useful for spotting partial-backfill gaps.
+
+    ``latest_version`` is the ``lulc_version`` of the most recently classified
+    row (by ``created_at``), not ``MAX(lulc_version)``, because the version
+    string (e.g. ``v200_2021``) does not sort lexicographically by recency.
+    """
+    row = conn.execute(
+        text(
+            """
+            SELECT
+                MAX(created_at) FILTER (WHERE lulc_version IS NOT NULL) AS last_lulc_at,
+                (array_agg(lulc_version ORDER BY created_at DESC)
+                    FILTER (WHERE lulc_version IS NOT NULL))[1]           AS latest_version,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days'
+                                   AND lulc_version IS NOT NULL)          AS classified_last_7d,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS total_last_7d
+            FROM fire_detections
+            """
+        )
+    ).mappings().first()
+
+    r = row or {}
+    classified = int(r.get("classified_last_7d") or 0)
+    total = int(r.get("total_last_7d") or 0)
+
+    return {
+        "last_seen_at": _as_utc(r.get("last_lulc_at")),
+        "idempotency": {
+            "latest_version": r.get("latest_version"),
+            "classified_last_7d": classified,
+            "total_last_7d": total,
+            "coverage_ratio_last_7d": round(float(classified) / float(total), 4) if total > 0 else None,
         },
     }
 
@@ -375,6 +423,7 @@ def build_data_status_snapshot(
         terrain = _fetch_latest_terrain_status(conn)
         perimeters = _fetch_latest_perimeters_status(conn)
         lfmc = _fetch_latest_lfmc_status(conn)
+        lulc = _fetch_latest_lulc_status(conn)
 
     weather_status = _source_status(
         name="weather",
@@ -429,6 +478,12 @@ def build_data_status_snapshot(
             name="lfmc",
             last_seen_at=lfmc["last_seen_at"],
             threshold_minutes=settings.data_stale_lfmc_minutes,
+            now=now_utc,
+        ),
+        "lulc": _source_status(
+            name="lulc",
+            last_seen_at=lulc["last_seen_at"],
+            threshold_minutes=settings.data_stale_lulc_minutes,
             now=now_utc,
         ),
     }
@@ -508,6 +563,15 @@ def build_data_status_snapshot(
         "forecast_gate": forecast_gate,
         "stale_behavior": stale_behavior,
         "sources": sources,
+        # Fuel data summary — named fields operators need at a glance.
+        # lfmc_coverage_fraction: fraction of bounding-box grid cells with
+        # valid (non-NaN) LFMC values from the most recent completed run.
+        # Derived from fuel_moisture_runs.coverage_fraction (stored at ingest).
+        "fuel": {
+            "lfmc_last_updated": lfmc["last_seen_at"].isoformat() if lfmc["last_seen_at"] else None,
+            "lulc_last_updated": lulc["last_seen_at"].isoformat() if lulc["last_seen_at"] else None,
+            "lfmc_coverage_fraction": lfmc.get("coverage_fraction"),
+        },
     }
     if include_internal:
         snapshot["idempotency_dashboard"] = {
@@ -516,5 +580,6 @@ def build_data_status_snapshot(
             "terrain": terrain["idempotency"],
             "perimeters": perimeters["idempotency"],
             "lfmc": lfmc["idempotency"],
+            "lulc": lulc["idempotency"],
         }
     return snapshot

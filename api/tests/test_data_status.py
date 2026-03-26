@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from api.data_status import _fetch_latest_firms_status, build_data_status_snapshot
+from api.data_status import _fetch_latest_firms_status, _fetch_latest_lulc_status, build_data_status_snapshot
 
 
 class DummyEngine:
@@ -44,6 +44,7 @@ _FRESH_DEFAULTS: dict[str, dict[str, Any]] = {
     "terrain": {"last_seen_at_offset": 30, "idempotency": {"total_rows": 1}},
     "perimeters": {"last_seen_at_offset": 60, "idempotency": {"total_rows": 5}},
     "lfmc": {"last_seen_at_offset": 60, "idempotency": {"completed_runs_last_24h": 3, "failed_runs_last_24h": 0}},
+    "lulc": {"last_seen_at_offset": 120, "idempotency": {"latest_version": "v200_2021", "classified_last_7d": 500, "total_last_7d": 500}},
 }
 
 _WEATHER_VARIABLES = ("wind", "temperature", "humidity", "precipitation")
@@ -54,6 +55,7 @@ _FETCH_FUNCTIONS = {
     "terrain": "api.data_status._fetch_latest_terrain_status",
     "perimeters": "api.data_status._fetch_latest_perimeters_status",
     "lfmc": "api.data_status._fetch_latest_lfmc_status",
+    "lulc": "api.data_status._fetch_latest_lulc_status",
 }
 
 
@@ -78,6 +80,16 @@ def _stub_all_sources(
                 lambda _conn, ls=last_seen_at, idem=idempotency, vls=variables_last_seen: {
                     "last_seen_at": ls,
                     "variables_last_seen": vls,
+                    "idempotency": idem,
+                },
+            )
+        elif source == "lfmc":
+            coverage_fraction = override.get("coverage_fraction", 0.92)
+            monkeypatch.setattr(
+                _FETCH_FUNCTIONS[source],
+                lambda _conn, ls=last_seen_at, idem=idempotency, cf=coverage_fraction: {
+                    "last_seen_at": ls,
+                    "coverage_fraction": cf,
                     "idempotency": idem,
                 },
             )
@@ -274,3 +286,107 @@ def test_weather_missing_variable_flags_stale(monkeypatch):
     assert weather["variables"]["precipitation"]["is_stale"] is True
     assert weather["any_variable_stale"] is True
     assert weather["is_stale"] is True
+
+
+def test_fuel_section_present_with_named_fields(monkeypatch):
+    """Snapshot always includes a 'fuel' section with the three operator fields."""
+    now = datetime(2026, 3, 26, 12, 0, tzinfo=timezone.utc)
+
+    lfmc_ts = now - timedelta(minutes=60)
+    lulc_ts = now - timedelta(hours=48)
+
+    _stub_all_sources(
+        monkeypatch,
+        now,
+        lfmc={"last_seen_at": lfmc_ts, "coverage_fraction": 0.87, "idempotency": {"completed_runs_last_24h": 2, "failed_runs_last_24h": 0}},
+        lulc={"last_seen_at": lulc_ts, "idempotency": {"latest_version": "v200_2021", "classified_last_7d": 400, "total_last_7d": 400}},
+    )
+
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine())
+
+    fuel = snapshot["fuel"]
+    assert fuel["lfmc_last_updated"] == lfmc_ts.isoformat()
+    assert fuel["lulc_last_updated"] == lulc_ts.isoformat()
+    assert fuel["lfmc_coverage_fraction"] == 0.87
+
+
+def test_fuel_section_none_when_no_data(monkeypatch):
+    """fuel fields are None when LFMC/LULC have never run."""
+    now = datetime(2026, 3, 26, 12, 0, tzinfo=timezone.utc)
+
+    _stub_all_sources(
+        monkeypatch,
+        now,
+        lfmc={"last_seen_at": None, "coverage_fraction": None, "idempotency": {"completed_runs_last_24h": 0, "failed_runs_last_24h": 0}},
+        lulc={"last_seen_at": None, "idempotency": {"latest_version": None, "classified_last_7d": 0, "total_last_7d": 0}},
+    )
+
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine())
+
+    fuel = snapshot["fuel"]
+    assert fuel["lfmc_last_updated"] is None
+    assert fuel["lulc_last_updated"] is None
+    assert fuel["lfmc_coverage_fraction"] is None
+
+
+def test_lulc_source_in_snapshot(monkeypatch):
+    """LULC appears as a source with freshness state."""
+    now = datetime(2026, 3, 26, 12, 0, tzinfo=timezone.utc)
+
+    _stub_all_sources(monkeypatch, now)
+
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine(), include_internal=True)
+
+    assert "lulc" in snapshot["sources"]
+    assert snapshot["sources"]["lulc"]["state"] == "fresh"
+    assert "lulc" in snapshot["idempotency_dashboard"]
+
+
+def test_lulc_stale_when_old(monkeypatch):
+    """LULC reports stale when backfill exceeds the weekly threshold."""
+    now = datetime(2026, 3, 26, 12, 0, tzinfo=timezone.utc)
+
+    _stub_all_sources(
+        monkeypatch,
+        now,
+        lulc={
+            "last_seen_at_offset": 15000,  # > 10080 min (7 days)
+            "idempotency": {"latest_version": "v200_2021", "classified_last_7d": 0, "total_last_7d": 100},
+        },
+    )
+
+    snapshot = build_data_status_snapshot(now=now, engine=DummyEngine(), include_internal=True)
+
+    assert snapshot["sources"]["lulc"]["state"] == "stale"
+    assert snapshot["sources"]["lulc"]["is_stale"] is True
+    assert "lulc" in snapshot["stale_sources"]
+
+
+class _DummyLulcConn:
+    """Minimal conn stub for _fetch_latest_lulc_status unit test (single merged query)."""
+
+    def __init__(self, row):
+        self._row = row
+
+    def execute(self, stmt):
+        return _DummyMappingsResult(self._row)
+
+
+def test_fetch_latest_lulc_status_returns_expected_shape():
+    now = datetime(2026, 3, 26, 12, 0, tzinfo=timezone.utc)
+    conn = _DummyLulcConn(
+        row={
+            "last_lulc_at": now - timedelta(hours=12),
+            "latest_version": "v200_2021",
+            "classified_last_7d": 300,
+            "total_last_7d": 350,
+        },
+    )
+
+    result = _fetch_latest_lulc_status(conn)
+
+    assert result["last_seen_at"] == now - timedelta(hours=12)
+    assert result["idempotency"]["latest_version"] == "v200_2021"
+    assert result["idempotency"]["classified_last_7d"] == 300
+    assert result["idempotency"]["total_last_7d"] == 350
+    assert result["idempotency"]["coverage_ratio_last_7d"] == round(300 / 350, 4)
