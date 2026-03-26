@@ -87,7 +87,7 @@ def _list_detections(
     return {"count": len(detections), "detections": detections}
 
 
-@fires_router.get("", dependencies=[Depends(RateLimiter(times=30, seconds=60))])
+@fires_router.get("", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
 async def get_fires(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
     min_lat: float = Query(..., description="Minimum latitude (south boundary)"),
