@@ -299,6 +299,42 @@ def test_get_fronts_endpoint_passthrough_geom_provenance(monkeypatch):
     assert front["authoritative_perimeter_id"] == 12345
 
 
+def test_detections_cache_control_header(monkeypatch):
+    """Verify /fires/detections sets Cache-Control: max-age=60 (E4)."""
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
+    monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
+
+    response = client.get(
+        "/fires/detections",
+        params={
+            "min_lon": 20.0, "min_lat": 40.0, "max_lon": 22.0, "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "max-age=60"
+
+
+def test_fires_alias_cache_control_header(monkeypatch):
+    """Verify /fires alias also sets Cache-Control: max-age=60 (E4)."""
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
+    monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
+
+    response = client.get(
+        "/fires",
+        params={
+            "min_lon": 20.0, "min_lat": 40.0, "max_lon": 22.0, "max_lat": 43.0,
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-02T00:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "max-age=60"
+
+
 def test_get_reverse_geocode_endpoint(monkeypatch):
     """Test that /fires/reverse-geocode delegates to reverse_geocode_point."""
     mock_reverse = MagicMock(
