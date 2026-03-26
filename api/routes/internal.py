@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from api.config import settings
 from api.data_status import build_data_status_snapshot
-from api.db_health import build_db_size_snapshot
+from api.db_health import build_db_size_snapshot, read_orchestrator_dashboard
 from api.model_registry import list_active_models
 from api.terrain.features_repo import list_terrain_coverage_inventory
 from api.fires.repo import (
@@ -265,6 +265,62 @@ async def db_size_health() -> dict:
             },
             "error": str(exc),
         }
+
+
+@internal_router.get("/internal/health/dashboard")
+async def ingest_health_dashboard() -> dict:
+    """Return consolidated operational snapshot: per-job metrics, data freshness, DB size, and cleanup status.
+
+    Assembles in a single response what would otherwise require cross-referencing:
+    - ``GET /internal/health/data-freshness`` (source freshness)
+    - ``GET /internal/health/db-size`` (DB size + cleanup timing)
+    - The raw orchestrator dashboard JSON (per-job success/failure timestamps)
+
+    All section helpers are reused directly — no duplicate business logic.
+
+    Schema is additive; individual sub-endpoints remain available for targeted queries.
+    """
+    as_of = datetime.now(timezone.utc).isoformat()
+
+    # --- per-job metrics from orchestrator dashboard file ---
+    raw = read_orchestrator_dashboard()
+    jobs_section = raw.get("metrics") if raw else None
+    orchestrator_generated_at = raw.get("generated_at") if raw else None
+
+    # --- data freshness (reuse shared helper; include internal idempotency fields) ---
+    try:
+        freshness_snapshot = build_data_status_snapshot(include_internal=True)
+        freshness_section = {
+            "overall_state": freshness_snapshot.get("overall_state"),
+            "forecast_inputs_ready": freshness_snapshot.get("forecast_inputs_ready"),
+            "sources": freshness_snapshot.get("sources", {}),
+        }
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        freshness_section = {"overall_state": "unknown", "forecast_inputs_ready": False, "sources": {}, "error": str(exc)}
+
+    # --- DB size + cleanup (reuse shared helper; pass pre-read dashboard to avoid a second file read) ---
+    try:
+        db_snapshot = build_db_size_snapshot(dashboard=raw)
+        db_section = {
+            "database": db_snapshot.get("database"),
+            "tables": db_snapshot.get("tables"),
+            "retention_policy": db_snapshot.get("retention_policy"),
+        }
+        cleanup_section = db_snapshot.get("cleanup")
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        db_section = {"database": {"size_bytes": None, "size_pretty": None}, "tables": {}, "retention_policy": {}, "error": str(exc)}
+        cleanup_section = {"last_run_at": None, "last_outcome": None, "next_run_at": None, "interval_minutes": None, "source": "error"}
+
+    return {
+        "as_of": as_of,
+        "orchestrator": {
+            "generated_at": orchestrator_generated_at,
+            "jobs": jobs_section,
+        },
+        "data_freshness": freshness_section,
+        "db_size": db_section,
+        "cleanup": cleanup_section,
+    }
 
 
 @internal_router.post("/internal/denoiser/review-queue/{event_id}/resolve")

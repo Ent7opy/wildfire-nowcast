@@ -76,6 +76,10 @@ _DEFAULT_CLEANUP_INTERVAL_MINUTES = float(
 
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
+# Sentinel used to distinguish "caller did not provide a pre-read dashboard" from
+# "caller already read the dashboard and got None (file absent)".
+_UNSET: object = object()
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -92,15 +96,28 @@ def _read_dashboard(dashboard_path: Path) -> dict | None:
     return None
 
 
-def _get_cleanup_status(dashboard_path: Path) -> dict:
+def read_orchestrator_dashboard(dashboard_path: Path | None = None) -> dict | None:
+    """Return parsed orchestrator dashboard JSON, or None if unavailable.
+
+    Public helper consumed by the consolidated health dashboard endpoint so it
+    can surface per-job metrics without duplicating the read logic.
+    """
+    return _read_dashboard(dashboard_path or DEFAULT_DASHBOARD_PATH)
+
+
+def _get_cleanup_status(dashboard_path: Path, *, dashboard: dict | None = _UNSET) -> dict:
     """Derive last-run timestamp and next-scheduled estimate from dashboard file.
 
     Returns a dict with numeric/string fields so monitors can scrape them directly.
     ``source`` explains the data provenance; consumers should check it when
     ``last_run_at`` is None.
+
+    Pass a pre-read ``dashboard`` dict to skip a redundant file read (e.g. when
+    the caller has already read the dashboard for other purposes).
     """
     interval_minutes = _DEFAULT_CLEANUP_INTERVAL_MINUTES
-    dashboard = _read_dashboard(dashboard_path)
+    if dashboard is _UNSET:
+        dashboard = _read_dashboard(dashboard_path)
 
     if dashboard is None:
         return {
@@ -199,6 +216,8 @@ def _query_db_sizes() -> dict:
 
 def build_db_size_snapshot(
     dashboard_path: Path | None = None,
+    *,
+    dashboard: object = _UNSET,
 ) -> dict:
     """Return per-table row counts, total DB size, and retention/cleanup status.
 
@@ -209,6 +228,10 @@ def build_db_size_snapshot(
     Args:
         dashboard_path: Path to orchestrator dashboard JSON.  Defaults to
             ``data/ingest/orchestrator_dashboard.json`` relative to repo root.
+        dashboard: Pre-parsed orchestrator dashboard dict (or ``None`` when the
+            file was already read and found to be absent).  Pass this when the
+            caller has already read the dashboard to avoid a second file read.
+            Omit to let the function read the file itself.
 
     Returns:
         Structured dict with ``as_of``, ``database``, ``tables``,
@@ -220,7 +243,7 @@ def build_db_size_snapshot(
 
     as_of = datetime.now(timezone.utc).isoformat()
     db_data = _query_db_sizes()
-    cleanup_status = _get_cleanup_status(resolved_path)
+    cleanup_status = _get_cleanup_status(resolved_path, dashboard=dashboard)
 
     return {
         "as_of": as_of,
