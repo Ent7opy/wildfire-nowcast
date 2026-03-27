@@ -25,6 +25,7 @@ import FireDetailsPanel from "./components/FireDetailsPanel";
 import FireMap from "./components/FireMap";
 import ForecastNotification from "./components/ForecastNotification";
 import RegionFilter from "./components/RegionFilter";
+import ReviewQueuePanel from "./components/ReviewQueuePanel";
 import SafetyStatusBar from "./components/SafetyStatusBar";
 import { useArchiveData } from "./hooks/useArchiveData";
 import { useEmbedMode } from "./hooks/useEmbedMode";
@@ -666,6 +667,11 @@ export default function App(): JSX.Element {
             <Box sx={{ flex: "0 0 auto", minHeight: { xs: 360, lg: 0 } }}>
               <FireDetailsPanel visibleEvents={filteredEvents} />
             </Box>
+            {!isArchiveMode && (
+              <Box sx={{ flex: "0 0 auto" }}>
+                <ReviewQueuePanel visibleEvents={filteredEvents} />
+              </Box>
+            )}
             {!isArchiveMode && (
               <Box sx={{ flex: 1, minHeight: 320 }}>
                 <AIChatAssistant />

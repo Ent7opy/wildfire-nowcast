@@ -24,7 +24,9 @@ export const FIRE_COLORS = {
   veryLowFill: [253, 224, 71, 180],
   unscoredFill: [128, 128, 128, 150],
   outlineHigh: [255, 107, 53, 200],
-  outlineDefault: [255, 255, 255, 100]
+  outlineDefault: [255, 255, 255, 100],
+  reviewFill: [251, 146, 60, 220],
+  reviewOutline: [253, 186, 116, 255]
 } as const;
 
 export interface RenderEvent extends FireEvent {
@@ -138,8 +140,8 @@ export function toRenderEvent(event: FireEvent): RenderEvent | null {
     return null;
   }
   const severity = eventSeverity(event);
-  const fill = fireFillRgba(severity);
-  const line = fireLineRgba(severity);
+  const fill = event.review_required ? [...FIRE_COLORS.reviewFill] : fireFillRgba(severity);
+  const line = event.review_required ? [...FIRE_COLORS.reviewOutline] : fireLineRgba(severity);
   const detectionCount = safeFloat(event.detection_count);
   return {
     ...event,
