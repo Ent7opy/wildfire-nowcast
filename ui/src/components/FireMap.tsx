@@ -47,7 +47,7 @@ import {
   isForecastContourVisible,
   toRenderEvent
 } from "../map/layerUtils";
-import { computeArchiveTimeRange, computeTimeRange } from "../utils/time";
+import { computeArchiveTimeRange, computeFullDayTimeRange, computeTimeRange } from "../utils/time";
 import { eventLimitForZoom, frontLimitForZoom, shouldLoadFronts, shouldRenderCentroids, viewportBbox } from "../utils/mapMath";
 import { useDebounce } from "../hooks/useDebounce";
 import { selectionViewFromBounds } from "../utils/mapSelection";
@@ -145,11 +145,16 @@ export default function FireMap({
   const debouncedMapView = useDebounce(mapView, 400);
   const bbox = useMemo(() => viewportBbox(debouncedMapView), [debouncedMapView]);
   const timeRange = useMemo(() => {
-    if (isArchiveMode && archive.archiveDate && archive.archiveTimeframe) {
-      return computeArchiveTimeRange(archive.archiveDate, archive.archiveTimeframe);
+    if (isArchiveMode) {
+      if (archive.archiveSubMode === "range" && archive.scrubDate) {
+        return computeFullDayTimeRange(archive.scrubDate);
+      }
+      if (archive.archiveDate && archive.archiveTimeframe) {
+        return computeArchiveTimeRange(archive.archiveDate, archive.archiveTimeframe);
+      }
     }
     return computeTimeRange(filters);
-  }, [isArchiveMode, archive.archiveDate, archive.archiveTimeframe, filters]);
+  }, [isArchiveMode, archive.archiveSubMode, archive.scrubDate, archive.archiveDate, archive.archiveTimeframe, filters]);
   const normalizedSearch = searchQuery.trim().toLowerCase();
 
   const eventsQuery = useQuery({

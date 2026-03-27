@@ -2,11 +2,18 @@ import type { FireEvent } from "./api";
 
 export type ViewMode = 'live' | 'archive';
 export type ArchiveTimeframe = 'morning' | 'afternoon' | 'evening' | 'night';
+export type ArchiveSubMode = 'single' | 'range';
 
 export interface ArchiveModeState {
   viewMode: ViewMode;
-  archiveDate: string | null;  // 'YYYY-MM-DD'
+  archiveDate: string | null;       // 'YYYY-MM-DD' — used in single-day mode
   archiveTimeframe: ArchiveTimeframe | null;
+  // Range-mode fields (active when archiveSubMode === 'range')
+  archiveSubMode: ArchiveSubMode;
+  rangeStart: string | null;        // 'YYYY-MM-DD'
+  rangeEnd: string | null;          // 'YYYY-MM-DD'
+  rangeJobId: string | null;
+  scrubDate: string | null;         // current day displayed in range playback
 }
 
 export interface FiltersState {

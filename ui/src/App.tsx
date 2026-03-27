@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Box,
   Button,
   CircularProgress,
+  LinearProgress,
   Paper,
   TextField,
   Tooltip,
@@ -27,7 +28,9 @@ import ForecastNotification from "./components/ForecastNotification";
 import RegionFilter from "./components/RegionFilter";
 import ReviewQueuePanel from "./components/ReviewQueuePanel";
 import SafetyStatusBar from "./components/SafetyStatusBar";
+import ArchiveRangeScrubber from "./components/ArchiveRangeScrubber";
 import { useArchiveData } from "./hooks/useArchiveData";
+import { useArchiveRangeData } from "./hooks/useArchiveRangeData";
 import { useEmbedMode } from "./hooks/useEmbedMode";
 import { useForecastPolling } from "./hooks/useForecastPolling";
 import { useGeolocation } from "./hooks/useGeolocation";
@@ -139,6 +142,9 @@ export default function App(): JSX.Element {
   const exitToLiveMode = useAppStore((s) => s.exitToLiveMode);
   const setArchiveDate = useAppStore((s) => s.setArchiveDate);
   const setArchiveTimeframe = useAppStore((s) => s.setArchiveTimeframe);
+  const setArchiveSubMode = useAppStore((s) => s.setArchiveSubMode);
+  const setArchiveRange = useAppStore((s) => s.setArchiveRange);
+  const setScrubDate = useAppStore((s) => s.setScrubDate);
   const safety = useAppStore((s) => s.safety);
   const enableSafetyMode = useAppStore((s) => s.enableSafetyMode);
   const disableSafetyMode = useAppStore((s) => s.disableSafetyMode);
@@ -150,9 +156,21 @@ export default function App(): JSX.Element {
   useParentFrame(isEmbedded);
 
   const isArchiveMode = archive.viewMode === "archive";
+  const isRangeMode = isArchiveMode && archive.archiveSubMode === "range";
   const isSafetyMode = safety.enabled;
   const archiveData = useArchiveData();
+  const archiveRangeData = useArchiveRangeData();
   const { requestLocation } = useGeolocation();
+
+  // Local inputs for range date pickers (not committed until "Load Range" is clicked)
+  const today = new Date().toISOString().slice(0, 10);
+  const [rangeInputStart, setRangeInputStart] = useState<string>("");
+  const [rangeInputEnd, setRangeInputEnd] = useState<string>("");
+
+  const handleLoadRange = useCallback(() => {
+    if (!rangeInputStart || !rangeInputEnd) return;
+    setArchiveRange(rangeInputStart, rangeInputEnd);
+  }, [rangeInputStart, rangeInputEnd, setArchiveRange]);
 
   useForecastPolling();
   const safetyEvents = useMemo(
@@ -291,12 +309,19 @@ export default function App(): JSX.Element {
     { label: "High Confidence", value: confidencePercent === null ? "n/a" : formatStatValue(confidencePercent, 1), unit: "%", icon: VerifiedIcon, color: "#4ade80" }
   ];
 
-  const archiveStats: StatCard[] = [
-    { label: "Time Filter", value: activeTimeframeDef?.label ?? "—", unit: "", icon: activeTimeframeDef ? TIMEFRAME_ICONS[activeTimeframeDef.id] : AccessTimeIcon, color: "#60a5fa" },
-    { label: "Active Events", value: formatStatValue(filteredEvents.length), unit: "", icon: ShowChartIcon, color: "#f97316" },
-    { label: "Max Intensity", value: maxIntensityFrp === null ? "n/a" : formatStatValue(maxIntensityFrp), unit: "MW", icon: LocalFireDepartmentIcon, color: "#ef4444" },
-    { label: "Context", value: "ARCHIVE", unit: "", icon: PublicIcon, color: "#4ade80" }
-  ];
+  const archiveStats: StatCard[] = isRangeMode
+    ? [
+      { label: "Viewing Date", value: archive.scrubDate ?? "—", unit: "", icon: AccessTimeIcon, color: "#60a5fa" },
+      { label: "Active Events", value: formatStatValue(filteredEvents.length), unit: "", icon: ShowChartIcon, color: "#f97316" },
+      { label: "Max Intensity", value: maxIntensityFrp === null ? "n/a" : formatStatValue(maxIntensityFrp), unit: "MW", icon: LocalFireDepartmentIcon, color: "#ef4444" },
+      { label: "Context", value: "REPLAY", unit: "", icon: PublicIcon, color: "#4ade80" }
+    ]
+    : [
+      { label: "Time Filter", value: activeTimeframeDef?.label ?? "—", unit: "", icon: activeTimeframeDef ? TIMEFRAME_ICONS[activeTimeframeDef.id] : AccessTimeIcon, color: "#60a5fa" },
+      { label: "Active Events", value: formatStatValue(filteredEvents.length), unit: "", icon: ShowChartIcon, color: "#f97316" },
+      { label: "Max Intensity", value: maxIntensityFrp === null ? "n/a" : formatStatValue(maxIntensityFrp), unit: "MW", icon: LocalFireDepartmentIcon, color: "#ef4444" },
+      { label: "Context", value: "ARCHIVE", unit: "", icon: PublicIcon, color: "#4ade80" }
+    ];
 
   const SAFETY_TIER_COLORS: Record<string, string> = {
     SAFE: "#22c55e", WATCH: "#eab308", WARNING: "#f97316", DANGER: "#ef4444"
@@ -467,12 +492,17 @@ export default function App(): JSX.Element {
             <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.8 }}>
               {isArchiveMode && <AccessTimeIcon sx={{ color: "#60a5fa", fontSize: 28 }} />}
               <Typography variant="h3" sx={{ color: "#fff", fontWeight: 800, lineHeight: 1.05, letterSpacing: "-0.02em" }}>
-                {isArchiveMode ? "Wildfire Snapshot" : "Wildfire Nowcast"}
+                {isRangeMode ? "Wildfire Replay" : isArchiveMode ? "Wildfire Snapshot" : "Wildfire Nowcast"}
               </Typography>
             </Box>
 
             {/* Subtitle */}
-            {isArchiveMode ? (
+            {isRangeMode ? (
+              <Typography sx={{ color: "#6b7280", maxWidth: 650, fontSize: 14, lineHeight: 1.65 }}>
+                Replaying {archive.rangeStart ?? "—"} → {archive.rangeEnd ?? "—"}.
+                {archive.scrubDate ? ` Viewing ${archive.scrubDate}.` : " Select a day on the scrubber below."}
+              </Typography>
+            ) : isArchiveMode ? (
               <Typography sx={{ color: "#6b7280", maxWidth: 650, fontSize: 14, lineHeight: 1.65 }}>
                 Viewing Archive for {archive.archiveDate ?? "—"}. Quadrant:{" "}
                 {activeTimeframeDef?.label ?? "—"}.
@@ -483,72 +513,195 @@ export default function App(): JSX.Element {
               </Typography>
             )}
 
-            {/* Archive date + timeframe controls */}
+            {/* Archive controls */}
             {isArchiveMode && (
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mt: 1.5, flexWrap: "wrap" }}>
-                <TextField
-                  type="date"
-                  size="small"
-                  value={archive.archiveDate ?? ""}
-                  onChange={(e) => setArchiveDate(e.target.value)}
-                  inputProps={{ max: new Date().toISOString().slice(0, 10) }}
-                  sx={{
-                    "& .MuiOutlinedInput-root": {
-                      bgcolor: "#0d1117",
-                      borderRadius: 2,
-                      fontSize: 12,
-                      color: "#e5e7eb"
-                    },
-                    "& input": { colorScheme: "light" }
-                  }}
-                />
-                <Box sx={{ display: "flex", gap: 0.5 }}>
-                  {TIMEFRAME_DEFS.map((def) => {
-                    const Icon = TIMEFRAME_ICONS[def.id];
-                    const isSelected = archive.archiveTimeframe === def.id;
+              <Box sx={{ mt: 1.5 }}>
+                {/* Sub-mode selector: Single Day | Range */}
+                <Box sx={{ display: "flex", gap: 0, mb: 1.5, p: 0.4, bgcolor: "#0d1117", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 1.5, width: "fit-content" }}>
+                  {(["single", "range"] as const).map((mode) => {
+                    const active = archive.archiveSubMode === mode;
                     return (
-                      <Tooltip key={def.id} title={def.label}>
-                        <Box
-                          component="button"
-                          onClick={() => setArchiveTimeframe(def.id)}
-                          sx={{
-                            p: 0.8,
-                            borderRadius: 1.5,
-                            border: isSelected ? "1px solid rgba(59,130,246,0.6)" : "1px solid rgba(255,255,255,0.1)",
-                            bgcolor: isSelected ? "rgba(59,130,246,0.15)" : "#0d1117",
-                            color: isSelected ? "#60a5fa" : "#6b7280",
-                            cursor: "pointer",
-                            display: "flex",
-                            alignItems: "center",
-                            transition: "all 0.15s",
-                            "&:hover": { borderColor: "rgba(59,130,246,0.4)", color: "#93c5fd" }
-                          }}
-                        >
-                          <Icon sx={{ fontSize: 16 }} />
-                        </Box>
-                      </Tooltip>
+                      <Box
+                        key={mode}
+                        component="button"
+                        onClick={() => setArchiveSubMode(mode)}
+                        sx={{
+                          px: 1.5,
+                          py: 0.5,
+                          borderRadius: 1,
+                          fontSize: 10,
+                          fontWeight: 800,
+                          letterSpacing: "0.1em",
+                          textTransform: "uppercase",
+                          cursor: "pointer",
+                          border: "none",
+                          bgcolor: active ? (mode === "range" ? "rgba(96,165,250,0.15)" : "rgba(249,115,22,0.12)") : "transparent",
+                          color: active ? (mode === "range" ? "#60a5fa" : "#f97316") : "#6b7280",
+                          transition: "all 0.15s",
+                          "&:hover": { color: mode === "range" ? "#93c5fd" : "#fb923c" }
+                        }}
+                      >
+                        {mode === "single" ? "Single Day" : "Date Range"}
+                      </Box>
                     );
                   })}
                 </Box>
-                {/* Ingestion status indicator */}
-                {archiveData.status === "checking" && (
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-                    <CircularProgress size={14} sx={{ color: "#60a5fa" }} />
-                    <Typography sx={{ fontSize: 11, color: "#6b7280" }}>Checking data…</Typography>
+
+                {/* Single-day controls */}
+                {archive.archiveSubMode === "single" && (
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
+                    <TextField
+                      type="date"
+                      size="small"
+                      value={archive.archiveDate ?? ""}
+                      onChange={(e) => setArchiveDate(e.target.value)}
+                      inputProps={{ max: today }}
+                      sx={{
+                        "& .MuiOutlinedInput-root": { bgcolor: "#0d1117", borderRadius: 2, fontSize: 12, color: "#e5e7eb" },
+                        "& input": { colorScheme: "light" }
+                      }}
+                    />
+                    <Box sx={{ display: "flex", gap: 0.5 }}>
+                      {TIMEFRAME_DEFS.map((def) => {
+                        const Icon = TIMEFRAME_ICONS[def.id];
+                        const isSelected = archive.archiveTimeframe === def.id;
+                        return (
+                          <Tooltip key={def.id} title={def.label}>
+                            <Box
+                              component="button"
+                              onClick={() => setArchiveTimeframe(def.id)}
+                              sx={{
+                                p: 0.8,
+                                borderRadius: 1.5,
+                                border: isSelected ? "1px solid rgba(59,130,246,0.6)" : "1px solid rgba(255,255,255,0.1)",
+                                bgcolor: isSelected ? "rgba(59,130,246,0.15)" : "#0d1117",
+                                color: isSelected ? "#60a5fa" : "#6b7280",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                transition: "all 0.15s",
+                                "&:hover": { borderColor: "rgba(59,130,246,0.4)", color: "#93c5fd" }
+                              }}
+                            >
+                              <Icon sx={{ fontSize: 16 }} />
+                            </Box>
+                          </Tooltip>
+                        );
+                      })}
+                    </Box>
+                    {archiveData.status === "checking" && (
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                        <CircularProgress size={14} sx={{ color: "#60a5fa" }} />
+                        <Typography sx={{ fontSize: 11, color: "#6b7280" }}>Checking data…</Typography>
+                      </Box>
+                    )}
+                    {archiveData.status === "ingesting" && (
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                        <CircularProgress size={14} sx={{ color: "#f97316" }} />
+                        <Typography sx={{ fontSize: 11, color: "#f97316" }}>
+                          {archiveData.message ?? "Ingesting data…"}
+                        </Typography>
+                      </Box>
+                    )}
+                    {archiveData.status === "unavailable" && (
+                      <Typography sx={{ fontSize: 11, color: "#ef4444" }}>
+                        {archiveData.message ?? "Data unavailable for this date."}
+                      </Typography>
+                    )}
                   </Box>
                 )}
-                {archiveData.status === "ingesting" && (
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-                    <CircularProgress size={14} sx={{ color: "#f97316" }} />
-                    <Typography sx={{ fontSize: 11, color: "#f97316" }}>
-                      {archiveData.message ?? "Ingesting data…"}
-                    </Typography>
+
+                {/* Range controls */}
+                {archive.archiveSubMode === "range" && (
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                      <TextField
+                        type="date"
+                        size="small"
+                        label="Start"
+                        value={rangeInputStart}
+                        onChange={(e) => setRangeInputStart(e.target.value)}
+                        inputProps={{ max: today }}
+                        InputLabelProps={{ shrink: true, sx: { fontSize: 11, color: "#6b7280" } }}
+                        sx={{
+                          "& .MuiOutlinedInput-root": { bgcolor: "#0d1117", borderRadius: 2, fontSize: 12, color: "#e5e7eb" },
+                          "& input": { colorScheme: "light" }
+                        }}
+                      />
+                      <Typography sx={{ fontSize: 10, color: "#374151" }}>→</Typography>
+                      <TextField
+                        type="date"
+                        size="small"
+                        label="End"
+                        value={rangeInputEnd}
+                        onChange={(e) => setRangeInputEnd(e.target.value)}
+                        inputProps={{ max: today, min: rangeInputStart || undefined }}
+                        InputLabelProps={{ shrink: true, sx: { fontSize: 11, color: "#6b7280" } }}
+                        sx={{
+                          "& .MuiOutlinedInput-root": { bgcolor: "#0d1117", borderRadius: 2, fontSize: 12, color: "#e5e7eb" },
+                          "& input": { colorScheme: "light" }
+                        }}
+                      />
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={handleLoadRange}
+                        disabled={!rangeInputStart || !rangeInputEnd || archiveRangeData.status === "loading"}
+                        sx={{
+                          fontSize: 10,
+                          fontWeight: 800,
+                          letterSpacing: "0.1em",
+                          borderColor: "rgba(96,165,250,0.4)",
+                          color: "#60a5fa",
+                          "&:hover": { borderColor: "rgba(96,165,250,0.7)", bgcolor: "rgba(96,165,250,0.07)" },
+                          "&.Mui-disabled": { borderColor: "rgba(255,255,255,0.08)", color: "#374151" }
+                        }}
+                      >
+                        Load Range
+                      </Button>
+                    </Box>
+
+                    {/* Range ingest progress */}
+                    {archiveRangeData.status === "loading" && archiveRangeData.totalCount > 0 && (
+                      <Box sx={{ maxWidth: 420 }}>
+                        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 0.5 }}>
+                          <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                            <CircularProgress size={12} sx={{ color: "#60a5fa" }} />
+                            <Typography sx={{ fontSize: 11, color: "#6b7280" }}>
+                              {archiveRangeData.message ?? "Loading range…"}
+                            </Typography>
+                          </Box>
+                          <Typography sx={{ fontSize: 10, color: "#374151", fontVariantNumeric: "tabular-nums" }}>
+                            {archiveRangeData.completedCount}/{archiveRangeData.totalCount}
+                          </Typography>
+                        </Box>
+                        <LinearProgress
+                          variant="determinate"
+                          value={archiveRangeData.totalCount > 0 ? (archiveRangeData.completedCount / archiveRangeData.totalCount) * 100 : 0}
+                          sx={{
+                            height: 3,
+                            borderRadius: 2,
+                            bgcolor: "rgba(255,255,255,0.06)",
+                            "& .MuiLinearProgress-bar": { bgcolor: "#60a5fa", borderRadius: 2 }
+                          }}
+                        />
+                      </Box>
+                    )}
+
+                    {/* Warning for large ranges */}
+                    {archiveRangeData.warning && (
+                      <Typography sx={{ fontSize: 11, color: "#eab308", maxWidth: 500 }}>
+                        ⚠ {archiveRangeData.warning}
+                      </Typography>
+                    )}
+
+                    {/* Error */}
+                    {archiveRangeData.status === "unavailable" && (
+                      <Typography sx={{ fontSize: 11, color: "#ef4444" }}>
+                        {archiveRangeData.message ?? "Range ingest unavailable."}
+                      </Typography>
+                    )}
                   </Box>
-                )}
-                {archiveData.status === "unavailable" && (
-                  <Typography sx={{ fontSize: 11, color: "#ef4444" }}>
-                    {archiveData.message ?? "Data unavailable for this date."}
-                  </Typography>
                 )}
               </Box>
             )}
@@ -634,6 +787,17 @@ export default function App(): JSX.Element {
                 confidenceFilter={confidenceFilter}
               />
             </Box>
+
+            {/* Timeline scrubber — visible only in range mode once at least one day status exists */}
+            {isRangeMode && archive.rangeStart && archive.rangeEnd && archiveRangeData.dayStatuses.length > 0 && (
+              <ArchiveRangeScrubber
+                startDate={archive.rangeStart}
+                endDate={archive.rangeEnd}
+                scrubDate={archive.scrubDate}
+                dayStatuses={archiveRangeData.dayStatuses}
+                onScrub={setScrubDate}
+              />
+            )}
 
             <Box
               sx={{
