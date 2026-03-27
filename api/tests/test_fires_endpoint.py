@@ -132,7 +132,7 @@ def test_get_detections_endpoint_with_include_noise(monkeypatch):
 
 def test_get_events_endpoint(monkeypatch):
     """Test that /fires/events delegates to list_fire_events_bbox_time."""
-    mock_events = MagicMock(return_value=[{"event_id": "evt_1", "event_score": 0.95}])
+    mock_events = MagicMock(return_value={"data": [{"event_id": "evt_1", "event_score": 0.95}], "next_cursor": None, "has_more": False, "limit": 1000})
     monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
 
     response = client.get(
@@ -153,6 +153,8 @@ def test_get_events_endpoint(monkeypatch):
     payload = response.json()
     assert payload["count"] == 1
     assert payload["events"][0]["event_id"] == "evt_1"
+    assert payload["next_cursor"] is None
+    assert payload["has_more"] is False
 
     _, kwargs = mock_events.call_args
     assert kwargs["min_event_score"] == 0.5
@@ -162,13 +164,13 @@ def test_get_events_endpoint(monkeypatch):
 def test_get_events_endpoint_passthrough_geom_geojson(monkeypatch):
     """Test that /fires/events returns event geometry payload when provided by repo."""
     mock_events = MagicMock(
-        return_value=[
+        return_value={"data": [
             {
                 "event_id": "evt_geom_1",
                 "event_score": 0.93,
                 "geom_geojson": '{"type":"MultiPolygon","coordinates":[]}',
             }
-        ]
+        ], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
 
@@ -194,7 +196,7 @@ def test_get_events_endpoint_passthrough_geom_geojson(monkeypatch):
 def test_get_events_endpoint_passthrough_geom_provenance(monkeypatch):
     """Test that /fires/events preserves geometry provenance fields from repo."""
     mock_events = MagicMock(
-        return_value=[
+        return_value={"data": [
             {
                 "event_id": "evt_geom_2",
                 "geom_source": "estimated",
@@ -203,7 +205,7 @@ def test_get_events_endpoint_passthrough_geom_provenance(monkeypatch):
                 "authority_profile": None,
                 "authoritative_perimeter_id": None,
             }
-        ]
+        ], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
 
@@ -232,7 +234,7 @@ def test_get_events_endpoint_passthrough_geom_provenance(monkeypatch):
 
 def test_get_fronts_endpoint(monkeypatch):
     """Test that /fires/fronts delegates to list_fire_fronts_bbox_time."""
-    mock_fronts = MagicMock(return_value=[{"front_id": "front_1", "event_id": "evt_1"}])
+    mock_fronts = MagicMock(return_value={"data": [{"front_id": "front_1", "event_id": "evt_1"}], "next_cursor": None, "has_more": False, "limit": 800})
     monkeypatch.setattr(fires, "list_fire_fronts_bbox_time", mock_fronts)
 
     response = client.get(
@@ -253,6 +255,8 @@ def test_get_fronts_endpoint(monkeypatch):
     payload = response.json()
     assert payload["count"] == 1
     assert payload["fronts"][0]["front_id"] == "front_1"
+    assert payload["next_cursor"] is None
+    assert payload["has_more"] is False
 
     _, kwargs = mock_fronts.call_args
     assert kwargs["min_event_score"] == 0.5
@@ -262,7 +266,7 @@ def test_get_fronts_endpoint(monkeypatch):
 def test_get_fronts_endpoint_passthrough_geom_provenance(monkeypatch):
     """Test that /fires/fronts preserves geometry provenance fields from repo."""
     mock_fronts = MagicMock(
-        return_value=[
+        return_value={"data": [
             {
                 "front_id": "front_geom_1",
                 "event_id": "evt_geom_2",
@@ -272,7 +276,7 @@ def test_get_fronts_endpoint_passthrough_geom_provenance(monkeypatch):
                 "authority_profile": "wfigs_us",
                 "authoritative_perimeter_id": 12345,
             }
-        ]
+        ], "next_cursor": None, "has_more": False, "limit": 800}
     )
     monkeypatch.setattr(fires, "list_fire_fronts_bbox_time", mock_fronts)
 
@@ -374,3 +378,165 @@ def test_get_reverse_geocode_endpoint_bad_request(monkeypatch):
     )
 
     assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Cursor pagination tests
+# ---------------------------------------------------------------------------
+
+_BASE_PARAMS = {
+    "min_lon": 20.0,
+    "min_lat": 40.0,
+    "max_lon": 22.0,
+    "max_lat": 43.0,
+    "start_time": "2025-01-01T00:00:00Z",
+    "end_time": "2025-01-02T00:00:00Z",
+}
+
+
+def test_detections_response_includes_pagination_fields(monkeypatch):
+    """Response must include next_cursor and has_more even when empty."""
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
+    monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
+
+    response = client.get("/fires/detections", params=_BASE_PARAMS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "next_cursor" in payload
+    assert "has_more" in payload
+    assert payload["next_cursor"] is None
+    assert payload["has_more"] is False
+
+
+def test_detections_cursor_param_forwarded_to_repo(monkeypatch):
+    """cursor query param must be forwarded to list_fire_detections_bbox_time."""
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
+    monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
+
+    client.get("/fires/detections", params={**_BASE_PARAMS, "cursor": "abc123"})
+
+    _, kwargs = mock_list.call_args
+    assert kwargs["cursor"] == "abc123"
+
+
+def test_detections_offset_param_forwarded_to_repo(monkeypatch):
+    """Deprecated offset query param must be forwarded to repo."""
+    mock_list = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
+    monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
+
+    client.get("/fires/detections", params={**_BASE_PARAMS, "offset": 500})
+
+    _, kwargs = mock_list.call_args
+    assert kwargs["offset"] == 500
+
+
+def test_detections_response_has_more_true(monkeypatch):
+    """When repo signals has_more=True, next_cursor must be non-None in the response."""
+    mock_list = MagicMock(return_value={
+        "data": [{"id": 42, "lat": 41.0, "lon": 21.0}],
+        "next_cursor": "dGVzdGN1cnNvcg==",
+        "has_more": True,
+        "limit": 1000,
+    })
+    monkeypatch.setattr(fires, "list_fire_detections_bbox_time", mock_list)
+
+    response = client.get("/fires/detections", params=_BASE_PARAMS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["has_more"] is True
+    assert payload["next_cursor"] == "dGVzdGN1cnNvcg=="
+
+
+def test_detections_invalid_cursor_returns_400(monkeypatch):
+    """A malformed cursor must produce HTTP 400."""
+    monkeypatch.setattr(
+        fires,
+        "list_fire_detections_bbox_time",
+        MagicMock(side_effect=ValueError("Invalid cursor: ...")),
+    )
+
+    response = client.get("/fires/detections", params={**_BASE_PARAMS, "cursor": "!!!notvalid!!!"})
+
+    assert response.status_code == 400
+
+
+def test_events_cursor_param_forwarded_to_repo(monkeypatch):
+    """cursor query param on /fires/events must be forwarded to repo."""
+    mock_events = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
+    monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
+
+    client.get("/fires/events", params={**_BASE_PARAMS, "cursor": "evtcursor"})
+
+    _, kwargs = mock_events.call_args
+    assert kwargs["cursor"] == "evtcursor"
+
+
+def test_events_offset_param_forwarded_to_repo(monkeypatch):
+    """Deprecated offset query param on /fires/events must be forwarded to repo."""
+    mock_events = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 1000})
+    monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
+
+    client.get("/fires/events", params={**_BASE_PARAMS, "offset": 200})
+
+    _, kwargs = mock_events.call_args
+    assert kwargs["offset"] == 200
+
+
+def test_events_response_has_more_true(monkeypatch):
+    """When repo signals has_more=True, next_cursor must appear in events response."""
+    mock_events = MagicMock(return_value={
+        "data": [{"event_id": "evt_x"}],
+        "next_cursor": "ZXZ0Y3Vyc29y",
+        "has_more": True,
+        "limit": 1000,
+    })
+    monkeypatch.setattr(fires, "list_fire_events_bbox_time", mock_events)
+
+    response = client.get("/fires/events", params=_BASE_PARAMS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["has_more"] is True
+    assert payload["next_cursor"] == "ZXZ0Y3Vyc29y"
+
+
+def test_fronts_cursor_param_forwarded_to_repo(monkeypatch):
+    """cursor query param on /fires/fronts must be forwarded to repo."""
+    mock_fronts = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 800})
+    monkeypatch.setattr(fires, "list_fire_fronts_bbox_time", mock_fronts)
+
+    client.get("/fires/fronts", params={**_BASE_PARAMS, "cursor": "frontcursor"})
+
+    _, kwargs = mock_fronts.call_args
+    assert kwargs["cursor"] == "frontcursor"
+
+
+def test_fronts_offset_param_forwarded_to_repo(monkeypatch):
+    """Deprecated offset query param on /fires/fronts must be forwarded to repo."""
+    mock_fronts = MagicMock(return_value={"data": [], "next_cursor": None, "has_more": False, "limit": 800})
+    monkeypatch.setattr(fires, "list_fire_fronts_bbox_time", mock_fronts)
+
+    client.get("/fires/fronts", params={**_BASE_PARAMS, "offset": 100})
+
+    _, kwargs = mock_fronts.call_args
+    assert kwargs["offset"] == 100
+
+
+def test_fronts_response_has_more_true(monkeypatch):
+    """When repo signals has_more=True, next_cursor must appear in fronts response."""
+    mock_fronts = MagicMock(return_value={
+        "data": [{"front_id": "front_z"}],
+        "next_cursor": "ZnJvbnRjdXJzb3I=",
+        "has_more": True,
+        "limit": 800,
+    })
+    monkeypatch.setattr(fires, "list_fire_fronts_bbox_time", mock_fronts)
+
+    response = client.get("/fires/fronts", params=_BASE_PARAMS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["has_more"] is True
+    assert payload["next_cursor"] == "ZnJvbnRjdXJzb3I="

@@ -122,7 +122,8 @@ def test_list_fire_fronts_bbox_time_uses_authoritative_event_links(monkeypatch):
     assert "ff.authoritative_perimeter_id" in sql
     assert executed_params is not None
     assert executed_params["min_event_score"] == 0.6
-    assert executed_params["limit"] == 400
+    # limit is sent as limit+1 to detect has_more; effective_limit caps fronts at 800
+    assert executed_params["limit"] == 401
 
 
 def test_list_fire_events_bbox_time_selects_geom_provenance_fields(monkeypatch):
@@ -171,4 +172,5 @@ def test_list_fire_events_bbox_time_selects_geom_provenance_fields(monkeypatch):
     assert "authoritative_perimeter_id" in sql
     assert executed_params is not None
     assert executed_params["min_event_score"] == 0.5
-    assert executed_params["limit"] == 250
+    # limit is sent as limit+1 to detect has_more
+    assert executed_params["limit"] == 251
