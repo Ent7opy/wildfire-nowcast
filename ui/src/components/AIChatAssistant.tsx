@@ -4,10 +4,12 @@ import {
   CircularProgress,
   IconButton,
   TextField,
+  Tooltip,
   Typography
 } from "@mui/material";
 import ChatBubbleOutlineIcon from "@mui/icons-material/ChatBubbleOutline";
 import SendIcon from "@mui/icons-material/Send";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import ReactMarkdown from "react-markdown";
 
 import { EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT, SAFETY_ASSISTANT_SYSTEM_PROMPT } from "../config/assistant";
@@ -92,6 +94,7 @@ export default function AIChatAssistant(): JSX.Element {
   const [autoBriefing, setAutoBriefing] = useState<string | null>(null);
   const [isBriefing, setIsBriefing] = useState(false);
   const [assistantConfigured, setAssistantConfigured] = useState(false);
+  const [circuitDegraded, setCircuitDegraded] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const lastBriefedEventId = useRef<string | null>(null);
   const lastBriefedPrompt = useRef<string | null>(null);
@@ -107,12 +110,26 @@ export default function AIChatAssistant(): JSX.Element {
   const clearAssistantBriefingPrompt = useAppStore((s) => s.clearAssistantBriefingPrompt);
   const isSafetyMode = safety.enabled;
 
-  useEffect(() => {
-    fetch(`${apiBase}/assistant/config`)
+  const refreshHealth = useCallback(() => {
+    fetch(`${apiBase}/assistant/health`)
       .then((r) => r.json())
-      .then((data: { configured: boolean }) => setAssistantConfigured(data.configured))
-      .catch(() => setAssistantConfigured(false));
+      .then((data: { configured: boolean; circuit_state: string }) => {
+        setAssistantConfigured(data.configured);
+        setCircuitDegraded(data.circuit_state !== "closed");
+      })
+      .catch((err: unknown) => {
+        console.error("[AIChatAssistant] health check failed:", err);
+        setAssistantConfigured(false);
+      });
   }, []);
+
+  useEffect(() => {
+    refreshHealth();
+    // Poll more frequently when degraded, less when healthy.
+    const interval = setInterval(refreshHealth, circuitDegraded ? 15_000 : 60_000);
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [circuitDegraded]);
 
   const eventContext = useMemo(() => compactEventContext(selectedEvent), [selectedEvent]);
   const timeRange = useMemo(() => computeTimeRange(filters), [filters]);
@@ -192,8 +209,9 @@ export default function AIChatAssistant(): JSX.Element {
       const payload = (await response.json()) as unknown;
       const reply = extractReply(payload);
       if (reply) setAutoBriefing(reply);
-    } catch {
-      // Silently fail for auto-briefings — don't disrupt UX
+    } catch (err: unknown) {
+      console.error("[AIChatAssistant] auto-briefing failed:", err);
+      setCircuitDegraded(true);
     } finally {
       setIsBriefing(false);
     }
@@ -313,17 +331,22 @@ export default function AIChatAssistant(): JSX.Element {
         </Box>
 
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.65 }}>
+          {assistantConfigured && circuitDegraded && (
+            <Tooltip title="Assistant degraded — circuit breaker open. Requests are being retried automatically." arrow>
+              <WarningAmberIcon sx={{ fontSize: 13, color: "#f59e0b" }} />
+            </Tooltip>
+          )}
           <Box
             sx={{
               width: 6,
               height: 6,
               borderRadius: "50%",
-              bgcolor: assistantConfigured ? "#22c55e" : "#f59e0b",
-              animation: assistantConfigured ? "pulse 1.4s ease-in-out infinite" : "none"
+              bgcolor: !assistantConfigured ? "#f59e0b" : circuitDegraded ? "#f59e0b" : "#22c55e",
+              animation: assistantConfigured && !circuitDegraded ? "pulse 1.4s ease-in-out infinite" : "none"
             }}
           />
           <Typography sx={{ fontSize: 10, color: "#6b7280", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase" }}>
-            {assistantConfigured ? "Live" : "Offline"}
+            {!assistantConfigured ? "Offline" : circuitDegraded ? "Degraded" : "Live"}
           </Typography>
         </Box>
       </Box>
@@ -332,6 +355,13 @@ export default function AIChatAssistant(): JSX.Element {
         <Box sx={{ px: 2, py: 1.1, borderBottom: "1px solid rgba(245,158,11,0.25)", bgcolor: "rgba(245,158,11,0.1)" }}>
           <Typography sx={{ fontSize: 11, color: "#fbbf24" }}>
             Assistant not configured. Set `GEMINI_API_KEY` on the API server.
+          </Typography>
+        </Box>
+      )}
+      {assistantConfigured && circuitDegraded && (
+        <Box sx={{ px: 2, py: 1.1, borderBottom: "1px solid rgba(245,158,11,0.25)", bgcolor: "rgba(245,158,11,0.06)" }}>
+          <Typography sx={{ fontSize: 11, color: "#fbbf24" }}>
+            Assistant degraded — responses may be slow or unavailable. Retrying automatically.
           </Typography>
         </Box>
       )}
