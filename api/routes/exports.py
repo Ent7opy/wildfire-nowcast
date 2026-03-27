@@ -69,6 +69,8 @@ CREATE TABLE gpkg_geometry_columns (
 );
 """
 
+_DEFAULT_SRID = 4326
+
 _WGS84_WKT = (
     'GEOGCS["WGS 84",DATUM["WGS_1984",'
     'SPHEROID["WGS 84",6378137,298.257223563]],'
@@ -76,7 +78,7 @@ _WGS84_WKT = (
     'UNIT["degree",0.0174532925199433]]'
 )
 # Constant GPKG binary header: magic(GP) + version(0) + flags(0x01=LE,no-envelope) + srs_id(int32LE)
-_GPKG_GEOM_HEADER = struct.pack("<2sBBI", b"GP", 0, 0x01, 4326)
+_GPKG_GEOM_HEADER = struct.pack("<2sBBI", b"GP", 0, 0x01, _DEFAULT_SRID)
 
 
 def _gpkg_geom_bytes(geojson_geom: dict) -> bytes:
@@ -90,12 +92,14 @@ def _write_gpkg(features: list[dict], layer_name: str, prop_names: list[str]) ->
     tmp.close()
     try:
         con = sqlite3.connect(tmp.name)
-        con.execute("PRAGMA application_id = 1196444487")  # 0x47504b47
-        con.execute("PRAGMA user_version = 10300")  # GeoPackage 1.3
-        con.executescript(_GPKG_SCHEMA_SQL)
+        con.executescript(
+            "PRAGMA application_id = 1196444487;"  # 0x47504b47
+            "PRAGMA user_version = 10300;"          # GeoPackage 1.3
+            + _GPKG_SCHEMA_SQL
+        )
         con.execute(
             "INSERT INTO gpkg_spatial_ref_sys VALUES (?,?,?,?,?,?)",
-            ("WGS 84", 4326, "EPSG", 4326, _WGS84_WKT, "WGS 84 geographic 2D CRS"),
+            ("WGS 84", _DEFAULT_SRID, "EPSG", _DEFAULT_SRID, _WGS84_WKT, "WGS 84 geographic 2D CRS"),
         )
         col_extra = (", " + ", ".join(f'"{p}" TEXT' for p in prop_names)) if prop_names else ""
         con.execute(
@@ -103,11 +107,11 @@ def _write_gpkg(features: list[dict], layer_name: str, prop_names: list[str]) ->
         )
         con.execute(
             "INSERT INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES (?,?,?,?)",
-            (layer_name, "features", layer_name, 4326),
+            (layer_name, "features", layer_name, _DEFAULT_SRID),
         )
         con.execute(
             "INSERT INTO gpkg_geometry_columns VALUES (?,?,?,?,?,?)",
-            (layer_name, "geom", "GEOMETRY", 4326, 0, 0),
+            (layer_name, "geom", "GEOMETRY", _DEFAULT_SRID, 0, 0),
         )
         if prop_names:
             col_list = ", ".join(f'"{p}"' for p in prop_names)
@@ -116,11 +120,12 @@ def _write_gpkg(features: list[dict], layer_name: str, prop_names: list[str]) ->
         else:
             insert_sql = f'INSERT INTO "{layer_name}" (geom) VALUES (?)'
         try:
-            for feat in features:
-                geom_bytes = _gpkg_geom_bytes(feat["geometry"]) if feat.get("geometry") else None
-                props = feat.get("properties") or {}
-                row = [geom_bytes] + ["" if (v := props.get(p)) is None else str(v) for p in prop_names]
-                con.execute(insert_sql, row)
+            rows = [
+                [_gpkg_geom_bytes(feat["geometry"]) if feat.get("geometry") else None]
+                + ["" if (v := (feat.get("properties") or {}).get(p)) is None else str(v) for p in prop_names]
+                for feat in features
+            ]
+            con.executemany(insert_sql, rows)
             con.commit()
         finally:
             con.close()
