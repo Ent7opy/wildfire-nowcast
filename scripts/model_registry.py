@@ -19,6 +19,7 @@ from api.model_registry import (  # noqa: E402
     register_model,
     rollback_model,
     update_model_metrics_json,
+    validate_model_gate,
 )
 
 
@@ -128,6 +129,11 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "promote":
         promoted_by = args.by or os.getenv("USER") or os.getenv("USERNAME")
+        try:
+            validate_model_gate(args.family, args.model_id)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise SystemExit(1)
         active = promote_model(
             family=args.family,
             model_id=args.model_id,

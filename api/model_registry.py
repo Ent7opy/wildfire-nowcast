@@ -379,6 +379,47 @@ def resolve_active_model(family: str, *, engine: Engine | None = None) -> dict[s
     return payload
 
 
+def validate_gate_report(metrics_json: dict[str, Any] | None) -> tuple[bool, str]:
+    """Validate that a model's gate report passes before promotion.
+
+    Gate report is expected at ``metrics_json["gate_report"]`` with a ``"pass"`` boolean.
+    Returns ``(is_valid, reason)`` — reason is empty string on success.
+
+    Shared between the API and CLI promotion code paths.
+    """
+    if not metrics_json:
+        return False, "No metrics_json found on model"
+
+    gate_report = metrics_json.get("gate_report")
+    if gate_report is None:
+        return False, "No gate_report in metrics_json"
+
+    if not isinstance(gate_report, dict):
+        return False, "gate_report must be a JSON object"
+
+    if not gate_report.get("pass"):
+        reason = gate_report.get("reason") or gate_report.get("failure_reason") or "gate_report.pass is false"
+        return False, str(reason)
+
+    return True, ""
+
+
+def validate_model_gate(family: str, model_id: str, *, engine: Engine | None = None) -> None:
+    """Assert that a model exists and its gate report passes promotion criteria.
+
+    Raises ``ValueError`` on any failure — invalid family, missing model, or
+    gate report not passing.  Shared pre-condition for API and CLI promotion flows.
+    """
+    family_norm = _normalize_family(family)
+    db = engine or get_engine()
+    row = _get_registry_row(family=family_norm, model_id=model_id, engine=db)
+    if row is None:
+        raise ValueError(f"Model not found for family={family_norm}: {model_id}")
+    is_valid, reason = validate_gate_report(row.get("metrics_json"))
+    if not is_valid:
+        raise ValueError(f"Gate report validation failed: {reason}")
+
+
 def list_active_models(*, engine: Engine | None = None) -> dict[str, dict[str, Any]]:
     """Return active promoted models keyed by family."""
     db = engine or get_engine()

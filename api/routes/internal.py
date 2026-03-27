@@ -1,12 +1,18 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from api.config import settings
 from api.data_status import build_data_status_snapshot
 from api.db_health import build_db_size_snapshot, read_orchestrator_dashboard
-from api.model_registry import list_active_models
+from api.model_registry import (
+    list_active_models,
+    promote_model,
+    resolve_active_model,
+    rollback_model,
+    validate_model_gate,
+)
 from api.terrain.features_repo import list_terrain_coverage_inventory
 from api.fires.repo import (
     get_latest_denoiser_gate_report,
@@ -23,6 +29,17 @@ internal_router = APIRouter(tags=["internal"])
 class DenoiserReviewResolveRequest(BaseModel):
     resolved_by: str = "system"
     resolved_notes: str | None = None
+
+
+class PromoteModelRequest(BaseModel):
+    model_id: str
+    promoted_by: str | None = None
+    notes: str | None = None
+
+
+class RollbackModelRequest(BaseModel):
+    promoted_by: str | None = None
+    notes: str | None = None
 
 
 @internal_router.get("/health")
@@ -169,6 +186,62 @@ async def active_models() -> dict:
         return {"as_of": as_of, "models": {}, "error": str(exc)}
 
     return {"as_of": as_of, "models": models}
+
+
+@internal_router.get("/internal/models/{family}/active")
+async def family_active_model(family: str) -> dict:
+    """Return currently promoted model for a specific family."""
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        active = resolve_active_model(family)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "model": None, "error": str(exc)}
+    return {"as_of": as_of, "model": active}
+
+
+@internal_router.post("/internal/models/{family}/promote")
+async def promote_family_model(family: str, request: PromoteModelRequest) -> dict:
+    """Promote a registered model to active champion after gate report validation.
+
+    Returns 422 if the family is invalid, the model does not exist, or the
+    model's ``metrics_json.gate_report.pass`` is not ``true``.
+    """
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        validate_model_gate(family, request.model_id)
+        active = promote_model(
+            family=family,
+            model_id=request.model_id,
+            promoted_by=request.promoted_by,
+            notes=request.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return {"as_of": as_of, "action": "promote", "active": active}
+
+
+@internal_router.post("/internal/models/{family}/rollback")
+async def rollback_family_model(family: str, request: RollbackModelRequest) -> dict:
+    """Rollback to the previously promoted model for a family.
+
+    Returns 422 if the family is invalid or no rollback target is recorded.
+    Rollback bypasses gate report validation — it restores a previously
+    gate-approved model.
+    """
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        active = rollback_model(
+            family=family,
+            promoted_by=request.promoted_by,
+            notes=request.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return {"as_of": as_of, "action": "rollback", "active": active}
 
 
 @internal_router.get("/internal/denoiser/gates/latest")
