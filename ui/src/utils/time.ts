@@ -54,6 +54,24 @@ export function currentTimeframe(): ArchiveTimeframe {
   return 'afternoon';
 }
 
+/** Return every calendar date (YYYY-MM-DD) from start to end, inclusive. */
+export function datesInRange(start: string, end: string): string[] {
+  const dates: string[] = [];
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  for (let ms = startMs; ms <= endMs; ms += 86_400_000) {
+    dates.push(new Date(ms).toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
+export function computeFullDayTimeRange(date: string): { startTime: Date; endTime: Date } {
+  const [year, month, day] = date.split('-').map(Number);
+  const startTime = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+  const endTime = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 0));
+  return { startTime, endTime };
+}
+
 export function formatTimeWindow(filters: FiltersState): string {
   const hours = filters.hoursStart - filters.hoursEnd;
   if (filters.hoursEnd === 0) {

@@ -395,6 +395,45 @@ export async function triggerArchiveIngest(
   return postJson<ArchiveIngestResponse>("/fires/archive/ingest", { date, timeframe }, 202);
 }
 
+export type ArchiveDayIngestStatus = 'queued' | 'started' | 'finished' | 'failed';
+export type ArchiveRangeOverallStatus = 'queued' | 'in_progress' | 'completed' | 'partial_failure' | 'not_found';
+
+export interface ArchiveRangeDayStatus {
+  date: string;
+  status: ArchiveDayIngestStatus;
+  error: string | null;
+}
+
+export interface ArchiveRangeIngestResponse {
+  range_job_id: string;
+  dates: string[];
+  estimated_minutes: number;
+  warning: string | null;
+}
+
+export interface ArchiveRangeStatusResponse {
+  range_job_id: string;
+  days: ArchiveRangeDayStatus[];
+  overall_status: ArchiveRangeOverallStatus;
+  completed_count: number;
+  total_count: number;
+}
+
+export async function triggerArchiveRangeIngest(
+  startDate: string,
+  endDate: string
+): Promise<ArchiveRangeIngestResponse> {
+  return postJson<ArchiveRangeIngestResponse>(
+    "/fires/archive/ingest-range",
+    { start_date: startDate, end_date: endDate },
+    202
+  );
+}
+
+export async function getArchiveRangeStatus(rangeJobId: string): Promise<ArchiveRangeStatusResponse> {
+  return getJson<ArchiveRangeStatusResponse>(`/fires/archive/ingest-range/${rangeJobId}/status`, {});
+}
+
 export async function getDenoiserReviewQueue(): Promise<ReviewQueueResponse> {
   return getJson<ReviewQueueResponse>("/internal/denoiser/review-queue", { limit: 200, status: "open" });
 }

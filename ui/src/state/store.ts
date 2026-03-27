@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { FireEvent } from "../types/api";
 import type {
   ArchiveModeState,
+  ArchiveSubMode,
   ArchiveTimeframe,
   AssistantViewContext,
   FiltersState,
@@ -56,6 +57,11 @@ const DEFAULT_ARCHIVE_STATE: ArchiveModeState = {
   viewMode: 'live',
   archiveDate: null,
   archiveTimeframe: null,
+  archiveSubMode: 'single',
+  rangeStart: null,
+  rangeEnd: null,
+  rangeJobId: null,
+  scrubDate: null,
 };
 
 function computeSafetyTier(nearestKm: number | null): SafetyTier {
@@ -118,6 +124,10 @@ interface AppStoreState {
   setArchiveDate: (date: string) => void;
   setArchiveTimeframe: (tf: ArchiveTimeframe) => void;
   setViewMode: (mode: ViewMode) => void;
+  setArchiveSubMode: (subMode: ArchiveSubMode) => void;
+  setArchiveRange: (startDate: string, endDate: string) => void;
+  setRangeJobId: (jobId: string | null) => void;
+  setScrubDate: (date: string | null) => void;
   enableSafetyMode: () => void;
   disableSafetyMode: () => void;
   setSafetyLocation: (location: UserLocationState | null) => void;
@@ -267,7 +277,7 @@ export const useAppStore = create<AppStoreState>((set) => ({
     const today = new Date();
     const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     set((state) => ({
-      archive: { viewMode: 'archive', archiveDate: date, archiveTimeframe: currentTimeframe() },
+      archive: { ...state.archive, viewMode: 'archive', archiveDate: date, archiveTimeframe: currentTimeframe(), archiveSubMode: 'single' as const },
       selectedEvent: null,
       lastClick: null,
       forecast: { ...state.forecast, jobId: null, pollCount: 0, activeRequest: null, notification: null },
@@ -294,6 +304,34 @@ export const useAppStore = create<AppStoreState>((set) => ({
 
   setViewMode: (mode) => {
     set((state) => ({ archive: { ...state.archive, viewMode: mode } }));
+  },
+
+  setArchiveSubMode: (subMode) => {
+    set((state) => ({ archive: { ...state.archive, archiveSubMode: subMode } }));
+  },
+
+  setArchiveRange: (startDate, endDate) => {
+    set((state) => ({
+      archive: {
+        ...state.archive,
+        viewMode: 'archive',
+        archiveSubMode: 'range',
+        rangeStart: startDate,
+        rangeEnd: endDate,
+        rangeJobId: null,
+        scrubDate: startDate,
+      },
+      selectedEvent: null,
+      lastClick: null,
+    }));
+  },
+
+  setRangeJobId: (jobId) => {
+    set((state) => ({ archive: { ...state.archive, rangeJobId: jobId } }));
+  },
+
+  setScrubDate: (date) => {
+    set((state) => ({ archive: { ...state.archive, scrubDate: date }, selectedEvent: null, lastClick: null }));
   },
 
   focusMapOnPoint: (lat, lon, minZoom) => {

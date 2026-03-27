@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
-from datetime import date, datetime, timezone
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -33,6 +35,14 @@ TIMEFRAME_HOURS: dict[str, tuple[int, int]] = {
 }
 
 MAX_FIRMS_LOOKBACK_DAYS = 10
+MAX_ARCHIVE_RANGE_DAYS = int(os.getenv("MAX_ARCHIVE_RANGE_DAYS", "7"))
+INTER_DAY_DELAY_SECONDS = 2
+RANGE_REDIS_TTL_SECONDS = 7 * 86400  # 7 days
+
+
+def _redis_url() -> str:
+    """Return the Redis connection URL from environment variables."""
+    return f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}"
 
 
 def _timeframe_window(date_str: str, timeframe: str) -> tuple[datetime, datetime]:
@@ -58,6 +68,91 @@ def _full_day_window(date_str: str) -> tuple[datetime, datetime]:
     start_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
     end_dt = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
     return start_dt, end_dt
+
+
+class ArchiveRangeIngestRequest(BaseModel):
+    start_date: str  # 'YYYY-MM-DD'
+    end_date: str    # 'YYYY-MM-DD'
+
+
+class ArchiveRangeDayStatus(BaseModel):
+    date: str
+    status: str  # queued | started | finished | failed
+    error: str | None = None
+
+
+class ArchiveRangeIngestResponse(BaseModel):
+    range_job_id: str
+    dates: list[str]
+    estimated_minutes: int
+    warning: str | None = None
+
+
+class ArchiveRangeStatusResponse(BaseModel):
+    range_job_id: str
+    days: list[ArchiveRangeDayStatus]
+    overall_status: str  # queued | in_progress | completed | partial_failure | not_found
+    completed_count: int
+    total_count: int
+
+
+def _compute_range_overall_status(day_statuses: list[dict]) -> str:
+    """Derive an overall status string from the list of per-day status dicts."""
+    statuses = {d["status"] for d in day_statuses}
+    if not statuses or statuses <= {"queued"}:
+        return "queued"
+    if "started" in statuses or "queued" in statuses:
+        return "in_progress"
+    if statuses <= {"finished"}:
+        return "completed"
+    # Mix of finished + failed, no pending/started
+    return "partial_failure"
+
+
+def _run_archive_ingest_range(range_job_id: str, dates: list[str]) -> None:
+    """RQ worker task: ingest multiple archive dates sequentially.
+
+    Stores per-day status as a JSON blob in Redis under
+    ``archive_range:{range_job_id}`` so the status endpoint can report
+    fine-grained progress.  Processing continues even if individual days fail
+    so the caller can see which days succeeded.
+    """
+    import json as _json
+
+    from redis import Redis as _Redis
+
+    redis_conn = _Redis.from_url(_redis_url())
+    key = f"archive_range:{range_job_id}"
+
+    # Load the pre-initialised status map once; maintain it in memory for the
+    # rest of the loop to avoid a redundant Redis round-trip per day.
+    raw = redis_conn.get(key)
+    status_map: dict[str, dict] = (
+        _json.loads(raw)
+        if raw
+        else {d: {"status": "queued", "error": None} for d in dates}
+    )
+
+    for i, date_str in enumerate(dates):
+        status_map[date_str] = {"status": "started", "error": None}
+        redis_conn.setex(key, RANGE_REDIS_TTL_SECONDS, _json.dumps(status_map))
+
+        logger.info(
+            "Archive range ingest: day %d/%d: %s (range_job_id=%s)",
+            i + 1, len(dates), date_str, range_job_id,
+        )
+        try:
+            _run_archive_ingest(date_str, "full")
+            status_map[date_str] = {"status": "finished", "error": None}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Archive range ingest failed for %s: %s", date_str, exc)
+            status_map[date_str] = {"status": "failed", "error": str(exc)}
+
+        redis_conn.setex(key, RANGE_REDIS_TTL_SECONDS, _json.dumps(status_map))
+
+        # Brief pause between days to stay within FIRMS rate limits
+        if i < len(dates) - 1:
+            time.sleep(INTER_DAY_DELAY_SECONDS)
 
 
 class ArchiveAvailabilityResponse(BaseModel):
@@ -186,10 +281,8 @@ async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestRes
     try:
         from redis import Redis
         from rq import Queue
-        import os
 
-        redis_url = f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}"
-        redis_conn = Redis.from_url(redis_url)
+        redis_conn = Redis.from_url(_redis_url())
         q = Queue(connection=redis_conn, default_timeout=600)
         job = q.enqueue(_run_archive_ingest, body.date, body.timeframe)
         job_id = str(job.id)
@@ -213,10 +306,8 @@ async def get_archive_ingest_status(job_id: str) -> ArchiveIngestStatusResponse:
     try:
         from redis import Redis
         from rq.job import Job
-        import os
 
-        redis_url = f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}"
-        redis_conn = Redis.from_url(redis_url)
+        redis_conn = Redis.from_url(_redis_url())
         job = Job.fetch(job_id, connection=redis_conn)
         job_status = job.get_status()
         error: str | None = None
@@ -228,3 +319,157 @@ async def get_archive_ingest_status(job_id: str) -> ArchiveIngestStatusResponse:
     except Exception as exc:
         logger.warning("Could not fetch job status for %s: %s", job_id, exc)
         return ArchiveIngestStatusResponse(status="unknown", error=None)
+
+
+@archive_router.post(
+    "/fires/archive/ingest-range",
+    response_model=ArchiveRangeIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(no_cache)],
+)
+async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> ArchiveRangeIngestResponse:
+    """Trigger background FIRMS re-ingest for a contiguous date range.
+
+    Each day is processed sequentially by a single RQ job.  Per-day progress
+    is tracked in Redis and available via ``GET /fires/archive/ingest-range/{range_job_id}/status``.
+    Ranges exceeding ``MAX_ARCHIVE_RANGE_DAYS`` (default 7, env-overridable) are rejected.
+    Ranges larger than 5 days include a warning about temporary DB size impact.
+    """
+    try:
+        start_d = date.fromisoformat(body.start_date)
+        end_d = date.fromisoformat(body.end_date)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid date format: {exc}. Expected YYYY-MM-DD.",
+        )
+
+    if end_d < start_d:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end_date must be on or after start_date.",
+        )
+
+    today = date.today()
+    for d, label in [(start_d, "start_date"), (end_d, "end_date")]:
+        days_ago = (today - d).days
+        if days_ago < 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{label} {d} is in the future. Cannot ingest future dates.",
+            )
+        if days_ago >= MAX_FIRMS_LOOKBACK_DAYS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"{label} {d} is {days_ago} days ago. "
+                    f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back."
+                ),
+            )
+
+    num_days = (end_d - start_d).days + 1
+    if num_days > MAX_ARCHIVE_RANGE_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Range of {num_days} days exceeds the maximum of {MAX_ARCHIVE_RANGE_DAYS}. "
+                "Reduce the date range or increase MAX_ARCHIVE_RANGE_DAYS."
+            ),
+        )
+
+    dates = [(start_d + timedelta(days=i)).isoformat() for i in range(num_days)]
+
+    warning: str | None = None
+    if num_days > 5:
+        warning = (
+            f"Ingesting {num_days} days will write a significant volume of archive data. "
+            "Archive rows carry a 3-day TTL and are cleaned up automatically, "
+            "but large ranges may temporarily increase DB size."
+        )
+
+    try:
+        import json as _json
+        import uuid as _uuid
+
+        from redis import Redis
+        from rq import Queue
+
+        redis_conn = Redis.from_url(_redis_url())
+
+        # Pre-generate the range_job_id so we can initialise Redis state before the
+        # worker starts (the status endpoint needs to see "queued" immediately).
+        range_job_id = str(_uuid.uuid4())
+        status_map = {d: {"status": "queued", "error": None} for d in dates}
+        redis_conn.setex(
+            f"archive_range:{range_job_id}",
+            RANGE_REDIS_TTL_SECONDS,
+            _json.dumps(status_map),
+        )
+
+        q = Queue(connection=redis_conn, default_timeout=num_days * 600)  # 10 min per day
+        q.enqueue(_run_archive_ingest_range, range_job_id, dates)
+
+    except Exception as exc:
+        logger.error("Failed to enqueue archive range ingest: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Worker queue unavailable. Please try again later.",
+        )
+
+    estimated_minutes = num_days * 5  # ~5 min per day (FIRMS fetch + eventize)
+
+    return ArchiveRangeIngestResponse(
+        range_job_id=range_job_id,
+        dates=dates,
+        estimated_minutes=estimated_minutes,
+        warning=warning,
+    )
+
+
+@archive_router.get(
+    "/fires/archive/ingest-range/{range_job_id}/status",
+    response_model=ArchiveRangeStatusResponse,
+)
+async def get_archive_range_status(range_job_id: str) -> ArchiveRangeStatusResponse:
+    """Return per-day completion status for a range ingest job."""
+    try:
+        import json as _json
+
+        from redis import Redis
+
+        redis_conn = Redis.from_url(_redis_url())
+        raw = redis_conn.get(f"archive_range:{range_job_id}")
+
+        if raw is None:
+            return ArchiveRangeStatusResponse(
+                range_job_id=range_job_id,
+                days=[],
+                overall_status="not_found",
+                completed_count=0,
+                total_count=0,
+            )
+
+        status_map: dict[str, dict] = _json.loads(raw)
+        days = [
+            ArchiveRangeDayStatus(date=d, status=v["status"], error=v.get("error"))
+            for d, v in sorted(status_map.items())
+        ]
+        overall = _compute_range_overall_status([{"status": v["status"]} for v in status_map.values()])
+        completed = sum(1 for v in status_map.values() if v["status"] == "finished")
+
+        return ArchiveRangeStatusResponse(
+            range_job_id=range_job_id,
+            days=days,
+            overall_status=overall,
+            completed_count=completed,
+            total_count=len(days),
+        )
+    except Exception as exc:
+        logger.warning("Could not fetch range status for %s: %s", range_job_id, exc)
+        return ArchiveRangeStatusResponse(
+            range_job_id=range_job_id,
+            days=[],
+            overall_status="not_found",
+            completed_count=0,
+            total_count=0,
+        )

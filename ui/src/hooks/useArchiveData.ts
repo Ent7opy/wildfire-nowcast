@@ -15,7 +15,7 @@ const POLL_INTERVAL_MS = 5_000;
 
 export function useArchiveData(): ArchiveDataState {
   const archive = useAppStore((s) => s.archive);
-  const { viewMode, archiveDate, archiveTimeframe } = archive;
+  const { viewMode, archiveDate, archiveTimeframe, archiveSubMode } = archive;
 
   const [state, setState] = useState<ArchiveDataState>({ status: "idle", message: null, estimatedMinutes: null });
 
@@ -39,7 +39,7 @@ export function useArchiveData(): ArchiveDataState {
   useEffect(() => {
     stopPolling();
 
-    if (viewMode !== "archive" || !archiveDate || !archiveTimeframe) {
+    if (viewMode !== "archive" || !archiveDate || !archiveTimeframe || archiveSubMode === "range") {
       setState({ status: "idle", message: null, estimatedMinutes: null });
       return;
     }
@@ -140,7 +140,7 @@ export function useArchiveData(): ArchiveDataState {
       cancelled = true;
       stopPolling();
     };
-  }, [viewMode, archiveDate, archiveTimeframe, stopPolling]);
+  }, [viewMode, archiveDate, archiveTimeframe, archiveSubMode, stopPolling]);
 
   return state;
 }
