@@ -556,6 +556,7 @@ async def _job_status_event_stream(
     except asyncio.CancelledError:
         # Client disconnected
         yield f"event: close\ndata: {json.dumps({'message': 'Client disconnected'})}\n\n"
+        raise
     except Exception as e:
         yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
