@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 from api.config import settings
 from api.errors import ErrorResponse
 from api.routes import archive_router, assistant_router, internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router
+from api.startup_check import StartupError, run_api_startup_checks
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,12 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    try:
+        run_api_startup_checks(settings)
+    except StartupError as exc:
+        LOGGER.critical("STARTUP CONFIG ERROR: %s", exc)
+        raise SystemExit(f"Startup check failed: {exc}") from exc
+
     try:
         redis = Redis.from_url(
             f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}",
