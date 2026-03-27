@@ -93,8 +93,8 @@ def _write_gpkg(features: list[dict], layer_name: str, prop_names: list[str]) ->
     try:
         con = sqlite3.connect(tmp.name)
         con.executescript(
-            f"PRAGMA application_id = 1196444487;"  # 0x47504b47
-            f"PRAGMA user_version = 10300;"          # GeoPackage 1.3
+            "PRAGMA application_id = 1196444487;"  # 0x47504b47
+            "PRAGMA user_version = 10300;"          # GeoPackage 1.3
             + _GPKG_SCHEMA_SQL
         )
         con.execute(
