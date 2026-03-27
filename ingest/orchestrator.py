@@ -17,6 +17,7 @@ from typing import Any, Callable, Sequence
 
 from ingest.config import REPO_ROOT
 from ingest.dem_preprocess import DemIngestSettings, ingest_terrain_for_bbox
+from ingest.startup_check import StartupError, run_ingest_startup_checks
 from ingest.firms_ingest import run_firms_ingest
 from ingest.industrial_sources_ingest import run_industrial_ingest
 from ingest.nifc_perimeters_ingest import fetch_nifc_perimeters, ingest_perimeters
@@ -1071,6 +1072,13 @@ def run_scheduler(
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+
+    try:
+        run_ingest_startup_checks()
+    except StartupError as exc:
+        LOGGER.critical("STARTUP CONFIG ERROR: %s", exc)
+        raise SystemExit(f"Startup check failed: {exc}") from exc
+
     jobs = build_jobs(args)
     dashboard_path = Path(args.dashboard_path)
 
