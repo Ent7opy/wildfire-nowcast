@@ -33,11 +33,14 @@ async def proxy_chat(body: dict) -> dict:
     url = (
         f"{settings.gemini_api_base_url}/models/"
         f"{settings.gemini_model}:generateContent"
-        f"?key={settings.gemini_api_key}"
     )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(url, json=body)
+        resp = await client.post(
+            url,
+            json=body,
+            headers={"x-goog-api-key": settings.gemini_api_key},
+        )
 
     if not resp.is_success:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
