@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +16,36 @@ from sqlalchemy.exc import SQLAlchemyError
 from api.db import get_engine
 
 MODEL_FAMILIES = {"denoiser", "spread"}
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _notify_model_event(
+    action: str,
+    family: str,
+    model_id: str,
+    promoted_by: str | None,
+    notes: str | None,
+) -> None:
+    try:
+        from api.notifications import notify  # noqa: PLC0415
+
+        severity = "warning" if action == "rollback" else "info"
+        body_parts = [f"model_id={model_id}", f"by={promoted_by or 'unknown'}"]
+        if notes:
+            body_parts.append(notes.rstrip("."))
+        notify(
+            f"model_{action}:{family}",
+            title=f"Model {action}: {family}",
+            body=". ".join(body_parts) + ".",
+            severity=severity,
+            family=family,
+            model_id=model_id,
+            action=action,
+            promoted_by=promoted_by or "unknown",
+        )
+    except Exception:
+        LOGGER.debug("Failed to send model-%s notification for family=%s", action, family)
 
 
 def _utc_now() -> datetime:
@@ -193,6 +224,7 @@ def promote_model(
     promoted_by: str | None = None,
     notes: str | None = None,
     engine: Engine | None = None,
+    _notify: bool = True,
 ) -> dict[str, Any]:
     """Promote a registered model to active champion for its family."""
     family_norm = _normalize_family(family)
@@ -292,6 +324,8 @@ def promote_model(
     active = resolve_active_model(family_norm, engine=db)
     if active is None:
         raise RuntimeError(f"Promotion failed to resolve active model for family={family_norm}")
+    if _notify:
+        _notify_model_event("promoted", family_norm, model_id, promoted_by, notes)
     return active
 
 
@@ -327,12 +361,14 @@ def rollback_model(
     if not merged_notes:
         merged_notes = "rollback"
 
+    _notify_model_event("rollback", family_norm, str(rollback_model_id), promoted_by, merged_notes)
     return promote_model(
         family=family_norm,
         model_id=str(rollback_model_id),
         promoted_by=promoted_by,
         notes=merged_notes,
         engine=db,
+        _notify=False,
     )
 
 
