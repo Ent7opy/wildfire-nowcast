@@ -209,6 +209,17 @@ class AppSettings(BaseSettings):
         default="https://generativelanguage.googleapis.com/v1beta",
         validation_alias="GEMINI_API_BASE_URL",
     )
+    gemini_timeout_seconds: float = Field(
+        default=60.0, ge=1.0, le=300.0, validation_alias="GEMINI_TIMEOUT_SECONDS"
+    )
+    # Circuit breaker: open after this many consecutive failures
+    gemini_circuit_breaker_threshold: int = Field(
+        default=5, ge=1, validation_alias="GEMINI_CIRCUIT_BREAKER_THRESHOLD"
+    )
+    # Circuit breaker: seconds to wait before allowing a probe request
+    gemini_circuit_breaker_cooldown_seconds: float = Field(
+        default=60.0, ge=5.0, validation_alias="GEMINI_CIRCUIT_BREAKER_COOLDOWN_SECONDS"
+    )
 
     @property
     def data_status_critical_sources_set(self) -> set[str]:
