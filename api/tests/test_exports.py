@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import struct
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -97,9 +101,24 @@ def _is_valid_gpkg(data: bytes) -> bool:
     if not data.startswith(b"SQLite format 3\x00"):
         return False
     # application_id at offset 68 (big-endian int32) must be 0x47504b47
-    import struct
     app_id = struct.unpack(">I", data[68:72])[0]
     return app_id == 0x47504B47
+
+
+@contextmanager
+def _gpkg_db(data: bytes):
+    """Write GeoPackage bytes to a temp file and yield an open sqlite3 connection."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False)
+    tmp.write(data)
+    tmp.close()
+    try:
+        con = sqlite3.connect(tmp.name)
+        try:
+            yield con
+        finally:
+            con.close()
+    finally:
+        os.unlink(tmp.name)
 
 
 def test_export_fires_gpkg_returns_valid_geopackage(monkeypatch):
@@ -117,18 +136,9 @@ def test_export_fires_gpkg_layer_has_expected_rows(monkeypatch):
     resp = client.get("/fires/export", params={**_BBOX_PARAMS, "format": "gpkg"})
     assert resp.status_code == 200
 
-    import tempfile
-    import os
-    tmp = tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False)
-    tmp.write(resp.content)
-    tmp.close()
-    try:
-        con = sqlite3.connect(tmp.name)
+    with _gpkg_db(resp.content) as con:
         rows = con.execute("SELECT * FROM fire_detections").fetchall()
-        con.close()
-        assert len(rows) == 2
-    finally:
-        os.unlink(tmp.name)
+    assert len(rows) == 2
 
 
 def test_export_fires_gpkg_has_gpkg_contents_row(monkeypatch):
@@ -136,18 +146,9 @@ def test_export_fires_gpkg_has_gpkg_contents_row(monkeypatch):
     resp = client.get("/fires/export", params={**_BBOX_PARAMS, "format": "gpkg"})
     assert resp.status_code == 200
 
-    import tempfile
-    import os
-    tmp = tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False)
-    tmp.write(resp.content)
-    tmp.close()
-    try:
-        con = sqlite3.connect(tmp.name)
+    with _gpkg_db(resp.content) as con:
         rows = con.execute("SELECT table_name, data_type FROM gpkg_contents").fetchall()
-        con.close()
-        assert any(r[0] == "fire_detections" and r[1] == "features" for r in rows)
-    finally:
-        os.unlink(tmp.name)
+    assert any(r[0] == "fire_detections" and r[1] == "features" for r in rows)
 
 
 # ---------------------------------------------------------------------------
