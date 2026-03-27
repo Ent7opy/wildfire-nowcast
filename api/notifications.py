@@ -43,7 +43,7 @@ def _is_rate_limited(event_type: str) -> bool:
     now = time.monotonic()
     window = _rate_limit_seconds()
     with _rate_limit_lock:
-        last = _last_sent.get(event_type, 0.0)
+        last = _last_sent.get(event_type, float("-inf"))
         if now - last < window:
             return True
         _last_sent[event_type] = now
