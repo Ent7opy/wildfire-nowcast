@@ -43,7 +43,8 @@ export function useParentFrame(
 
     sendToParent({ type: "ready" });
 
-    if (!onMessage) return;
+    const handler = onMessage;
+    if (!handler) return;
 
     function handleMessage(event: MessageEvent): void {
       if (!ALLOWED_ORIGINS.has(event.origin)) return;
@@ -54,7 +55,7 @@ export function useParentFrame(
       ) {
         return;
       }
-      onMessage(event.data as ParentMessage);
+      handler(event.data as ParentMessage);
     }
 
     window.addEventListener("message", handleMessage);
