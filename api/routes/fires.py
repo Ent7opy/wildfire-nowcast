@@ -60,6 +60,8 @@ def _list_detections(
     include_masked: bool,
     include_denoiser_fields: bool,
     limit: Optional[int],
+    cursor: Optional[str],
+    offset: Optional[int],
 ):
     # Validate bbox coordinates
     try:
@@ -71,20 +73,29 @@ def _list_detections(
     if include_denoiser_fields:
         columns.extend(FIRE_DETECTION_DENOISER_COLUMNS)
 
-    result = list_fire_detections_bbox_time(
-        bbox=(min_lon, min_lat, max_lon, max_lat),
-        start_time=start_time,
-        end_time=end_time,
-        columns=columns,
-        include_noise=include_noise,
-        include_masked=include_masked,
-        limit=limit,
-        min_confidence=min_confidence,
-        min_fire_likelihood=min_fire_likelihood,
-    )
-    detections = result["data"]
+    try:
+        result = list_fire_detections_bbox_time(
+            bbox=(min_lon, min_lat, max_lon, max_lat),
+            start_time=start_time,
+            end_time=end_time,
+            columns=columns,
+            include_noise=include_noise,
+            include_masked=include_masked,
+            limit=limit,
+            min_confidence=min_confidence,
+            min_fire_likelihood=min_fire_likelihood,
+            cursor=cursor,
+            offset=offset,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return {"count": len(detections), "detections": detections}
+    return {
+        "count": len(result["data"]),
+        "detections": result["data"],
+        "next_cursor": result["next_cursor"],
+        "has_more": result["has_more"],
+    }
 
 
 @fires_router.get("", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
@@ -103,6 +114,8 @@ async def get_fires(
         False, description="Include denoised_score and is_noise in response."
     ),
     limit: Optional[int] = Query(None, gt=0, le=10000),
+    cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
+    offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
 ):
     """Alias for `/fires/detections` (kept for UI/backward compatibility)."""
     return _list_detections(
@@ -118,6 +131,8 @@ async def get_fires(
         limit=limit,
         min_confidence=min_confidence,
         min_fire_likelihood=min_fire_likelihood,
+        cursor=cursor,
+        offset=offset,
     )
 
 
@@ -137,10 +152,16 @@ async def get_detections(
         False, description="Include denoised_score and is_noise in response."
     ),
     limit: Optional[int] = Query(None, gt=0, le=10000),
+    cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
+    offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
 ):
     """
     Get raw fire detections within a spatio-temporal window.
-    
+
+    Supports cursor-based pagination via the ``cursor`` param (pass the
+    ``next_cursor`` value from the previous response). The legacy ``offset``
+    param is still accepted but performs a sequential scan — prefer ``cursor``.
+
     By default, only non-noise detections (or those not yet scored) are returned.
     """
     return _list_detections(
@@ -156,6 +177,8 @@ async def get_detections(
         limit=limit,
         min_confidence=min_confidence,
         min_fire_likelihood=min_fire_likelihood,
+        cursor=cursor,
+        offset=offset,
     )
 
 
@@ -175,6 +198,8 @@ async def get_events(
         description="Include events currently marked as requiring review.",
     ),
     limit: Optional[int] = Query(1000, gt=0, le=10000),
+    cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
+    offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
 ):
     """Get fire events within a spatio-temporal window."""
     try:
@@ -182,15 +207,26 @@ async def get_events(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    events = list_fire_events_bbox_time(
-        bbox=(min_lon, min_lat, max_lon, max_lat),
-        start_time=start_time,
-        end_time=end_time,
-        min_event_score=min_event_score,
-        include_review_required=include_review_required,
-        limit=int(limit or 1000),
-    )
-    return {"count": len(events), "events": events}
+    try:
+        result = list_fire_events_bbox_time(
+            bbox=(min_lon, min_lat, max_lon, max_lat),
+            start_time=start_time,
+            end_time=end_time,
+            min_event_score=min_event_score,
+            include_review_required=include_review_required,
+            limit=int(limit or 1000),
+            cursor=cursor,
+            offset=offset,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "count": len(result["data"]),
+        "events": result["data"],
+        "next_cursor": result["next_cursor"],
+        "has_more": result["has_more"],
+    }
 
 
 @fires_router.get("/fronts", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
@@ -209,6 +245,8 @@ async def get_fronts(
         description="Include fronts linked to events currently marked as requiring review.",
     ),
     limit: Optional[int] = Query(2000, gt=0, le=10000),
+    cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
+    offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
 ):
     """Get fire fronts within a spatio-temporal window."""
     try:
@@ -216,15 +254,26 @@ async def get_fronts(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    fronts = list_fire_fronts_bbox_time(
-        bbox=(min_lon, min_lat, max_lon, max_lat),
-        start_time=start_time,
-        end_time=end_time,
-        min_event_score=min_event_score,
-        include_review_required=include_review_required,
-        limit=int(limit or 2000),
-    )
-    return {"count": len(fronts), "fronts": fronts}
+    try:
+        result = list_fire_fronts_bbox_time(
+            bbox=(min_lon, min_lat, max_lon, max_lat),
+            start_time=start_time,
+            end_time=end_time,
+            min_event_score=min_event_score,
+            include_review_required=include_review_required,
+            limit=int(limit or 2000),
+            cursor=cursor,
+            offset=offset,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "count": len(result["data"]),
+        "fronts": result["data"],
+        "next_cursor": result["next_cursor"],
+        "has_more": result["has_more"],
+    }
 
 
 @fires_router.get("/reverse-geocode", dependencies=[Depends(RateLimiter(times=120, seconds=60))])

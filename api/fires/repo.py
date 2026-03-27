@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import json as _json
 import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Iterable, Literal, TYPE_CHECKING
+from typing import Callable, Iterable, Literal, TYPE_CHECKING
 
 from sqlalchemy import text, column as sa_column
 
@@ -64,6 +66,56 @@ def validate_bbox(bbox: BBox) -> None:
     if min_lat >= max_lat:
         raise ValueError(f"min_lat ({min_lat}) must be less than max_lat ({max_lat})")
 
+
+def _encode_cursor(**fields: object) -> str:
+    """Encode cursor fields as a URL-safe base64 JSON string."""
+    serialized: dict[str, object] = {}
+    for k, v in fields.items():
+        serialized[k] = v.isoformat() if isinstance(v, datetime) else v
+    return base64.urlsafe_b64encode(_json.dumps(serialized).encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> dict:
+    """Decode a cursor string produced by _encode_cursor.
+
+    Returns a dict with field ``t`` parsed as a timezone-aware datetime (or
+    None) and all other fields left as-is.
+
+    Raises ValueError on malformed input.
+    """
+    try:
+        data = _json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+    except Exception as exc:
+        raise ValueError(f"Invalid cursor: {exc}") from exc
+    if data.get("t") is not None:
+        try:
+            t = datetime.fromisoformat(data["t"])
+            data["t"] = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        except Exception as exc:
+            raise ValueError(f"Invalid cursor timestamp: {exc}") from exc
+    return data
+
+
+def _build_page(
+    rows: list,
+    limit: int,
+    cursor_fn: Callable[[dict], str],
+) -> dict:
+    """Trim rows to limit, detect has_more, encode next_cursor, return page dict."""
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+    next_cursor: str | None = None
+    if has_more and rows:
+        next_cursor = cursor_fn(dict(rows[-1]))
+    return {
+        "data": [dict(r) for r in rows],
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "limit": limit,
+    }
+
+
 # Keep this list tight to avoid SQL injection when constructing SELECT clauses.
 _ALLOWED_COLUMNS: dict[str, str] = {
     "id": "id",
@@ -108,7 +160,8 @@ def list_fire_detections_bbox_time(
     include_masked: bool = False,
     min_confidence: float | None = None,
     min_fire_likelihood: float | None = None,
-    cursor_after_id: int | None = None,
+    cursor: str | None = None,
+    offset: int | None = None,
 ) -> dict:
     """List fire detections in a lon/lat bbox and acquisition time window.
 
@@ -122,7 +175,7 @@ def list_fire_detections_bbox_time(
     - False-source masking: By default, filters out rows where `false_source_masked` is TRUE.
     - Filtering: min_confidence filters FIRMS confidence (0-100), min_fire_likelihood filters
       composite likelihood score (0-1). Both include NULL values (not yet scored).
-    - Pagination: Use cursor_after_id from previous response to fetch next page.
+    - Pagination: Pass next_cursor from a previous response as cursor to get the next page.
       Returns at most `limit` rows per request (default: 1000, max: 10000).
     """
 
@@ -131,6 +184,12 @@ def list_fire_detections_bbox_time(
     cols = list(columns)
     if not cols:
         raise ValueError("columns must be non-empty.")
+
+    # acq_time and id are required for keyset cursor construction; ensure they are
+    # always selected regardless of the caller-supplied column list.
+    for _required in ("id", "acq_time"):
+        if _required not in cols:
+            cols.append(_required)
 
     # Build SELECT clause using SQLAlchemy column objects for safety
     # This avoids SQL injection even if whitelist is bypassed in future
@@ -174,28 +233,45 @@ def list_fire_detections_bbox_time(
         limit = 1000
     if limit <= 0 or limit > 10000:
         raise ValueError("limit must be between 1 and 10000.")
-    
-    limit_sql = "\n        LIMIT :limit"
-    
-    # Cursor-based pagination: fetch rows after a specific ID
-    # This enables efficient pagination for large result sets
-    cursor_predicate = ""
-    if cursor_after_id is not None:
-        if cursor_after_id <= 0:
-            raise ValueError("cursor_after_id must be positive.")
-        cursor_predicate = "AND id > :cursor_after_id"
-    
+
     # Ensure datetimes are timezone-aware (UTC) for database queries
     if start_time.tzinfo is None:
         start_time = start_time.replace(tzinfo=timezone.utc)
     elif start_time.tzinfo != timezone.utc:
         start_time = start_time.astimezone(timezone.utc)
-    
+
     if end_time.tzinfo is None:
         end_time = end_time.replace(tzinfo=timezone.utc)
     elif end_time.tzinfo != timezone.utc:
         end_time = end_time.astimezone(timezone.utc)
-    
+
+    # Cursor-based pagination: keyset on (acq_time, id) for stable, index-friendly pagination.
+    # Cursor encodes {"t": acq_time_iso, "id": int_id}.
+    cursor_acq_time: datetime | None = None
+    cursor_id: int | None = None
+    cursor_predicate = ""
+    if cursor is not None:
+        parsed = _decode_cursor(cursor)
+        cursor_acq_time = parsed["t"]
+        cursor_id = int(parsed["id"])
+        if order == "asc":
+            cursor_predicate = (
+                "AND (acq_time > :cursor_acq_time "
+                "OR (acq_time = :cursor_acq_time AND id > :cursor_id))"
+            )
+        else:
+            cursor_predicate = (
+                "AND (acq_time < :cursor_acq_time "
+                "OR (acq_time = :cursor_acq_time AND id < :cursor_id))"
+            )
+
+    # Deprecated offset path: slow on large tables, kept for backward compatibility.
+    offset_sql = ""
+    if cursor is None and offset is not None:
+        if offset < 0:
+            raise ValueError("offset must be >= 0.")
+        offset_sql = "\n        OFFSET :offset"
+
     params: dict[str, object] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -209,8 +285,11 @@ def list_fire_detections_bbox_time(
         params["min_confidence"] = float(min_confidence)
     if min_fire_likelihood is not None:
         params["min_fire_likelihood"] = float(min_fire_likelihood)
-    if cursor_after_id is not None:
-        params["cursor_after_id"] = int(cursor_after_id)
+    if cursor_acq_time is not None and cursor_id is not None:
+        params["cursor_acq_time"] = cursor_acq_time
+        params["cursor_id"] = cursor_id
+    if cursor is None and offset is not None:
+        params["offset"] = int(offset)
 
     stmt = text(
         f"""
@@ -226,32 +305,18 @@ def list_fire_detections_bbox_time(
           {likelihood_predicate}
           {cursor_predicate}
         ORDER BY acq_time {order}, id {order}
-        {limit_sql}
+        LIMIT :limit{offset_sql}
         """
     )
 
     with get_engine().begin() as conn:
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
-    
-    # Determine if there's a next page and extract the cursor
-    has_more = len(rows) > limit
-    if has_more:
-        # Remove the extra row used for pagination detection
-        rows = rows[:limit]
-    
-    next_cursor = None
-    if has_more and rows:
-        # Use the last row's ID as the next cursor
-        last_row = dict(rows[-1])
-        next_cursor = last_row.get("id")
-    
-    return {
-        "data": [dict(r) for r in rows],
-        "next_cursor": next_cursor,
-        "has_more": has_more,
-        "limit": limit,
-    }
+
+    return _build_page(
+        rows, limit,
+        cursor_fn=lambda r: _encode_cursor(t=r["acq_time"], id=r["id"]),
+    )
 
 
 def update_false_source_masking(batch_id: int, conn: Connection | None = None) -> int:
@@ -726,8 +791,14 @@ def list_fire_events_bbox_time(
     min_event_score: float | None = None,
     include_review_required: bool = True,
     limit: int = 1000,
-) -> list[dict]:
-    """List denoiser events in a bbox/time window."""
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """List denoiser events in a bbox/time window.
+
+    Returns a dict with keys ``data``, ``next_cursor``, ``has_more``, and ``limit``.
+    Order is COALESCE(start_time, end_time) DESC, event_id DESC.
+    """
     min_lon, min_lat, max_lon, max_lat = bbox
 
     if limit <= 0 or limit > 10000:
@@ -746,6 +817,33 @@ def list_fire_events_bbox_time(
         review_predicate = "AND review_required IS NOT TRUE"
 
     score_predicate = ""
+    # Cursor keyset pagination on (COALESCE(start_time, end_time) DESC, event_id DESC).
+    # Cursor encodes {"t": iso_datetime_or_null, "id": event_id_string}.
+    cursor_predicate = ""
+    if cursor is not None:
+        parsed = _decode_cursor(cursor)
+        cursor_event_time: datetime | None = parsed.get("t")
+        cursor_event_id: str = str(parsed["id"])
+        if cursor_event_time is not None:
+            cursor_predicate = (
+                "AND (COALESCE(start_time, end_time) < :cursor_time "
+                "OR COALESCE(start_time, end_time) IS NULL "
+                "OR (COALESCE(start_time, end_time) = :cursor_time AND event_id < :cursor_id))"
+            )
+        else:
+            # Already in the NULL bucket; only advance by event_id.
+            cursor_predicate = (
+                "AND COALESCE(start_time, end_time) IS NULL "
+                "AND event_id < :cursor_id"
+            )
+
+    # Deprecated offset path.
+    offset_sql = ""
+    if cursor is None and offset is not None:
+        if offset < 0:
+            raise ValueError("offset must be >= 0.")
+        offset_sql = "\n            OFFSET :offset"
+
     params: dict[str, object] = {
         "start_time": start_time,
         "end_time": end_time,
@@ -753,11 +851,17 @@ def list_fire_events_bbox_time(
         "min_lat": float(min_lat),
         "max_lon": float(max_lon),
         "max_lat": float(max_lat),
-        "limit": int(limit),
+        "limit": int(limit) + 1,  # fetch one extra to detect has_more
     }
     if min_event_score is not None:
         score_predicate = "AND (event_score IS NULL OR event_score >= :min_event_score)"
         params["min_event_score"] = float(min_event_score)
+    if cursor is not None:
+        if cursor_event_time is not None:
+            params["cursor_time"] = cursor_event_time
+        params["cursor_id"] = cursor_event_id
+    if cursor is None and offset is not None:
+        params["offset"] = int(offset)
 
     stmt = text(
         f"""
@@ -786,8 +890,9 @@ def list_fire_events_bbox_time(
               AND ST_Intersects(geom, ST_MakeEnvelope(:min_lon, :min_lat, :max_lon, :max_lat, 4326))
               {review_predicate}
               {score_predicate}
+              {cursor_predicate}
             ORDER BY COALESCE(start_time, end_time) DESC, event_id DESC
-            LIMIT :limit
+            LIMIT :limit{offset_sql}
         )
         SELECT
             e.event_id,
@@ -840,7 +945,13 @@ def list_fire_events_bbox_time(
     with get_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         rows = conn.execute(stmt, params).mappings().all()
-    return [dict(r) for r in rows]
+
+    return _build_page(
+        rows, limit,
+        cursor_fn=lambda r: _encode_cursor(
+            t=r.get("start_time") or r.get("end_time"), id=r["event_id"]
+        ),
+    )
 
 
 def list_fire_fronts_bbox_time(
@@ -851,8 +962,14 @@ def list_fire_fronts_bbox_time(
     min_event_score: float | None = None,
     include_review_required: bool = True,
     limit: int = 2000,
-) -> list[dict]:
-    """List denoiser fire fronts in a bbox/time window."""
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """List denoiser fire fronts in a bbox/time window.
+
+    Returns a dict with keys ``data``, ``next_cursor``, ``has_more``, and ``limit``.
+    Order is COALESCE(overpass_end, overpass_start) DESC NULLS LAST, front_id DESC.
+    """
     min_lon, min_lat, max_lon, max_lat = bbox
 
     if limit <= 0 or limit > 10000:
@@ -872,6 +989,33 @@ def list_fire_fronts_bbox_time(
     if not include_review_required:
         review_predicate = "AND fe.review_required IS NOT TRUE"
 
+    # Cursor keyset pagination on (COALESCE(overpass_end, overpass_start) DESC NULLS LAST, front_id DESC).
+    # Cursor encodes {"t": iso_datetime_or_null, "id": front_id_string}.
+    cursor_predicate = ""
+    if cursor is not None:
+        parsed = _decode_cursor(cursor)
+        cursor_front_time: datetime | None = parsed.get("t")
+        cursor_front_id: str = str(parsed["id"])
+        if cursor_front_time is not None:
+            cursor_predicate = (
+                "AND (COALESCE(overpass_end, overpass_start) < :cursor_time "
+                "OR COALESCE(overpass_end, overpass_start) IS NULL "
+                "OR (COALESCE(overpass_end, overpass_start) = :cursor_time "
+                "AND front_id < :cursor_id))"
+            )
+        else:
+            cursor_predicate = (
+                "AND COALESCE(overpass_end, overpass_start) IS NULL "
+                "AND front_id < :cursor_id"
+            )
+
+    # Deprecated offset path.
+    offset_sql = ""
+    if cursor is None and offset is not None:
+        if offset < 0:
+            raise ValueError("offset must be >= 0.")
+        offset_sql = "\n            OFFSET :offset"
+
     score_predicate = ""
     params: dict[str, object] = {
         "start_time": start_time,
@@ -880,11 +1024,17 @@ def list_fire_fronts_bbox_time(
         "min_lat": float(min_lat),
         "max_lon": float(max_lon),
         "max_lat": float(max_lat),
-        "limit": effective_limit,
+        "limit": effective_limit + 1,  # fetch one extra to detect has_more
     }
     if min_event_score is not None:
         score_predicate = "AND (fe.event_score IS NULL OR fe.event_score >= :min_event_score)"
         params["min_event_score"] = float(min_event_score)
+    if cursor is not None:
+        if cursor_front_time is not None:
+            params["cursor_time"] = cursor_front_time
+        params["cursor_id"] = cursor_front_id
+    if cursor is None and offset is not None:
+        params["offset"] = int(offset)
 
     stmt = text(
         f"""
@@ -969,8 +1119,9 @@ def list_fire_fronts_bbox_time(
                 geom
             FROM ranked_fronts
             WHERE front_rank = 1
+              {cursor_predicate}
             ORDER BY COALESCE(overpass_end, overpass_start) DESC NULLS LAST, front_id DESC
-            LIMIT :limit
+            LIMIT :limit{offset_sql}
         )
         SELECT
             sf.front_id,
@@ -1002,7 +1153,13 @@ def list_fire_fronts_bbox_time(
         # Keep request latency bounded so map interactions do not starve API health checks.
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         rows = conn.execute(stmt, params).mappings().all()
-    return [dict(r) for r in rows]
+
+    return _build_page(
+        rows, effective_limit,
+        cursor_fn=lambda r: _encode_cursor(
+            t=r.get("overpass_end") or r.get("overpass_start"), id=r["front_id"]
+        ),
+    )
 
 
 def get_fire_front_by_id(
