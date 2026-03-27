@@ -137,3 +137,36 @@ export interface ActiveModelsResponse {
 export interface RiskFeatureCollection extends FeatureCollection {
   features: Array<Feature<Polygon | MultiPolygon, { risk_score?: number; [key: string]: unknown }>>;
 }
+
+export interface DenoiserReviewPayload {
+  event_score?: number;
+  frp_max?: number;
+  confidence_max?: number;
+  fail_closed_hard_bypass?: boolean;
+}
+
+export interface DenoiserReviewItem {
+  id: number;
+  event_id: string;
+  fire_detection_id?: number | null;
+  reason: string;
+  severity: string;
+  status: string;
+  payload_json?: DenoiserReviewPayload | null;
+  resolved_by?: string | null;
+  resolved_notes?: string | null;
+  resolved_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewQueueResponse {
+  as_of: string;
+  rows: DenoiserReviewItem[];
+}
+
+export interface ResolveReviewResponse {
+  as_of: string;
+  event_id: string;
+  updated: number;
+}
