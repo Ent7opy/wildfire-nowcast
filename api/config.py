@@ -121,6 +121,13 @@ class AppSettings(BaseSettings):
         validation_alias="CORS_ALLOW_ORIGINS",
     )
 
+    # CSP frame-ancestors: space-separated list of origins allowed to embed this app.
+    # Use "'self'" to allow same-origin framing, or "'none'" to block all framing.
+    frame_ancestors: str = Field(
+        default="'self' https://earth-tools.org",
+        validation_alias="FRAME_ANCESTORS",
+    )
+
     # Export settings
     exports_dir: Path = Field(
         default=REPO_ROOT / "data" / "exports",

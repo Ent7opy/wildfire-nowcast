@@ -31,6 +31,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Pre-computed once at startup — settings are static.
+_CSP_HEADER = f"frame-ancestors {settings.frame_ancestors}"
+
+
+@app.middleware("http")
+async def _add_csp_header(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = _CSP_HEADER
+    return response
+
 @app.on_event("startup")
 async def startup():
     try:
