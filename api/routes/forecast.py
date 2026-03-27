@@ -498,7 +498,7 @@ async def _job_status_event_stream(
     Yields:
         SSE formatted event strings with job status updates
     """
-    start_time = asyncio.get_event_loop().time()
+    start_time = asyncio.get_running_loop().time()
     last_status = None
     
     status_messages = {
@@ -513,7 +513,7 @@ async def _job_status_event_stream(
     try:
         while True:
             # Check for timeout
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = asyncio.get_running_loop().time() - start_time
             if elapsed > max_duration:
                 yield f"event: timeout\ndata: {json.dumps({'message': 'Stream timeout - check status endpoint'})}\n\n"
                 break
