@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 import io
 import json
 import os
+import sqlite3
+import struct
+import tempfile
 from typing import Any, Generator
 from uuid import UUID
 
@@ -14,6 +17,9 @@ from fastapi import APIRouter, HTTPException, Query, Response, status, Depends
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel
+
+from shapely.geometry import shape as shapely_shape
+from shapely.wkb import dumps as wkb_dumps
 
 from api.deps import no_cache
 from api.aois import repo as aois_repo
@@ -26,6 +32,123 @@ from api.exports.map_renderer import render_map_png
 exports_router = APIRouter(tags=["exports"])
 
 MAX_SYNC_FEATURES = 10000
+
+# ---------------------------------------------------------------------------
+# GeoPackage helpers
+# ---------------------------------------------------------------------------
+
+_GPKG_SCHEMA_SQL = """
+CREATE TABLE gpkg_spatial_ref_sys (
+    srs_name TEXT NOT NULL,
+    srs_id INTEGER NOT NULL PRIMARY KEY,
+    organization TEXT NOT NULL,
+    organization_coordsys_id INTEGER NOT NULL,
+    definition TEXT NOT NULL,
+    description TEXT
+);
+CREATE TABLE gpkg_contents (
+    table_name TEXT NOT NULL PRIMARY KEY,
+    data_type TEXT NOT NULL,
+    identifier TEXT,
+    description TEXT DEFAULT '',
+    last_change DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S.000Z','now')),
+    min_x REAL, min_y REAL, max_x REAL, max_y REAL,
+    srs_id INTEGER,
+    CONSTRAINT fk_gc_r_srs_id FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+);
+CREATE TABLE gpkg_geometry_columns (
+    table_name TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    geometry_type_name TEXT NOT NULL,
+    srs_id INTEGER NOT NULL,
+    z TINYINT NOT NULL,
+    m TINYINT NOT NULL,
+    CONSTRAINT pk_geom_cols PRIMARY KEY (table_name, column_name),
+    CONSTRAINT fk_gc_tn FOREIGN KEY (table_name) REFERENCES gpkg_contents(table_name),
+    CONSTRAINT fk_gc_srs FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
+);
+"""
+
+_WGS84_WKT = (
+    'GEOGCS["WGS 84",DATUM["WGS_1984",'
+    'SPHEROID["WGS 84",6378137,298.257223563]],'
+    'PRIMEM["Greenwich",0],'
+    'UNIT["degree",0.0174532925199433]]'
+)
+# Constant GPKG binary header: magic(GP) + version(0) + flags(0x01=LE,no-envelope) + srs_id(int32LE)
+_GPKG_GEOM_HEADER = struct.pack("<2sBBI", b"GP", 0, 0x01, 4326)
+
+
+def _gpkg_geom_bytes(geojson_geom: dict) -> bytes:
+    """Encode a GeoJSON geometry dict as GeoPackage Standard Binary Format."""
+    return _GPKG_GEOM_HEADER + wkb_dumps(shapely_shape(geojson_geom), byte_order=1)
+
+
+def _write_gpkg(features: list[dict], layer_name: str, prop_names: list[str]) -> bytes:
+    """Write features to a GeoPackage file and return the raw bytes."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False)
+    tmp.close()
+    try:
+        con = sqlite3.connect(tmp.name)
+        con.execute("PRAGMA application_id = 1196444487")  # 0x47504b47
+        con.execute("PRAGMA user_version = 10300")  # GeoPackage 1.3
+        con.executescript(_GPKG_SCHEMA_SQL)
+        con.execute(
+            "INSERT INTO gpkg_spatial_ref_sys VALUES (?,?,?,?,?,?)",
+            ("WGS 84", 4326, "EPSG", 4326, _WGS84_WKT, "WGS 84 geographic 2D CRS"),
+        )
+        col_extra = (", " + ", ".join(f'"{p}" TEXT' for p in prop_names)) if prop_names else ""
+        con.execute(
+            f'CREATE TABLE "{layer_name}" (fid INTEGER PRIMARY KEY AUTOINCREMENT, geom BLOB{col_extra})'
+        )
+        con.execute(
+            "INSERT INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES (?,?,?,?)",
+            (layer_name, "features", layer_name, 4326),
+        )
+        con.execute(
+            "INSERT INTO gpkg_geometry_columns VALUES (?,?,?,?,?,?)",
+            (layer_name, "geom", "GEOMETRY", 4326, 0, 0),
+        )
+        if prop_names:
+            col_list = ", ".join(f'"{p}"' for p in prop_names)
+            placeholders = ", ".join("?" * (1 + len(prop_names)))
+            insert_sql = f'INSERT INTO "{layer_name}" (geom, {col_list}) VALUES ({placeholders})'
+        else:
+            insert_sql = f'INSERT INTO "{layer_name}" (geom) VALUES (?)'
+        try:
+            for feat in features:
+                geom_bytes = _gpkg_geom_bytes(feat["geometry"]) if feat.get("geometry") else None
+                props = feat.get("properties") or {}
+                row = [geom_bytes] + ["" if (v := props.get(p)) is None else str(v) for p in prop_names]
+                con.execute(insert_sql, row)
+            con.commit()
+        finally:
+            con.close()
+        with open(tmp.name, "rb") as fh:
+            return fh.read()
+    finally:
+        os.unlink(tmp.name)
+
+
+def _detections_to_point_features(detections: list[dict]) -> list[dict]:
+    """Convert fire detection rows to GeoJSON Point features (raw property types)."""
+    features = []
+    for d in detections:
+        props = dict(d)
+        lat = props.pop("lat")
+        lon = props.pop("lon")
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": props,
+        })
+    return features
+
+
+def _gpkg_response(data: bytes, filename: str) -> Response:
+    resp = Response(content=data, media_type="application/geopackage+sqlite3")
+    resp.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    return resp
 
 
 def _stream_csv(data: list[dict[str, Any]], filename: str) -> StreamingResponse:
@@ -81,13 +204,12 @@ def _stream_json(data: Any, filename: str) -> StreamingResponse:
 
 
 @exports_router.get("/aois/{aoi_id}/export")
-def export_aoi(aoi_id: UUID, format: str = Query("geojson", pattern="^(geojson)$")):
+def export_aoi(aoi_id: UUID, format: str = Query("geojson", pattern="^(geojson|gpkg)$")):
     """Export an AOI geometry."""
     aoi = aois_repo.get_aoi(aoi_id)
     if not aoi:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
-    
-    # Construct Feature
+
     feature = {
         "type": "Feature",
         "geometry": aoi["geometry"],
@@ -97,9 +219,14 @@ def export_aoi(aoi_id: UUID, format: str = Query("geojson", pattern="^(geojson)$
             "description": aoi["description"],
             "area_km2": aoi["area_km2"],
             "created_at": str(aoi["created_at"]),
-        }
+        },
     }
-    
+
+    if format == "gpkg":
+        prop_names = ["id", "name", "description", "area_km2", "created_at"]
+        data = _write_gpkg([feature], "aoi", prop_names)
+        return _gpkg_response(data, f"aoi_{aoi_id}.gpkg")
+
     return _stream_json(feature, f"aoi_{aoi_id}.geojson")
 
 
@@ -111,12 +238,15 @@ def export_fires(
     max_lat: float = Query(..., description="Maximum latitude"),
     start_time: str = Query(..., description="Start time (ISO 8601)"),
     end_time: str = Query(..., description="End time (ISO 8601)"),
-    format: str = Query("csv", pattern="^(csv|geojson)$"),
+    format: str = Query("csv", pattern="^(csv|geojson|gpkg)$"),
     limit: int = Query(1000, ge=1, le=MAX_SYNC_FEATURES),
 ):
-    """Export fire detections."""
-    
-    # Parse times (simplified for MVP, ideally share parsing logic)
+    """Export fire detections.
+
+    Returns at most *limit* records (max {MAX_SYNC_FEATURES}).  When the query
+    matches more records than *limit* an HTTP 413 is returned with the count
+    and a hint to narrow the query or use the async export endpoint.
+    """
     try:
         dt_start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         dt_end = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
@@ -127,40 +257,51 @@ def export_fires(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid timestamps")
 
-    # Reuse repo logic
-    detections = fires_repo.list_fire_detections_bbox_time(
+    result = fires_repo.list_fire_detections_bbox_time(
         bbox=(min_lon, min_lat, max_lon, max_lat),
         start_time=dt_start,
         end_time=dt_end,
         limit=limit,
-        columns=["id", "lat", "lon", "acq_time", "confidence", "frp", "sensor", "source"] 
+        columns=["id", "lat", "lon", "acq_time", "confidence", "frp", "sensor", "source"],
     )
-    
+    if result.get("has_more"):
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Query matches more than {limit} records "
+                f"(sync limit is {MAX_SYNC_FEATURES}). "
+                "Narrow your time range or bounding box, reduce limit, "
+                "or use the async export endpoint POST /exports."
+            ),
+        )
+    detections: list[dict] = result.get("data", [])
+
     if format == "csv":
         return _stream_csv(detections, f"fires_{start_time}_{end_time}.csv")
-    
+
+    features = _detections_to_point_features(detections)
+
     if format == "geojson":
-        features = []
-        for d in detections:
-            props = dict(d)
-            lat = props.pop("lat")
-            lon = props.pop("lon")
-            features.append({
-                "type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                "properties": {k: str(v) if k == "acq_time" else v for k, v in props.items()}
-            })
+        for f in features:
+            p = f["properties"]
+            if "acq_time" in p:
+                p["acq_time"] = str(p["acq_time"])
         fc = {"type": "FeatureCollection", "features": features}
         return _stream_json(fc, f"fires_{start_time}_{end_time}.geojson")
 
+    if format == "gpkg":
+        prop_names = ["id", "acq_time", "confidence", "frp", "sensor", "source"]
+        data = _write_gpkg(features, "fire_detections", prop_names)
+        return _gpkg_response(data, f"fires_{start_time}_{end_time}.gpkg")
+
 
 @exports_router.get("/forecast/{run_id}/contours/export")
-def export_forecast_contours(run_id: int, format: str = Query("geojson", pattern="^(geojson)$")):
+def export_forecast_contours(run_id: int, format: str = Query("geojson", pattern="^(geojson|gpkg)$")):
     """Export forecast contours."""
     contours = forecast_repo.list_contours_for_run(run_id)
     if not contours:
         raise HTTPException(status_code=404, detail="No contours found for run")
-        
+
     features = []
     for c in contours:
         features.append({
@@ -168,10 +309,14 @@ def export_forecast_contours(run_id: int, format: str = Query("geojson", pattern
             "geometry": json.loads(c["geom_geojson"]),
             "properties": {
                 "horizon_hours": c["horizon_hours"],
-                "threshold": c["threshold"]
-            }
+                "threshold": c["threshold"],
+            },
         })
-    
+
+    if format == "gpkg":
+        data = _write_gpkg(features, "forecast_contours", ["horizon_hours", "threshold"])
+        return _gpkg_response(data, f"forecast_run_{run_id}_contours.gpkg")
+
     fc = {"type": "FeatureCollection", "features": features}
     return _stream_json(fc, f"forecast_run_{run_id}_contours.geojson")
 
