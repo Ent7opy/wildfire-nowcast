@@ -653,6 +653,20 @@ def _run_denoiser_drift(args: argparse.Namespace) -> int:
             mean_val,
             mean_delta_hard,
         )
+        _safe_notify(
+            "denoiser_drift_hard",
+            title="Denoiser drift hard violation — manual review required",
+            body=(
+                f"PSI={psi_val:.4f} (hard threshold={psi_hard:.2f}), "
+                f"score_mean_delta={mean_val:.4f} (hard threshold={mean_delta_hard:.2f}). "
+                "Run: make model-rollback FAMILY=denoiser"
+            ),
+            severity="critical",
+            psi=f"{psi_val:.4f}",
+            psi_hard_threshold=f"{psi_hard:.2f}",
+            mean_delta=f"{mean_val:.4f}",
+            mean_delta_hard_threshold=f"{mean_delta_hard:.2f}",
+        )
         return 1  # surfaces as job failure in dashboard; no rollback triggered
     if warn_violation:
         LOGGER.warning(
@@ -684,6 +698,16 @@ def _run_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _safe_notify(event_type: str, title: str, body: str, severity: str = "info", **context: Any) -> None:
+    """Dispatch a notification without blocking or raising. Lazy-imports to avoid startup cost."""
+    try:
+        from api.notifications import notify  # noqa: PLC0415
+
+        notify(event_type, title, body, severity, **context)
+    except Exception:
+        LOGGER.debug("Notification skipped: %s", event_type)
+
+
 def _run_with_logging(name: str, runner: Callable[[], int]) -> int:
     started = time.monotonic()
     LOGGER.info("Job started: %s", name)
@@ -691,6 +715,14 @@ def _run_with_logging(name: str, runner: Callable[[], int]) -> int:
         code = int(runner())
     except Exception:  # pragma: no cover - defensive wrapper
         LOGGER.exception("Job failed with unhandled exception: %s", name)
+        _safe_notify(
+            f"ingest_job_failed:{name}",
+            title=f"Ingest job failed: {name}",
+            body=f"Job '{name}' raised an unhandled exception. Check logs for details.",
+            severity="critical",
+            job=name,
+            exit_code="1",
+        )
         return 1
 
     elapsed = time.monotonic() - started
@@ -698,6 +730,14 @@ def _run_with_logging(name: str, runner: Callable[[], int]) -> int:
         LOGGER.info("Job succeeded: %s (%.2fs)", name, elapsed)
     else:
         LOGGER.error("Job failed: %s exit_code=%s (%.2fs)", name, code, elapsed)
+        _safe_notify(
+            f"ingest_job_failed:{name}",
+            title=f"Ingest job failed: {name}",
+            body=f"Job '{name}' exited with code {code}. Check logs for details.",
+            severity="critical",
+            job=name,
+            exit_code=str(code),
+        )
     return code
 
 
@@ -963,6 +1003,20 @@ def _execute_job(
 
     fresh_snapshot = status_snapshot_fn() if should_capture_snapshot else None
     _write_dashboard(dashboard_path=dashboard_path, metrics=metrics, snapshot=fresh_snapshot)
+    if fresh_snapshot and str(fresh_snapshot.get("overall_state", "")) == "critical":
+        critical_sources = fresh_snapshot.get("critical_stale_sources", [])
+        _safe_notify(
+            "data_stale_critical",
+            title="Critical data sources are stale",
+            body=(
+                f"Data freshness state is CRITICAL. "
+                f"Stale critical sources: {', '.join(critical_sources) or 'none detected'}. "
+                "Run: make ingest-orchestrator"
+            ),
+            severity="critical",
+            overall_state="critical",
+            stale_sources=", ".join(critical_sources),
+        )
     return code
 
 
