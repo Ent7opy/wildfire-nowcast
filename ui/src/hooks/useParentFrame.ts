@@ -43,8 +43,8 @@ export function useParentFrame(
 
     sendToParent({ type: "ready" });
 
-    const handler = onMessage;
-    if (!handler) return;
+    if (!onMessage) return;
+    const handler = onMessage;  // type is now (msg: ParentMessage) => void
 
     function handleMessage(event: MessageEvent): void {
       if (!ALLOWED_ORIGINS.has(event.origin)) return;
