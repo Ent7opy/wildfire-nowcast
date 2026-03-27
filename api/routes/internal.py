@@ -13,6 +13,7 @@ from api.model_registry import (
     rollback_model,
     validate_model_gate,
 )
+from api.industrial_coverage import query_industrial_coverage
 from api.terrain.features_repo import list_terrain_coverage_inventory
 from api.fires.repo import (
     get_latest_denoiser_gate_report,
@@ -173,6 +174,54 @@ async def terrain_coverage_inventory() -> dict:
         "stale_threshold_minutes": settings.data_stale_terrain_minutes,
         "region_count": len(regions),
         "regions": regions,
+    }
+
+
+@internal_router.get("/internal/health/industrial-coverage")
+async def industrial_coverage_health(bbox: str) -> dict:
+    """Return industrial source coverage report for a given bounding box.
+
+    ``bbox`` is a comma-separated string ``min_lon,min_lat,max_lon,max_lat``
+    in EPSG:4326.  Coverage fraction is the fraction of bbox area covered by
+    buffered industrial source zones, computed using the active masking policy
+    gold_buffer_m (or 1 km fallback).
+
+    Operators use this to detect forecast regions that lack industrial noise
+    filtering (blind spots where false-alarm detections may not be suppressed).
+    """
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        parts = [float(x.strip()) for x in bbox.split(",")]
+        if len(parts) != 4:
+            raise ValueError("Expected 4 comma-separated values")
+        bbox_tuple: tuple[float, float, float, float] = (parts[0], parts[1], parts[2], parts[3])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid bbox: {exc}")
+
+    bbox_dict = {"min_lon": bbox_tuple[0], "min_lat": bbox_tuple[1], "max_lon": bbox_tuple[2], "max_lat": bbox_tuple[3]}
+
+    try:
+        coverage = query_industrial_coverage(bbox_tuple)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {
+            "as_of": as_of,
+            "bbox": bbox_dict,
+            "source_count": None,
+            "types": [],
+            "coverage_fraction": None,
+            "has_coverage": None,
+            "buffer_m": None,
+            "error": str(exc),
+        }
+
+    return {
+        "as_of": as_of,
+        "bbox": bbox_dict,
+        "source_count": coverage["source_count"],
+        "types": coverage["types"],
+        "coverage_fraction": coverage["coverage_fraction"],
+        "has_coverage": coverage["source_count"] > 0,
+        "buffer_m": coverage["buffer_m"],
     }
 
 

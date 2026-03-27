@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -457,6 +458,61 @@ def test_consolidated_dashboard_cleanup_section(monkeypatch) -> None:
     assert cleanup["last_outcome"] == "success"
     assert cleanup["next_run_at"] == "2026-03-26T06:00:00+00:00"
     assert cleanup["source"] == "orchestrator_dashboard"
+
+
+# ---------------------------------------------------------------------------
+# /internal/health/industrial-coverage
+# ---------------------------------------------------------------------------
+
+
+def _mock_industrial_coverage(source_count: int, types: list, coverage_fraction: float, buffer_m: float = 1000.0):
+    return {
+        "source_count": source_count,
+        "types": types,
+        "coverage_fraction": coverage_fraction,
+        "buffer_m": buffer_m,
+    }
+
+
+def test_industrial_coverage_with_sources(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "api.routes.internal.query_industrial_coverage",
+        lambda bbox: _mock_industrial_coverage(12, ["gas_facility", "oil_refinery"], 0.34),
+    )
+    response = client.get("/internal/health/industrial-coverage?bbox=-120.5,37.0,-119.5,38.0")
+    assert response.status_code == 200
+    body = response.json()
+    assert "as_of" in body
+    assert body["source_count"] == 12
+    assert body["types"] == ["gas_facility", "oil_refinery"]
+    assert body["coverage_fraction"] == pytest.approx(0.34)
+    assert body["has_coverage"] is True
+    assert body["buffer_m"] == 1000.0
+    assert body["bbox"] == {"min_lon": -120.5, "min_lat": 37.0, "max_lon": -119.5, "max_lat": 38.0}
+
+
+def test_industrial_coverage_zero_sources(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "api.routes.internal.query_industrial_coverage",
+        lambda bbox: _mock_industrial_coverage(0, [], 0.0),
+    )
+    response = client.get("/internal/health/industrial-coverage?bbox=-110.0,40.0,-109.0,41.0")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source_count"] == 0
+    assert body["types"] == []
+    assert body["coverage_fraction"] == 0.0
+    assert body["has_coverage"] is False
+
+
+def test_industrial_coverage_invalid_bbox() -> None:
+    response = client.get("/internal/health/industrial-coverage?bbox=bad,values")
+    assert response.status_code == 422
+
+
+def test_industrial_coverage_bbox_wrong_part_count() -> None:
+    response = client.get("/internal/health/industrial-coverage?bbox=-120.0,37.0,-119.0")
+    assert response.status_code == 422
 
 
 def test_consolidated_dashboard_no_dashboard_file(monkeypatch) -> None:

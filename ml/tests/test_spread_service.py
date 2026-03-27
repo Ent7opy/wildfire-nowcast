@@ -777,3 +777,87 @@ class TestResolveClusterToBbox:
         cell_deg = max(0.08, 8.0 / 16)  # z=4 → cellDeg=0.5
         assert abs(min_lat - (-5 * cell_deg)) < 1e-9
         assert abs(min_lon - (-3 * cell_deg)) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Industrial coverage WARNING in run_spread_forecast
+# ---------------------------------------------------------------------------
+
+
+def _make_spread_request(bbox=(20.0, 40.0, 20.2, 40.2)):
+    return SpreadForecastRequest(
+        region_name="test_region",
+        bbox=bbox,
+        forecast_reference_time=datetime(2026, 3, 27, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def _make_mock_forecast():
+    mock_forecast = MagicMock(spec=SpreadForecast)
+    mock_forecast.probabilities = MagicMock()
+    mock_forecast.probabilities.min.return_value = 0.0
+    mock_forecast.probabilities.max.return_value = 0.0
+    return mock_forecast
+
+
+def test_spread_forecast_warns_when_no_industrial_coverage(mock_spread_inputs, caplog):
+    """run_spread_forecast must log a WARNING when industrial source count is 0."""
+    import logging
+
+    mock_model = MagicMock()
+    mock_model.predict.return_value = _make_mock_forecast()
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        with patch(
+            "api.industrial_coverage.query_industrial_coverage",
+            return_value={"source_count": 0, "types": [], "coverage_fraction": 0.0, "buffer_m": 1000.0},
+        ):
+            with caplog.at_level(logging.WARNING, logger="ml.spread.service"):
+                run_spread_forecast(_make_spread_request(), model=mock_model)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("industrial" in m.lower() and "blind spot" in m.lower() for m in warning_msgs), (
+        f"Expected industrial blind-spot WARNING, got: {warning_msgs}"
+    )
+
+
+def test_spread_forecast_no_warning_when_industrial_coverage_present(mock_spread_inputs, caplog):
+    """run_spread_forecast must not log industrial-coverage WARNING when sources exist."""
+    import logging
+
+    mock_model = MagicMock()
+    mock_model.predict.return_value = _make_mock_forecast()
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        with patch(
+            "api.industrial_coverage.query_industrial_coverage",
+            return_value={"source_count": 5, "types": ["gas_facility"], "coverage_fraction": 0.21, "buffer_m": 1000.0},
+        ):
+            with caplog.at_level(logging.WARNING, logger="ml.spread.service"):
+                run_spread_forecast(_make_spread_request(), model=mock_model)
+
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert not any("blind spot" in m.lower() for m in warning_msgs), (
+        f"Unexpected industrial blind-spot WARNING: {warning_msgs}"
+    )
+
+
+def test_spread_forecast_continues_when_industrial_coverage_check_fails(mock_spread_inputs, caplog):
+    """Coverage check failure must not abort the forecast — only log a warning."""
+    import logging
+
+    mock_model = MagicMock()
+    mock_model.predict.return_value = _make_mock_forecast()
+
+    def _raise(bbox):
+        raise RuntimeError("DB is down")
+
+    with patch("ml.spread.service.build_spread_inputs", return_value=mock_spread_inputs):
+        with patch("api.industrial_coverage.query_industrial_coverage", side_effect=_raise):
+            with caplog.at_level(logging.WARNING, logger="ml.spread.service"):
+                result = run_spread_forecast(_make_spread_request(), model=mock_model)
+
+    # Forecast must still succeed
+    assert result is not None
+    warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("industrial source coverage" in m.lower() for m in warning_msgs)

@@ -243,6 +243,35 @@ def run_spread_forecast(
             f"Window: {inputs_package.window.lat.size}x{inputs_package.window.lon.size}"
         )
 
+    # Check industrial source coverage — warn if forecasting in a blind spot.
+    # Lazy import mirrors the pattern used for build_spread_inputs.
+    try:
+        from api.industrial_coverage import query_industrial_coverage as _query_industrial_coverage
+
+        _ind_cov = _query_industrial_coverage(request.bbox)
+        if _ind_cov["source_count"] == 0:
+            LOGGER.warning(
+                "No industrial sources in forecast bbox — industrial noise filtering blind spot; "
+                "fire detections in this region are not masked against false industrial alarms. "
+                "Mitigation: ingest industrial sources for this region (science_grade target).",
+                extra={"bbox": request.bbox, "region": request.region_name},
+            )
+        else:
+            LOGGER.info(
+                "Industrial source coverage ok",
+                extra={
+                    "bbox": request.bbox,
+                    "source_count": _ind_cov["source_count"],
+                    "coverage_fraction": _ind_cov["coverage_fraction"],
+                },
+            )
+    except Exception as _exc:
+        LOGGER.warning(
+            "Could not check industrial source coverage: %s",
+            _exc,
+            extra={"bbox": request.bbox},
+        )
+
     # 2. Select and run model
     if model is None:
         # Default to baseline heuristic unless request includes explicit selection.
