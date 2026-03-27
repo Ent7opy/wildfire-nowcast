@@ -51,8 +51,8 @@ def test_export_fires_csv(monkeypatch):
         {"id": 1, "lat": 10.0, "lon": 20.0, "acq_time": datetime(2026, 1, 1, tzinfo=timezone.utc), "confidence": 100, "frp": 10, "sensor": "V", "source": "f"},
         {"id": 2, "lat": 11.0, "lon": 21.0, "acq_time": datetime(2026, 1, 1, tzinfo=timezone.utc), "confidence": 90, "frp": 20, "sensor": "V", "source": "f"}
     ]
-    
-    mock_list = MagicMock(return_value=mock_detections)
+
+    mock_list = MagicMock(return_value={"data": mock_detections, "has_more": False, "next_cursor": None, "limit": 1000})
     monkeypatch.setattr(exports_routes.fires_repo, "list_fire_detections_bbox_time", mock_list)
 
     response = client.get(
