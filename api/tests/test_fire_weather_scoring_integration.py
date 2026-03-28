@@ -15,7 +15,7 @@ def test_update_weather_scores_empty_batch():
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value.execute.return_value = mock_result
 
-    with patch("api.fires.repo.get_engine") as mock_engine:
+    with patch("api.fires.scoring_pipeline.get_engine") as mock_engine:
         mock_engine.return_value.begin.return_value = mock_conn
         count = update_weather_scores(batch_id=1)
 
@@ -42,8 +42,8 @@ def test_update_weather_scores_batch_with_detections():
     ]
 
     # Mock weather plausibility scoring to return scores
-    with patch("api.fires.repo.get_engine") as mock_engine, \
-         patch("api.fires.repo.compute_weather_plausibility_scores") as mock_compute:
+    with patch("api.fires.scoring_pipeline.get_engine") as mock_engine, \
+         patch("api.fires.scoring_pipeline.compute_weather_plausibility_scores") as mock_compute:
 
         # Setup mocks
         mock_conn = MagicMock()

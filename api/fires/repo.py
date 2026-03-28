@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json as _json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Literal, TYPE_CHECKING
@@ -17,38 +16,24 @@ if TYPE_CHECKING:
 
 from api.config import settings
 from api.db import get_engine
-from api.fires.scoring import (
-    compute_fire_likelihood,
-    compute_persistence_scores,
-    compute_weather_plausibility_scores,
-    mask_false_sources,
+from api.fires.scoring import compute_fire_likelihood
+from api.fires.scoring_pipeline import (
+    _log_step,
+    run_scoring_stage,
+    FalseSourceMaskingStrategy,
+    LandcoverScoringStrategy,
+    PersistenceScoringStrategy,
+    WeatherScoringStrategy,
 )
 
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 LOGGER = logging.getLogger(__name__)
-_LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD = int(
-    os.getenv("FIRE_SCORING_WEATHER_NEUTRAL_THRESHOLD", "5000")
-)
-_NEUTRAL_WEATHER_SCORE = 0.5
-_WEATHER_TIME_TOLERANCE_HOURS = float(
-    os.getenv("FIRE_SCORING_WEATHER_TIME_TOLERANCE_HOURS", "6")
-)
-_LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD = int(
-    os.getenv("FIRE_SCORING_PERSISTENCE_NEUTRAL_THRESHOLD", "20000")
-)
-_NEUTRAL_PERSISTENCE_SCORE = 0.3
-_DISABLE_NEUTRAL_FALLBACK = (
-    str(os.getenv("FIRE_SCORING_DISABLE_NEUTRAL_FALLBACK", "false")).strip().lower()
-    in {"1", "true", "yes", "on"}
-)
 
-
-def _log_step(step: str, started_at: float, *, batch_id: int, rows: int | None = None) -> None:
-    elapsed = time.perf_counter() - started_at
-    suffix = ""
-    if rows is not None:
-        suffix = f", rows={rows}"
-    LOGGER.info("batch=%s %s completed in %.3fs%s", batch_id, step, elapsed, suffix)
+# Stateless singletons — strategies hold no mutable state so one instance suffices.
+_FALSE_SOURCE_STRATEGY = FalseSourceMaskingStrategy()
+_PERSISTENCE_STRATEGY = PersistenceScoringStrategy()
+_LANDCOVER_STRATEGY = LandcoverScoringStrategy()
+_WEATHER_STRATEGY = WeatherScoringStrategy()
 
 
 def validate_bbox(bbox: BBox) -> None:
@@ -322,336 +307,33 @@ def list_fire_detections_bbox_time(
 def update_false_source_masking(batch_id: int, conn: Connection | None = None) -> int:
     """Update false_source_masked column for detections in a batch.
 
-    Queries detections from the batch, uses mask_false_sources() to identify
-    detections near industrial sources, and updates the false_source_masked column.
-
-    Args:
-        batch_id: The ingest batch ID to process
-        conn: Optional existing database connection to use. If provided, this
-            connection will be used for the operation and no new connection
-            will be opened. This is useful for batching multiple scoring updates
-            within a single transaction to avoid connection pool exhaustion.
-
-    Returns:
-        Number of detections marked as masked
+    Returns the number of detections marked as masked.
     """
-    # Query detections from the batch
-    stmt = text("""
-        SELECT id, lat, lon
-        FROM fire_detections
-        WHERE ingest_batch_id = :batch_id
-    """)
-
-    def _execute(conn: Connection) -> int:
-        started = time.perf_counter()
-        result = conn.execute(stmt, {"batch_id": batch_id})
-        rows = result.mappings().all()
-        _log_step("false_source.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
-
-        detections = [dict(r) for r in rows]
-        if not detections:
-            return 0
-
-        # Compute masking results
-        started = time.perf_counter()
-        masked_results = mask_false_sources(detections)
-        _log_step("false_source.compute_mask", started, batch_id=batch_id, rows=int(len(masked_results)))
-
-        # Update fire_detections table with masking results
-        update_stmt = text("""
-            UPDATE fire_detections
-            SET false_source_masked = :masked
-            WHERE id = :detection_id
-        """)
-
-        params = [
-            {"detection_id": det_id, "masked": is_masked}
-            for det_id, is_masked in masked_results.items()
-        ]
-
-        started = time.perf_counter()
-        conn.execute(update_stmt, params)
-        _log_step("false_source.update_batch", started, batch_id=batch_id, rows=int(len(params)))
-
-        # Count how many were marked as masked
-        return sum(1 for is_masked in masked_results.values() if is_masked)
-
-    if conn is not None:
-        return _execute(conn)
-    else:
-        with get_engine().begin() as new_conn:
-            return _execute(new_conn)
+    return run_scoring_stage(batch_id, _FALSE_SOURCE_STRATEGY, conn)
 
 
 def update_persistence_scores(batch_id: int, conn: Connection | None = None) -> int:
     """Update persistence_score column for detections in a batch.
 
-    Queries detections from the batch, uses compute_persistence_scores()
-    to compute spatial-temporal clustering scores, and updates the persistence_score column.
-
-    Args:
-        batch_id: The ingest batch ID to process
-        conn: Optional existing database connection to use. If provided, this
-            connection will be used for the operation and no new connection
-            will be opened. This is useful for batching multiple scoring updates
-            within a single transaction to avoid connection pool exhaustion.
-
-    Returns:
-        Number of detections with scores updated
+    Returns the number of detections with scores updated.
     """
-    def _execute(conn: Connection) -> int:
-        # Query detections from the batch with required fields
-        stmt = text("""
-            SELECT id, lat, lon, acq_time, sensor
-            FROM fire_detections
-            WHERE ingest_batch_id = :batch_id
-        """)
-
-        started = time.perf_counter()
-        result = conn.execute(stmt, {"batch_id": batch_id})
-        rows = result.mappings().all()
-        _log_step("persistence.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
-
-        detections = [dict(r) for r in rows]
-        if not detections:
-            return 0
-
-        # Large global repairs/backfills can make geospatial clustering too slow.
-        # Assign neutral persistence for throughput and keep strict completeness gates.
-        # SCIENCE_DEBT SD-01: replace with chunked computation to reach science_grade.
-        if (
-            (not _DISABLE_NEUTRAL_FALLBACK)
-            and _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD > 0
-            and len(detections) >= _LARGE_BATCH_PERSISTENCE_NEUTRAL_THRESHOLD
-        ):
-            LOGGER.warning(
-                "Batch %s has %s detections; assigning neutral persistence_score=%s for bulk throughput.",
-                batch_id,
-                len(detections),
-                _NEUTRAL_PERSISTENCE_SCORE,
-            )
-            update_stmt = text("""
-                UPDATE fire_detections
-                SET persistence_score = :score
-                WHERE ingest_batch_id = :batch_id
-            """)
-            started = time.perf_counter()
-            conn.execute(
-                update_stmt,
-                {
-                    "batch_id": batch_id,
-                    "score": _NEUTRAL_PERSISTENCE_SCORE,
-                },
-            )
-            _log_step("persistence.update_neutral", started, batch_id=batch_id, rows=int(len(detections)))
-            return len(detections)
-
-        # Compute persistence scores
-        started = time.perf_counter()
-        persistence_scores = compute_persistence_scores(detections)
-        _log_step(
-            "persistence.compute_scores",
-            started,
-            batch_id=batch_id,
-            rows=int(len(persistence_scores)),
-        )
-
-        # Update fire_detections table with persistence scores
-        update_stmt = text("""
-            UPDATE fire_detections
-            SET persistence_score = :score
-            WHERE id = :detection_id
-        """)
-
-        params = [
-            {"detection_id": det_id, "score": score}
-            for det_id, score in persistence_scores.items()
-        ]
-
-        started = time.perf_counter()
-        conn.execute(update_stmt, params)
-        _log_step("persistence.update_batch", started, batch_id=batch_id, rows=int(len(params)))
-
-        return len(persistence_scores)
-
-    if conn is not None:
-        return _execute(conn)
-    else:
-        with get_engine().begin() as new_conn:
-            return _execute(new_conn)
+    return run_scoring_stage(batch_id, _PERSISTENCE_STRATEGY, conn)
 
 
 def update_landcover_scores(batch_id: int, conn: Connection | None = None) -> int:
     """Update landcover_score column for detections in a batch.
 
-    Queries detections from the batch, uses compute_landcover_scores()
-    to compute land-cover plausibility scores, and updates the landcover_score column.
-
-    Args:
-        batch_id: The ingest batch ID to process
-        conn: Optional existing database connection to use. If provided, this
-            connection will be used for the operation and no new connection
-            will be opened. This is useful for batching multiple scoring updates
-            within a single transaction to avoid connection pool exhaustion.
-
-    Returns:
-        Number of detections with scores updated
+    Returns the number of detections with scores updated.
     """
-    def _execute(conn: Connection) -> int:
-        # Query detections from the batch with required fields
-        stmt = text("""
-            SELECT id, lat, lon
-            FROM fire_detections
-            WHERE ingest_batch_id = :batch_id
-        """)
-
-        started = time.perf_counter()
-        result = conn.execute(stmt, {"batch_id": batch_id})
-        rows = result.mappings().all()
-        _log_step("landcover.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
-
-        detections = [dict(r) for r in rows]
-        if not detections:
-            return 0
-
-        # Import landcover module
-        from api.fires.landcover import compute_landcover_scores
-
-        # Compute landcover scores
-        started = time.perf_counter()
-        landcover_scores = compute_landcover_scores(detections)
-        _log_step(
-            "landcover.compute_scores",
-            started,
-            batch_id=batch_id,
-            rows=int(len(landcover_scores)),
-        )
-
-        # Update fire_detections table with landcover scores
-        update_stmt = text("""
-            UPDATE fire_detections
-            SET landcover_score = :score
-            WHERE id = :detection_id
-        """)
-
-        params = [
-            {"detection_id": det_id, "score": score}
-            for det_id, score in landcover_scores.items()
-        ]
-
-        started = time.perf_counter()
-        conn.execute(update_stmt, params)
-        _log_step("landcover.update_batch", started, batch_id=batch_id, rows=int(len(params)))
-
-        return len(landcover_scores)
-
-    if conn is not None:
-        return _execute(conn)
-    else:
-        with get_engine().begin() as new_conn:
-            return _execute(new_conn)
+    return run_scoring_stage(batch_id, _LANDCOVER_STRATEGY, conn)
 
 
 def update_weather_scores(batch_id: int, conn: Connection | None = None) -> int:
     """Update weather_score column for detections in a batch.
 
-    Queries detections from the batch, uses compute_weather_plausibility_scores()
-    to compute weather plausibility scores, and updates the weather_score column.
-
-    Args:
-        batch_id: The ingest batch ID to process
-        conn: Optional existing database connection to use. If provided, this
-            connection will be used for the operation and no new connection
-            will be opened. This is useful for batching multiple scoring updates
-            within a single transaction to avoid connection pool exhaustion.
-
-    Returns:
-        Number of detections with scores updated
+    Returns the number of detections with scores updated.
     """
-    def _execute(conn: Connection) -> int:
-        # Query detections from the batch with required fields
-        stmt = text("""
-            SELECT id, lat, lon, acq_time
-            FROM fire_detections
-            WHERE ingest_batch_id = :batch_id
-        """)
-
-        started = time.perf_counter()
-        result = conn.execute(stmt, {"batch_id": batch_id})
-        rows = result.mappings().all()
-        _log_step("weather.fetch_batch", started, batch_id=batch_id, rows=int(len(rows)))
-
-        detections = [dict(r) for r in rows]
-        if not detections:
-            return 0
-
-        # Large global repairs/backfills can make per-detection weather lookup
-        # prohibitively slow. Use neutral weather score to keep ingestion fail-closed
-        # gates enforceable while preserving throughput.
-        # SCIENCE_DEBT SD-01: replace with chunked computation to reach science_grade.
-        if (
-            (not _DISABLE_NEUTRAL_FALLBACK)
-            and _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD > 0
-            and len(detections) >= _LARGE_BATCH_WEATHER_NEUTRAL_THRESHOLD
-        ):
-            LOGGER.warning(
-                "Batch %s has %s detections; assigning neutral weather_score=%s for bulk throughput.",
-                batch_id,
-                len(detections),
-                _NEUTRAL_WEATHER_SCORE,
-            )
-            update_stmt = text("""
-                UPDATE fire_detections
-                SET weather_score = :score
-                WHERE ingest_batch_id = :batch_id
-            """)
-            started = time.perf_counter()
-            conn.execute(
-                update_stmt,
-                {
-                    "batch_id": batch_id,
-                    "score": _NEUTRAL_WEATHER_SCORE,
-                },
-            )
-            _log_step("weather.update_neutral", started, batch_id=batch_id, rows=int(len(detections)))
-            return len(detections)
-
-        # Compute weather plausibility scores
-        started = time.perf_counter()
-        weather_scores = compute_weather_plausibility_scores(
-            detections,
-            time_tolerance_hours=_WEATHER_TIME_TOLERANCE_HOURS,
-        )
-        _log_step(
-            "weather.compute_scores",
-            started,
-            batch_id=batch_id,
-            rows=int(len(weather_scores)),
-        )
-
-        # Update fire_detections table with weather scores
-        update_stmt = text("""
-            UPDATE fire_detections
-            SET weather_score = :score
-            WHERE id = :detection_id
-        """)
-
-        params = [
-            {"detection_id": det_id, "score": score}
-            for det_id, score in weather_scores.items()
-        ]
-
-        started = time.perf_counter()
-        conn.execute(update_stmt, params)
-        _log_step("weather.update_batch", started, batch_id=batch_id, rows=int(len(params)))
-
-        return len(weather_scores)
-
-    if conn is not None:
-        return _execute(conn)
-    else:
-        with get_engine().begin() as new_conn:
-            return _execute(new_conn)
+    return run_scoring_stage(batch_id, _WEATHER_STRATEGY, conn)
 
 
 def update_fire_likelihood(batch_id: int, conn: Connection | None = None) -> int:
