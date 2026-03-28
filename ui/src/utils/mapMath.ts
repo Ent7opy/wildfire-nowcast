@@ -1,14 +1,17 @@
 import type { BBox } from "../types/api";
 import type { MapViewState } from "../types/state";
 
-export function viewportBbox(view: MapViewState): BBox {
+export function viewportBbox(view: MapViewState, viewportWidth = 1440, viewportHeight = 900): BBox {
   const degPerTile = 360.0 / 2 ** view.zoom;
-  const half = degPerTile * 0.5;
+  const tilesX = viewportWidth / 256;
+  const tilesY = viewportHeight / 256;
+  const halfLon = (degPerTile * tilesX) / 2;
+  const halfLat = (degPerTile * tilesY) / 2;
   return [
-    Math.max(view.longitude - half, -180),
-    Math.max(view.latitude - half, -85),
-    Math.min(view.longitude + half, 180),
-    Math.min(view.latitude + half, 85)
+    Math.max(view.longitude - halfLon, -180),
+    Math.min(view.latitude - halfLat, -85),
+    Math.min(view.longitude + halfLon, 180),
+    Math.min(view.latitude + halfLat, 85)
   ];
 }
 
