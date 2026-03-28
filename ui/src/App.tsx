@@ -32,10 +32,8 @@ import SafetyStatusBar from "./components/SafetyStatusBar";
 import ArchiveRangeScrubber from "./components/ArchiveRangeScrubber";
 import { useArchiveData } from "./hooks/useArchiveData";
 import { useArchiveRangeData } from "./hooks/useArchiveRangeData";
-import { useEmbedMode } from "./hooks/useEmbedMode";
 import { useForecastPolling } from "./hooks/useForecastPolling";
 import { useGeolocation } from "./hooks/useGeolocation";
-import { useParentFrame } from "./hooks/useParentFrame";
 import { useSafetyMetrics } from "./hooks/useSafetyMetrics";
 import { useAppStore } from "./state/store";
 import type { FireEvent } from "./types/api";
@@ -152,9 +150,6 @@ export default function App(): JSX.Element {
   const focusMapOnPoint = useAppStore((s) => s.focusMapOnPoint);
   const setMapView = useAppStore((s) => s.setMapView);
   const mapView = useAppStore((s) => s.mapView);
-
-  const isEmbedded = useEmbedMode();
-  useParentFrame(isEmbedded);
 
   const isArchiveMode = archive.viewMode === "archive";
   const isRangeMode = isArchiveMode && archive.archiveSubMode === "range";
@@ -361,17 +356,6 @@ export default function App(): JSX.Element {
   ];
 
   const stats: StatCard[] = isSafetyMode ? safetyStats : isArchiveMode ? archiveStats : liveStats;
-
-  if (isEmbedded) {
-    return (
-      <Box sx={{ width: "100%", height: "100vh", overflow: "hidden", bgcolor: "#010409" }}>
-        <FireMap
-          onVisibleEventsChange={setVisibleEvents}
-          confidenceFilter={confidenceFilter}
-        />
-      </Box>
-    );
-  }
 
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "#010409", color: "#d1d5db" }}>
