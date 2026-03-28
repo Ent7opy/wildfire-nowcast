@@ -397,6 +397,12 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             forecast = run_spread_forecast(request, model=model)
             logger.info(f"JIT job {job_id}: forecast computation completed")
 
+            # Compute max spread probability across all horizons and grid cells.
+            try:
+                max_spread_prob: float | None = float(forecast.probabilities.max())
+            except Exception:
+                max_spread_prob = None
+
             # Capture operational metadata
             extra_meta = {}
             try:
@@ -495,6 +501,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                 "weather_bias_corrected": extra_meta.get("weather_bias_corrected"),
                 "shadow_evaluated": bool(extra_meta.get("shadow_evaluated", False)),
                 "shadow_metrics_summary": extra_meta.get("shadow_metrics_summary"),
+                "max_spread_prob": max_spread_prob,
             }
 
             repo.update_jit_job_status(job_id, "completed", result=result)

@@ -1,0 +1,232 @@
+"""AOI watchlist scheduler.
+
+Queries watched AOIs that are due for a forecast check, submits JIT forecast
+jobs to the API, and fires notifications when spread probability exceeds the
+configured threshold.
+
+Designed to be called as an orchestrator job (run_aoi_watch_cycle) on a
+short recurring interval (default 5 minutes). Each call is idempotent: it
+only processes AOIs that are actually due based on their individual
+watch_interval_minutes setting.
+
+Alert rate-limiting is enforced at two levels:
+  1. DB: watch_last_alerted_at — persists across restarts.
+  2. In-process: api.notifications._is_rate_limited — suppresses within-process
+     duplicates using the global NOTIFICATION_RATE_LIMIT_SECONDS window.
+
+Environment variables (optional):
+  AOI_WATCH_API_BASE_URL   Base URL for the API (default: http://localhost:8000)
+  AOI_WATCH_JIT_TIMEOUT_S  Max seconds to wait for a JIT job (default: 300)
+  AOI_WATCH_POLL_INTERVAL_S  JIT polling interval in seconds (default: 5)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from datetime import datetime, timezone
+from typing import Any
+from uuid import UUID
+
+import httpx
+
+from api.aois.repo import list_watched_aois_due, update_aoi_watch_status
+from api.notifications import notify
+
+LOGGER = logging.getLogger(__name__)
+
+_DEFAULT_API_BASE_URL = "http://localhost:8000"
+_DEFAULT_JIT_TIMEOUT_S = 300.0
+_DEFAULT_POLL_INTERVAL_S = 5.0
+
+# Terminal JIT job statuses.
+_JIT_TERMINAL = {"completed", "failed"}
+
+
+def _api_base_url() -> str:
+    return os.getenv("AOI_WATCH_API_BASE_URL", _DEFAULT_API_BASE_URL).rstrip("/")
+
+
+def _jit_timeout() -> float:
+    return float(os.getenv("AOI_WATCH_JIT_TIMEOUT_S", str(_DEFAULT_JIT_TIMEOUT_S)))
+
+
+def _poll_interval() -> float:
+    return float(os.getenv("AOI_WATCH_POLL_INTERVAL_S", str(_DEFAULT_POLL_INTERVAL_S)))
+
+
+def _submit_jit_forecast(
+    client: httpx.Client,
+    bbox_geojson: dict[str, Any],
+    api_base: str,
+) -> str | None:
+    """Submit a JIT forecast for the AOI bbox. Returns job_id or None on error."""
+    # Extract bbox from GeoJSON envelope: [min_lon, min_lat, max_lon, max_lat]
+    try:
+        coords = bbox_geojson["coordinates"][0]
+        lons = [c[0] for c in coords]
+        lats = [c[1] for c in coords]
+        bbox = [min(lons), min(lats), max(lons), max(lats)]
+    except (KeyError, IndexError, TypeError) as exc:
+        LOGGER.warning("aoi_watch: could not extract bbox from AOI geometry: %s", exc)
+        return None
+
+    try:
+        resp = client.post(
+            f"{api_base}/forecast/jit",
+            json={"bbox": bbox},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["job_id"]
+    except Exception as exc:
+        LOGGER.warning("aoi_watch: JIT forecast submission failed: %s", exc)
+        return None
+
+
+def _poll_jit_job(
+    client: httpx.Client,
+    job_id: str,
+    api_base: str,
+) -> dict[str, Any] | None:
+    """Poll a JIT job until terminal. Returns the final job dict or None on timeout/error."""
+    timeout_s = _jit_timeout()
+    deadline = time.monotonic() + timeout_s
+    interval = _poll_interval()
+
+    while time.monotonic() < deadline:
+        try:
+            resp = client.get(f"{api_base}/forecast/jit/{job_id}", timeout=15.0)
+            resp.raise_for_status()
+            job = resp.json()
+        except Exception as exc:
+            LOGGER.warning("aoi_watch: job poll failed job_id=%s: %s", job_id, exc)
+            time.sleep(interval)
+            continue
+
+        if job.get("status") in _JIT_TERMINAL:
+            return job
+
+        time.sleep(interval)
+
+    LOGGER.warning("aoi_watch: JIT job %s timed out after %.0fs", job_id, timeout_s)
+    return None
+
+
+def _should_alert(
+    aoi: dict[str, Any],
+    max_spread_prob: float,
+    now: datetime,
+) -> bool:
+    """Return True if an alert should fire for this AOI.
+
+    Respects DB-level rate limiting: no duplicate alert within watch_interval_minutes.
+    """
+    threshold = aoi.get("watch_alert_threshold")
+    if threshold is None or max_spread_prob < threshold:
+        return False
+
+    last_alerted_at: datetime | None = aoi.get("watch_last_alerted_at")
+    interval_minutes: int | None = aoi.get("watch_interval_minutes")
+    if last_alerted_at is not None and interval_minutes is not None:
+        elapsed_minutes = (now - last_alerted_at).total_seconds() / 60.0
+        if elapsed_minutes < interval_minutes:
+            return False
+
+    return True
+
+
+def run_aoi_watch_cycle(api_base_url: str | None = None) -> int:
+    """Run one AOI watchlist check cycle.
+
+    Queries all watched AOIs that are due, submits JIT forecasts, checks
+    thresholds, and fires notifications.
+
+    Returns the number of AOIs processed.
+    """
+    api_base = (api_base_url or _api_base_url()).rstrip("/")
+    now = datetime.now(timezone.utc)
+
+    due_aois = list_watched_aois_due(now)
+    if not due_aois:
+        LOGGER.debug("aoi_watch: no AOIs due for check")
+        return 0
+
+    LOGGER.info("aoi_watch: %d AOI(s) due for forecast check", len(due_aois))
+
+    processed = 0
+    with httpx.Client() as client:
+        for aoi in due_aois:
+            aoi_id: UUID = aoi["id"]
+            aoi_name: str = aoi["name"]
+
+            LOGGER.info("aoi_watch: checking AOI %s (%s)", aoi_name, aoi_id)
+
+            job_id = _submit_jit_forecast(client, aoi["bbox"], api_base)
+            if job_id is None:
+                # Submission failed — update last_checked_at so we don't spam
+                update_aoi_watch_status(
+                    aoi_id=aoi_id,
+                    last_checked_at=datetime.now(timezone.utc),
+                    last_spread_prob=None,
+                )
+                LOGGER.warning("aoi_watch: skipping AOI %s — forecast submission failed", aoi_name)
+                continue
+
+            job = _poll_jit_job(client, job_id, api_base)
+            check_time = datetime.now(timezone.utc)
+
+            if job is None or job.get("status") != "completed":
+                error = job.get("error") if job else "timeout"
+                LOGGER.warning(
+                    "aoi_watch: forecast failed for AOI %s job_id=%s: %s",
+                    aoi_name, job_id, error,
+                )
+                update_aoi_watch_status(
+                    aoi_id=aoi_id,
+                    last_checked_at=check_time,
+                    last_spread_prob=None,
+                )
+                continue
+
+            max_spread_prob: float | None = job.get("result", {}).get("max_spread_prob")
+            alerted_at: datetime | None = None
+
+            if max_spread_prob is not None and _should_alert(aoi, max_spread_prob, check_time):
+                threshold = aoi["watch_alert_threshold"]
+                notify(
+                    event_type=f"aoi_watch_alert:{aoi_id}",
+                    title=f"Spread alert: {aoi_name}",
+                    body=(
+                        f"AOI '{aoi_name}' has reached spread probability "
+                        f"{max_spread_prob:.0%} (threshold: {threshold:.0%})."
+                    ),
+                    severity="warning",
+                    aoi_id=str(aoi_id),
+                    aoi_name=aoi_name,
+                    max_spread_prob=f"{max_spread_prob:.3f}",
+                    threshold=f"{threshold:.3f}",
+                    job_id=job_id,
+                )
+                alerted_at = check_time
+                LOGGER.info(
+                    "aoi_watch: alert fired for AOI %s max_spread_prob=%.3f threshold=%.3f",
+                    aoi_name, max_spread_prob, threshold,
+                )
+            elif max_spread_prob is not None:
+                LOGGER.info(
+                    "aoi_watch: AOI %s max_spread_prob=%.3f below threshold=%.3f — no alert",
+                    aoi_name, max_spread_prob, aoi.get("watch_alert_threshold"),
+                )
+
+            update_aoi_watch_status(
+                aoi_id=aoi_id,
+                last_checked_at=check_time,
+                last_spread_prob=max_spread_prob,
+                last_alerted_at=alerted_at,
+            )
+            processed += 1
+
+    LOGGER.info("aoi_watch: cycle complete — processed %d AOI(s)", processed)
+    return processed

@@ -21,6 +21,7 @@ import SunIcon from "@mui/icons-material/WbSunny";
 import VerifiedIcon from "@mui/icons-material/Verified";
 
 import AIChatAssistant from "./components/AIChatAssistant";
+import WatchlistDashboard from "./components/WatchlistDashboard";
 import DataFreshnessBanner from "./components/DataFreshnessBanner";
 import FireDetailsPanel from "./components/FireDetailsPanel";
 import FireMap from "./components/FireMap";
@@ -834,6 +835,11 @@ export default function App(): JSX.Element {
             {!isArchiveMode && (
               <Box sx={{ flex: "0 0 auto" }}>
                 <ReviewQueuePanel visibleEvents={filteredEvents} />
+              </Box>
+            )}
+            {!isArchiveMode && (
+              <Box sx={{ flex: "0 0 auto" }}>
+                <WatchlistDashboard />
               </Box>
             )}
             {!isArchiveMode && (
