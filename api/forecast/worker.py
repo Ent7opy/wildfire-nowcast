@@ -13,10 +13,11 @@ from urllib.parse import quote_plus
 from uuid import UUID
 
 from redis.lock import Lock as RedisLock
-from rq import Queue
+from rq import Queue, Retry
 
 from api.cache import get_redis
 from api.config import settings
+from api.notifications import notify
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
 from api.forecast.model_catalog import resolve_request_model_selection
@@ -35,9 +36,23 @@ if str(REPO_ROOT) not in sys.path:
 logger = logging.getLogger(__name__)
 
 queue = Queue(connection=get_redis(), default_timeout=120)
+failed_forecast_queue = Queue("failed_forecast", connection=get_redis())
 
 # Lock timeout in seconds for cache operations
 CACHE_LOCK_TIMEOUT = 300  # 5 minutes
+
+_DEFAULT_FORECAST_JOB_MAX_RETRIES = 3
+_DEFAULT_FORECAST_JOB_RETRY_INTERVALS = [10, 30, 60]
+
+_intervals_raw = os.getenv("FORECAST_JOB_RETRY_INTERVALS", "")
+_FORECAST_RETRY = Retry(
+    max=int(os.getenv("FORECAST_JOB_MAX_RETRIES", str(_DEFAULT_FORECAST_JOB_MAX_RETRIES))),
+    interval=[int(x.strip()) for x in _intervals_raw.split(",") if x.strip()]
+    if _intervals_raw.strip()
+    else list(_DEFAULT_FORECAST_JOB_RETRY_INTERVALS),
+)
+del _intervals_raw
+
 DEFAULT_HORIZONS_HOURS = [24, 48, 72]
 
 
@@ -132,6 +147,27 @@ def handle_jit_pipeline_failure(job, connection, type, value, traceback):
             repo.update_jit_job_status(job_id, "failed", error=error_msg)
     except Exception as e:
         logger.error(f"Failed to update job status in failure callback: {e}")
+
+
+def move_to_dead_letter(job, connection, type, value, traceback):
+    """RQ on_failure callback: update DB status, park job in dead-letter queue, and alert ops."""
+    handle_jit_pipeline_failure(job, connection, type, value, traceback)
+
+    try:
+        failed_forecast_queue.enqueue_job(job)
+    except Exception as e:
+        logger.error("Failed to move forecast job %s to dead-letter queue: %s", job.id, e)
+
+    error_name = type.__name__ if type else "Unknown"
+    error_msg = str(value) if value else ""
+    notify(
+        event_type="forecast_job_failed",
+        title="Forecast job exhausted retries",
+        body=f"Forecast job {job.id} failed after all retries: {error_name}: {error_msg}",
+        severity="critical",
+        job_id=str(job.id),
+        error_type=error_name,
+    )
 
 
 def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, float], forecast_params: dict):

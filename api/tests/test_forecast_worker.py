@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import uuid4
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import xarray as xr
 
-from api.forecast.worker import run_jit_forecast_pipeline
+from api.forecast.worker import run_jit_forecast_pipeline, move_to_dead_letter
 from api.core.grid import GridSpec
 from ml.spread.contract import SpreadForecast
 from ml.spread.region_key import bbox_region_name
@@ -141,3 +142,27 @@ def test_run_jit_pipeline_derives_region_key_for_bbox_requests():
     assert mock_ingest_terrain.call_args.kwargs["region_name"] == expected_region
     assert mock_create_run.call_args.kwargs["region_name"] == expected_region
     assert mock_create_run.call_args.kwargs["metadata"]["effective_region_name"] == expected_region
+
+
+def test_move_to_dead_letter_notifies_and_parks_job():
+    """After max retries, move_to_dead_letter parks job and fires a webhook notification."""
+    job = SimpleNamespace(id="rq-job-abc123", args=[uuid4()])
+    connection = MagicMock()
+    exc_type = ConnectionError
+    exc_value = ConnectionError("Redis timeout")
+
+    with (
+        patch("api.forecast.worker.repo.update_jit_job_status") as mock_update,
+        patch("api.forecast.worker.failed_forecast_queue") as mock_dlq,
+        patch("api.forecast.worker.notify") as mock_notify,
+    ):
+        move_to_dead_letter(job, connection, exc_type, exc_value, None)
+
+    mock_update.assert_called_once()
+    assert mock_update.call_args.args[1] == "failed"
+
+    mock_dlq.enqueue_job.assert_called_once_with(job)
+
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args.kwargs["event_type"] == "forecast_job_failed"
+    assert mock_notify.call_args.kwargs["severity"] == "critical"

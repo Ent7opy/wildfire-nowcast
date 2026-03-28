@@ -24,7 +24,7 @@ from api.fires.repo import get_fire_front_by_id, validate_bbox
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
 from api.forecast.model_catalog import resolve_request_model_selection
-from api.forecast.worker import queue, run_jit_forecast_pipeline, handle_jit_pipeline_failure
+from api.forecast.worker import queue, run_jit_forecast_pipeline, move_to_dead_letter, _FORECAST_RETRY
 from ml.spread.region_key import bbox_region_name
 from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS_ENV
 
@@ -311,7 +311,8 @@ def create_jit_forecast(request: JitForecastRequest):
             job_id,
             bbox,
             forecast_params,
-            on_failure=handle_jit_pipeline_failure
+            on_failure=move_to_dead_letter,
+            retry=_FORECAST_RETRY,
         )
         return {"job_id": job_id, "status": "queued"}
     except Exception as e:
@@ -402,7 +403,8 @@ def create_jit_forecast_from_front(request: JitForecastFromFrontRequest):
             job_id,
             bbox,
             forecast_params,
-            on_failure=handle_jit_pipeline_failure,
+            on_failure=move_to_dead_letter,
+            retry=_FORECAST_RETRY,
         )
         return {"job_id": job_id, "status": "queued", "front_id": request.front_id, "bbox": list(bbox)}
     except Exception as e:
