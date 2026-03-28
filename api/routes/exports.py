@@ -92,34 +92,34 @@ def _write_gpkg(features: list[dict], layer_name: str, prop_names: list[str]) ->
     tmp.close()
     try:
         con = sqlite3.connect(tmp.name)
-        con.executescript(
-            "PRAGMA application_id = 1196444487;"  # 0x47504b47
-            "PRAGMA user_version = 10300;"          # GeoPackage 1.3
-            + _GPKG_SCHEMA_SQL
-        )
-        con.execute(
-            "INSERT INTO gpkg_spatial_ref_sys VALUES (?,?,?,?,?,?)",
-            ("WGS 84", _DEFAULT_SRID, "EPSG", _DEFAULT_SRID, _WGS84_WKT, "WGS 84 geographic 2D CRS"),
-        )
-        col_extra = (", " + ", ".join(f'"{p}" TEXT' for p in prop_names)) if prop_names else ""
-        con.execute(
-            f'CREATE TABLE "{layer_name}" (fid INTEGER PRIMARY KEY AUTOINCREMENT, geom BLOB{col_extra})'
-        )
-        con.execute(
-            "INSERT INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES (?,?,?,?)",
-            (layer_name, "features", layer_name, _DEFAULT_SRID),
-        )
-        con.execute(
-            "INSERT INTO gpkg_geometry_columns VALUES (?,?,?,?,?,?)",
-            (layer_name, "geom", "GEOMETRY", _DEFAULT_SRID, 0, 0),
-        )
-        if prop_names:
-            col_list = ", ".join(f'"{p}"' for p in prop_names)
-            placeholders = ", ".join("?" * (1 + len(prop_names)))
-            insert_sql = f'INSERT INTO "{layer_name}" (geom, {col_list}) VALUES ({placeholders})'
-        else:
-            insert_sql = f'INSERT INTO "{layer_name}" (geom) VALUES (?)'
         try:
+            con.executescript(
+                "PRAGMA application_id = 1196444487;"  # 0x47504b47
+                "PRAGMA user_version = 10300;"          # GeoPackage 1.3
+                + _GPKG_SCHEMA_SQL
+            )
+            con.execute(
+                "INSERT INTO gpkg_spatial_ref_sys VALUES (?,?,?,?,?,?)",
+                ("WGS 84", _DEFAULT_SRID, "EPSG", _DEFAULT_SRID, _WGS84_WKT, "WGS 84 geographic 2D CRS"),
+            )
+            col_extra = (", " + ", ".join(f'"{p}" TEXT' for p in prop_names)) if prop_names else ""
+            con.execute(
+                f'CREATE TABLE "{layer_name}" (fid INTEGER PRIMARY KEY AUTOINCREMENT, geom BLOB{col_extra})'
+            )
+            con.execute(
+                "INSERT INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES (?,?,?,?)",
+                (layer_name, "features", layer_name, _DEFAULT_SRID),
+            )
+            con.execute(
+                "INSERT INTO gpkg_geometry_columns VALUES (?,?,?,?,?,?)",
+                (layer_name, "geom", "GEOMETRY", _DEFAULT_SRID, 0, 0),
+            )
+            if prop_names:
+                col_list = ", ".join(f'"{p}"' for p in prop_names)
+                placeholders = ", ".join("?" * (1 + len(prop_names)))
+                insert_sql = f'INSERT INTO "{layer_name}" (geom, {col_list}) VALUES ({placeholders})'
+            else:
+                insert_sql = f'INSERT INTO "{layer_name}" (geom) VALUES (?)'
             rows = [
                 [_gpkg_geom_bytes(feat["geometry"]) if feat.get("geometry") else None]
                 + ["" if (v := (feat.get("properties") or {}).get(p)) is None else str(v) for p in prop_names]
