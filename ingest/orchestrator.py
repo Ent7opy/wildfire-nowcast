@@ -38,7 +38,8 @@ JOB_PERIMETERS = "perimeters"
 JOB_INDUSTRIAL = "industrial"
 JOB_DENOISER_DRIFT = "denoiser_drift"
 JOB_CLEANUP = "cleanup"
-JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP)
+JOB_AOI_WATCH = "aoi_watch"
+JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP, JOB_AOI_WATCH)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 # Watermarks whose source name ends with _NRT are near-real-time feeds.
@@ -420,6 +421,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Local cache dir for ESA WorldCover tiles. Defaults to data/lulc/worldcover/v200_2021_tiles.",
     )
 
+    parser.add_argument(
+        "--aoi-watch-interval-minutes",
+        type=float,
+        default=5.0,
+        help="AOI watchlist check interval in minutes (loop mode).",
+    )
+    parser.add_argument(
+        "--aoi-watch-api-base-url",
+        type=str,
+        default=None,
+        help="API base URL for AOI watch JIT forecast requests (default: AOI_WATCH_API_BASE_URL env or http://localhost:8000).",
+    )
+
     args = parser.parse_args(argv)
     _validate_args(args)
     return args
@@ -447,6 +461,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--industrial-interval-minutes", args.industrial_interval_minutes),
         ("--denoiser-drift-interval-minutes", args.denoiser_drift_interval_minutes),
         ("--cleanup-interval-minutes", args.cleanup_interval_minutes),
+        ("--aoi-watch-interval-minutes", args.aoi_watch_interval_minutes),
     )
     for flag, value in interval_flags:
         if value <= 0:
@@ -684,6 +699,15 @@ def _run_denoiser_drift(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_aoi_watch(args: argparse.Namespace) -> int:
+    """Run one AOI watchlist check cycle."""
+    from ingest.aoi_watch import run_aoi_watch_cycle  # noqa: PLC0415
+
+    processed = run_aoi_watch_cycle(api_base_url=args.aoi_watch_api_base_url)
+    LOGGER.info("AOI watch cycle complete: processed=%d", processed)
+    return 0
+
+
 def _run_cleanup(args: argparse.Namespace) -> int:
     """Run database cleanup.
 
@@ -754,6 +778,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_INDUSTRIAL: lambda: _run_industrial(args),
         JOB_DENOISER_DRIFT: lambda: _run_denoiser_drift(args),
         JOB_CLEANUP: lambda: _run_cleanup(args),
+        JOB_AOI_WATCH: lambda: _run_aoi_watch(args),
     }
 
     intervals_seconds = {
@@ -766,6 +791,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_INDUSTRIAL: args.industrial_interval_minutes * 60.0,
         JOB_DENOISER_DRIFT: args.denoiser_drift_interval_minutes * 60.0,
         JOB_CLEANUP: args.cleanup_interval_minutes * 60.0,
+        JOB_AOI_WATCH: args.aoi_watch_interval_minutes * 60.0,
     }
 
     return [

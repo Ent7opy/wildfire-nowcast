@@ -170,3 +170,51 @@ export interface ResolveReviewResponse {
   event_id: string;
   updated: number;
 }
+
+export interface AOI {
+  id: string;
+  name: string;
+  description?: string | null;
+  tags?: Record<string, unknown> | null;
+  owner_id?: string | null;
+  geometry: Record<string, unknown>;
+  bbox: Record<string, unknown>;
+  area_km2: number;
+  vertex_count: number;
+  created_at: string;
+  updated_at: string;
+  watch_enabled: boolean;
+  watch_interval_minutes?: number | null;
+  watch_alert_threshold?: number | null;
+  watch_last_checked_at?: string | null;
+  watch_last_alerted_at?: string | null;
+  watch_last_spread_prob?: number | null;
+}
+
+export interface AOIListResponse {
+  items: AOI[];
+  count: number;
+}
+
+export interface WatchlistItem {
+  id: string;
+  name: string;
+  watch_enabled: boolean;
+  watch_interval_minutes?: number | null;
+  watch_alert_threshold?: number | null;
+  watch_last_checked_at?: string | null;
+  watch_last_alerted_at?: string | null;
+  watch_last_spread_prob?: number | null;
+  alert_active: boolean;
+}
+
+export interface WatchlistResponse {
+  items: WatchlistItem[];
+  count: number;
+}
+
+export interface WatchConfigRequest {
+  enabled: boolean;
+  interval_minutes?: number | null;
+  alert_threshold?: number | null;
+}

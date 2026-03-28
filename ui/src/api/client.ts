@@ -1,6 +1,8 @@
 import { apiBaseUrlCandidates } from "../config/runtime";
 import type {
   ActiveModelsResponse,
+  AOI,
+  AOIListResponse,
   BBox,
   DataFreshnessResponse,
   EventsResponse,
@@ -11,7 +13,9 @@ import type {
   ReverseGeocodeResponse,
   ReviewQueueResponse,
   ResolveReviewResponse,
-  RiskFeatureCollection
+  RiskFeatureCollection,
+  WatchConfigRequest,
+  WatchlistResponse
 } from "../types/api";
 
 export class ApiError extends Error {
@@ -137,7 +141,7 @@ async function getJson<T>(
   throw new ApiUnavailableError("API unavailable");
 }
 
-async function postJson<T>(path: string, payload: Record<string, unknown>, acceptedStatus = 200): Promise<T> {
+async function postJson<T>(path: string, payload: Record<string, unknown>, acceptedStatus = 200, method: "POST" | "PUT" = "POST"): Promise<T> {
   const candidates = apiBaseUrlCandidates();
   let lastUnavailable: ApiUnavailableError | null = null;
 
@@ -146,7 +150,7 @@ async function postJson<T>(path: string, payload: Record<string, unknown>, accep
     const timeout = withTimeout(15_000);
     try {
       const response = await fetch(url, {
-        method: "POST",
+        method,
         headers: {
           "Content-Type": "application/json"
         },
@@ -450,6 +454,68 @@ export async function resolveDenoiserReviewItem(args: {
       resolved_notes: args.resolvedNotes ?? null
     }
   );
+}
+
+// ── AOI / Watchlist ──────────────────────────────────────────────────────────
+
+function putJson<T>(path: string, payload: Record<string, unknown>): Promise<T> {
+  return postJson<T>(path, payload, 200, "PUT");
+}
+
+async function deleteRequest(path: string): Promise<void> {
+  const candidates = apiBaseUrlCandidates();
+  let lastUnavailable: ApiUnavailableError | null = null;
+
+  for (const base of candidates) {
+    const url = `${base}${path}`;
+    const timeout = withTimeout(10_000);
+    try {
+      const response = await fetch(url, { method: "DELETE", signal: timeout.signal });
+      timeout.cancel();
+      if (!response.ok && response.status !== 204) {
+        const text = await response.text();
+        throw new ApiError("Non-204 response from API", { statusCode: response.status, url, responseText: text });
+      }
+      return;
+    } catch (error) {
+      timeout.cancel();
+      if (error instanceof ApiError) throw error;
+      const message = error instanceof Error ? error.message : "API unavailable";
+      lastUnavailable = new ApiUnavailableError(message, { url });
+    }
+  }
+
+  if (lastUnavailable) throw lastUnavailable;
+  throw new ApiUnavailableError("API unavailable");
+}
+
+export async function listAOIs(params?: { limit?: number; offset?: number; q?: string }): Promise<AOIListResponse> {
+  return getJson<AOIListResponse>("/aois", params ?? {});
+}
+
+export async function getAOI(aoiId: string): Promise<AOI> {
+  return getJson<AOI>(`/aois/${aoiId}`, {});
+}
+
+export async function createAOI(payload: {
+  name: string;
+  geometry: Record<string, unknown>;
+  description?: string;
+  tags?: Record<string, unknown>;
+}): Promise<AOI> {
+  return postJson<AOI>("/aois", payload as Record<string, unknown>, 201);
+}
+
+export async function deleteAOI(aoiId: string): Promise<void> {
+  return deleteRequest(`/aois/${aoiId}`);
+}
+
+export async function configureAOIWatch(aoiId: string, config: WatchConfigRequest): Promise<AOI> {
+  return putJson<AOI>(`/aois/${aoiId}/watch`, { ...config });
+}
+
+export async function getWatchlist(): Promise<WatchlistResponse> {
+  return getJson<WatchlistResponse>("/aois/watchlist", {});
 }
 
 export function buildEventKey(event: FireEvent, lat: number, lon: number): string {
