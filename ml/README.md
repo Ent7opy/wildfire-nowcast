@@ -1,94 +1,91 @@
-# Machine Learning for Wildfire Nowcast
+# ML Pipelines
 
-This directory contains the machine learning pipelines for the Wildfire Nowcast project.
+## Denoiser v2 (current standard)
 
-> For a transparent explanation of post-processing layers (calibration and weather bias correction),
-> see `docs/ml/calibration_and_weather_bias_correction.md`.
+XGBoost classifier (exported to ONNX) that distinguishes real fires from noise in FIRMS detections. v2 is event-based: detections are grouped into fire events before labeling.
 
-## Denoiser Classifier
-
-The denoiser is a tabular classifier that distinguishes between real fires and noise (e.g., industrial heat sources, sensor noise) in FIRMS detections.
-
-### Training the Baseline Model
-
-To train the baseline denoiser model, use the `train_denoiser.py` script.
-
-#### Prerequisites
-
-1.  **Data Snapshot**: You need a Parquet snapshot produced by the labeling/feature pipeline. Snapshots are typically stored in `data/denoiser/snapshots/run_<timestamp>/`.
-2.  **Configuration**: Create or modify a configuration file (e.g., `configs/denoiser_train.yaml`).
-
-#### Usage
+### Pipeline steps
 
 ```bash
-# Using make (from repo root)
-make denoiser-train CONFIG=configs/denoiser_train.yaml
+# 1. Eventize detections into fire events
+make denoiser-eventize ARGS="--batch-id ..."
 
-# Or using uv directly
-python -m ml.train_denoiser --config configs/denoiser_train.yaml
+# 2. Label events
+make denoiser-label-v2 ARGS="--start ... --end ..."
+
+# 3. Build snapshot (feature table)
+make denoiser-snapshot-v2 ARGS="--bbox ... --start ... --end ... --version ..."
+
+# 4. Train
+make denoiser-train-v2 CONFIG=configs/denoiser_train_v2.yaml
+
+# 5. Evaluate
+make denoiser-eval-v2 MODEL_RUN=models/denoiser_v2/<run_id> SNAPSHOT=... OUT=reports/denoiser_v2/<run_id>
 ```
 
-#### Artifacts
+### Artifacts (per run under `models/denoiser_v2/<run_id>/`)
 
-Each training run produces versioned artifacts in the output directory specified in the config (default: `models/denoiser/`).
+- `model.onnx` — inference model
+- `metrics.json` — ROC-AUC, PR-AUC, event recall/precision, F1
+- `gate_report.json` — promotion gate result (`"pass": true/false`)
+- `runtime_contract.json` — feature schema and threshold profile for inference
+- `config_resolved.yaml` — reproducibility record
 
-Artifacts saved:
-- `model.pkl`: The trained model (using `joblib`).
-- `metadata.json`: Information about the training run, including configuration, feature list, and training environment.
-- `metrics.json`: ROC-AUC, PR-AUC, and threshold-based metrics (Precision, Recall, F1, Confusion Matrix).
-- `feature_list.json`: The list of features used for training.
-- `config_resolved.yaml`: The resolved config used for the run (for reproducibility).
+### Promotion gate requirements
 
-Notes:
-- AUC metrics are only defined when the eval split contains **both** classes. If a time-based split produces a single-class eval set, training will fall back to a reproducible stratified random split (configurable) so ROC-AUC/PR-AUC are meaningful.
+- `gate_report.json` field `"pass": true`
+- `coverage_data_freshness.fresh: true`
+- Threshold profile must match `DENOISER_THRESHOLD_PROFILE` in env
 
-### Project Structure
+### Full pipeline (train → eval → register → promote)
 
-- `ml/denoiser/`: Feature engineering and labeling logic.
-- `ml/train_denoiser.py`: Training entrypoint.
-- `ml/weather_bias_analysis.py`: Systematic bias analysis script.
-- `configs/`: Training configuration files.
-- `models/`: Trained model artifacts.
-- `reports/`: Analysis outputs and reports.
+```bash
+make train-denoiser TRAIN_DENOISER_PIPELINE=v2
+```
+
+---
+
+## Spread Forecasting v2
+
+Probabilistic 24-72 h fire spread model. 18-channel feature tensor; requires a gate report (champion-challenger eval) before promotion.
+
+### Pipeline steps
+
+```bash
+make train-spread TRAIN_SPREAD_PIPELINE=v2
+```
+
+Or step-by-step (hindcast build → eval → register → promote via `ml/spread/`).
+
+### Canonical feature channels (v2/v3, 18 channels, order fixed)
+
+```
+fire_t0, fire_t-6h, fire_t-12h,
+u10, v10, t2m, rh2m, precip_24h,
+slope_deg, aspect_sin, aspect_cos, elevation_m, ruggedness, tpi,
+ndvi, lfmc, dfmc,
+region_id_embedding_input
+```
+
+### Gate requirements
+
+See `docs/spread_gate_requirements.md` for full spec (hard stops, stage warnings, science debt register, metric thresholds, and the `science_grade` checklist).
+
+---
 
 ## Weather Bias Analysis
 
-Quantify systematic biases in weather fields (wind, temperature, humidity) by comparing forecasts with reanalysis or ground truth datasets (e.g., ERA5).
-
-### Usage
+Quantify systematic biases in GFS weather fields vs reanalysis (e.g., ERA5):
 
 ```bash
-# Using make (from repo root)
-make weather-bias ARGS="--forecast-nc data/weather/gfs_0p25/2025/12/06/12/gfs_0p25_20251206T12Z_0-24h_bbox_5.0_35.0_20.0_47.0.nc --truth-nc path/to/YOUR_ERA5_FILE.nc"
-
-# Or using uv directly
-uv run --project ml -m ml.weather_bias_analysis \
-    --forecast-nc data/weather/gfs_0p25/2025/12/06/12/gfs_0p25_20251206T12Z_0-24h_bbox_5.0_35.0_20.0_47.0.nc \
-    --truth-nc path/to/YOUR_ERA5_FILE.nc \
-    --out-dir reports/weather_bias
+make weather-bias ARGS="--forecast-nc data/weather/... --truth-nc path/to/era5.nc"
 ```
 
-> **Note**: `path/to/YOUR_ERA5_FILE.nc` is a placeholder. You must provide a path to a real NetCDF file containing reanalysis truth.
+Outputs to `reports/weather_bias/<timestamp>/`: `summary.csv`, `summary.json`, bias maps.
 
-Options:
-- `--variables`: Comma-separated mapping if truth variable names differ (e.g., `u10=u10_era,t2m=t2m_truth`).
-- `--dem-path`: Optional path to a DEM GeoTIFF for elevation-stratified bias analysis.
+## Weather Bias Correction
 
-### Artifacts
-
-Reports are saved to `reports/weather_bias/<timestamp>/`:
-- `summary.csv`: Per-variable bias, MAE, and RMSE.
-- `summary.json`: Comprehensive metrics including quadrant and elevation-binned stats.
-- `plots/`: Mean bias maps and time series plots.
-- `notes.md`: Template for documenting findings and observations.
-- `metadata.json` / `config_resolved.yaml`: Reproducibility metadata.
-
-## Weather Bias Correction (for Spread Inference)
-
-For spread inference, you can optionally apply a lightweight bias corrector to the weather cube.
-The corrector is a **per-variable affine transform** (truth \(\approx \alpha + \beta \cdot forecast\)) fit on aligned forecast vs truth data.
-
-### Training
+Train a per-variable affine corrector (`truth ≈ α + β·forecast`) for use in spread inference:
 
 ```bash
 python -m ml.train_weather_bias_corrector \
@@ -97,23 +94,9 @@ python -m ml.train_weather_bias_corrector \
   --out-dir models/weather_bias_corrector
 ```
 
-This writes a run directory containing:
-- `weather_bias_corrector.json`: correction parameters (loadable in inference).
-- `metrics.json`: before/after validation metrics on a held-out time slice.
+Pass corrector at inference via `WEATHER_BIAS_CORRECTOR_PATH` env var or `weather_bias_corrector_path` arg to `build_spread_inputs`.
 
-### Using in spread code
-
-`ml.spread_features._load_weather_cube` will apply the corrector automatically if you provide a path:
-- pass `weather_bias_corrector_path=Path(".../weather_bias_corrector.json")` to `build_spread_inputs`, or
-- set `WEATHER_BIAS_CORRECTOR_PATH=/abs/path/to/weather_bias_corrector.json` in the environment.
-
-## Evaluation: Calibration & Weather Bias Correction
-
-### Calibration evaluation (spread reliability)
-
-Given a hindcast run (predicted vs observed grids) and a calibrator run dir, generate a report with:
-- per-horizon **Brier score** and **ECE**
-- **reliability diagrams** (raw vs calibrated)
+## Spread Calibration Eval
 
 ```bash
 python -m ml.eval_spread_calibration \
@@ -121,20 +104,4 @@ python -m ml.eval_spread_calibration \
   --calibrator-run-dir models/spread_calibration/<run_id>
 ```
 
-Outputs are written to `reports/spread_calibration_eval/<timestamp>_<run_id>/`.
-
-### Weather bias correction evaluation (systematic error reduction)
-
-Compare forecast vs truth (raw and corrected) and generate:
-- per-variable **bias/MAE/RMSE** tables (raw vs corrected)
-- mean bias maps + bias reduction maps
-- domain-mean bias time series overlays
-
-```bash
-python -m ml.eval_weather_bias_correction \
-  --forecast-nc path/to/forecast.nc \
-  --truth-nc path/to/truth.nc \
-  --corrector-json models/weather_bias_corrector/<run_id>/weather_bias_corrector.json
-```
-
-Outputs are written to `reports/weather_bias_correction_eval/<timestamp>/`.
+Outputs per-horizon Brier score, ECE, and reliability diagrams to `reports/spread_calibration_eval/`.

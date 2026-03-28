@@ -1,5 +1,7 @@
 # Wildfire Nowcast
 
+> **North Star**: The globally deployable, hourly-refreshed ground truth for active fire events — giving incident commanders, dispatchers, researchers, and emergency managers a single, trusted picture of where fires are burning, how confident we are, and where they are headed, so that every operational decision is grounded in the best available evidence rather than guesswork or stale data.
+
 Wildfire Nowcast is a map-first decision support product for understanding active fires, near-term spread, and short-horizon risk using open geospatial signals.
 
 ## What We Are Building
@@ -26,8 +28,6 @@ Wildfire Nowcast is a map-first decision support product for understanding activ
 
 ## Getting Started
 
-Use the default local workflow from the repository root:
-
 ```bash
 make help
 make install
@@ -37,11 +37,11 @@ make dev-api
 make dev-ui
 ```
 
-For project documentation, start at [`docs/README.md`](docs/README.md).
+For documentation, see [`docs/README.md`](docs/README.md).
 
 ## Prepare Flow
 
-Use `prepare` as the operational bootstrap command:
+Bootstrap the full local environment:
 
 ```bash
 make prepare
@@ -51,67 +51,36 @@ What it does:
 - Runs DB migrations.
 - Cleans stale operational records.
 - Runs one-shot orchestrated ingest for FIRMS + weather + terrain + perimeters.
-- Applies incremental FIRMS watermark filtering (with grace window) so only new detections are processed.
+- Applies incremental FIRMS watermark filtering so only new detections are processed.
 
-Default local prep window is a Balkans smoke-grid bbox and can be overridden:
+Override defaults:
 
 ```bash
 make prepare PREPARE_BBOX="-125 24 -66 50" PREPARE_FIRMS_AREA="-125,24,-66,50" PREPARE_REGION="conus"
-```
-
-You can also customize jobs/retries:
-
-```bash
 make prepare PREPARE_JOBS="weather,terrain,perimeters" PREPARE_MAX_RETRIES=3
 ```
 
 ML application during prepare:
-- FIRMS denoiser inference is applied for new detections when enabled, and can be enforced via `DENOISER_REQUIRED=true`.
-- v1 production defaults are `DENOISER_PIPELINE_VERSION=v2` + `DENOISER_THRESHOLD_PROFILE=strict_v1`.
-- Strict mode reads thresholds from `metrics_json.runtime_contract` on the promoted model and fails closed on mismatches.
+- Denoiser v2 inference applied inline when enabled (`DENOISER_REQUIRED=true`).
+- Default: `DENOISER_PIPELINE_VERSION=v2` + `DENOISER_THRESHOLD_PROFILE=strict_v1`.
 
 ## Ingestion Orchestrator
 
-Run FIRMS + weather + terrain + perimeters in one command:
-
 ```bash
-make ingest-orchestrator
-```
-
-Run as a continuous scheduler:
-
-```bash
-make ops-start
-```
-
-Reliability controls:
-
-```bash
+make ingest-orchestrator        # one-shot
+make ops-start                  # continuous scheduler
 make ingest-orchestrator ARGS="--loop --max-retries 3 --retry-backoff-seconds 20 --enforce-freshness"
 ```
 
-The orchestrator writes a JSON dashboard by default to:
-`data/ingest/orchestrator_dashboard.json`
+Dashboard written to `data/ingest/orchestrator_dashboard.json`.
 
-API/UI stale-data status endpoint:
+## Health & Model Lifecycle
 
 ```bash
 curl http://localhost:8000/health/data-freshness
-```
-
-Internal ops freshness + idempotency diagnostics:
-
-```bash
 curl http://localhost:8000/internal/health/data-freshness
-```
-
-Active promoted models endpoint:
-
-```bash
 curl http://localhost:8000/internal/models/active
 ```
-
-Model lifecycle commands:
 
 ```bash
 make model-register FAMILY=denoiser ARTIFACT=models/denoiser_v2/<run_id> \
