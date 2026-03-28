@@ -1,6 +1,6 @@
 import type { FireEvent } from "../types/api";
 
-function toFiniteNumber(value: unknown): number | null {
+export function toFiniteNumber(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
