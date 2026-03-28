@@ -12,10 +12,10 @@ from typing import Optional
 from urllib.parse import quote_plus
 from uuid import UUID
 
-from redis import Redis
 from redis.lock import Lock as RedisLock
 from rq import Queue
 
+from api.cache import get_redis
 from api.config import settings
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
@@ -34,9 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 logger = logging.getLogger(__name__)
 
-REDIS_URL = f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}"
-redis_conn = Redis.from_url(REDIS_URL)
-queue = Queue(connection=redis_conn, default_timeout=120)
+queue = Queue(connection=get_redis(), default_timeout=120)
 
 # Lock timeout in seconds for cache operations
 CACHE_LOCK_TIMEOUT = 300  # 5 minutes
@@ -103,7 +101,7 @@ def _acquire_cache_lock(lock_key: str, timeout: int = CACHE_LOCK_TIMEOUT) -> Opt
     Returns:
         RedisLock if acquired, None otherwise
     """
-    lock = RedisLock(redis_conn, lock_key, timeout=timeout, blocking_timeout=5)
+    lock = RedisLock(get_redis(), lock_key, timeout=timeout, blocking_timeout=5)
     if lock.acquire():
         return lock
     return None

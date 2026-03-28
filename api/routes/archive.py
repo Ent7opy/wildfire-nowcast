@@ -16,6 +16,7 @@ from api.deps import no_cache
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from api.cache import get_redis
 from api.db import get_engine
 
 # Add repo root to path so the RQ worker can import ingest module
@@ -38,11 +39,6 @@ MAX_FIRMS_LOOKBACK_DAYS = 10
 MAX_ARCHIVE_RANGE_DAYS = int(os.getenv("MAX_ARCHIVE_RANGE_DAYS", "7"))
 INTER_DAY_DELAY_SECONDS = 2
 RANGE_REDIS_TTL_SECONDS = 7 * 86400  # 7 days
-
-
-def _redis_url() -> str:
-    """Return the Redis connection URL from environment variables."""
-    return f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}"
 
 
 def _timeframe_window(date_str: str, timeframe: str) -> tuple[datetime, datetime]:
@@ -119,9 +115,7 @@ def _run_archive_ingest_range(range_job_id: str, dates: list[str]) -> None:
     """
     import json as _json
 
-    from redis import Redis as _Redis
-
-    redis_conn = _Redis.from_url(_redis_url())
+    redis_conn = get_redis()
     key = f"archive_range:{range_job_id}"
 
     # Load the pre-initialised status map once; maintain it in memory for the
@@ -279,11 +273,9 @@ async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestRes
         )
 
     try:
-        from redis import Redis
         from rq import Queue
 
-        redis_conn = Redis.from_url(_redis_url())
-        q = Queue(connection=redis_conn, default_timeout=600)
+        q = Queue(connection=get_redis(), default_timeout=600)
         job = q.enqueue(_run_archive_ingest, body.date, body.timeframe)
         job_id = str(job.id)
     except Exception as exc:
@@ -304,11 +296,9 @@ async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestRes
 async def get_archive_ingest_status(job_id: str) -> ArchiveIngestStatusResponse:
     """Return the current status of an archive ingest job."""
     try:
-        from redis import Redis
         from rq.job import Job
 
-        redis_conn = Redis.from_url(_redis_url())
-        job = Job.fetch(job_id, connection=redis_conn)
+        job = Job.fetch(job_id, connection=get_redis())
         job_status = job.get_status()
         error: str | None = None
         if job.is_failed and job.exc_info:
@@ -391,10 +381,9 @@ async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> Archi
         import json as _json
         import uuid as _uuid
 
-        from redis import Redis
         from rq import Queue
 
-        redis_conn = Redis.from_url(_redis_url())
+        redis_conn = get_redis()
 
         # Pre-generate the range_job_id so we can initialise Redis state before the
         # worker starts (the status endpoint needs to see "queued" immediately).
@@ -435,10 +424,7 @@ async def get_archive_range_status(range_job_id: str) -> ArchiveRangeStatusRespo
     try:
         import json as _json
 
-        from redis import Redis
-
-        redis_conn = Redis.from_url(_redis_url())
-        raw = redis_conn.get(f"archive_range:{range_job_id}")
+        raw = get_redis().get(f"archive_range:{range_job_id}")
 
         if raw is None:
             return ArchiveRangeStatusResponse(

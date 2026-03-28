@@ -1,5 +1,4 @@
 import logging
-import os
 from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -52,7 +51,7 @@ async def startup():
 
     try:
         redis = Redis.from_url(
-            f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}",
+            settings.redis_url,
             encoding="utf-8",
             decode_responses=True,
             socket_connect_timeout=5,
@@ -66,7 +65,7 @@ async def startup():
         LOGGER.warning(
             "Redis connection failed; rate limiting disabled. Error: %s",
             e,
-            extra={"redis_host": os.getenv("REDIS_HOST", "localhost"), "redis_port": os.getenv("REDIS_PORT", "6379")},
+            extra={"redis_host": settings.redis_host, "redis_port": settings.redis_port},
         )
         # Graceful degradation: rate limiting is disabled, but app continues
         # Store None to indicate rate limiter is not available

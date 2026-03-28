@@ -135,9 +135,9 @@ class TestTriggerArchiveIngestRange:
         assert resp.status_code == 422
 
     @patch("rq.Queue")
-    @patch("redis.Redis")
-    def test_accepts_single_day_range(self, mock_redis_cls, mock_queue_cls, client):
-        mock_redis_cls.from_url.return_value = MagicMock()
+    @patch("api.routes.archive.get_redis")
+    def test_accepts_single_day_range(self, mock_get_redis, mock_queue_cls, client):
+        mock_get_redis.return_value = MagicMock()
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
         yesterday = _recent_date(1)
@@ -153,11 +153,11 @@ class TestTriggerArchiveIngestRange:
         assert body["warning"] is None
 
     @patch("rq.Queue")
-    @patch("redis.Redis")
-    def test_returns_warning_for_large_range(self, mock_redis_cls, mock_queue_cls, client):
+    @patch("api.routes.archive.get_redis")
+    def test_returns_warning_for_large_range(self, mock_get_redis, mock_queue_cls, client):
         if MAX_ARCHIVE_RANGE_DAYS < 6:
             pytest.skip("MAX_ARCHIVE_RANGE_DAYS too small to test warning threshold")
-        mock_redis_cls.from_url.return_value = MagicMock()
+        mock_get_redis.return_value = MagicMock()
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
         end_days_ago = 1
@@ -174,9 +174,9 @@ class TestTriggerArchiveIngestRange:
         assert "db" in body["warning"].lower() or "archive" in body["warning"].lower()
 
     @patch("rq.Queue")
-    @patch("redis.Redis")
-    def test_dates_list_covers_full_range(self, mock_redis_cls, mock_queue_cls, client):
-        mock_redis_cls.from_url.return_value = MagicMock()
+    @patch("api.routes.archive.get_redis")
+    def test_dates_list_covers_full_range(self, mock_get_redis, mock_queue_cls, client):
+        mock_get_redis.return_value = MagicMock()
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
         start = _recent_date(3)
@@ -201,8 +201,7 @@ class TestGetArchiveRangeStatus:
     def test_returns_not_found_when_redis_empty(self, client):
         mock_redis = MagicMock()
         mock_redis.get.return_value = None
-        with patch("redis.Redis") as mock_cls:
-            mock_cls.from_url.return_value = mock_redis
+        with patch("api.routes.archive.get_redis", return_value=mock_redis):
             resp = client.get("/fires/archive/ingest-range/nonexistent-uuid/status")
         assert resp.status_code == 200
         body = resp.json()
@@ -216,8 +215,7 @@ class TestGetArchiveRangeStatus:
         }
         mock_redis = MagicMock()
         mock_redis.get.return_value = json.dumps(status_map).encode()
-        with patch("redis.Redis") as mock_cls:
-            mock_cls.from_url.return_value = mock_redis
+        with patch("api.routes.archive.get_redis", return_value=mock_redis):
             resp = client.get("/fires/archive/ingest-range/some-range-id/status")
         assert resp.status_code == 200
         body = resp.json()
@@ -232,8 +230,7 @@ class TestGetArchiveRangeStatus:
         }
         mock_redis = MagicMock()
         mock_redis.get.return_value = json.dumps(status_map).encode()
-        with patch("redis.Redis") as mock_cls:
-            mock_cls.from_url.return_value = mock_redis
+        with patch("api.routes.archive.get_redis", return_value=mock_redis):
             resp = client.get("/fires/archive/ingest-range/some-range-id/status")
         assert resp.status_code == 200
         body = resp.json()
@@ -248,8 +245,7 @@ class TestGetArchiveRangeStatus:
         }
         mock_redis = MagicMock()
         mock_redis.get.return_value = json.dumps(status_map).encode()
-        with patch("redis.Redis") as mock_cls:
-            mock_cls.from_url.return_value = mock_redis
+        with patch("api.routes.archive.get_redis", return_value=mock_redis):
             resp = client.get("/fires/archive/ingest-range/some-range-id/status")
         assert resp.status_code == 200
         body = resp.json()
@@ -267,8 +263,7 @@ class TestGetArchiveRangeStatus:
         }
         mock_redis = MagicMock()
         mock_redis.get.return_value = json.dumps(status_map).encode()
-        with patch("redis.Redis") as mock_cls:
-            mock_cls.from_url.return_value = mock_redis
+        with patch("api.routes.archive.get_redis", return_value=mock_redis):
             resp = client.get("/fires/archive/ingest-range/some-range-id/status")
         assert resp.status_code == 200
         body = resp.json()
@@ -276,8 +271,7 @@ class TestGetArchiveRangeStatus:
         assert dates == sorted(dates)
 
     def test_returns_not_found_on_redis_error(self, client):
-        with patch("redis.Redis") as mock_cls:
-            mock_cls.from_url.side_effect = ConnectionError("Redis down")
+        with patch("api.routes.archive.get_redis", side_effect=ConnectionError("Redis down")):
             resp = client.get("/fires/archive/ingest-range/any-id/status")
         assert resp.status_code == 200
         assert resp.json()["overall_status"] == "not_found"

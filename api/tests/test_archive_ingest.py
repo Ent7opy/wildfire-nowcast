@@ -123,13 +123,13 @@ class TestTriggerArchiveIngest:
         assert resp.status_code == 422
 
     @patch("rq.Queue")
-    @patch("redis.Redis")
-    def test_accepts_valid_recent_date(self, mock_redis_cls, mock_queue_cls, client):
+    @patch("api.routes.archive.get_redis")
+    def test_accepts_valid_recent_date(self, mock_get_redis, mock_queue_cls, client):
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         mock_job = MagicMock()
         mock_job.id = "test-job-id-123"
         mock_queue_cls.return_value.enqueue.return_value = mock_job
-        mock_redis_cls.from_url.return_value = MagicMock()
+        mock_get_redis.return_value = MagicMock()
 
         resp = client.post("/fires/archive/ingest", json={"date": yesterday, "timeframe": "morning"})
         assert resp.status_code == 202
@@ -142,20 +142,19 @@ class TestGetArchiveIngestStatus:
     """get_archive_ingest_status must fall back to 'unknown' when Redis is unavailable."""
 
     def test_returns_unknown_when_redis_unavailable(self, client):
-        with patch("redis.Redis") as mock_redis_cls:
-            mock_redis_cls.from_url.side_effect = ConnectionError("Redis down")
+        with patch("api.routes.archive.get_redis", side_effect=ConnectionError("Redis down")):
             resp = client.get("/fires/archive/ingest/nonexistent-job-id")
         assert resp.status_code == 200
         assert resp.json()["status"] == "unknown"
 
     @patch("rq.job.Job")
-    @patch("redis.Redis")
-    def test_returns_finished_status(self, mock_redis_cls, mock_job_cls, client):
+    @patch("api.routes.archive.get_redis")
+    def test_returns_finished_status(self, mock_get_redis, mock_job_cls, client):
         mock_job = MagicMock()
         mock_job.get_status.return_value = MagicMock(value="finished")
         mock_job.is_failed = False
         mock_job_cls.fetch.return_value = mock_job
-        mock_redis_cls.from_url.return_value = MagicMock()
+        mock_get_redis.return_value = MagicMock()
 
         resp = client.get("/fires/archive/ingest/some-job-id")
         assert resp.status_code == 200
@@ -163,14 +162,14 @@ class TestGetArchiveIngestStatus:
         assert resp.json()["error"] is None
 
     @patch("rq.job.Job")
-    @patch("redis.Redis")
-    def test_extracts_last_line_of_traceback_on_failure(self, mock_redis_cls, mock_job_cls, client):
+    @patch("api.routes.archive.get_redis")
+    def test_extracts_last_line_of_traceback_on_failure(self, mock_get_redis, mock_job_cls, client):
         mock_job = MagicMock()
         mock_job.get_status.return_value = MagicMock(value="failed")
         mock_job.is_failed = True
         mock_job.exc_info = "Traceback (most recent call last):\n  File ...\nRuntimeError: FIRMS ingest failed"
         mock_job_cls.fetch.return_value = mock_job
-        mock_redis_cls.from_url.return_value = MagicMock()
+        mock_get_redis.return_value = MagicMock()
 
         resp = client.get("/fires/archive/ingest/some-job-id")
         assert resp.status_code == 200

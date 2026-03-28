@@ -1,19 +1,16 @@
 """RQ worker configuration and job definitions."""
 import csv
 import logging
-import os
 import traceback
 from datetime import datetime, timezone
-from redis import Redis
 from rq import Queue
 
+from api.cache import get_redis
 from api.config import settings
 
 logger = logging.getLogger(__name__)
 
-REDIS_URL = f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}"
-redis_conn = Redis.from_url(REDIS_URL)
-queue = Queue(connection=redis_conn)
+queue = Queue(connection=get_redis())
 
 def export_task(job_id, kind, request):
     """Execute an export job."""

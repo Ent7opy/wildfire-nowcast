@@ -47,6 +47,24 @@ class AppSettings(BaseSettings):
     environment: str = Field(default="dev", validation_alias="APP_ENV")
     git_commit: str = Field(default_factory=_get_git_commit, validation_alias="GIT_COMMIT")
 
+    # Redis connection settings
+    redis_host: str = Field(default="localhost", validation_alias="REDIS_HOST")
+    redis_port: int = Field(default=6379, validation_alias="REDIS_PORT")
+    redis_pool_max_connections: int = Field(
+        default=20, validation_alias="REDIS_POOL_MAX_CONNECTIONS"
+    )
+
+    @property
+    def redis_url(self) -> str:
+        return f"redis://{self.redis_host}:{self.redis_port}"
+
+    # SQLAlchemy connection pool settings
+    db_pool_size: int = Field(default=10, validation_alias="DB_POOL_SIZE")
+    db_pool_max_overflow: int = Field(default=20, validation_alias="DB_POOL_MAX_OVERFLOW")
+    db_pool_recycle_seconds: int = Field(
+        default=1800, validation_alias="DB_POOL_RECYCLE_SECONDS"
+    )
+
     # Database settings. Accept POSTGRES_* (local/docker) or PG* / DATABASE_URL (e.g. Railway PostGIS).
     database_url_override: str | None = Field(
         default=None,
