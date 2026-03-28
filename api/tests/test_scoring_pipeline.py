@@ -7,7 +7,7 @@ no subclassing required, demonstrating that the Protocol is genuinely duck-typed
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
