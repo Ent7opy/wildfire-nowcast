@@ -11,8 +11,9 @@ from typing import Any, AsyncGenerator
 from urllib.parse import quote_plus
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, ConfigDict
 
@@ -28,6 +29,38 @@ from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
 DEFAULT_HORIZONS_HOURS = [24, 48, 72]
+
+# Fire probability colormap: transparent at 0, yellow → orange → red for probabilities 0→1.
+# Keys are integer pixel values 0-255 (after TiTiler rescales the float raster with rescale=0,1).
+FIRE_PROBABILITY_COLORMAP: dict[str, list[int]] = {
+    "0": [0, 0, 0, 0],            # transparent — no spread probability
+    "30": [255, 255, 0, 120],     # faint yellow
+    "100": [255, 200, 0, 180],    # yellow
+    "160": [255, 120, 0, 210],    # orange
+    "210": [220, 40, 0, 240],     # red-orange
+    "255": [180, 0, 0, 255],      # deep red
+}
+# Pre-serialised once at import time; reused on every tile request.
+_COLORMAP_JSON: str = json.dumps(FIRE_PROBABILITY_COLORMAP)
+
+
+def _make_tile_url(run_id: int, horizon_hours: int) -> str:
+    """Return the XYZ tile URL template for a given forecast run and horizon."""
+    return f"/forecast/{run_id}/tiles/{{z}}/{{x}}/{{y}}.png?horizon_hours={horizon_hours}"
+
+
+def _enrich_rasters(rasters: list[dict], run_id: int) -> None:
+    """Mutate each raster dict in-place with tilejson_url and tile_url fields."""
+    for r in rasters:
+        storage_path = str(r["storage_path"])
+        titiler_path = storage_path.replace(
+            settings.data_dir_local_prefix, settings.data_dir_titiler_mount
+        )
+        encoded_path = quote_plus(titiler_path)
+        r["tilejson_url"] = (
+            f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
+        )
+        r["tile_url"] = _make_tile_url(run_id, r["horizon_hours"])
 
 
 class GenerateForecastRequest(BaseModel):
@@ -154,21 +187,8 @@ async def get_forecast(
     rasters = repo.list_rasters_for_run(run_id)
     contours = repo.list_contours_for_run(run_id)
 
-    # Enrich rasters with TileJSON URLs for TiTiler
-    for r in rasters:
-        # Map local storage path to TiTiler-internal path
-        # e.g. "data/forecasts/run_1/spread_h024_cog.tif" -> "/data/forecasts/run_1/spread_h024_cog.tif"
-        storage_path = str(r["storage_path"])
-        titiler_path = storage_path.replace(
-            settings.data_dir_local_prefix, settings.data_dir_titiler_mount
-        )
-
-        # Build TileJSON URL. TiTiler COG endpoint takes a 'url' query parameter.
-        # When running in Docker, this 'url' can be a path to a file mounted inside the TiTiler container.
-        encoded_path = quote_plus(titiler_path)
-        r["tilejson_url"] = (
-            f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
-        )
+    # Enrich rasters with TileJSON and XYZ tile URL fields
+    _enrich_rasters(rasters, run_id)
 
     # Build GeoJSON FeatureCollection for contours
     features = []
@@ -636,6 +656,68 @@ async def stream_jit_forecast_status(
     )
 
 
+@forecast_router.get(
+    "/{run_id}/tiles/{z}/{x}/{y}.png",
+    response_class=Response,
+    dependencies=[Depends(RateLimiter(times=300, seconds=60))],
+)
+async def get_forecast_tile(
+    run_id: int,
+    z: int,
+    x: int,
+    y: int,
+    horizon_hours: int = 24,
+):
+    """Return a colored PNG raster tile for a forecast run horizon.
+
+    Proxies to TiTiler with a fire-appropriate colormap (transparent at 0,
+    yellow → orange → red for increasing spread probability).
+
+    Args:
+        run_id: Forecast run ID.
+        z, x, y: XYZ tile coordinates.
+        horizon_hours: Forecast horizon in hours (default: 24).
+    """
+    raster = repo.get_raster_for_run(run_id, horizon_hours)
+    if not raster:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No raster found for run {run_id} at horizon {horizon_hours}h",
+        )
+
+    storage_path = str(raster["storage_path"])
+    titiler_path = storage_path.replace(
+        settings.data_dir_local_prefix, settings.data_dir_titiler_mount
+    )
+
+    tile_url = (
+        f"{settings.titiler_internal_base_url}"
+        f"/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png"
+    )
+    params = {
+        "url": titiler_path,
+        "rescale": "0,1",
+        "colormap": _COLORMAP_JSON,
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(tile_url, params=params)
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=502, detail=f"TiTiler unavailable: {exc}")
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Tile not found")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"TiTiler error: {resp.status_code}")
+
+    return Response(
+        content=resp.content,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
 def _parse_iso8601_datetime(value: str) -> datetime:
     """Parse ISO 8601 datetime string with robust handling of various formats.
     
@@ -768,15 +850,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             rasters = repo.list_rasters_for_run(run_id)
             contours = repo.list_contours_for_run(run_id)
 
-            for r in rasters:
-                storage_path = str(r["storage_path"])
-                titiler_path = storage_path.replace(
-                    settings.data_dir_local_prefix, settings.data_dir_titiler_mount
-                )
-                encoded_path = quote_plus(titiler_path)
-                r["tilejson_url"] = (
-                    f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
-                )
+            _enrich_rasters(rasters, run_id)
 
             return {
                 "run": {
@@ -891,16 +965,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         # Finalize
         finalize_spread_forecast_run(run_id, status="completed", extra_metadata=extra_meta)
 
-        # Enrich rasters with TileJSON URLs for TiTiler
-        for r in raster_records:
-            storage_path = str(r["storage_path"])
-            titiler_path = storage_path.replace(
-                settings.data_dir_local_prefix, settings.data_dir_titiler_mount
-            )
-            encoded_path = quote_plus(titiler_path)
-            r["tilejson_url"] = (
-                f"{settings.titiler_public_base_url}/cog/WebMercatorQuad/tilejson.json?url={encoded_path}"
-            )
+        _enrich_rasters(raster_records, run_id)
 
         # Return response similar to GET /forecast
         return {

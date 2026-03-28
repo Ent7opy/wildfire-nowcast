@@ -138,6 +138,21 @@ def find_cached_forecast_run(
     return dict(row) if row else None
 
 
+def get_raster_for_run(run_id: int, horizon_hours: int) -> dict[str, Any] | None:
+    """Get a specific raster asset for a forecast run by horizon."""
+    stmt = text(
+        """
+        SELECT horizon_hours, file_format, storage_path
+        FROM spread_forecast_rasters
+        WHERE run_id = :run_id AND horizon_hours = :horizon_hours
+        LIMIT 1
+        """
+    )
+    with get_engine().begin() as conn:
+        row = conn.execute(stmt, {"run_id": run_id, "horizon_hours": horizon_hours}).mappings().first()
+    return dict(row) if row else None
+
+
 def list_rasters_for_run(run_id: int) -> list[dict[str, Any]]:
     """List all raster assets for a forecast run."""
     stmt = text(
