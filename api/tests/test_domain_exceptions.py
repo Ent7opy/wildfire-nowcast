@@ -7,7 +7,7 @@ Each test verifies that:
 from __future__ import annotations
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +20,6 @@ from api.errors import (
     ModelNotReadyError,
     StalenessError,
     WildfireError,
-    wildfire_error_handler,
     _STATUS_MAP,
 )
 from api.fires.repository import FireRepository
