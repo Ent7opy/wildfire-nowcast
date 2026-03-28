@@ -109,7 +109,8 @@ class TestTriggerArchiveIngest:
     def test_rejects_date_at_lookback_boundary(self, client):
         too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS)).isoformat()
         resp = client.post("/fires/archive/ingest", json={"date": too_old, "timeframe": "morning"})
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "ArchiveRangeError"
         assert str(MAX_FIRMS_LOOKBACK_DAYS) in _error_text(resp)
 
     def test_rejects_invalid_date_format(self, client):

@@ -6,12 +6,14 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.errors import WildfireError, wildfire_error_handler
 from api.routes.forecast import forecast_router
 from ml.spread.region_key import bbox_region_name
 
 # Create a test app
 app = FastAPI()
 app.include_router(forecast_router)
+app.add_exception_handler(WildfireError, wildfire_error_handler)
 client = TestClient(app)
 
 
@@ -421,14 +423,16 @@ def test_create_jit_forecast_rejects_tampered_catalog_signature():
 
 
 def test_create_jit_forecast_invalid_bbox_length():
-    """Test POST /forecast/jit with invalid bbox (wrong length) returns 400 error."""
+    """Test POST /forecast/jit with invalid bbox (wrong length) raises InvalidBoundingBoxError."""
     response = client.post(
         "/forecast/jit",
         json={"bbox": [20.0, 40.0, 21.0]},
     )
-    
-    assert response.status_code == 400
-    assert "bbox must have exactly 4 elements" in response.json()["detail"]
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "InvalidBoundingBoxError"
+    assert "bbox must have exactly 4 elements" in body["detail"]
 
 
 def test_create_jit_forecast_enqueue_failure():

@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from api.config import settings
 from api.deps import no_cache
+from api.errors import InvalidBoundingBoxError
 from api.fires.repo import get_fire_front_by_id, validate_bbox
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
@@ -258,10 +259,7 @@ def create_jit_forecast(request: JitForecastRequest):
         ```
     """
     if len(request.bbox) != 4:
-        raise HTTPException(
-            status_code=400,
-            detail="bbox must have exactly 4 elements: [min_lon, min_lat, max_lon, max_lat]"
-        )
+        raise InvalidBoundingBoxError("bbox must have exactly 4 elements: [min_lon, min_lat, max_lon, max_lat]")
 
     bbox = tuple(request.bbox)
 
@@ -269,7 +267,7 @@ def create_jit_forecast(request: JitForecastRequest):
     try:
         validate_bbox(bbox)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise InvalidBoundingBoxError(str(e)) from e
 
     try:
         model_name, model_params, selected_model_id = resolve_request_model_selection(
@@ -349,7 +347,7 @@ def create_jit_forecast_from_front(request: JitForecastFromFrontRequest):
     try:
         validate_bbox(bbox)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise InvalidBoundingBoxError(str(e)) from e
 
     try:
         model_name, model_params, selected_model_id = resolve_request_model_selection(

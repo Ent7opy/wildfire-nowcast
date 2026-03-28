@@ -18,6 +18,7 @@ from sqlalchemy import text
 
 from api.cache import get_redis
 from api.db import get_engine
+from api.errors import ArchiveRangeError
 
 # Add repo root to path so the RQ worker can import ingest module
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -263,13 +264,10 @@ async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestRes
             detail="Cannot ingest future dates.",
         )
     if days_ago >= MAX_FIRMS_LOOKBACK_DAYS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Date {body.date} is {days_ago} days ago. "
-                f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back. "
-                "Historical data older than this is not available via the online API."
-            ),
+        raise ArchiveRangeError(
+            f"Date {body.date} is {days_ago} days ago. "
+            f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back. "
+            "Historical data older than this is not available via the online API."
         )
 
     try:
@@ -349,22 +347,16 @@ async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> Archi
                 detail=f"{label} {d} is in the future. Cannot ingest future dates.",
             )
         if days_ago >= MAX_FIRMS_LOOKBACK_DAYS:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"{label} {d} is {days_ago} days ago. "
-                    f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back."
-                ),
+            raise ArchiveRangeError(
+                f"{label} {d} is {days_ago} days ago. "
+                f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back."
             )
 
     num_days = (end_d - start_d).days + 1
     if num_days > MAX_ARCHIVE_RANGE_DAYS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Range of {num_days} days exceeds the maximum of {MAX_ARCHIVE_RANGE_DAYS}. "
-                "Reduce the date range or increase MAX_ARCHIVE_RANGE_DAYS."
-            ),
+        raise ArchiveRangeError(
+            f"Range of {num_days} days exceeds the maximum of {MAX_ARCHIVE_RANGE_DAYS}. "
+            "Reduce the date range or increase MAX_ARCHIVE_RANGE_DAYS."
         )
 
     dates = [(start_d + timedelta(days=i)).isoformat() for i in range(num_days)]
