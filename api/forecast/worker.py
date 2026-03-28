@@ -185,6 +185,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             forecast_reference_time=forecast_time,
             horizons_hours=horizons_hours,
             region_name=effective_region_name,
+            model_id=selected_model_id,
             model_name=model_name,
             model_params=model_params,
             strict_inputs=strict_inputs,

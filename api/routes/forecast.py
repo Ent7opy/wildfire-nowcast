@@ -826,6 +826,7 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
         forecast_reference_time=forecast_reference_time,
         horizons_hours=[int(h) for h in horizons],
         region_name=request.region_name,
+        model_id=selected_model_id,
         model_name=model_name,
         model_params=model_params,
         strict_inputs=strict_inputs,
