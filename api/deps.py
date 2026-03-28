@@ -2,7 +2,11 @@
 
 from typing import Callable, Optional
 
-from fastapi import Response
+from fastapi import Depends, Response
+from sqlalchemy.engine import Engine
+
+from api.db import get_engine
+from api.fires.repository import FireRepository
 
 
 def cache_control(max_age: Optional[int] = None) -> Callable[[Response], None]:
@@ -22,3 +26,8 @@ def cache_control(max_age: Optional[int] = None) -> Callable[[Response], None]:
 cache_60 = cache_control(60)
 cache_300 = cache_control(300)
 no_cache = cache_control()
+
+
+def get_fire_repo(engine: Engine = Depends(get_engine)) -> FireRepository:
+    """FastAPI dependency that provides a FireRepository bound to the current engine."""
+    return FireRepository(engine)

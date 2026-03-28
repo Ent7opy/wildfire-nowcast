@@ -21,10 +21,19 @@ if str(workspace_root) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def disable_rate_limiter(monkeypatch):
-    """Bypass FastAPI rate limiting in tests to avoid Redis dependency."""
-    from fastapi_limiter.depends import RateLimiter
+    """Bypass FastAPI rate limiting in tests to avoid Redis dependency.
 
-    async def _allow(*args, **kwargs):
+    The replacement must mirror the original ``RateLimiter.__call__`` signature
+    (``request``, ``response``) so that FastAPI's dependency inspector does not
+    treat the parameters as required query-string fields.  Using ``*args`` /
+    ``**kwargs`` breaks when ``app.dependency_overrides`` is non-empty because
+    FastAPI re-inspects all dependency signatures in that code path.
+    """
+    from fastapi_limiter.depends import RateLimiter
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    async def _allow(self, request: Request, response: Response) -> None:
         return None
 
     monkeypatch.setattr(RateLimiter, "__call__", _allow)
