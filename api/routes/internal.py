@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
+
+from api.errors import InvalidBoundingBoxError
 from pydantic import BaseModel
 
 from api.config import settings
@@ -196,7 +198,7 @@ async def industrial_coverage_health(bbox: str) -> dict:
             raise ValueError("Expected 4 comma-separated values")
         bbox_tuple: tuple[float, float, float, float] = (parts[0], parts[1], parts[2], parts[3])
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid bbox: {exc}")
+        raise InvalidBoundingBoxError(f"Invalid bbox: {exc}") from exc
 
     bbox_dict = {"min_lon": bbox_tuple[0], "min_lat": bbox_tuple[1], "max_lon": bbox_tuple[2], "max_lat": bbox_tuple[3]}
 

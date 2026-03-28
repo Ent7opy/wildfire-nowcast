@@ -8,7 +8,7 @@ from fastapi_limiter.depends import RateLimiter
 from redis.asyncio import Redis
 
 from api.config import settings
-from api.errors import ErrorResponse
+from api.errors import ErrorResponse, WildfireError, wildfire_error_handler
 from api.routes import archive_router, assistant_router, internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router
 from api.startup_check import StartupError, run_api_startup_checks
 
@@ -75,6 +75,9 @@ async def startup():
         async def _noop_rate_limiter(self, *args, **kwargs):
             return None
         RateLimiter.__call__ = _noop_rate_limiter
+
+app.add_exception_handler(WildfireError, wildfire_error_handler)
+
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):

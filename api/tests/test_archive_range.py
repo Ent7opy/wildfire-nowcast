@@ -98,7 +98,8 @@ class TestTriggerArchiveIngestRange:
             "/fires/archive/ingest-range",
             json={"start_date": too_old, "end_date": yesterday},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "ArchiveRangeError"
         assert str(MAX_FIRMS_LOOKBACK_DAYS) in _error_text(resp)
 
     def test_rejects_end_beyond_lookback(self, client):
@@ -111,7 +112,8 @@ class TestTriggerArchiveIngestRange:
             "/fires/archive/ingest-range",
             json={"start_date": too_old, "end_date": too_old},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "ArchiveRangeError"
 
     def test_rejects_range_too_large(self, client):
         # MAX_ARCHIVE_RANGE_DAYS+1 days — but must stay within FIRMS lookback.
@@ -124,7 +126,8 @@ class TestTriggerArchiveIngestRange:
             "/fires/archive/ingest-range",
             json={"start_date": _recent_date(start_days_ago), "end_date": _recent_date(end_days_ago)},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "ArchiveRangeError"
         assert str(MAX_ARCHIVE_RANGE_DAYS) in _error_text(resp)
 
     def test_rejects_invalid_date_format(self, client):

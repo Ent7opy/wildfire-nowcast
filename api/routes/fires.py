@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi_limiter.depends import RateLimiter
 
 from api.deps import cache_60, get_fire_repo
+from api.errors import InvalidBoundingBoxError
 from api.fires.repository import FireRepository
 from api.fires.geocoding import reverse_geocode_point
 
@@ -63,7 +64,7 @@ def _list_detections(
     try:
         repo.validate_bbox((min_lon, min_lat, max_lon, max_lat))
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise InvalidBoundingBoxError(str(e)) from e
 
     columns = FIRE_DETECTION_BASE_COLUMNS.copy()
     if include_denoiser_fields:
@@ -206,7 +207,7 @@ async def get_events(
     try:
         repo.validate_bbox((min_lon, min_lat, max_lon, max_lat))
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise InvalidBoundingBoxError(str(e)) from e
 
     try:
         result = repo.list_fire_events_bbox_time(
@@ -254,7 +255,7 @@ async def get_fronts(
     try:
         repo.validate_bbox((min_lon, min_lat, max_lon, max_lat))
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise InvalidBoundingBoxError(str(e)) from e
 
     try:
         result = repo.list_fire_fronts_bbox_time(
