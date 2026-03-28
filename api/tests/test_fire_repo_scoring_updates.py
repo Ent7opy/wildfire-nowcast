@@ -21,8 +21,8 @@ def test_update_persistence_scores_queries_correct_fields():
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value.execute.return_value = mock_result
     
-    with patch("api.fires.repo.get_engine") as mock_engine, \
-         patch("api.fires.repo.compute_persistence_scores") as mock_compute:
+    with patch("api.fires.scoring_pipeline.get_engine") as mock_engine, \
+         patch("api.fires.scoring_pipeline.compute_persistence_scores") as mock_compute:
         mock_engine.return_value.begin.return_value = mock_conn
         mock_compute.return_value = {1: 0.8, 2: 0.9}
         
@@ -54,8 +54,8 @@ def test_update_persistence_scores_handles_empty_batch():
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value.execute.return_value = mock_result
     
-    with patch("api.fires.repo.get_engine") as mock_engine, \
-         patch("api.fires.repo.compute_persistence_scores") as mock_compute:
+    with patch("api.fires.scoring_pipeline.get_engine") as mock_engine, \
+         patch("api.fires.scoring_pipeline.compute_persistence_scores") as mock_compute:
         mock_engine.return_value.begin.return_value = mock_conn
         
         result = repo.update_persistence_scores(batch_id)
@@ -81,9 +81,9 @@ def test_update_landcover_scores_handles_missing_landcover_data():
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value.execute.return_value = mock_result
     
-    with patch("api.fires.repo.get_engine") as mock_engine:
+    with patch("api.fires.scoring_pipeline.get_engine") as mock_engine:
         mock_engine.return_value.begin.return_value = mock_conn
-        
+
         # Mock compute_landcover_scores to return neutral scores (simulating missing data)
         with patch("api.fires.landcover.compute_landcover_scores") as mock_compute:
             mock_compute.return_value = {1: 0.5, 2: 0.5}
@@ -112,11 +112,10 @@ def test_update_landcover_scores_imports_module_correctly():
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value.execute.return_value = mock_result
     
-    with patch("api.fires.repo.get_engine") as mock_engine:
+    with patch("api.fires.scoring_pipeline.get_engine") as mock_engine:
         mock_engine.return_value.begin.return_value = mock_conn
-        
-        # The import happens dynamically in the function
-        # We can't easily patch it, but we can verify the function runs
+
+        # The import happens dynamically in the strategy's compute() method
         with patch("api.fires.landcover.compute_landcover_scores") as mock_compute:
             mock_compute.return_value = {1: 1.0}
             
