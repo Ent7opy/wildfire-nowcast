@@ -58,9 +58,9 @@ def test_compute_weather_plausibility_high_rh_penalty():
         "run_time": datetime(2025, 1, 1, 6, 0, tzinfo=timezone.utc),
     }
 
-    with patch("api.fires.scoring.get_engine") as mock_engine, \
-         patch("api.fires.scoring.xr.open_dataset", return_value=mock_ds), \
-         patch("api.fires.scoring.Path") as mock_path:
+    with patch("api.core.weather.get_engine") as mock_engine, \
+         patch("api.core.weather.xr.open_dataset", return_value=mock_ds), \
+         patch("api.core.weather.Path") as mock_path:
 
         mock_path.return_value.is_absolute.return_value = True
         mock_path.return_value.exists.return_value = True
@@ -97,9 +97,9 @@ def test_compute_weather_plausibility_low_rh_bonus():
         "run_time": datetime(2025, 1, 1, 6, 0, tzinfo=timezone.utc),
     }
 
-    with patch("api.fires.scoring.get_engine") as mock_engine, \
-         patch("api.fires.scoring.xr.open_dataset", return_value=mock_ds), \
-         patch("api.fires.scoring.Path") as mock_path:
+    with patch("api.core.weather.get_engine") as mock_engine, \
+         patch("api.core.weather.xr.open_dataset", return_value=mock_ds), \
+         patch("api.core.weather.Path") as mock_path:
 
         mock_path.return_value.is_absolute.return_value = True
         mock_path.return_value.exists.return_value = True
@@ -136,9 +136,9 @@ def test_compute_weather_plausibility_high_wind_bonus():
         "run_time": datetime(2025, 1, 1, 6, 0, tzinfo=timezone.utc),
     }
 
-    with patch("api.fires.scoring.get_engine") as mock_engine, \
-         patch("api.fires.scoring.xr.open_dataset", return_value=mock_ds), \
-         patch("api.fires.scoring.Path") as mock_path:
+    with patch("api.core.weather.get_engine") as mock_engine, \
+         patch("api.core.weather.xr.open_dataset", return_value=mock_ds), \
+         patch("api.core.weather.Path") as mock_path:
 
         mock_path.return_value.is_absolute.return_value = True
         mock_path.return_value.exists.return_value = True
@@ -169,7 +169,7 @@ def test_compute_weather_plausibility_no_weather_data():
     mock_db_result = MagicMock()
     mock_db_result.mappings.return_value.first.return_value = None
 
-    with patch("api.fires.scoring.get_engine") as mock_engine:
+    with patch("api.core.weather.get_engine") as mock_engine:
         mock_conn = MagicMock()
         mock_conn.__enter__.return_value.execute.return_value = mock_db_result
         mock_engine.return_value.connect.return_value = mock_conn
@@ -202,9 +202,9 @@ def test_compute_weather_plausibility_combined_effects():
         "run_time": datetime(2025, 1, 1, 6, 0, tzinfo=timezone.utc),
     }
 
-    with patch("api.fires.scoring.get_engine") as mock_engine, \
-         patch("api.fires.scoring.xr.open_dataset", return_value=mock_ds), \
-         patch("api.fires.scoring.Path") as mock_path:
+    with patch("api.core.weather.get_engine") as mock_engine, \
+         patch("api.core.weather.xr.open_dataset", return_value=mock_ds), \
+         patch("api.core.weather.Path") as mock_path:
 
         mock_path.return_value.is_absolute.return_value = True
         mock_path.return_value.exists.return_value = True
@@ -248,9 +248,9 @@ def test_compute_weather_plausibility_score_clamping():
         "run_time": datetime(2025, 1, 1, 6, 0, tzinfo=timezone.utc),
     }
 
-    with patch("api.fires.scoring.get_engine") as mock_engine, \
-         patch("api.fires.scoring.xr.open_dataset", return_value=mock_ds), \
-         patch("api.fires.scoring.Path") as mock_path:
+    with patch("api.core.weather.get_engine") as mock_engine, \
+         patch("api.core.weather.xr.open_dataset", return_value=mock_ds), \
+         patch("api.core.weather.Path") as mock_path:
 
         mock_path.return_value.is_absolute.return_value = True
         mock_path.return_value.exists.return_value = True
