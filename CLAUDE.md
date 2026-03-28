@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## North Star
+
+Wildfire Nowcast is the globally deployable, hourly-refreshed ground truth for active fire events — giving incident commanders, dispatchers, researchers, and emergency managers a single, trusted picture of where fires are burning, how confident we are, and where they are headed, so that every operational decision is grounded in the best available evidence rather than guesswork or stale data.
+
 ## Scientific Engineering Mandate
 
 This is a production-grade wildfire decision support system. Per `AGENTS.md`:
@@ -107,11 +111,14 @@ Ingest → Interpret → Deliver → Learn
 | ingest_scheduler | — | Continuous ingest loop |
 
 ### API (`api/`)
-FastAPI with routers: fires, forecast, aois, exports, risk, tiles, internal. Key modules:
-- `model_registry.py`: Model lifecycle (register/promote/rollback/rollback)
+FastAPI with routers: fires, forecast, aois, exports, risk, tiles, internal, archive, assistant. Key modules:
+- `routes/archive.py`: Multi-day historical replay — POST `/fires/archive/ingest-range`, GET status; validates against `MAX_ARCHIVE_RANGE_DAYS` (default 7) and FIRMS 10-day lookback
+- `notifications.py`: Fire-and-forget webhook (Slack/Discord-compatible) + SMTP email alerts; rate-limited per event type; wired into orchestrator job failures, denoiser drift violations, data staleness, and model promote/rollback
+- `industrial_coverage.py`: GET `/internal/health/industrial-coverage?bbox=...` — spread service emits a WARNING (never a BLOCKER) when forecasting a bbox with zero industrial sources
+- `routes/forecast.py`: Forecast endpoint streams SSE via `StreamingResponse`; use `asyncio.get_running_loop()` not `get_event_loop()` in async generators here
+- `model_registry.py`: Model lifecycle (register/promote/rollback)
 - `data_status.py`: Data freshness monitoring
 - `migrations/`: Alembic schema (run via `cd api && uv run alembic`)
-- `scripts/model_registry.py`: CLI for registry operations
 
 ### Ingest (`ingest/`)
 Orchestrated by `orchestrator.py` with watermark-based incremental ingestion:
@@ -143,7 +150,9 @@ React 18 + TypeScript with:
 - **State**: Zustand stores (`state/`)
 - **Data fetching**: React Query (`@tanstack/react-query`)
 - **Components**: MUI 7 + custom map/layer components
-- `components/AIChatAssistant`: Gemini-backed AI assistant (configured via `VITE_GEMINI_*`)
+- `components/ReviewQueuePanel`: Operator triage UI — lists flagged detections, resolve as confirmed fire or noise; `review_required` events render amber on map
+- `components/ArchiveRangeScrubber`: Day-range replay scrubber with play/pause/step/speed controls; polls ingest status every 5 s
+- `components/AIChatAssistant`: Gemini-backed AI assistant (configured via `VITE_GEMINI_*`); circuit breaker CLOSED→OPEN→HALF_OPEN, health polled at `/assistant/health` (60 s healthy, 15 s degraded)
 
 ## Key Configuration
 
@@ -152,6 +161,12 @@ React 18 + TypeScript with:
 - `POSTGRES_*` — database connection
 - `DENOISER_REQUIRED`, `DENOISER_PIPELINE_VERSION`, `DENOISER_THRESHOLD_PROFILE` — inference gates
 - `VITE_GEMINI_*` — AI assistant in UI
+- `NOTIFICATION_WEBHOOK_URL` — Slack/Discord webhook for ops alerts (optional)
+- `NOTIFICATION_EMAIL_TO`, `NOTIFICATION_SMTP_*` — SMTP email alerts (all required together to enable)
+- `NOTIFICATION_RATE_LIMIT_SECONDS` — dedupe window per event type (default 900 s)
+- `GEMINI_TIMEOUT_SECONDS`, `GEMINI_CIRCUIT_BREAKER_THRESHOLD`, `GEMINI_CIRCUIT_BREAKER_COOLDOWN_SECONDS` — AI assistant resilience
+- `MAX_ARCHIVE_RANGE_DAYS` — cap on historical replay range (default 7; FIRMS hard limit is 10 days)
+- `INTER_DAY_DELAY_SECONDS` — pacing between per-day RQ jobs in archive ingest
 
 Configs in `configs/` drive ML training and ingestion parameters (YAML).
 
