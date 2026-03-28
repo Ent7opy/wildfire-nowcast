@@ -1122,10 +1122,10 @@ def ingest_weather_for_bbox(
     except httpx.HTTPStatusError as exc:
         error_ctx = _extract_error_context(exc)
         prev_run_time = forecast_time - timedelta(hours=6)
-        
+
         # Check if fallback would exceed max age
         if max_fallback_age_hours > 0:
-            fallback_age_hours = (forecast_time - prev_run_time).total_seconds() / 3600
+            fallback_age_hours = (datetime.now(timezone.utc) - prev_run_time).total_seconds() / 3600
             if fallback_age_hours > max_fallback_age_hours:
                 LOGGER.error(
                     "Fallback cycle %s would be %.1f hours old, exceeding max age of %d hours. "
