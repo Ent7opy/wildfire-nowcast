@@ -94,6 +94,10 @@ class AppSettings(BaseSettings):
     titiler_public_base_url: str = Field(
         default="http://localhost:8080", validation_alias="TITILER_PUBLIC_BASE_URL"
     )
+    # Internal URL for server-to-server calls (e.g. tile proxy inside Docker network)
+    titiler_internal_base_url: str = Field(
+        default="http://titiler:80", validation_alias="TITILER_INTERNAL_BASE_URL"
+    )
     # Vector Tile Server settings (MVP default: same port mapping logic as TiTiler, but different port)
     vector_tiles_public_base_url: str = Field(
         default="http://localhost:7800", validation_alias="VECTOR_TILES_PUBLIC_BASE_URL"

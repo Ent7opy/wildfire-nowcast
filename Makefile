@@ -1,4 +1,4 @@
-.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias
+.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias
 
 PYTHON ?= python3
 UV ?= uv
@@ -123,6 +123,9 @@ lint-fix: ## Auto-fix lint errors (API + UI + ML + Ingest)
 	cd ml && $(UV) run --no-sync ruff check --fix .
 	@echo "Fixing Ingest..."
 	cd ingest && $(UV) run --no-sync ruff check --fix .
+
+widget-build: ## Build standalone embeddable forecast widget (ui/dist-widget/widget.js)
+	cd ui && npm run build:widget
 
 clean: ## Remove Python caches and build artifacts
 	@$(PYTHON) scripts/clean.py
