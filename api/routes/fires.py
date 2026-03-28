@@ -4,13 +4,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi_limiter.depends import RateLimiter
 
-from api.deps import cache_60
-from api.fires.repo import (
-    validate_bbox,
-    list_fire_detections_bbox_time,
-    list_fire_events_bbox_time,
-    list_fire_fronts_bbox_time,
-)
+from api.deps import cache_60, get_fire_repo
+from api.fires.repository import FireRepository
 from api.fires.geocoding import reverse_geocode_point
 
 
@@ -47,6 +42,7 @@ fires_router = APIRouter(prefix="/fires", tags=["fires"])
 
 
 def _list_detections(
+    repo: FireRepository,
     *,
     min_lon: float,
     min_lat: float,
@@ -65,7 +61,7 @@ def _list_detections(
 ):
     # Validate bbox coordinates
     try:
-        validate_bbox((min_lon, min_lat, max_lon, max_lat))
+        repo.validate_bbox((min_lon, min_lat, max_lon, max_lat))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -74,7 +70,7 @@ def _list_detections(
         columns.extend(FIRE_DETECTION_DENOISER_COLUMNS)
 
     try:
-        result = list_fire_detections_bbox_time(
+        result = repo.list_fire_detections_bbox_time(
             bbox=(min_lon, min_lat, max_lon, max_lat),
             start_time=start_time,
             end_time=end_time,
@@ -116,9 +112,11 @@ async def get_fires(
     limit: Optional[int] = Query(None, gt=0, le=10000),
     cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
     offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
+    repo: FireRepository = Depends(get_fire_repo),
 ):
     """Alias for `/fires/detections` (kept for UI/backward compatibility)."""
     return _list_detections(
+        repo,
         min_lon=min_lon,
         min_lat=min_lat,
         max_lon=max_lon,
@@ -154,6 +152,7 @@ async def get_detections(
     limit: Optional[int] = Query(None, gt=0, le=10000),
     cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
     offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
+    repo: FireRepository = Depends(get_fire_repo),
 ):
     """
     Get raw fire detections within a spatio-temporal window.
@@ -165,6 +164,7 @@ async def get_detections(
     By default, only non-noise detections (or those not yet scored) are returned.
     """
     return _list_detections(
+        repo,
         min_lon=min_lon,
         min_lat=min_lat,
         max_lon=max_lon,
@@ -200,15 +200,16 @@ async def get_events(
     limit: Optional[int] = Query(1000, gt=0, le=10000),
     cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
     offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
+    repo: FireRepository = Depends(get_fire_repo),
 ):
     """Get fire events within a spatio-temporal window."""
     try:
-        validate_bbox((min_lon, min_lat, max_lon, max_lat))
+        repo.validate_bbox((min_lon, min_lat, max_lon, max_lat))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        result = list_fire_events_bbox_time(
+        result = repo.list_fire_events_bbox_time(
             bbox=(min_lon, min_lat, max_lon, max_lat),
             start_time=start_time,
             end_time=end_time,
@@ -247,15 +248,16 @@ async def get_fronts(
     limit: Optional[int] = Query(2000, gt=0, le=10000),
     cursor: Optional[str] = Query(None, description="Opaque pagination cursor from a previous response's next_cursor field."),
     offset: Optional[int] = Query(None, ge=0, description="(Deprecated) Row offset for pagination. Use cursor instead."),
+    repo: FireRepository = Depends(get_fire_repo),
 ):
     """Get fire fronts within a spatio-temporal window."""
     try:
-        validate_bbox((min_lon, min_lat, max_lon, max_lat))
+        repo.validate_bbox((min_lon, min_lat, max_lon, max_lat))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        result = list_fire_fronts_bbox_time(
+        result = repo.list_fire_fronts_bbox_time(
             bbox=(min_lon, min_lat, max_lon, max_lat),
             start_time=start_time,
             end_time=end_time,
