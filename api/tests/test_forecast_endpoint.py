@@ -679,8 +679,33 @@ def test_get_jit_status_all_intermediate_statuses():
         
         with patch("api.forecast.repo.get_jit_job", return_value=mock_job):
             response = client.get(f"/forecast/jit/{mock_job_id}")
-            
+
             assert response.status_code == 200
             data = response.json()
             assert data["status"] == status
             assert data["progress_message"] == expected_message
+
+
+def test_cache_key_differs_by_model_id():
+    """Promoting a new model changes the cache key, causing natural cache misses."""
+    from datetime import datetime, timezone
+    from api.forecast.repo import build_forecast_result_cache_key
+
+    common = dict(
+        bbox=(-120.0, 37.0, -119.0, 38.0),
+        forecast_reference_time=datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc),
+        horizons_hours=[6, 12, 24],
+        region_name="test-region",
+        model_name="HeuristicSpreadModelV0",
+        model_params={},
+        strict_inputs=False,
+        thresholds=[0.3, 0.5, 0.7],
+    )
+
+    key_v1 = build_forecast_result_cache_key(**common, model_id="model-id-v1")
+    key_v2 = build_forecast_result_cache_key(**common, model_id="model-id-v2")
+    key_none = build_forecast_result_cache_key(**common, model_id=None)
+
+    assert key_v1 != key_v2, "Different model_id values must produce different cache keys"
+    assert key_v1 != key_none, "model_id=None must produce a different key than a named model_id"
+    assert key_v2 != key_none
