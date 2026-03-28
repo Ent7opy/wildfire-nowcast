@@ -101,7 +101,7 @@ def _acquire_cache_lock(lock_key: str, timeout: int = CACHE_LOCK_TIMEOUT) -> Opt
     Returns:
         RedisLock if acquired, None otherwise
     """
-    lock = RedisLock(redis_conn, lock_key, timeout=timeout, blocking_timeout=5)
+    lock = RedisLock(get_redis(), lock_key, timeout=timeout, blocking_timeout=5)
     if lock.acquire():
         return lock
     return None
