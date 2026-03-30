@@ -304,6 +304,32 @@ def list_fire_detections_bbox_time(
     )
 
 
+def get_fire_detection_by_id(detection_id: int) -> dict | None:
+    """Fetch a single fire detection by primary key.
+
+    Returns a dict of detection attributes or ``None`` if not found.
+    """
+    stmt = text("""
+        SELECT
+            id, lat, lon, acq_time,
+            confidence, brightness, bright_t31, frp,
+            sensor, source,
+            confidence_score, persistence_score, landcover_score, weather_score,
+            false_source_masked, fire_likelihood,
+            denoised_score, is_noise, event_id, event_score,
+            denoiser_decision, review_required
+        FROM fire_detections
+        WHERE id = :detection_id
+    """)
+
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"detection_id": detection_id}).mappings().first()
+
+    if not row:
+        return None
+    return dict(row)
+
+
 def update_false_source_masking(batch_id: int, conn: Connection | None = None) -> int:
     """Update false_source_masked column for detections in a batch.
 

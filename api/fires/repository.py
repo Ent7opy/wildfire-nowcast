@@ -99,6 +99,9 @@ class FireRepository:
             offset=offset,
         )
 
+    def get_fire_detection_by_id(self, detection_id: int) -> dict | None:
+        return _repo.get_fire_detection_by_id(detection_id)
+
     def get_fire_front_by_id(
         self,
         front_id: str,
