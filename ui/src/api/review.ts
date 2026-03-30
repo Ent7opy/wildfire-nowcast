@@ -1,6 +1,8 @@
 import type {
   ReviewQueueResponse,
-  ResolveReviewResponse
+  ResolveReviewResponse,
+  ReviewEventDetailResponse,
+  ReviewEventDetail,
 } from "../types/api";
 import { getJson, postJson } from "./http";
 
@@ -20,4 +22,12 @@ export async function resolveDenoiserReviewItem(args: {
       resolved_notes: args.resolvedNotes ?? null
     }
   );
+}
+
+export async function getReviewEventDetail(eventId: string): Promise<ReviewEventDetail> {
+  const resp = await getJson<ReviewEventDetailResponse>(
+    `/internal/denoiser/review-queue/${eventId}/detail`,
+    {}
+  );
+  return resp.detail;
 }

@@ -177,6 +177,27 @@ export interface ResolveReviewResponse {
   updated: number;
 }
 
+export interface ReviewEventDetail {
+  reason_summary: string;
+  centroid_lat: number;
+  centroid_lon: number;
+  wind_speed_kmh: number | null;
+  wind_direction_deg: number | null;
+  relative_humidity_pct: number | null;
+  temperature_c: number | null;
+  nearby_fires_count: number;
+  nearby_fires_max_frp_mw: number | null;
+  nearby_fires_nearest_km: number | null;
+  location_history_flagged: number;
+  location_history_confirmed: number;
+  location_history_noise: number;
+}
+
+export interface ReviewEventDetailResponse {
+  as_of: string;
+  detail: ReviewEventDetail;
+}
+
 export interface AOI {
   id: string;
   name: string;

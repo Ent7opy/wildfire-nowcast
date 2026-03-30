@@ -43,7 +43,8 @@ export {
 // Review queue
 export {
   getDenoiserReviewQueue,
-  resolveDenoiserReviewItem
+  resolveDenoiserReviewItem,
+  getReviewEventDetail,
 } from "./review";
 
 // AOI / Watchlist / Export / Data freshness
