@@ -17,6 +17,7 @@ from rq import Queue, Retry
 
 from api.cache import get_redis
 from api.config import settings
+from api.constants import DEFAULT_HORIZONS_HOURS
 from api.notifications import notify
 from api.forecast import repo
 from api.forecast.cache_lock import acquire_forecast_result_lock, release_forecast_result_lock
@@ -52,8 +53,6 @@ _FORECAST_RETRY = Retry(
     else list(_DEFAULT_FORECAST_JOB_RETRY_INTERVALS),
 )
 del _intervals_raw
-
-DEFAULT_HORIZONS_HOURS = [24, 48, 72]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

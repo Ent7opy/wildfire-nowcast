@@ -4,41 +4,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi_limiter.depends import RateLimiter
 
+from api.constants import FIRE_DETECTION_BASE_COLUMNS, FIRE_DETECTION_DENOISER_COLUMNS
 from api.core.weather import get_weather_context_for_point
 from api.deps import cache_60, get_fire_repo
 from api.errors import InvalidBoundingBoxError
 from api.fires.repository import FireRepository
 from api.fires.geocoding import reverse_geocode_point
-
-
-# Standard fire detection columns - defined centrally to stay in sync with schema
-FIRE_DETECTION_BASE_COLUMNS = [
-    "id",
-    "lat",
-    "lon",
-    "acq_time",
-    "confidence",
-    "brightness",
-    "bright_t31",
-    "frp",
-    "sensor",
-    "source",
-    "confidence_score",
-    "persistence_score",
-    "landcover_score",
-    "weather_score",
-    "false_source_masked",
-    "fire_likelihood",
-]
-
-FIRE_DETECTION_DENOISER_COLUMNS = [
-    "denoised_score",
-    "is_noise",
-    "event_id",
-    "event_score",
-    "denoiser_decision",
-    "review_required",
-]
 
 fires_router = APIRouter(prefix="/fires", tags=["fires"])
 

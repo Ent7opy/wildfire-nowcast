@@ -18,6 +18,7 @@ from fastapi_limiter.depends import RateLimiter
 from pydantic import BaseModel, ConfigDict
 
 from api.config import settings
+from api.constants import DEFAULT_HORIZONS_HOURS
 from api.deps import no_cache
 from api.errors import InvalidBoundingBoxError
 from api.fires.repo import get_fire_front_by_id, validate_bbox
@@ -29,7 +30,6 @@ from ml.spread.region_key import bbox_region_name
 from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS_ENV
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
-DEFAULT_HORIZONS_HOURS = [24, 48, 72]
 
 # Fire probability colormap: transparent at 0, yellow → orange → red for probabilities 0→1.
 # Keys are integer pixel values 0-255 (after TiTiler rescales the float raster with rescale=0,1).
