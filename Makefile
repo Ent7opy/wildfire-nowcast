@@ -1,4 +1,4 @@
-.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias
+.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places
 
 PYTHON ?= python3
 UV ?= uv
@@ -223,6 +223,10 @@ model-update-contract: ## Update runtime contract on a registered model (usage: 
 	$(if $(MODEL_ID),,$(error Please provide MODEL_ID=<registered model id>))
 	$(if $(RUNTIME_CONTRACT),,$(error Please provide RUNTIME_CONTRACT=@path/or-json))
 	$(UV) run --project api scripts/model_registry.py update-contract --family "$(FAMILY)" --model-id "$(MODEL_ID)" --runtime-contract '$(RUNTIME_CONTRACT)' $(if $(REPLACE),--replace,)
+
+seed-ne-places: ## Load Natural Earth populated places (usage: make seed-ne-places NE_PLACES=/path/to/ne_10m_populated_places.geojson)
+	$(if $(NE_PLACES),,$(error Please provide NE_PLACES=/path/to/ne_10m_populated_places.geojson or .shp))
+	$(UV) run --project api scripts/seed_ne_populated_places.py "$(NE_PLACES)" $(if $(TRUNCATE),--truncate,)
 
 # ── Full train pipelines ───────────────────────────────────────────────────────
 

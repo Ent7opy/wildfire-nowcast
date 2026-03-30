@@ -158,6 +158,12 @@ export interface DenoiserReviewItem {
   resolved_at?: string | null;
   created_at: string;
   updated_at: string;
+  centroid_lat?: number | null;
+  centroid_lon?: number | null;
+  country_code?: string | null;
+  region_name?: string | null;
+  nearest_place?: string | null;
+  terrain_label?: string | null;
 }
 
 export interface ReviewQueueResponse {
