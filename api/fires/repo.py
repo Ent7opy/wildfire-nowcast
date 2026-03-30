@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import base64
-import json as _json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Callable, Iterable, Literal, TYPE_CHECKING
+from typing import Iterable, Literal, TYPE_CHECKING
 
 from sqlalchemy import text, column as sa_column
 
@@ -15,6 +13,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
 from api.config import settings
+from api.pagination import encode_cursor, decode_cursor, build_page
 from api.db import get_engine
 from api.fires.scoring import compute_fire_likelihood
 from api.fires.scoring_pipeline import (
@@ -51,54 +50,6 @@ def validate_bbox(bbox: BBox) -> None:
     if min_lat >= max_lat:
         raise ValueError(f"min_lat ({min_lat}) must be less than max_lat ({max_lat})")
 
-
-def _encode_cursor(**fields: object) -> str:
-    """Encode cursor fields as a URL-safe base64 JSON string."""
-    serialized: dict[str, object] = {}
-    for k, v in fields.items():
-        serialized[k] = v.isoformat() if isinstance(v, datetime) else v
-    return base64.urlsafe_b64encode(_json.dumps(serialized).encode()).decode()
-
-
-def _decode_cursor(cursor: str) -> dict:
-    """Decode a cursor string produced by _encode_cursor.
-
-    Returns a dict with field ``t`` parsed as a timezone-aware datetime (or
-    None) and all other fields left as-is.
-
-    Raises ValueError on malformed input.
-    """
-    try:
-        data = _json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
-    except Exception as exc:
-        raise ValueError(f"Invalid cursor: {exc}") from exc
-    if data.get("t") is not None:
-        try:
-            t = datetime.fromisoformat(data["t"])
-            data["t"] = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-        except Exception as exc:
-            raise ValueError(f"Invalid cursor timestamp: {exc}") from exc
-    return data
-
-
-def _build_page(
-    rows: list,
-    limit: int,
-    cursor_fn: Callable[[dict], str],
-) -> dict:
-    """Trim rows to limit, detect has_more, encode next_cursor, return page dict."""
-    has_more = len(rows) > limit
-    if has_more:
-        rows = rows[:limit]
-    next_cursor: str | None = None
-    if has_more and rows:
-        next_cursor = cursor_fn(dict(rows[-1]))
-    return {
-        "data": [dict(r) for r in rows],
-        "next_cursor": next_cursor,
-        "has_more": has_more,
-        "limit": limit,
-    }
 
 
 # Keep this list tight to avoid SQL injection when constructing SELECT clauses.
@@ -236,7 +187,7 @@ def list_fire_detections_bbox_time(
     cursor_id: int | None = None
     cursor_predicate = ""
     if cursor is not None:
-        parsed = _decode_cursor(cursor)
+        parsed = decode_cursor(cursor)
         cursor_acq_time = parsed["t"]
         cursor_id = int(parsed["id"])
         if order == "asc":
@@ -298,9 +249,9 @@ def list_fire_detections_bbox_time(
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
 
-    return _build_page(
+    return build_page(
         rows, limit,
-        cursor_fn=lambda r: _encode_cursor(t=r["acq_time"], id=r["id"]),
+        cursor_fn=lambda r: encode_cursor(t=r["acq_time"], id=r["id"]),
     )
 
 
@@ -503,7 +454,7 @@ def list_fire_events_bbox_time(
     # Cursor encodes {"t": iso_datetime_or_null, "id": event_id_string}.
     cursor_predicate = ""
     if cursor is not None:
-        parsed = _decode_cursor(cursor)
+        parsed = decode_cursor(cursor)
         cursor_event_time: datetime | None = parsed.get("t")
         cursor_event_id: str = str(parsed["id"])
         if cursor_event_time is not None:
@@ -628,9 +579,9 @@ def list_fire_events_bbox_time(
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         rows = conn.execute(stmt, params).mappings().all()
 
-    return _build_page(
+    return build_page(
         rows, limit,
-        cursor_fn=lambda r: _encode_cursor(
+        cursor_fn=lambda r: encode_cursor(
             t=r.get("start_time") or r.get("end_time"), id=r["event_id"]
         ),
     )
@@ -675,7 +626,7 @@ def list_fire_fronts_bbox_time(
     # Cursor encodes {"t": iso_datetime_or_null, "id": front_id_string}.
     cursor_predicate = ""
     if cursor is not None:
-        parsed = _decode_cursor(cursor)
+        parsed = decode_cursor(cursor)
         cursor_front_time: datetime | None = parsed.get("t")
         cursor_front_id: str = str(parsed["id"])
         if cursor_front_time is not None:
@@ -836,9 +787,9 @@ def list_fire_fronts_bbox_time(
         conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
         rows = conn.execute(stmt, params).mappings().all()
 
-    return _build_page(
+    return build_page(
         rows, effective_limit,
-        cursor_fn=lambda r: _encode_cursor(
+        cursor_fn=lambda r: encode_cursor(
             t=r.get("overpass_end") or r.get("overpass_start"), id=r["front_id"]
         ),
     )
