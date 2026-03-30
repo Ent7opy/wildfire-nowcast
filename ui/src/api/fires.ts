@@ -1,3 +1,4 @@
+import type { FeatureCollection } from "geojson";
 import type {
   BBox,
   EventsResponse,
@@ -95,6 +96,18 @@ export async function getWeatherForPoint(args: {
       ref_time: isoFormat(args.refTime),
     }
   );
+}
+
+export async function getWeatherWarnings(args: {
+  bbox: BBox;
+}): Promise<FeatureCollection> {
+  const [minLon, minLat, maxLon, maxLat] = args.bbox;
+  return getJson<FeatureCollection>("/fires/weather-warnings", {
+    min_lon: minLon,
+    min_lat: minLat,
+    max_lon: maxLon,
+    max_lat: maxLat,
+  });
 }
 
 export function buildEventKey(event: FireEvent, lat: number, lon: number): string {

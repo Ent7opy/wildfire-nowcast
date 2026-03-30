@@ -34,6 +34,7 @@ const DEFAULT_LAYERS: LayersState = {
   showFronts: true,
   showForecast: true,
   showRisk: false,
+  showWarnings: false,
   basemap: 'dark'
 };
 

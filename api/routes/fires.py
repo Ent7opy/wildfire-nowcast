@@ -1,11 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi_limiter.depends import RateLimiter
 
 from api.constants import FIRE_DETECTION_BASE_COLUMNS, FIRE_DETECTION_DENOISER_COLUMNS
-from api.core.weather import get_weather_context_for_point
+from api.core.weather import get_weather_context_for_point, get_weather_forecast_for_point
+from api.core.warnings_registry import get_brief_warnings_for_point, get_warning_cache, warnings_overlaps_bbox
 from api.deps import cache_60, get_fire_repo
 from api.errors import InvalidBoundingBoxError
 from api.fires.repository import FireRepository
@@ -180,6 +181,8 @@ async def get_detection_detail(
     weather = None
     weather_unavailable_reason: str | None = None
 
+    forecast = None
+    warnings = None
     if lat is not None and lon is not None and acq_time is not None:
         weather = get_weather_context_for_point(
             lat=lat,
@@ -190,6 +193,13 @@ async def get_detection_detail(
             weather_unavailable_reason = (
                 "No GFS weather run covers this location within the tolerance window"
             )
+        else:
+            forecast = get_weather_forecast_for_point(
+                lat=lat,
+                lon=lon,
+                ref_time=acq_time,
+            )
+        warnings = get_brief_warnings_for_point(lat, lon)
     else:
         weather_unavailable_reason = (
             "Detection is missing coordinates or acquisition time"
@@ -199,6 +209,8 @@ async def get_detection_detail(
         **detection,
         "weather": weather,
         "weather_unavailable_reason": weather_unavailable_reason,
+        "forecast": forecast,
+        "warnings": warnings,
     }
 
 
@@ -222,14 +234,59 @@ def get_weather_for_point(
         ref_time=ref_time,
     )
     weather_unavailable_reason: str | None = None
+    forecast = None
+    warnings = None
     if weather is None:
         weather_unavailable_reason = (
             "No GFS weather run covers this location within the tolerance window"
         )
+    else:
+        forecast = get_weather_forecast_for_point(
+            lat=lat,
+            lon=lon,
+            ref_time=ref_time,
+        )
+    warnings = get_brief_warnings_for_point(lat, lon)
     return {
         "weather": weather,
         "weather_unavailable_reason": weather_unavailable_reason,
+        "forecast": forecast,
+        "warnings": warnings,
     }
+
+
+@fires_router.get(
+    "/weather-warnings",
+    dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)],
+)
+async def get_weather_warnings(
+    min_lon: float = Query(..., ge=-180, le=180),
+    min_lat: float = Query(..., ge=-90, le=90),
+    max_lon: float = Query(..., ge=-180, le=180),
+    max_lat: float = Query(..., ge=-90, le=90),
+):
+    """Return active MeteoAlarm weather warnings as a GeoJSON FeatureCollection.
+
+    The result is filtered to warnings whose geometry intersects the
+    requested bounding box.  Outside Europe the response is an empty
+    FeatureCollection (graceful degradation — no error).
+
+    Used by the map warning layer toggle.
+    """
+    cache = get_warning_cache()
+    now = datetime.now(timezone.utc)
+
+    if cache is None:
+        return {"type": "FeatureCollection", "features": []}
+
+    all_warnings = await cache.get_all_warnings(now=now)
+
+    features = [
+        w.as_geojson_feature()
+        for w in all_warnings
+        if w.is_active(now) and warnings_overlaps_bbox(w.geometry, min_lon, min_lat, max_lon, max_lat)
+    ]
+    return {"type": "FeatureCollection", "features": features}
 
 
 @fires_router.get("/events", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])

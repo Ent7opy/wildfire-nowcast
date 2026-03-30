@@ -83,7 +83,8 @@ class _WeatherSnapshot:
     """Result of opening a weather run and selecting the nearest grid point."""
 
     ds: xr.Dataset
-    ds_point: xr.Dataset
+    ds_spatial: xr.Dataset   # spatially selected, NOT time-selected
+    ds_point: xr.Dataset     # spatially + time-selected (nearest to ref_time)
     ref_time_64: np.datetime64
     run_time: datetime
     storage_path: Path
@@ -100,6 +101,11 @@ def _open_weather_for_point(
 
     Returns ``None`` (with debug logging) when no qualifying run exists.
     The caller is responsible for closing ``snapshot.ds``.
+
+    The snapshot exposes both ``ds_spatial`` (spatially selected, all time
+    steps) and ``ds_point`` (additionally time-selected to the nearest step
+    before or at *ref_time*).  Use ``ds_spatial`` when you need multiple
+    forecast steps; use ``ds_point`` for the current-conditions shortcut.
     """
     stmt = text("""
         SELECT id, storage_path, run_time
@@ -136,14 +142,17 @@ def _open_weather_for_point(
         storage_path = Path.cwd() / storage_path
 
     ds = xr.open_dataset(storage_path)
-    ds_point = ds.sel(lat=lat, lon=lon, method="nearest")
+    ds_spatial = ds.sel(lat=lat, lon=lon, method="nearest")
 
     ref_time_64 = _to_numpy_datetime64(ref_time)
-    if "time" in ds_point.coords:
-        ds_point = ds_point.sel(time=ref_time_64, method="nearest")
+    if "time" in ds_spatial.coords:
+        ds_point = ds_spatial.sel(time=ref_time_64, method="nearest")
+    else:
+        ds_point = ds_spatial
 
     return _WeatherSnapshot(
         ds=ds,
+        ds_spatial=ds_spatial,
         ds_point=ds_point,
         ref_time_64=ref_time_64,
         run_time=row["run_time"],
@@ -173,6 +182,57 @@ def _extract_precip_mm(
     except Exception as exc:
         LOGGER.debug("Failed to compute precipitation accumulation: %s", exc)
     return None
+
+
+def _extract_weather_fields(
+    ds_point_at_time: xr.Dataset,
+    ds_spatial: xr.Dataset,
+    target_time: datetime,
+    target_time_64: np.datetime64,
+    precip_lookback_hours: float,
+) -> dict[str, Any]:
+    """Extract all weather fields from a time-selected spatial point dataset.
+
+    Returns a dict with wind, humidity, temperature, precipitation, and
+    rh_fire_risk.  Missing variables are omitted rather than set to null so
+    callers can detect partial data.
+    """
+    ctx: dict[str, Any] = {}
+
+    # --- wind ---
+    if "u10" in ds_point_at_time.data_vars and "v10" in ds_point_at_time.data_vars:
+        u10 = float(ds_point_at_time["u10"].values)
+        v10 = float(ds_point_at_time["v10"].values)
+        if not np.isnan(u10) and not np.isnan(v10):
+            ctx["wind_speed_ms"] = round(float(np.sqrt(u10**2 + v10**2)), 1)
+            # Meteorological convention: direction wind is coming *from*
+            ctx["wind_direction_deg"] = round(
+                (math.degrees(math.atan2(-u10, -v10)) + 360) % 360, 1
+            )
+
+    # --- humidity ---
+    if "rh2m" in ds_point_at_time.data_vars:
+        rh = float(ds_point_at_time["rh2m"].values)
+        if not np.isnan(rh):
+            ctx["relative_humidity_pct"] = round(rh, 1)
+            ctx["rh_fire_risk"] = classify_rh_fire_risk(rh)
+
+    # --- temperature ---
+    if "t2m" in ds_point_at_time.data_vars:
+        t2m = float(ds_point_at_time["t2m"].values)
+        if not np.isnan(t2m):
+            # GFS stores temperature in Kelvin
+            ctx["temperature_c"] = round(t2m - 273.15, 1)
+
+    # --- precipitation ---
+    precip = _extract_precip_mm(
+        ds_point_at_time, ds_spatial, target_time, target_time_64,
+        precip_lookback_hours,
+    )
+    if precip is not None:
+        ctx["precip_mm_24h"] = round(precip, 1)
+
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -288,40 +348,10 @@ def get_weather_context_for_point(
         return None
 
     try:
-        ctx: dict[str, Any] = {}
-
-        # --- wind ---
-        if "u10" in snap.ds_point.data_vars and "v10" in snap.ds_point.data_vars:
-            u10 = float(snap.ds_point["u10"].values)
-            v10 = float(snap.ds_point["v10"].values)
-            if not np.isnan(u10) and not np.isnan(v10):
-                ctx["wind_speed_ms"] = round(float(np.sqrt(u10**2 + v10**2)), 1)
-                # Meteorological convention: direction wind is coming *from*
-                ctx["wind_direction_deg"] = round(
-                    (math.degrees(math.atan2(-u10, -v10)) + 360) % 360, 1
-                )
-
-        # --- humidity ---
-        if "rh2m" in snap.ds_point.data_vars:
-            rh = float(snap.ds_point["rh2m"].values)
-            if not np.isnan(rh):
-                ctx["relative_humidity_pct"] = round(rh, 1)
-                ctx["rh_fire_risk"] = classify_rh_fire_risk(rh)
-
-        # --- temperature ---
-        if "t2m" in snap.ds_point.data_vars:
-            t2m = float(snap.ds_point["t2m"].values)
-            if not np.isnan(t2m):
-                # GFS stores temperature in Kelvin
-                ctx["temperature_c"] = round(t2m - 273.15, 1)
-
-        # --- precipitation ---
-        precip = _extract_precip_mm(
-            snap.ds_point, snap.ds, ref_time, snap.ref_time_64,
+        ctx = _extract_weather_fields(
+            snap.ds_point, snap.ds_spatial, ref_time, snap.ref_time_64,
             precip_lookback_hours,
         )
-        if precip is not None:
-            ctx["precip_mm_24h"] = round(precip, 1)
 
         if not ctx:
             return None
@@ -349,3 +379,71 @@ def get_weather_context_for_point(
         return None
     finally:
         snap.ds.close()
+
+
+def get_weather_forecast_for_point(
+    *,
+    lat: float,
+    lon: float,
+    ref_time: datetime,
+    forecast_offsets_hours: tuple[int, ...] = (6, 12),
+    time_tolerance_hours: float = 6.0,
+    precip_lookback_hours: float = 24.0,
+) -> list[dict[str, Any]] | None:
+    """Return near-term forecast steps for the fire detail response.
+
+    Opens the same GFS run as :func:`get_weather_context_for_point` but
+    selects additional time steps at *ref_time* + each offset in
+    *forecast_offsets_hours*.  Each step carries the same fields as the
+    current-conditions block plus ``forecast_hour`` and ``valid_time``.
+
+    Returns ``None`` when no qualifying weather run covers the point.
+    Returns a partial list when only some offsets fall within the stored
+    forecast horizon (steps beyond the dataset are silently skipped).
+    """
+    try:
+        snap = _open_weather_for_point(
+            lat=lat, lon=lon, ref_time=ref_time,
+            time_tolerance_hours=time_tolerance_hours,
+        )
+    except Exception as exc:
+        LOGGER.warning("Failed to open weather data for forecast: %s", exc)
+        return None
+
+    if snap is None:
+        return None
+
+    ref_time_utc = _ensure_utc(ref_time)
+
+    steps: list[dict[str, Any]] = []
+    try:
+        for offset_h in forecast_offsets_hours:
+            target_time = ref_time_utc + timedelta(hours=offset_h)
+            target_time_64 = _to_numpy_datetime64(target_time)
+
+            # Select the nearest time step available; skip if no time dimension
+            if "time" in snap.ds_spatial.coords:
+                ds_at_time = snap.ds_spatial.sel(time=target_time_64, method="nearest")
+            else:
+                # Dataset has no time dimension — single-step file; only valid for +0
+                break
+
+            fields = _extract_weather_fields(
+                ds_at_time, snap.ds_spatial, target_time, target_time_64,
+                precip_lookback_hours,
+            )
+            if not fields:
+                continue
+
+            fields["forecast_hour"] = offset_h
+            fields["valid_time"] = target_time.isoformat()
+            steps.append(fields)
+
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to extract forecast steps from %s: %s", snap.storage_path, exc,
+        )
+    finally:
+        snap.ds.close()
+
+    return steps if steps else None
