@@ -246,7 +246,32 @@ export interface WeatherContext {
   bias_correction: WeatherBiasCorrection;
 }
 
+export interface WeatherForecastStep {
+  forecast_hour: number;
+  valid_time: string;
+  wind_speed_ms: number;
+  wind_direction_deg: number;
+  relative_humidity_pct: number;
+  rh_fire_risk: RhFireRisk;
+  temperature_c: number;
+  precip_mm_24h: number;
+}
+
+export type WarningSeverity = "red" | "orange" | "yellow" | "green";
+export type WarningType = "wind" | "heat" | "drought" | "thunderstorm" | "rain" | "snow" | "fog" | "other";
+
+export interface WeatherWarningBrief {
+  source: string;
+  warning_type: WarningType;
+  severity: WarningSeverity;
+  headline: string;
+  expires: string;
+  country_code: string | null;
+}
+
 export interface WeatherResponse {
   weather: WeatherContext | null;
   weather_unavailable_reason: string | null;
+  forecast: WeatherForecastStep[] | null;
+  warnings: WeatherWarningBrief[] | null;
 }

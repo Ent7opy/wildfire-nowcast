@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 
 import { windCompassLabel, rhRiskDisplay, WeatherBlock } from "../components/fire-details/WeatherBlock";
-import type { WeatherContext } from "../types/api";
+import type { WeatherContext, WeatherForecastStep } from "../types/api";
 
 // ---------------------------------------------------------------------------
 // Helper unit tests
@@ -63,6 +63,20 @@ function makeWeather(overrides: Partial<WeatherContext> = {}): WeatherContext {
       method: "affine (fitted against ERA5 reanalysis)",
       variables: ["u10", "v10", "t2m", "rh2m"],
     },
+    ...overrides,
+  };
+}
+
+function makeForecastStep(overrides: Partial<WeatherForecastStep> = {}): WeatherForecastStep {
+  return {
+    forecast_hour: 6,
+    valid_time: "2026-03-28T18:00:00Z",
+    wind_speed_ms: 14.1,
+    wind_direction_deg: 240,
+    relative_humidity_pct: 14.0,
+    rh_fire_risk: "critical",
+    temperature_c: 38.5,
+    precip_mm_24h: 0.0,
     ...overrides,
   };
 }
@@ -157,5 +171,62 @@ describe("WeatherBlock", () => {
     render(<WeatherBlock weather={null} unavailableReason={null} isLoading />);
 
     expect(screen.getByText(/Loading weather data/)).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Forecast timeline
+// ---------------------------------------------------------------------------
+
+describe("WeatherBlock forecast timeline", () => {
+  it("renders forecast timeline when forecast steps are provided", () => {
+    const weather = makeWeather();
+    const forecast = [
+      makeForecastStep({ forecast_hour: 6 }),
+      makeForecastStep({ forecast_hour: 12, wind_speed_ms: 10.2, temperature_c: 32.0, rh_fire_risk: "elevated", relative_humidity_pct: 22 }),
+    ];
+    render(<WeatherBlock weather={weather} unavailableReason={null} forecast={forecast} />);
+
+    expect(screen.getByTestId("forecast-timeline")).toBeDefined();
+    expect(screen.getByText("+6h")).toBeDefined();
+    expect(screen.getByText("+12h")).toBeDefined();
+    expect(screen.getByText("Now")).toBeDefined();
+  });
+
+  it("does not render forecast timeline when forecast is null", () => {
+    const weather = makeWeather();
+    render(<WeatherBlock weather={weather} unavailableReason={null} forecast={null} />);
+
+    expect(screen.queryByTestId("forecast-timeline")).toBeNull();
+  });
+
+  it("does not render forecast timeline when forecast is empty array", () => {
+    const weather = makeWeather();
+    render(<WeatherBlock weather={weather} unavailableReason={null} forecast={[]} />);
+
+    expect(screen.queryByTestId("forecast-timeline")).toBeNull();
+  });
+
+  it("renders RH fire risk badge for each forecast step", () => {
+    const weather = makeWeather({ rh_fire_risk: "normal", relative_humidity_pct: 30 });
+    const forecast = [
+      makeForecastStep({ forecast_hour: 6, rh_fire_risk: "critical", relative_humidity_pct: 12 }),
+    ];
+    render(<WeatherBlock weather={weather} unavailableReason={null} forecast={forecast} />);
+
+    // "Critical" badge should appear in the forecast column
+    const criticalBadges = screen.getAllByText("Critical");
+    expect(criticalBadges.length).toBeGreaterThan(0);
+  });
+
+  it("shows forecast wind speed and temperature per step", () => {
+    const weather = makeWeather();
+    const forecast = [
+      makeForecastStep({ forecast_hour: 6, wind_speed_ms: 14.1, temperature_c: 38.5 }),
+    ];
+    render(<WeatherBlock weather={weather} unavailableReason={null} forecast={forecast} />);
+
+    expect(screen.getByText("14.1 m/s")).toBeDefined();
+    expect(screen.getByText("38.5 °C")).toBeDefined();
   });
 });

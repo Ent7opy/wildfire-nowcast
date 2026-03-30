@@ -21,6 +21,7 @@ describe("app store filters", () => {
         showFronts: true,
         showForecast: true,
         showRisk: false,
+        showWarnings: false,
         basemap: 'dark' as const
       }
     });

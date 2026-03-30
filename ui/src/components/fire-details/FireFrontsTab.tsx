@@ -23,6 +23,7 @@ import {
 } from "./types";
 import { ForecastPanel } from "./ForecastPanel";
 import { QAReviewPanel } from "./QAReviewPanel";
+import { WarningsBlock } from "./WarningsBlock";
 import { WeatherBlock } from "./WeatherBlock";
 
 interface ForecastMutationArgs {
@@ -264,7 +265,10 @@ export function FireFrontsTab({ selectedEvent, resolvedGeocodes, submitError, fo
         weather={weatherData?.weather ?? null}
         unavailableReason={weatherData?.weather_unavailable_reason ?? null}
         isLoading={weatherEnabled && weatherLoading}
+        forecast={weatherData?.forecast ?? null}
       />
+
+      <WarningsBlock warnings={weatherData?.warnings ?? null} />
 
       <Divider sx={{ borderColor: "rgba(255,255,255,0.08)" }} />
 

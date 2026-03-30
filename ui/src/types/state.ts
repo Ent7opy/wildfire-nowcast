@@ -29,6 +29,7 @@ export interface LayersState {
   showFronts: boolean;
   showForecast: boolean;
   showRisk: boolean;
+  showWarnings: boolean;
   basemap: 'dark' | 'light' | 'satellite';
 }
 

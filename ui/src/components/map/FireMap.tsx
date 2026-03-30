@@ -32,6 +32,7 @@ import type { Feature } from "geojson";
 
 import { apiPublicBaseUrl } from "../../config/runtime";
 import { getFireEvents, getFireFronts, getRiskGrid } from "../../api/client";
+import { getWeatherWarnings } from "../../api/fires";
 import { useAppStore } from "../../state/store";
 import type { FireEvent } from "../../types/api";
 import {
@@ -74,6 +75,17 @@ interface FireMapProps {
   onVisibleEventsChange: (events: FireEvent[]) => void;
   searchQuery?: string;
   confidenceFilter?: ConfidenceFilter;
+}
+
+const WARNING_SEVERITY_RGB: Record<string, [number, number, number]> = {
+  red: [239, 68, 68],
+  orange: [249, 115, 22],
+  yellow: [234, 179, 8],
+};
+
+function warningSeverityColor(sev: string, alpha: number): [number, number, number, number] {
+  const [r, g, b] = WARNING_SEVERITY_RGB[sev] ?? WARNING_SEVERITY_RGB.yellow;
+  return [r, g, b, alpha];
 }
 
 function isHighConfidence(event: FireEvent): boolean {
@@ -170,6 +182,14 @@ export default function FireMap({
     queryKey: ["risk-grid", bbox, layersState.showRisk],
     queryFn: () => getRiskGrid({ bbox }),
     enabled: layersState.showRisk,
+    placeholderData: (prev) => prev
+  });
+
+  const warningsQuery = useQuery({
+    queryKey: ["weather-warnings", bbox, layersState.showWarnings],
+    queryFn: () => getWeatherWarnings({ bbox }),
+    enabled: layersState.showWarnings,
+    staleTime: 15 * 60 * 1000,  // MeteoAlarm feed updates every ~15 min
     placeholderData: (prev) => prev
   });
 
@@ -444,6 +464,28 @@ export default function FireMap({
       );
     }
 
+    if (layersState.showWarnings && warningsQuery.data) {
+      deckLayers.push(
+        new GeoJsonLayer({
+          id: `weather-warnings-${warningsQuery.data.features.length}`,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          data: warningsQuery.data as any,
+          pickable: false,
+          stroked: true,
+          filled: true,
+          getFillColor: (feature) => {
+            const sev = String((feature.properties as Record<string, unknown>).severity || "yellow");
+            return warningSeverityColor(sev, sev === "yellow" ? 45 : 55);
+          },
+          getLineColor: (feature) => {
+            const sev = String((feature.properties as Record<string, unknown>).severity || "yellow");
+            return warningSeverityColor(sev, sev === "yellow" ? 180 : 200);
+          },
+          lineWidthMinPixels: 1.5,
+        })
+      );
+    }
+
     // User location layers (safety mode)
     if (safety.enabled && safety.userLocation) {
       const locationLayers = buildUserLocationLayers(safety.userLocation, safety.proximityRadiusKm);
@@ -458,9 +500,11 @@ export default function FireMap({
     layersState.showFronts,
     layersState.showForecast,
     layersState.showRisk,
+    layersState.showWarnings,
     mapView.zoom,
     normalizedEvents,
     riskQuery.data,
+    warningsQuery.data,
     safety.enabled,
     safety.userLocation,
     safety.proximityRadiusKm,
@@ -682,6 +726,11 @@ export default function FireMap({
         <FormControlLabel
           control={<Switch size="small" checked={layersState.showRisk} onChange={(e) => setLayersState({ showRisk: e.target.checked })} disabled={!filters.clusterPoints} />}
           label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Risk Index</Typography>}
+          sx={{ display: "flex", mx: 0, mb: 0.25 }}
+        />
+        <FormControlLabel
+          control={<Switch size="small" checked={layersState.showWarnings} onChange={(e) => setLayersState({ showWarnings: e.target.checked })} />}
+          label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Weather Warnings <Typography component="span" sx={{ fontSize: 10, color: "#6b7280" }}>(Europe)</Typography></Typography>}
           sx={{ display: "flex", mx: 0 }}
         />
 
