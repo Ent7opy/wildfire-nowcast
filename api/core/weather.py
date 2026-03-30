@@ -8,8 +8,11 @@ dependency on fire internals.
 from __future__ import annotations
 
 import logging
+import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import xarray as xr
@@ -19,6 +22,33 @@ from api.db import get_engine
 
 LOGGER = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# RH fire-risk classification
+# ---------------------------------------------------------------------------
+
+_RH_THRESHOLDS: list[tuple[float, str]] = [
+    (15.0, "critical"),
+    (25.0, "elevated"),
+]
+
+
+def classify_rh_fire_risk(rh_pct: float) -> str:
+    """Return a fire-risk level based on relative humidity.
+
+    Thresholds follow standard fire-weather convention:
+    - <15 %  → ``"critical"``
+    - <25 %  → ``"elevated"``
+    - ≥25 %  → ``"normal"``
+    """
+    for threshold, level in _RH_THRESHOLDS:
+        if rh_pct < threshold:
+            return level
+    return "normal"
+
+
+# ---------------------------------------------------------------------------
+# Shared internals
+# ---------------------------------------------------------------------------
 
 def _to_numpy_datetime64(dt: datetime) -> np.datetime64:
     """Convert a datetime to numpy datetime64 with proper UTC handling.
@@ -41,28 +71,35 @@ def _to_numpy_datetime64(dt: datetime) -> np.datetime64:
     return np.datetime64(dt_utc.replace(tzinfo=None), "ms")
 
 
-def get_weather_data_for_point(
+def _ensure_utc(dt: datetime) -> datetime:
+    """Normalise a datetime to UTC, treating naive values as UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class _WeatherSnapshot:
+    """Result of opening a weather run and selecting the nearest grid point."""
+
+    ds: xr.Dataset
+    ds_point: xr.Dataset
+    ref_time_64: np.datetime64
+    run_time: datetime
+    storage_path: Path
+
+
+def _open_weather_for_point(
     *,
     lat: float,
     lon: float,
     ref_time: datetime,
     time_tolerance_hours: float,
-    precip_lookback_hours: float,
-) -> dict[str, float] | None:
-    """Query weather data for a specific point and time.
+) -> _WeatherSnapshot | None:
+    """Find the best weather run, open the dataset, and select the nearest point.
 
-    Args:
-        lat: Latitude of the point
-        lon: Longitude of the point
-        ref_time: Reference time for weather data
-        time_tolerance_hours: Maximum time difference allowed for matching
-        precip_lookback_hours: Hours to look back for precipitation accumulation
-
-    Returns:
-        Dict with weather variables or None if data unavailable:
-        - rh2m: Relative humidity at 2m (%)
-        - precip_recent_mm: Recent precipitation accumulation (mm)
-        - wind_speed_ms: Wind speed (m/s)
+    Returns ``None`` (with debug logging) when no qualifying run exists.
+    The caller is responsible for closing ``snapshot.ds``.
     """
     stmt = text("""
         SELECT id, storage_path, run_time
@@ -90,7 +127,7 @@ def get_weather_data_for_point(
     if not row:
         LOGGER.debug(
             "No weather run found for point (lat=%s, lon=%s) at time %s",
-            lat, lon, ref_time
+            lat, lon, ref_time,
         )
         return None
 
@@ -98,53 +135,217 @@ def get_weather_data_for_point(
     if not storage_path.is_absolute():
         storage_path = Path.cwd() / storage_path
 
-    ds = None
+    ds = xr.open_dataset(storage_path)
+    ds_point = ds.sel(lat=lat, lon=lon, method="nearest")
+
+    ref_time_64 = _to_numpy_datetime64(ref_time)
+    if "time" in ds_point.coords:
+        ds_point = ds_point.sel(time=ref_time_64, method="nearest")
+
+    return _WeatherSnapshot(
+        ds=ds,
+        ds_point=ds_point,
+        ref_time_64=ref_time_64,
+        run_time=row["run_time"],
+        storage_path=storage_path,
+    )
+
+
+def _extract_precip_mm(
+    ds_point: xr.Dataset,
+    ds: xr.Dataset,
+    ref_time: datetime,
+    ref_time_64: np.datetime64,
+    lookback_hours: float,
+) -> float | None:
+    """Sum total precipitation over the lookback window, converting m → mm."""
+    if "tp" not in ds_point.data_vars or "time" not in ds.coords:
+        return None
     try:
-        ds = xr.open_dataset(storage_path)
-        ds_point = ds.sel(lat=lat, lon=lon, method="nearest")
+        precip_start_64 = _to_numpy_datetime64(
+            ref_time - timedelta(hours=lookback_hours)
+        )
+        ds_precip = ds_point.sel(time=slice(precip_start_64, ref_time_64))
+        if "tp" in ds_precip.data_vars and len(ds_precip.time) > 0:
+            precip_sum = float(ds_precip["tp"].sum().values)
+            if not np.isnan(precip_sum):
+                return precip_sum * 1000.0
+    except Exception as exc:
+        LOGGER.debug("Failed to compute precipitation accumulation: %s", exc)
+    return None
 
-        ref_time_64 = _to_numpy_datetime64(ref_time)
-        if "time" in ds_point.coords:
-            ds_point = ds_point.sel(time=ref_time_64, method="nearest")
 
+# ---------------------------------------------------------------------------
+# Public API — scoring (flat numeric dict)
+# ---------------------------------------------------------------------------
+
+def get_weather_data_for_point(
+    *,
+    lat: float,
+    lon: float,
+    ref_time: datetime,
+    time_tolerance_hours: float,
+    precip_lookback_hours: float,
+) -> dict[str, float] | None:
+    """Query weather data for a specific point and time.
+
+    Args:
+        lat: Latitude of the point
+        lon: Longitude of the point
+        ref_time: Reference time for weather data
+        time_tolerance_hours: Maximum time difference allowed for matching
+        precip_lookback_hours: Hours to look back for precipitation accumulation
+
+    Returns:
+        Dict with weather variables or None if data unavailable:
+        - rh2m: Relative humidity at 2m (%)
+        - precip_recent_mm: Recent precipitation accumulation (mm)
+        - wind_speed_ms: Wind speed (m/s)
+    """
+    try:
+        snap = _open_weather_for_point(
+            lat=lat, lon=lon, ref_time=ref_time,
+            time_tolerance_hours=time_tolerance_hours,
+        )
+    except Exception as exc:
+        LOGGER.warning("Failed to open weather data: %s", exc)
+        return None
+
+    if snap is None:
+        return None
+
+    try:
         result: dict[str, float] = {}
 
-        if "rh2m" in ds_point.data_vars:
-            rh_val = float(ds_point["rh2m"].values)
+        if "rh2m" in snap.ds_point.data_vars:
+            rh_val = float(snap.ds_point["rh2m"].values)
             if not np.isnan(rh_val):
                 result["rh2m"] = rh_val
 
-        if "u10" in ds_point.data_vars and "v10" in ds_point.data_vars:
-            u10_val = float(ds_point["u10"].values)
-            v10_val = float(ds_point["v10"].values)
+        if "u10" in snap.ds_point.data_vars and "v10" in snap.ds_point.data_vars:
+            u10_val = float(snap.ds_point["u10"].values)
+            v10_val = float(snap.ds_point["v10"].values)
             if not np.isnan(u10_val) and not np.isnan(v10_val):
                 result["wind_speed_ms"] = float(np.sqrt(u10_val**2 + v10_val**2))
 
-        if "tp" in ds_point.data_vars and "time" in ds.coords:
-            try:
-                precip_start_64 = _to_numpy_datetime64(
-                    ref_time - timedelta(hours=precip_lookback_hours)
-                )
-                ds_precip = ds_point.sel(time=slice(precip_start_64, ref_time_64))
-
-                if "tp" in ds_precip.data_vars and len(ds_precip.time) > 0:
-                    precip_sum = float(ds_precip["tp"].sum().values)
-                    if not np.isnan(precip_sum):
-                        # GFS outputs precipitation in meters; convert to mm
-                        result["precip_recent_mm"] = precip_sum * 1000.0
-            except Exception as e:
-                LOGGER.debug(
-                    "Failed to compute precipitation accumulation: %s", e
-                )
+        precip = _extract_precip_mm(
+            snap.ds_point, snap.ds, ref_time, snap.ref_time_64,
+            precip_lookback_hours,
+        )
+        if precip is not None:
+            result["precip_recent_mm"] = precip
 
         return result if result else None
 
-    except Exception as e:
+    except Exception as exc:
         LOGGER.warning(
-            "Failed to load weather data from %s: %s",
-            storage_path, e
+            "Failed to load weather data from %s: %s", snap.storage_path, exc,
         )
         return None
     finally:
-        if ds is not None:
-            ds.close()
+        snap.ds.close()
+
+
+# ---------------------------------------------------------------------------
+# Public API — fire detail panel (rich context dict)
+# ---------------------------------------------------------------------------
+
+_RESOLUTION_NOTE = "GFS 0.25\u00b0 \u2014 nearest grid point (~25 km)"
+
+# Variables that the GFS ingest pipeline bias-corrects (affine correction
+# fitted against ERA5 reanalysis).  Listed here so the API response can
+# transparently communicate which values have been post-processed.
+_BIAS_CORRECTED_VARS = ("u10", "v10", "t2m", "rh2m")
+
+
+def get_weather_context_for_point(
+    *,
+    lat: float,
+    lon: float,
+    ref_time: datetime,
+    time_tolerance_hours: float = 6.0,
+    precip_lookback_hours: float = 24.0,
+) -> dict[str, Any] | None:
+    """Return a weather-context block suitable for the fire detail response.
+
+    Unlike :func:`get_weather_data_for_point` (which returns a flat dict of
+    numeric values for scoring), this function returns the full context
+    including wind direction, temperature, source provenance, data-age, bias
+    correction metadata, and RH fire-risk classification.
+
+    Returns ``None`` when no qualifying weather run covers the point.
+    """
+    try:
+        snap = _open_weather_for_point(
+            lat=lat, lon=lon, ref_time=ref_time,
+            time_tolerance_hours=time_tolerance_hours,
+        )
+    except Exception as exc:
+        LOGGER.warning("Failed to open weather data: %s", exc)
+        return None
+
+    if snap is None:
+        return None
+
+    try:
+        ctx: dict[str, Any] = {}
+
+        # --- wind ---
+        if "u10" in snap.ds_point.data_vars and "v10" in snap.ds_point.data_vars:
+            u10 = float(snap.ds_point["u10"].values)
+            v10 = float(snap.ds_point["v10"].values)
+            if not np.isnan(u10) and not np.isnan(v10):
+                ctx["wind_speed_ms"] = round(float(np.sqrt(u10**2 + v10**2)), 1)
+                # Meteorological convention: direction wind is coming *from*
+                ctx["wind_direction_deg"] = round(
+                    (math.degrees(math.atan2(-u10, -v10)) + 360) % 360, 1
+                )
+
+        # --- humidity ---
+        if "rh2m" in snap.ds_point.data_vars:
+            rh = float(snap.ds_point["rh2m"].values)
+            if not np.isnan(rh):
+                ctx["relative_humidity_pct"] = round(rh, 1)
+                ctx["rh_fire_risk"] = classify_rh_fire_risk(rh)
+
+        # --- temperature ---
+        if "t2m" in snap.ds_point.data_vars:
+            t2m = float(snap.ds_point["t2m"].values)
+            if not np.isnan(t2m):
+                # GFS stores temperature in Kelvin
+                ctx["temperature_c"] = round(t2m - 273.15, 1)
+
+        # --- precipitation ---
+        precip = _extract_precip_mm(
+            snap.ds_point, snap.ds, ref_time, snap.ref_time_64,
+            precip_lookback_hours,
+        )
+        if precip is not None:
+            ctx["precip_mm_24h"] = round(precip, 1)
+
+        if not ctx:
+            return None
+
+        # --- provenance ---
+        run_time_utc = _ensure_utc(snap.run_time)
+        ref_time_utc = _ensure_utc(ref_time)
+        ctx["source_run_time"] = run_time_utc.isoformat()
+        ctx["data_age_hours"] = round(
+            (ref_time_utc - run_time_utc).total_seconds() / 3600, 1
+        )
+        ctx["resolution_note"] = _RESOLUTION_NOTE
+        ctx["bias_correction"] = {
+            "applied": True,
+            "method": "affine (fitted against ERA5 reanalysis)",
+            "variables": list(_BIAS_CORRECTED_VARS),
+        }
+
+        return ctx
+
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to load weather context from %s: %s", snap.storage_path, exc,
+        )
+        return None
+    finally:
+        snap.ds.close()

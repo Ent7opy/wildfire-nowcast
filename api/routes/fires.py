@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi_limiter.depends import RateLimiter
 
+from api.core.weather import get_weather_context_for_point
 from api.deps import cache_60, get_fire_repo
 from api.errors import InvalidBoundingBoxError
 from api.fires.repository import FireRepository
@@ -181,6 +182,53 @@ async def get_detections(
         cursor=cursor,
         offset=offset,
     )
+
+
+@fires_router.get(
+    "/detections/{detection_id}",
+    dependencies=[Depends(RateLimiter(times=60, seconds=60)), Depends(cache_60)],
+)
+async def get_detection_detail(
+    detection_id: int = Path(..., description="Fire detection primary key"),
+    repo: FireRepository = Depends(get_fire_repo),
+):
+    """Return a single fire detection with weather context.
+
+    The response includes a ``weather`` block when GFS data covers the
+    detection's location.  When no weather data is available, ``weather``
+    is ``null`` with a ``weather_unavailable_reason`` string.
+    """
+    detection = repo.get_fire_detection_by_id(detection_id)
+    if detection is None:
+        raise HTTPException(status_code=404, detail="Detection not found")
+
+    acq_time = detection.get("acq_time")
+    lat = detection.get("lat")
+    lon = detection.get("lon")
+
+    weather = None
+    weather_unavailable_reason: str | None = None
+
+    if lat is not None and lon is not None and acq_time is not None:
+        weather = get_weather_context_for_point(
+            lat=lat,
+            lon=lon,
+            ref_time=acq_time,
+        )
+        if weather is None:
+            weather_unavailable_reason = (
+                "No GFS weather run covers this location within the tolerance window"
+            )
+    else:
+        weather_unavailable_reason = (
+            "Detection is missing coordinates or acquisition time"
+        )
+
+    return {
+        **detection,
+        "weather": weather,
+        "weather_unavailable_reason": weather_unavailable_reason,
+    }
 
 
 @fires_router.get("/events", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
