@@ -46,7 +46,7 @@ function formatFrp(value: unknown): string {
 
 function formatConfidence(value: unknown): string {
   const num = safeFloat(value);
-  return num === null ? "n/a" : `${(num * 100).toFixed(0)}%`;
+  return num === null ? "n/a" : `${num.toFixed(0)}%`;
 }
 
 function ReasonChip({ reason }: { reason: string }) {
