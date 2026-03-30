@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -83,13 +83,14 @@ function formatScoreBand(score: number): string {
 }
 
 function sortItems(items: DenoiserReviewItem[]): DenoiserReviewItem[] {
-  return [...items].sort((a, b) => {
-    const frpA = safeFloat(a.payload_json?.frp_max) ?? 0;
-    const frpB = safeFloat(b.payload_json?.frp_max) ?? 0;
-    if (frpB !== frpA) return frpB - frpA;
-    // oldest first within same FRP tier
-    return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-  });
+  type Keyed = { item: DenoiserReviewItem; frp: number; ts: number };
+  const keyed: Keyed[] = items.map((item) => ({
+    item,
+    frp: safeFloat(item.payload_json?.frp_max) ?? 0,
+    ts: new Date(item.created_at).getTime()
+  }));
+  keyed.sort((a, b) => b.frp !== a.frp ? b.frp - a.frp : a.ts - b.ts);
+  return keyed.map((k) => k.item);
 }
 
 function ReasonChip({ reason }: { reason: string }) {
@@ -119,6 +120,48 @@ function ReasonChip({ reason }: { reason: string }) {
     </Tooltip>
   ) : (
     chip
+  );
+}
+
+interface ActionButtonProps {
+  tooltip: string;
+  icon: React.ReactNode;
+  label: string;
+  color: string;
+  hoverBg: string;
+  borderColor: string;
+  hoverBorderColor: string;
+  isResolving: boolean;
+  onClick: () => void;
+}
+
+function ActionButton({ tooltip, icon, label, color, hoverBg, borderColor, hoverBorderColor, isResolving, onClick }: ActionButtonProps) {
+  return (
+    <Tooltip title={tooltip}>
+      <span>
+        <Button
+          size="small"
+          disabled={isResolving}
+          startIcon={isResolving ? <CircularProgress size={12} /> : icon}
+          onClick={onClick}
+          sx={{
+            fontSize: 10,
+            fontWeight: 700,
+            py: 0.4,
+            px: 1,
+            color,
+            borderColor,
+            border: "1px solid",
+            borderRadius: 1,
+            textTransform: "none",
+            "&:hover": { bgcolor: hoverBg, borderColor: hoverBorderColor },
+            "&:disabled": { opacity: 0.4 }
+          }}
+        >
+          {label}
+        </Button>
+      </span>
+    </Tooltip>
   );
 }
 
@@ -210,56 +253,28 @@ function ReviewItemRow({ item, matchedEvent, onResolve, isResolving }: ReviewIte
         sx={{ display: "flex", gap: 0.75 }}
         onClick={(e) => e.stopPropagation()}
       >
-        <Tooltip title="Confirm this detection as a real fire">
-          <span>
-            <Button
-              size="small"
-              disabled={isResolving}
-              startIcon={isResolving ? <CircularProgress size={12} /> : <CheckCircleOutlineIcon />}
-              onClick={() => onResolve(item.event_id, "confirmed_fire")}
-              sx={{
-                fontSize: 10,
-                fontWeight: 700,
-                py: 0.4,
-                px: 1,
-                color: "#4ade80",
-                borderColor: "rgba(74,222,128,0.35)",
-                border: "1px solid",
-                borderRadius: 1,
-                textTransform: "none",
-                "&:hover": { bgcolor: "rgba(74,222,128,0.1)", borderColor: "rgba(74,222,128,0.6)" },
-                "&:disabled": { opacity: 0.4 }
-              }}
-            >
-              Confirm Fire
-            </Button>
-          </span>
-        </Tooltip>
-        <Tooltip title="Mark this detection as noise / false positive">
-          <span>
-            <Button
-              size="small"
-              disabled={isResolving}
-              startIcon={isResolving ? <CircularProgress size={12} /> : <DoNotDisturbOnIcon />}
-              onClick={() => onResolve(item.event_id, "marked_noise")}
-              sx={{
-                fontSize: 10,
-                fontWeight: 700,
-                py: 0.4,
-                px: 1,
-                color: "#9ca3af",
-                borderColor: "rgba(156,163,175,0.3)",
-                border: "1px solid",
-                borderRadius: 1,
-                textTransform: "none",
-                "&:hover": { bgcolor: "rgba(156,163,175,0.08)", borderColor: "rgba(156,163,175,0.5)" },
-                "&:disabled": { opacity: 0.4 }
-              }}
-            >
-              Mark as Noise
-            </Button>
-          </span>
-        </Tooltip>
+        <ActionButton
+          tooltip="Confirm this detection as a real fire"
+          icon={<CheckCircleOutlineIcon />}
+          label="Confirm Fire"
+          color="#4ade80"
+          hoverBg="rgba(74,222,128,0.1)"
+          borderColor="rgba(74,222,128,0.35)"
+          hoverBorderColor="rgba(74,222,128,0.6)"
+          isResolving={isResolving}
+          onClick={() => onResolve(item.event_id, "confirmed_fire")}
+        />
+        <ActionButton
+          tooltip="Mark this detection as noise / false positive"
+          icon={<DoNotDisturbOnIcon />}
+          label="Mark as Noise"
+          color="#9ca3af"
+          hoverBg="rgba(156,163,175,0.08)"
+          borderColor="rgba(156,163,175,0.3)"
+          hoverBorderColor="rgba(156,163,175,0.5)"
+          isResolving={isResolving}
+          onClick={() => onResolve(item.event_id, "marked_noise")}
+        />
       </Box>
     </Box>
   );
@@ -399,14 +414,14 @@ export default function ReviewQueuePanel({ visibleEvents }: ReviewQueuePanelProp
   const rows = data?.rows ?? [];
   const count = rows.length;
 
-  const hardBypassItems = useMemo(
-    () => sortItems(rows.filter((r) => r.reason === HARD_BYPASS)),
-    [rows]
-  );
-  const uncertaintyItems = useMemo(
-    () => sortItems(rows.filter((r) => r.reason !== HARD_BYPASS)),
-    [rows]
-  );
+  const [hardBypassItems, uncertaintyItems] = useMemo(() => {
+    const hard: DenoiserReviewItem[] = [];
+    const uncertain: DenoiserReviewItem[] = [];
+    for (const row of rows) {
+      (row.reason === HARD_BYPASS ? hard : uncertain).push(row);
+    }
+    return [sortItems(hard), sortItems(uncertain)];
+  }, [rows]);
 
   function handleResolve(eventId: string, notes: ResolutionNote) {
     resolveMutation.mutate({ eventId, resolvedBy: "operator", resolvedNotes: notes });
@@ -485,7 +500,7 @@ export default function ReviewQueuePanel({ visibleEvents }: ReviewQueuePanelProp
           <Stack spacing={0.5} divider={<Divider sx={{ borderColor: "rgba(255,255,255,0.05)" }} />}>
             <QueueSection
               title="High-Energy Alerts"
-              color="#ef4444"
+              color={REASON_META.fail_closed_hard_bypass.color}
               items={hardBypassItems}
               visibleEventIndex={visibleEventIndex}
               onResolve={handleResolve}
@@ -494,7 +509,7 @@ export default function ReviewQueuePanel({ visibleEvents }: ReviewQueuePanelProp
             />
             <QueueSection
               title="Uncertain Detections"
-              color="#f97316"
+              color={REASON_META.fail_closed_or_uncertainty.color}
               items={uncertaintyItems}
               visibleEventIndex={visibleEventIndex}
               onResolve={handleResolve}
