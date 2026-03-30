@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from api.fires.landcover import LANDCOVER_SCORES, get_landcover_path
-from api.fires.scoring import _get_weather_data_for_point
+from api.core.weather import get_weather_data_for_point
 
 try:
     import rasterio
@@ -235,7 +235,7 @@ def _compute_dynamic_risk(lat: float, lon: float, ref_time: datetime) -> Optiona
         Dynamic risk score in range [0, 1] or None if weather unavailable
     """
     # Reuse weather plausibility scoring logic
-    weather_data = _get_weather_data_for_point(
+    weather_data = get_weather_data_for_point(
         lat=lat,
         lon=lon,
         ref_time=ref_time,
