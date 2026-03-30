@@ -26,7 +26,8 @@ export async function resolveDenoiserReviewItem(args: {
 
 export async function getReviewEventDetail(eventId: string): Promise<ReviewEventDetail> {
   const resp = await getJson<ReviewEventDetailResponse>(
-    `/internal/denoiser/review-queue/${eventId}/detail`
+    `/internal/denoiser/review-queue/${eventId}/detail`,
+    {}
   );
   return resp.detail;
 }
