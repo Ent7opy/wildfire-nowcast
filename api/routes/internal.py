@@ -24,6 +24,7 @@ from api.fires.repo import (
     list_recent_denoiser_drift,
     list_denoiser_review_queue,
     resolve_denoiser_review_event,
+    get_review_event_detail,
 )
 
 internal_router = APIRouter(tags=["internal"])
@@ -445,6 +446,19 @@ async def ingest_health_dashboard() -> dict:
         "db_size": db_section,
         "cleanup": cleanup_section,
     }
+
+
+@internal_router.get("/internal/denoiser/review-queue/{event_id}/detail")
+async def denoiser_review_queue_detail(event_id: str) -> dict:
+    """Return decision-panel context for a single review queue event."""
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        detail = get_review_event_detail(event_id=event_id)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "detail": None, "error": str(exc)}
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Review event {event_id!r} not found")
+    return {"as_of": as_of, "detail": detail}
 
 
 @internal_router.post("/internal/denoiser/review-queue/{event_id}/resolve")

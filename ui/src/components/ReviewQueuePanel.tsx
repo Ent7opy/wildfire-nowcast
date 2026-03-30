@@ -20,8 +20,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiUnavailableError, getDenoiserReviewQueue, resolveDenoiserReviewItem } from "../api/client";
 import { safeFloat } from "../map/layerUtils";
-import { useAppStore } from "../state/store";
 import type { DenoiserReviewItem, FireEvent } from "../types/api";
+import { ReviewDecisionPanel } from "./ReviewDecisionPanel";
 
 type ResolutionNote = "confirmed_fire" | "marked_noise";
 
@@ -216,11 +216,11 @@ interface ReviewItemRowProps {
   matchedEvent: FireEvent | null;
   onResolve: (eventId: string, notes: ResolutionNote) => void;
   isResolving: boolean;
+  expandedEventId: string | null;
+  setExpandedEventId: (id: string | null) => void;
 }
 
-function ReviewItemRow({ item, matchedEvent, onResolve, isResolving }: ReviewItemRowProps) {
-  const focusMapOnPoint = useAppStore((s) => s.focusMapOnPoint);
-
+function ReviewItemRow({ item, matchedEvent, onResolve, isResolving, expandedEventId, setExpandedEventId }: ReviewItemRowProps) {
   const frp = item.payload_json?.frp_max;
   const confidence = item.payload_json?.confidence_max;
   const score = item.payload_json?.event_score;
@@ -228,102 +228,113 @@ function ReviewItemRow({ item, matchedEvent, onResolve, isResolving }: ReviewIte
   const time = matchedEvent?.end_time ?? item.created_at;
   const isHardBypass = item.reason === HARD_BYPASS;
   const { color: reasonColor } = getReasonMeta(item.reason);
+  const isExpanded = expandedEventId === item.event_id;
 
-  function handleFocus() {
-    const lat = safeFloat(matchedEvent?.lat);
-    const lon = safeFloat(matchedEvent?.lon);
-    if (lat !== null && lon !== null) {
-      focusMapOnPoint(lat, lon, 9);
-    }
+  function handleToggleExpand() {
+    setExpandedEventId(isExpanded ? null : item.event_id);
   }
-
-  const canFocus = safeFloat(matchedEvent?.lat) !== null;
 
   return (
     <Box
       sx={{
-        p: 1.25,
         borderRadius: 1.5,
         bgcolor: "#0d1117",
-        border: `1px solid ${reasonColor}40`,
-        cursor: canFocus ? "pointer" : "default",
+        border: `1px solid ${isExpanded ? `${reasonColor}88` : `${reasonColor}40`}`,
         transition: "border-color 0.15s",
-        "&:hover": canFocus ? { borderColor: `${reasonColor}88` } : {}
+        "&:hover": { borderColor: `${reasonColor}88` }
       }}
-      onClick={handleFocus}
     >
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", mb: 0.75 }}>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, flexWrap: "wrap" }}>
-          <ReasonChip reason={item.reason} />
-          {sensor && (
-            <Typography sx={{ fontSize: 10, color: "#6b7280", fontWeight: 600 }}>
-              {sensor}
+      {/* Clickable row header */}
+      <Box
+        sx={{ p: 1.25, cursor: "pointer" }}
+        onClick={handleToggleExpand}
+      >
+        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", mb: 0.75 }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, flexWrap: "wrap" }}>
+            <ReasonChip reason={item.reason} />
+            {sensor && (
+              <Typography sx={{ fontSize: 10, color: "#6b7280", fontWeight: 600 }}>
+                {sensor}
+              </Typography>
+            )}
+          </Box>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+            <Typography sx={{ fontSize: 10, color: "#4b5563", whiteSpace: "nowrap" }}>
+              {formatTimestamp(time)}
             </Typography>
-          )}
+            <Box sx={{ fontSize: 14, color: "#4b5563", display: "flex" }}>
+              {isExpanded ? <ExpandLessIcon fontSize="inherit" /> : <ExpandMoreIcon fontSize="inherit" />}
+            </Box>
+          </Box>
         </Box>
-        <Typography sx={{ fontSize: 10, color: "#4b5563", whiteSpace: "nowrap", ml: 1 }}>
-          {formatTimestamp(time)}
-        </Typography>
-      </Box>
 
-      <Box sx={{ display: "flex", gap: 2, mb: 0.75 }}>
-        <Box>
-          <Typography sx={{ fontSize: 9, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
-            FRP
-          </Typography>
-          <Typography sx={{ fontSize: 13, color: "#e5e7eb", fontWeight: 700 }}>
-            {formatFrp(frp)}
-          </Typography>
-        </Box>
-        <Box>
-          <Typography sx={{ fontSize: 9, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
-            Confidence
-          </Typography>
-          <Typography sx={{ fontSize: 13, color: "#e5e7eb", fontWeight: 700 }}>
-            {formatConfidence(confidence)}
-          </Typography>
-        </Box>
-        {!isHardBypass && score != null && (
+        <Box sx={{ display: "flex", gap: 2, mb: 0.75 }}>
           <Box>
             <Typography sx={{ fontSize: 9, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
-              Model
+              FRP
             </Typography>
             <Typography sx={{ fontSize: 13, color: "#e5e7eb", fontWeight: 700 }}>
-              {formatScoreBand(score)}
+              {formatFrp(frp)}
             </Typography>
           </Box>
-        )}
+          <Box>
+            <Typography sx={{ fontSize: 9, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+              Confidence
+            </Typography>
+            <Typography sx={{ fontSize: 13, color: "#e5e7eb", fontWeight: 700 }}>
+              {formatConfidence(confidence)}
+            </Typography>
+          </Box>
+          {!isHardBypass && score != null && (
+            <Box>
+              <Typography sx={{ fontSize: 9, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+                Model
+              </Typography>
+              <Typography sx={{ fontSize: 13, color: "#e5e7eb", fontWeight: 700 }}>
+                {formatScoreBand(score)}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+
+        <LocationContext item={item} />
+
+        <Box
+          sx={{ display: "flex", gap: 0.75 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ActionButton
+            tooltip="Confirm this detection as a real fire"
+            icon={<CheckCircleOutlineIcon />}
+            label="Confirm Fire"
+            color="#4ade80"
+            hoverBg="rgba(74,222,128,0.1)"
+            borderColor="rgba(74,222,128,0.35)"
+            hoverBorderColor="rgba(74,222,128,0.6)"
+            isResolving={isResolving}
+            onClick={() => onResolve(item.event_id, "confirmed_fire")}
+          />
+          <ActionButton
+            tooltip="Mark this detection as noise / false positive"
+            icon={<DoNotDisturbOnIcon />}
+            label="Mark as Noise"
+            color="#9ca3af"
+            hoverBg="rgba(156,163,175,0.08)"
+            borderColor="rgba(156,163,175,0.3)"
+            hoverBorderColor="rgba(156,163,175,0.5)"
+            isResolving={isResolving}
+            onClick={() => onResolve(item.event_id, "marked_noise")}
+          />
+        </Box>
       </Box>
 
-      <LocationContext item={item} />
-
-      <Box
-        sx={{ display: "flex", gap: 0.75 }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <ActionButton
-          tooltip="Confirm this detection as a real fire"
-          icon={<CheckCircleOutlineIcon />}
-          label="Confirm Fire"
-          color="#4ade80"
-          hoverBg="rgba(74,222,128,0.1)"
-          borderColor="rgba(74,222,128,0.35)"
-          hoverBorderColor="rgba(74,222,128,0.6)"
-          isResolving={isResolving}
-          onClick={() => onResolve(item.event_id, "confirmed_fire")}
+      <Collapse in={isExpanded} unmountOnExit>
+        <ReviewDecisionPanel
+          eventId={item.event_id}
+          borderColor={reasonColor}
+          onViewOnMap={() => setExpandedEventId(null)}
         />
-        <ActionButton
-          tooltip="Mark this detection as noise / false positive"
-          icon={<DoNotDisturbOnIcon />}
-          label="Mark as Noise"
-          color="#9ca3af"
-          hoverBg="rgba(156,163,175,0.08)"
-          borderColor="rgba(156,163,175,0.3)"
-          hoverBorderColor="rgba(156,163,175,0.5)"
-          isResolving={isResolving}
-          onClick={() => onResolve(item.event_id, "marked_noise")}
-        />
-      </Box>
+      </Collapse>
     </Box>
   );
 }
@@ -336,6 +347,8 @@ interface QueueSectionProps {
   onResolve: (eventId: string, notes: ResolutionNote) => void;
   resolvingIds: Set<string>;
   emptyText: string;
+  expandedEventId: string | null;
+  setExpandedEventId: (id: string | null) => void;
 }
 
 function QueueSection({
@@ -345,7 +358,9 @@ function QueueSection({
   visibleEventIndex,
   onResolve,
   resolvingIds,
-  emptyText
+  emptyText,
+  expandedEventId,
+  setExpandedEventId,
 }: QueueSectionProps) {
   const [open, setOpen] = useState(true);
 
@@ -414,6 +429,8 @@ function QueueSection({
                 matchedEvent={visibleEventIndex.get(item.event_id) ?? null}
                 onResolve={onResolve}
                 isResolving={resolvingIds.has(item.event_id)}
+                expandedEventId={expandedEventId}
+                setExpandedEventId={setExpandedEventId}
               />
             ))}
           </Stack>
@@ -426,6 +443,7 @@ function QueueSection({
 export default function ReviewQueuePanel({ visibleEvents }: ReviewQueuePanelProps) {
   const queryClient = useQueryClient();
   const [resolvingIds, setResolvingIds] = useState<Set<string>>(new Set());
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["denoiser-review-queue"],
@@ -554,6 +572,8 @@ export default function ReviewQueuePanel({ visibleEvents }: ReviewQueuePanelProp
               onResolve={handleResolve}
               resolvingIds={resolvingIds}
               emptyText="No high-energy alerts pending"
+              expandedEventId={expandedEventId}
+              setExpandedEventId={setExpandedEventId}
             />
             <QueueSection
               title="Uncertain Detections"
@@ -563,6 +583,8 @@ export default function ReviewQueuePanel({ visibleEvents }: ReviewQueuePanelProp
               onResolve={handleResolve}
               resolvingIds={resolvingIds}
               emptyText="No uncertain detections pending"
+              expandedEventId={expandedEventId}
+              setExpandedEventId={setExpandedEventId}
             />
           </Stack>
         )}

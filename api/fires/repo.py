@@ -1271,6 +1271,193 @@ def list_denoiser_review_queue(limit: int = 200, status: str = "open") -> list[d
     return result
 
 
+def _build_reason_summary(
+    reason: str,
+    payload: dict | None,
+    terrain_label: str | None,
+) -> str:
+    """Build a plain-language explanation of why this event was flagged."""
+    p = payload or {}
+    frp = p.get("frp_max")
+    score = p.get("event_score")
+    terrain = terrain_label or "unknown terrain"
+
+    if reason == "fail_closed_hard_bypass":
+        frp_str = f"{frp:.0f} MW " if frp is not None else ""
+        return (
+            f"Flagged automatically: {frp_str}fire radiative power in {terrain}. "
+            "High-confidence FIRMS detection. Treated as confirmed fire until reviewed."
+        )
+
+    if reason == "fail_closed_or_uncertainty":
+        score_str = f"{score:.2f}" if score is not None else "unknown"
+        frp_note = (
+            "Low FRP suggests possible industrial or agricultural burn."
+            if frp is not None and frp < 50
+            else "High FRP — likely a real fire needing confirmation."
+            if frp is not None
+            else "Insufficient FRP data to determine burn type."
+        )
+        return (
+            f"Model score was {score_str} — right at the decision boundary "
+            f"(threshold: 0.45–0.55). {frp_note}"
+        )
+
+    return f"Flagged for operator review (reason: {reason})."
+
+
+def get_review_event_detail(event_id: str) -> dict | None:
+    """Return decision-panel data for a single review queue event.
+
+    Returns None if the event is not found in the review queue.
+    Collects: reason summary, weather context, nearby fires (100 km / 48 h),
+    location history (5 km / 30 d).
+    """
+    from api.core.weather import get_weather_context_for_point
+
+    # ── 1. Fetch event centroid, reason, payload, terrain ──────────────────
+    base_stmt = text(
+        """
+        SELECT
+            drq.reason,
+            drq.payload_json,
+            ST_Y(ST_Centroid(fe.geom)) AS centroid_lat,
+            ST_X(ST_Centroid(fe.geom)) AS centroid_lon,
+            MODE() WITHIN GROUP (ORDER BY fd.landcover_label) AS terrain_label
+        FROM denoiser_review_queue drq
+        JOIN fire_events fe ON fe.event_id = drq.event_id
+        LEFT JOIN fire_detections fd
+            ON fd.event_id = drq.event_id AND fd.landcover_label IS NOT NULL
+        WHERE drq.event_id = :event_id
+        GROUP BY drq.reason, drq.payload_json, fe.geom
+        LIMIT 1
+        """
+    )
+
+    # ── 2. Nearby fires (100 km / 48 h) ───────────────────────────────────
+    # LEFT JOIN aggregates FRP per event once; avoids a correlated subquery per row.
+    nearby_stmt = text(
+        """
+        SELECT
+            COUNT(fe.event_id)                                              AS cnt,
+            MAX(fd_agg.total_frp)                                          AS max_frp,
+            MIN(
+                ST_Distance(
+                    ST_Centroid(fe.geom)::geography,
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                ) / 1000.0
+            )                                                               AS nearest_km
+        FROM fire_events fe
+        LEFT JOIN (
+            SELECT event_id, SUM(frp) AS total_frp
+            FROM fire_detections
+            GROUP BY event_id
+        ) fd_agg ON fd_agg.event_id = fe.event_id
+        WHERE fe.review_required IS NOT TRUE
+          AND (fe.denoiser_decision IS NULL OR fe.denoiser_decision != 'drop')
+          AND fe.end_time >= NOW() - INTERVAL '48 hours'
+          AND fe.event_id != :event_id
+          AND ST_DWithin(
+                ST_Centroid(fe.geom)::geography,
+                ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                100000
+              )
+        """
+    )
+
+    # ── 3. Location history (5 km / 30 d) ─────────────────────────────────
+    history_stmt = text(
+        """
+        SELECT
+            drq.resolved_notes,
+            COUNT(*) AS cnt
+        FROM denoiser_review_queue drq
+        JOIN fire_events fe ON fe.event_id = drq.event_id
+        WHERE drq.event_id != :event_id
+          AND drq.created_at >= NOW() - INTERVAL '30 days'
+          AND ST_DWithin(
+                ST_Centroid(fe.geom)::geography,
+                ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                5000
+              )
+        GROUP BY drq.resolved_notes
+        """
+    )
+
+    with get_engine().begin() as conn:
+        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
+
+        base_row = conn.execute(base_stmt, {"event_id": event_id}).mappings().first()
+        if base_row is None:
+            return None
+
+        lat = base_row["centroid_lat"]
+        lon = base_row["centroid_lon"]
+        coords = {"lat": lat, "lon": lon, "event_id": event_id}
+
+        nearby_row = conn.execute(nearby_stmt, coords).mappings().first()
+        history_rows = conn.execute(history_stmt, coords).mappings().all()
+
+    history_confirmed = 0
+    history_noise = 0
+    history_other = 0
+    for h in history_rows:
+        notes = (h["resolved_notes"] or "").lower()
+        if "confirmed" in notes or notes == "confirmed_fire":
+            history_confirmed += int(h["cnt"])
+        elif "noise" in notes or notes == "marked_noise":
+            history_noise += int(h["cnt"])
+        else:
+            history_other += int(h["cnt"])
+    history_flagged = history_confirmed + history_noise + history_other
+
+    weather = None
+    if lat is not None and lon is not None:
+        try:
+            weather = get_weather_context_for_point(
+                lat=lat,
+                lon=lon,
+                ref_time=datetime.now(timezone.utc),
+            )
+        except Exception:
+            weather = None
+
+    wind_speed_kmh: float | None = None
+    wind_dir: float | None = None
+    rh: float | None = None
+    temp: float | None = None
+    if weather:
+        ws = weather.get("wind_speed_ms")
+        wind_speed_kmh = round(ws * 3.6, 1) if ws is not None else None
+        wind_dir = weather.get("wind_direction_deg")
+        rh = weather.get("relative_humidity_pct")
+        temp = weather.get("temperature_c")
+
+    payload = base_row["payload_json"] or {}
+
+    reason_summary = _build_reason_summary(
+        reason=base_row["reason"],
+        payload=payload,
+        terrain_label=base_row["terrain_label"],
+    )
+
+    return {
+        "reason_summary": reason_summary,
+        "centroid_lat": lat,
+        "centroid_lon": lon,
+        "wind_speed_kmh": wind_speed_kmh,
+        "wind_direction_deg": wind_dir,
+        "relative_humidity_pct": rh,
+        "temperature_c": temp,
+        "nearby_fires_count": int(nearby_row["cnt"]) if nearby_row else 0,
+        "nearby_fires_max_frp_mw": float(nearby_row["max_frp"]) if nearby_row and nearby_row["max_frp"] is not None else None,
+        "nearby_fires_nearest_km": float(nearby_row["nearest_km"]) if nearby_row and nearby_row["nearest_km"] is not None else None,
+        "location_history_flagged": history_flagged,
+        "location_history_confirmed": history_confirmed,
+        "location_history_noise": history_noise,
+    }
+
+
 def resolve_denoiser_review_event(
     event_id: str,
     *,
