@@ -218,3 +218,29 @@ export interface WatchConfigRequest {
   interval_minutes?: number | null;
   alert_threshold?: number | null;
 }
+
+export interface WeatherBiasCorrection {
+  applied: boolean;
+  method: string;
+  variables: string[];
+}
+
+export type RhFireRisk = "critical" | "elevated" | "normal";
+
+export interface WeatherContext {
+  wind_speed_ms: number;
+  wind_direction_deg: number;
+  relative_humidity_pct: number;
+  rh_fire_risk: RhFireRisk;
+  temperature_c: number;
+  precip_mm_24h: number;
+  source_run_time: string;
+  data_age_hours: number;
+  resolution_note: string;
+  bias_correction: WeatherBiasCorrection;
+}
+
+export interface WeatherResponse {
+  weather: WeatherContext | null;
+  weather_unavailable_reason: string | null;
+}

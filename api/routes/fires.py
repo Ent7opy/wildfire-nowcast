@@ -231,6 +231,36 @@ async def get_detection_detail(
     }
 
 
+@fires_router.get(
+    "/weather",
+    dependencies=[Depends(RateLimiter(times=60, seconds=60)), Depends(cache_60)],
+)
+def get_weather_for_point(
+    lat: float = Query(..., ge=-90, le=90, description="Latitude"),
+    lon: float = Query(..., ge=-180, le=180, description="Longitude"),
+    ref_time: datetime = Query(..., description="Reference time (ISO 8601)"),
+):
+    """Return weather context for an arbitrary point and time.
+
+    Used by the fire detail panel to show ambient conditions for an event
+    without requiring a specific detection ID.
+    """
+    weather = get_weather_context_for_point(
+        lat=lat,
+        lon=lon,
+        ref_time=ref_time,
+    )
+    weather_unavailable_reason: str | None = None
+    if weather is None:
+        weather_unavailable_reason = (
+            "No GFS weather run covers this location within the tolerance window"
+        )
+    return {
+        "weather": weather,
+        "weather_unavailable_reason": weather_unavailable_reason,
+    }
+
+
 @fires_router.get("/events", dependencies=[Depends(RateLimiter(times=30, seconds=60)), Depends(cache_60)])
 async def get_events(
     min_lon: float = Query(..., description="Minimum longitude (west boundary)"),
