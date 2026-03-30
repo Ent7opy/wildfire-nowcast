@@ -4,7 +4,8 @@ import type {
   FireEvent,
   FrontsResponse,
   ReverseGeocodeResponse,
-  RiskFeatureCollection
+  RiskFeatureCollection,
+  WeatherResponse
 } from "../types/api";
 import { getJson, isoFormat, toSearchParams } from "./http";
 
@@ -79,6 +80,21 @@ export async function getRiskGrid(args: { bbox: BBox }): Promise<RiskFeatureColl
     max_lon: maxLon,
     max_lat: maxLat
   });
+}
+
+export async function getWeatherForPoint(args: {
+  lat: number;
+  lon: number;
+  refTime: Date;
+}): Promise<WeatherResponse> {
+  return getJson<WeatherResponse>(
+    "/fires/weather",
+    {
+      lat: args.lat,
+      lon: args.lon,
+      ref_time: isoFormat(args.refTime),
+    }
+  );
 }
 
 export function buildEventKey(event: FireEvent, lat: number, lon: number): string {

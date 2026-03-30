@@ -7,6 +7,7 @@ export {
   getFireFronts,
   getReverseGeocode,
   getRiskGrid,
+  getWeatherForPoint,
   buildEventKey,
   buildFiresCsvExportUrl,
   buildMapPngExportUrl

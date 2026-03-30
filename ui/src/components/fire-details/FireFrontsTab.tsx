@@ -1,7 +1,9 @@
 import { Alert, Box, Button, Divider, Stack, Typography } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import QueryStatsIcon from "@mui/icons-material/QueryStats";
+import { useQuery } from "@tanstack/react-query";
 import type { FireEvent, ReverseGeocodeResponse } from "../../types/api";
+import { getWeatherForPoint } from "../../api/fires";
 import { haversineKm } from "../../utils/geo";
 import { forecastButtonState } from "../../utils/forecast";
 import { useAppStore } from "../../state/store";
@@ -21,6 +23,7 @@ import {
 } from "./types";
 import { ForecastPanel } from "./ForecastPanel";
 import { QAReviewPanel } from "./QAReviewPanel";
+import { WeatherBlock } from "./WeatherBlock";
 
 interface ForecastMutationArgs {
   mutate: (event: FireEvent) => void;
@@ -32,6 +35,13 @@ interface FireFrontsTabProps {
   resolvedGeocodes: Record<string, ReverseGeocodeResponse>;
   submitError: string | null;
   forecastMutation: ForecastMutationArgs;
+}
+
+function parseRefTime(event: FireEvent): Date | null {
+  const raw = event.end_time ?? event.start_time;
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 export function FireFrontsTab({ selectedEvent, resolvedGeocodes, submitError, forecastMutation }: FireFrontsTabProps): JSX.Element {
@@ -63,6 +73,19 @@ export function FireFrontsTab({ selectedEvent, resolvedGeocodes, submitError, fo
   const intensity = primaryIntensity(selectedEvent);
   const score = severity(selectedEvent);
   const provenance = geometryProvenanceLabel(selectedEvent);
+
+  const refTime = parseRefTime(selectedEvent);
+  const weatherEnabled = lat !== null && lon !== null && refTime !== null;
+
+  const { data: weatherData, isLoading: weatherLoading } = useQuery({
+    queryKey: ["event-weather", lat, lon, refTime?.toISOString()],
+    queryFn: () => {
+      if (lat === null || lon === null || refTime === null) throw new Error("unreachable");
+      return getWeatherForPoint({ lat, lon, refTime });
+    },
+    enabled: weatherEnabled,
+    staleTime: 5 * 60 * 1000,
+  });
 
   const riskTier = riskTierFromScore(score);
   const distanceToFireKm = isSafetyMode && safety.userLocation && lat !== null && lon !== null
@@ -236,6 +259,12 @@ export function FireFrontsTab({ selectedEvent, resolvedGeocodes, submitError, fo
           {observationSummary(selectedEvent)}
         </Typography>
       </Stack>
+
+      <WeatherBlock
+        weather={weatherData?.weather ?? null}
+        unavailableReason={weatherData?.weather_unavailable_reason ?? null}
+        isLoading={weatherEnabled && weatherLoading}
+      />
 
       <Divider sx={{ borderColor: "rgba(255,255,255,0.08)" }} />
 
