@@ -28,6 +28,9 @@ from api.fires.scoring_pipeline import (
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 LOGGER = logging.getLogger(__name__)
 
+# Shared statement timeout applied to all spatial queries to keep API latency bounded.
+_SPATIAL_QUERY_TIMEOUT = "SET LOCAL statement_timeout = '5000ms'"
+
 # Stateless singletons — strategies hold no mutable state so one instance suffices.
 _FALSE_SOURCE_STRATEGY = FalseSourceMaskingStrategy()
 _PERSISTENCE_STRATEGY = PersistenceScoringStrategy()
@@ -602,7 +605,7 @@ def list_fire_events_bbox_time(
     params["geocoding_precision"] = settings.geocoding_cache_precision
 
     with get_engine().begin() as conn:
-        conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
         rows = conn.execute(stmt, params).mappings().all()
 
     return build_page(
@@ -810,7 +813,7 @@ def list_fire_fronts_bbox_time(
 
     with get_engine().begin() as conn:
         # Keep request latency bounded so map interactions do not starve API health checks.
-        conn.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
         rows = conn.execute(stmt, params).mappings().all()
 
     return build_page(
@@ -1168,35 +1171,104 @@ def list_recent_denoiser_drift(limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+_COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+
+def _format_nearest_place(name: str | None, dist_km: float | None, bearing_deg: float | None) -> str | None:
+    if name is None or dist_km is None:
+        return None
+    idx = round((float(bearing_deg or 0) % 360) / 45) % 8
+    return f"{int(dist_km)} km {_COMPASS[idx]} of {name}"
+
+
 def list_denoiser_review_queue(limit: int = 200, status: str = "open") -> list[dict]:
-    """List denoiser review queue rows."""
+    """List denoiser review queue rows enriched with location context."""
     stmt = text(
         """
+        WITH limited_queue AS (
+            SELECT
+                id,
+                event_id,
+                fire_detection_id,
+                reason,
+                severity,
+                status,
+                payload_json,
+                resolved_by,
+                resolved_notes,
+                resolved_at,
+                created_at,
+                updated_at
+            FROM denoiser_review_queue
+            WHERE status = :status
+            ORDER BY created_at DESC, id DESC
+            LIMIT :limit
+        ),
+        event_centroids AS (
+            SELECT fe.event_id,
+                   ST_Centroid(fe.geom)            AS centroid,
+                   ST_Centroid(fe.geom)::geography AS centroid_geog
+            FROM   fire_events fe
+            INNER JOIN limited_queue lq ON lq.event_id = fe.event_id
+        )
         SELECT
-            id,
-            event_id,
-            fire_detection_id,
-            reason,
-            severity,
-            status,
-            payload_json,
-            resolved_by,
-            resolved_notes,
-            resolved_at,
-            created_at,
-            updated_at
-        FROM denoiser_review_queue
-        WHERE status = :status
-        ORDER BY created_at DESC, id DESC
-        LIMIT :limit
+            lq.*,
+            ST_Y(ec.centroid)                                                AS centroid_lat,
+            ST_X(ec.centroid)                                                AS centroid_lon,
+            UPPER(rgc.raw_payload->'address'->>'country_code')               AS country_code,
+            rgc.admin1_name                                                  AS region_name,
+            np.name                                                          AS _np_name,
+            ROUND(
+                ST_Distance(ec.centroid_geog, np.geom::geography) / 1000.0
+            )                                                                AS _np_dist_km,
+            degrees(
+                ST_Azimuth(np.geom::geography, ec.centroid_geog)
+            )                                                                AS _np_bearing_deg,
+            lc.terrain_label
+        FROM limited_queue lq
+        LEFT JOIN event_centroids ec ON ec.event_id = lq.event_id
+        LEFT JOIN reverse_geocode_cache rgc
+            ON  ec.centroid IS NOT NULL
+            AND rgc.provider      = :geocoding_provider
+            AND rgc.cached_lat    = ROUND(CAST(ST_Y(ec.centroid) AS NUMERIC), :geocoding_precision)
+            AND rgc.cached_lon    = ROUND(CAST(ST_X(ec.centroid) AS NUMERIC), :geocoding_precision)
+            AND rgc.expires_at    > NOW()
+        LEFT JOIN LATERAL (
+            SELECT pp.name, pp.geom
+            FROM   ne_populated_places pp
+            WHERE  ec.centroid IS NOT NULL
+              AND  ST_DWithin(ec.centroid_geog, pp.geom::geography, 200000)
+            ORDER BY pp.geom <-> ec.centroid
+            LIMIT 1
+        ) np ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT MODE() WITHIN GROUP (ORDER BY fd.landcover_label) AS terrain_label
+            FROM   fire_detections fd
+            WHERE  fd.event_id        = lq.event_id
+              AND  fd.landcover_label IS NOT NULL
+        ) lc ON TRUE
         """
     )
+    params = {
+        "status": str(status),
+        "limit": max(1, int(limit)),
+        "geocoding_provider": settings.geocoding_provider.strip().lower(),
+        "geocoding_precision": settings.geocoding_cache_precision,
+    }
     with get_engine().begin() as conn:
-        rows = conn.execute(
-            stmt,
-            {"status": str(status), "limit": max(1, int(limit))},
-        ).mappings().all()
-    return [dict(r) for r in rows]
+        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
+        rows = conn.execute(stmt, params).mappings().all()
+
+    result = []
+    for r in rows:
+        row = dict(r)
+        row["nearest_place"] = _format_nearest_place(
+            row.pop("_np_name"),
+            row.pop("_np_dist_km"),
+            row.pop("_np_bearing_deg"),
+        )
+        result.append(row)
+    return result
 
 
 def resolve_denoiser_review_event(

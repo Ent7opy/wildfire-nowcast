@@ -165,6 +165,52 @@ function ActionButton({ tooltip, icon, label, color, hoverBg, borderColor, hover
   );
 }
 
+function countryFlagEmoji(countryCode: string | null | undefined): string {
+  if (!countryCode || countryCode.length !== 2) return "";
+  const code = countryCode.toUpperCase();
+  // Regional indicator symbols: A = 0x1F1E6, offset from 'A' char code 65
+  return String.fromCodePoint(
+    0x1f1e6 + code.charCodeAt(0) - 65,
+    0x1f1e6 + code.charCodeAt(1) - 65
+  );
+}
+
+function LocationContext({ item }: { item: DenoiserReviewItem }) {
+  const { country_code, region_name, nearest_place, terrain_label } = item;
+  const hasAny = country_code || region_name || nearest_place || terrain_label;
+
+  if (!hasAny) {
+    return (
+      <Typography sx={{ fontSize: 10, color: "#4b5563", mb: 0.75, fontStyle: "italic" }}>
+        Location unavailable
+      </Typography>
+    );
+  }
+
+  const flag = countryFlagEmoji(country_code);
+  const locationLine = [flag, region_name].filter(Boolean).join(" ") || null;
+
+  return (
+    <Box sx={{ mb: 0.75 }}>
+      {locationLine && (
+        <Typography sx={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.4 }}>
+          {locationLine}
+        </Typography>
+      )}
+      {nearest_place && (
+        <Typography sx={{ fontSize: 10, color: "#6b7280", fontStyle: "italic", lineHeight: 1.4 }}>
+          {nearest_place}
+        </Typography>
+      )}
+      {terrain_label && (
+        <Typography sx={{ fontSize: 10, color: "#6b7280", lineHeight: 1.4 }}>
+          {terrain_label}
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
 interface ReviewItemRowProps {
   item: DenoiserReviewItem;
   matchedEvent: FireEvent | null;
@@ -220,7 +266,7 @@ function ReviewItemRow({ item, matchedEvent, onResolve, isResolving }: ReviewIte
         </Typography>
       </Box>
 
-      <Box sx={{ display: "flex", gap: 2, mb: 1 }}>
+      <Box sx={{ display: "flex", gap: 2, mb: 0.75 }}>
         <Box>
           <Typography sx={{ fontSize: 9, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
             FRP
@@ -248,6 +294,8 @@ function ReviewItemRow({ item, matchedEvent, onResolve, isResolving }: ReviewIte
           </Box>
         )}
       </Box>
+
+      <LocationContext item={item} />
 
       <Box
         sx={{ display: "flex", gap: 0.75 }}
