@@ -7,8 +7,6 @@ Each test verifies that:
 from __future__ import annotations
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -22,8 +20,8 @@ from api.errors import (
     WildfireError,
     _STATUS_MAP,
 )
-from api.fires.repository import FireRepository
 from api.main import app
+from api.tests.conftest import make_fire_repo
 
 client = TestClient(app, raise_server_exceptions=False)
 
@@ -65,12 +63,10 @@ _FIRES_PARAMS = {
 }
 
 
-def _make_bbox_repo(raise_on_validate: str | None = None) -> FireRepository:
-    repo = MagicMock(spec=FireRepository)
+def _make_bbox_repo(raise_on_validate: str | None = None):
+    repo = make_fire_repo()
     if raise_on_validate:
         repo.validate_bbox.side_effect = ValueError(raise_on_validate)
-    else:
-        repo.validate_bbox.return_value = None
     return repo
 
 

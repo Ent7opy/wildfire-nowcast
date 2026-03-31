@@ -29,8 +29,6 @@ from api.fires.scoring_pipeline import (
 BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 LOGGER = logging.getLogger(__name__)
 
-# Shared statement timeout applied to all spatial queries to keep API latency bounded.
-# Pre-constructed as a TextClause so call sites avoid re-creating it on every request.
 _SPATIAL_QUERY_TIMEOUT = text("SET LOCAL statement_timeout = '5000ms'")
 
 # Stateless singletons — strategies hold no mutable state so one instance suffices.
@@ -281,6 +279,7 @@ def list_fire_detections_bbox_time(
     )
 
     with get_engine().begin() as conn:
+        conn.execute(_SPATIAL_QUERY_TIMEOUT)
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
 
@@ -315,6 +314,7 @@ async def async_list_fire_detections_bbox_time(
     )
 
     async with get_async_engine().begin() as conn:
+        await conn.execute(_SPATIAL_QUERY_TIMEOUT)
         result = await conn.execute(stmt, params)
         rows = result.mappings().all()
 

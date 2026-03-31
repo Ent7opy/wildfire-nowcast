@@ -62,3 +62,11 @@ def get_async_engine() -> AsyncEngine:
             echo=settings.environment == "dev",
         )
     return _async_engine
+
+
+async def dispose_async_engine() -> None:
+    """Dispose the async engine if it was created.  Safe to call unconditionally."""
+    global _async_engine
+    if _async_engine is not None:
+        await _async_engine.dispose()
+        _async_engine = None
