@@ -8,13 +8,14 @@ from datetime import datetime, timezone
 from typing import Iterable, Literal, TYPE_CHECKING
 
 from sqlalchemy import text, column as sa_column
+from sqlalchemy.sql.expression import TextClause
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
 from api.config import settings
 from api.pagination import encode_cursor, decode_cursor, build_page
-from api.db import get_engine
+from api.db import get_engine, get_async_engine
 from api.fires.scoring import compute_fire_likelihood
 from api.fires.scoring_pipeline import (
     _log_step,
@@ -29,7 +30,8 @@ BBox = tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
 LOGGER = logging.getLogger(__name__)
 
 # Shared statement timeout applied to all spatial queries to keep API latency bounded.
-_SPATIAL_QUERY_TIMEOUT = "SET LOCAL statement_timeout = '5000ms'"
+# Pre-constructed as a TextClause so call sites avoid re-creating it on every request.
+_SPATIAL_QUERY_TIMEOUT = text("SET LOCAL statement_timeout = '5000ms'")
 
 # Stateless singletons — strategies hold no mutable state so one instance suffices.
 _FALSE_SOURCE_STRATEGY = FalseSourceMaskingStrategy()
@@ -87,7 +89,7 @@ _ALLOWED_COLUMNS: dict[str, str] = {
 }
 
 
-def list_fire_detections_bbox_time(
+def _build_detections_query(
     bbox: BBox,
     start_time: datetime,
     end_time: datetime,
@@ -101,23 +103,12 @@ def list_fire_detections_bbox_time(
     min_fire_likelihood: float | None = None,
     cursor: str | None = None,
     offset: int | None = None,
-) -> dict:
-    """List fire detections in a lon/lat bbox and acquisition time window.
+) -> tuple[TextClause, dict[str, object], int]:
+    """Build the SQL statement and params for listing fire detections.
 
-    Supports cursor-based pagination for efficient retrieval of large result sets.
-
-    Notes
-    - Time filter uses `BETWEEN` (inclusive bounds).
-    - Spatial filter uses GiST index-friendly predicates:
-      `geom && envelope` plus `ST_Intersects(geom, envelope)`.
-    - Denoiser: By default, filters out rows where `is_noise` is TRUE.
-    - False-source masking: By default, filters out rows where `false_source_masked` is TRUE.
-    - Filtering: min_confidence filters FIRMS confidence (0-100), min_fire_likelihood filters
-      composite likelihood score (0-1). Both include NULL values (not yet scored).
-    - Pagination: Pass next_cursor from a previous response as cursor to get the next page.
-      Returns at most `limit` rows per request (default: 1000, max: 10000).
+    Returns ``(stmt, params, page_limit)`` where *page_limit* is the
+    validated limit value to pass to :func:`build_page`.
     """
-
     min_lon, min_lat, max_lon, max_lat = bbox
 
     cols = list(columns)
@@ -160,7 +151,7 @@ def list_fire_detections_bbox_time(
     if min_confidence is not None:
         # Include NULL confidence values when filtering (NULL means unknown, not 0)
         confidence_predicate = "AND (confidence IS NULL OR confidence >= :min_confidence)"
-    
+
     likelihood_predicate = ""
     if min_fire_likelihood is not None:
         # Include NULL likelihood values when filtering (NULL means not yet scored)
@@ -248,14 +239,103 @@ def list_fire_detections_bbox_time(
         """
     )
 
+    return stmt, params, limit
+
+
+def list_fire_detections_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    columns: Iterable[str] = ("lat", "lon", "acq_time"),
+    limit: int | None = None,
+    order: Literal["asc", "desc"] = "asc",
+    include_noise: bool = False,
+    include_masked: bool = False,
+    min_confidence: float | None = None,
+    min_fire_likelihood: float | None = None,
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """List fire detections in a lon/lat bbox and acquisition time window.
+
+    Supports cursor-based pagination for efficient retrieval of large result sets.
+
+    Notes
+    - Time filter uses `BETWEEN` (inclusive bounds).
+    - Spatial filter uses GiST index-friendly predicates:
+      `geom && envelope` plus `ST_Intersects(geom, envelope)`.
+    - Denoiser: By default, filters out rows where `is_noise` is TRUE.
+    - False-source masking: By default, filters out rows where `false_source_masked` is TRUE.
+    - Filtering: min_confidence filters FIRMS confidence (0-100), min_fire_likelihood filters
+      composite likelihood score (0-1). Both include NULL values (not yet scored).
+    - Pagination: Pass next_cursor from a previous response as cursor to get the next page.
+      Returns at most `limit` rows per request (default: 1000, max: 10000).
+    """
+    stmt, params, page_limit = _build_detections_query(
+        bbox, start_time, end_time,
+        columns=columns, limit=limit, order=order,
+        include_noise=include_noise, include_masked=include_masked,
+        min_confidence=min_confidence, min_fire_likelihood=min_fire_likelihood,
+        cursor=cursor, offset=offset,
+    )
+
     with get_engine().begin() as conn:
         result = conn.execute(stmt, params)
         rows = result.mappings().all()
 
     return build_page(
-        rows, limit,
+        rows, page_limit,
         cursor_fn=lambda r: encode_cursor(t=r["acq_time"], id=r["id"]),
     )
+
+
+async def async_list_fire_detections_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    columns: Iterable[str] = ("lat", "lon", "acq_time"),
+    limit: int | None = None,
+    order: Literal["asc", "desc"] = "asc",
+    include_noise: bool = False,
+    include_masked: bool = False,
+    min_confidence: float | None = None,
+    min_fire_likelihood: float | None = None,
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """Async variant of :func:`list_fire_detections_bbox_time`."""
+    stmt, params, page_limit = _build_detections_query(
+        bbox, start_time, end_time,
+        columns=columns, limit=limit, order=order,
+        include_noise=include_noise, include_masked=include_masked,
+        min_confidence=min_confidence, min_fire_likelihood=min_fire_likelihood,
+        cursor=cursor, offset=offset,
+    )
+
+    async with get_async_engine().begin() as conn:
+        result = await conn.execute(stmt, params)
+        rows = result.mappings().all()
+
+    return build_page(
+        rows, page_limit,
+        cursor_fn=lambda r: encode_cursor(t=r["acq_time"], id=r["id"]),
+    )
+
+
+_DETECTION_BY_ID_SQL = text("""
+    SELECT
+        id, lat, lon, acq_time,
+        confidence, brightness, bright_t31, frp,
+        sensor, source,
+        confidence_score, persistence_score, landcover_score, weather_score,
+        false_source_masked, fire_likelihood,
+        denoised_score, is_noise, event_id, event_score,
+        denoiser_decision, review_required
+    FROM fire_detections
+    WHERE id = :detection_id
+""")
 
 
 def get_fire_detection_by_id(detection_id: int) -> dict | None:
@@ -263,21 +343,20 @@ def get_fire_detection_by_id(detection_id: int) -> dict | None:
 
     Returns a dict of detection attributes or ``None`` if not found.
     """
-    stmt = text("""
-        SELECT
-            id, lat, lon, acq_time,
-            confidence, brightness, bright_t31, frp,
-            sensor, source,
-            confidence_score, persistence_score, landcover_score, weather_score,
-            false_source_masked, fire_likelihood,
-            denoised_score, is_noise, event_id, event_score,
-            denoiser_decision, review_required
-        FROM fire_detections
-        WHERE id = :detection_id
-    """)
-
     with get_engine().connect() as conn:
-        row = conn.execute(stmt, {"detection_id": detection_id}).mappings().first()
+        row = conn.execute(_DETECTION_BY_ID_SQL, {"detection_id": detection_id}).mappings().first()
+
+    if not row:
+        return None
+    return dict(row)
+
+
+async def async_get_fire_detection_by_id(detection_id: int) -> dict | None:
+    """Async variant of :func:`get_fire_detection_by_id`."""
+    async with get_async_engine().connect() as conn:
+        row = (
+            await conn.execute(_DETECTION_BY_ID_SQL, {"detection_id": detection_id})
+        ).mappings().first()
 
     if not row:
         return None
@@ -445,7 +524,7 @@ def update_all_scoring_for_batch(
         return _execute(new_conn)
 
 
-def list_fire_events_bbox_time(
+def _build_events_query(
     bbox: BBox,
     start_time: datetime,
     end_time: datetime,
@@ -455,11 +534,10 @@ def list_fire_events_bbox_time(
     limit: int = 1000,
     cursor: str | None = None,
     offset: int | None = None,
-) -> dict:
-    """List denoiser events in a bbox/time window.
+) -> tuple[TextClause, dict[str, object], int]:
+    """Build the SQL statement and params for listing fire events.
 
-    Returns a dict with keys ``data``, ``next_cursor``, ``has_more``, and ``limit``.
-    Order is COALESCE(start_time, end_time) DESC, event_id DESC.
+    Returns ``(stmt, params, page_limit)``.
     """
     min_lon, min_lat, max_lon, max_lat = bbox
 
@@ -604,19 +682,76 @@ def list_fire_events_bbox_time(
     params["geocoding_provider"] = settings.geocoding_provider.strip().lower()
     params["geocoding_precision"] = settings.geocoding_cache_precision
 
+    return stmt, params, limit
+
+
+def list_fire_events_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    min_event_score: float | None = None,
+    include_review_required: bool = True,
+    limit: int = 1000,
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """List denoiser events in a bbox/time window.
+
+    Returns a dict with keys ``data``, ``next_cursor``, ``has_more``, and ``limit``.
+    Order is COALESCE(start_time, end_time) DESC, event_id DESC.
+    """
+    stmt, params, page_limit = _build_events_query(
+        bbox, start_time, end_time,
+        min_event_score=min_event_score,
+        include_review_required=include_review_required,
+        limit=limit, cursor=cursor, offset=offset,
+    )
+
     with get_engine().begin() as conn:
-        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
+        conn.execute(_SPATIAL_QUERY_TIMEOUT)
         rows = conn.execute(stmt, params).mappings().all()
 
     return build_page(
-        rows, limit,
+        rows, page_limit,
         cursor_fn=lambda r: encode_cursor(
             t=r.get("start_time") or r.get("end_time"), id=r["event_id"]
         ),
     )
 
 
-def list_fire_fronts_bbox_time(
+async def async_list_fire_events_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    min_event_score: float | None = None,
+    include_review_required: bool = True,
+    limit: int = 1000,
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """Async variant of :func:`list_fire_events_bbox_time`."""
+    stmt, params, page_limit = _build_events_query(
+        bbox, start_time, end_time,
+        min_event_score=min_event_score,
+        include_review_required=include_review_required,
+        limit=limit, cursor=cursor, offset=offset,
+    )
+
+    async with get_async_engine().begin() as conn:
+        await conn.execute(_SPATIAL_QUERY_TIMEOUT)
+        rows = (await conn.execute(stmt, params)).mappings().all()
+
+    return build_page(
+        rows, page_limit,
+        cursor_fn=lambda r: encode_cursor(
+            t=r.get("start_time") or r.get("end_time"), id=r["event_id"]
+        ),
+    )
+
+
+def _build_fronts_query(
     bbox: BBox,
     start_time: datetime,
     end_time: datetime,
@@ -626,11 +761,10 @@ def list_fire_fronts_bbox_time(
     limit: int = 2000,
     cursor: str | None = None,
     offset: int | None = None,
-) -> dict:
-    """List denoiser fire fronts in a bbox/time window.
+) -> tuple[TextClause, dict[str, object], int]:
+    """Build the SQL statement and params for listing fire fronts.
 
-    Returns a dict with keys ``data``, ``next_cursor``, ``has_more``, and ``limit``.
-    Order is COALESCE(overpass_end, overpass_start) DESC NULLS LAST, front_id DESC.
+    Returns ``(stmt, params, effective_limit)``.
     """
     min_lon, min_lat, max_lon, max_lat = bbox
 
@@ -811,13 +945,70 @@ def list_fire_fronts_bbox_time(
         """
     )
 
+    return stmt, params, effective_limit
+
+
+def list_fire_fronts_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    min_event_score: float | None = None,
+    include_review_required: bool = True,
+    limit: int = 2000,
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """List denoiser fire fronts in a bbox/time window.
+
+    Returns a dict with keys ``data``, ``next_cursor``, ``has_more``, and ``limit``.
+    Order is COALESCE(overpass_end, overpass_start) DESC NULLS LAST, front_id DESC.
+    """
+    stmt, params, page_limit = _build_fronts_query(
+        bbox, start_time, end_time,
+        min_event_score=min_event_score,
+        include_review_required=include_review_required,
+        limit=limit, cursor=cursor, offset=offset,
+    )
+
     with get_engine().begin() as conn:
         # Keep request latency bounded so map interactions do not starve API health checks.
-        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
+        conn.execute(_SPATIAL_QUERY_TIMEOUT)
         rows = conn.execute(stmt, params).mappings().all()
 
     return build_page(
-        rows, effective_limit,
+        rows, page_limit,
+        cursor_fn=lambda r: encode_cursor(
+            t=r.get("overpass_end") or r.get("overpass_start"), id=r["front_id"]
+        ),
+    )
+
+
+async def async_list_fire_fronts_bbox_time(
+    bbox: BBox,
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    min_event_score: float | None = None,
+    include_review_required: bool = True,
+    limit: int = 2000,
+    cursor: str | None = None,
+    offset: int | None = None,
+) -> dict:
+    """Async variant of :func:`list_fire_fronts_bbox_time`."""
+    stmt, params, page_limit = _build_fronts_query(
+        bbox, start_time, end_time,
+        min_event_score=min_event_score,
+        include_review_required=include_review_required,
+        limit=limit, cursor=cursor, offset=offset,
+    )
+
+    async with get_async_engine().begin() as conn:
+        await conn.execute(_SPATIAL_QUERY_TIMEOUT)
+        rows = (await conn.execute(stmt, params)).mappings().all()
+
+    return build_page(
+        rows, page_limit,
         cursor_fn=lambda r: encode_cursor(
             t=r.get("overpass_end") or r.get("overpass_start"), id=r["front_id"]
         ),
@@ -1256,7 +1447,7 @@ def list_denoiser_review_queue(limit: int = 200, status: str = "open") -> list[d
         "geocoding_precision": settings.geocoding_cache_precision,
     }
     with get_engine().begin() as conn:
-        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
+        conn.execute(_SPATIAL_QUERY_TIMEOUT)
         rows = conn.execute(stmt, params).mappings().all()
 
     result = []
@@ -1385,7 +1576,7 @@ def get_review_event_detail(event_id: str) -> dict | None:
     )
 
     with get_engine().begin() as conn:
-        conn.execute(text(_SPATIAL_QUERY_TIMEOUT))
+        conn.execute(_SPATIAL_QUERY_TIMEOUT)
 
         base_row = conn.execute(base_stmt, {"event_id": event_id}).mappings().first()
         if base_row is None:

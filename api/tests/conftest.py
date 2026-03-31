@@ -50,6 +50,25 @@ def clear_spread_model_catalog_cache():
 
 
 
+def make_fire_repo(**method_overrides):
+    """Return a MagicMock FireRepository with validate_bbox silenced by default.
+
+    Methods whose name starts with ``async_`` are wired as :class:`AsyncMock`
+    so that ``await repo.async_foo(...)`` works inside async route handlers.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from api.fires.repository import FireRepository
+
+    repo = MagicMock(spec=FireRepository)
+    repo.validate_bbox.return_value = None
+    for name, value in method_overrides.items():
+        if name.startswith("async_"):
+            setattr(repo, name, AsyncMock(return_value=value))
+        else:
+            getattr(repo, name).return_value = value
+    return repo
+
+
 def pytest_configure(config):
     """Register custom pytest marks."""
     config.addinivalue_line(

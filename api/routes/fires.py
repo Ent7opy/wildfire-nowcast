@@ -15,7 +15,7 @@ from api.fires.geocoding import reverse_geocode_point
 fires_router = APIRouter(prefix="/fires", tags=["fires"])
 
 
-def _list_detections(
+async def _list_detections(
     repo: FireRepository,
     *,
     min_lon: float,
@@ -44,7 +44,7 @@ def _list_detections(
         columns.extend(FIRE_DETECTION_DENOISER_COLUMNS)
 
     try:
-        result = repo.list_fire_detections_bbox_time(
+        result = await repo.async_list_fire_detections_bbox_time(
             bbox=(min_lon, min_lat, max_lon, max_lat),
             start_time=start_time,
             end_time=end_time,
@@ -89,7 +89,7 @@ async def get_fires(
     repo: FireRepository = Depends(get_fire_repo),
 ):
     """Alias for `/fires/detections` (kept for UI/backward compatibility)."""
-    return _list_detections(
+    return await _list_detections(
         repo,
         min_lon=min_lon,
         min_lat=min_lat,
@@ -137,7 +137,7 @@ async def get_detections(
 
     By default, only non-noise detections (or those not yet scored) are returned.
     """
-    return _list_detections(
+    return await _list_detections(
         repo,
         min_lon=min_lon,
         min_lat=min_lat,
@@ -170,7 +170,7 @@ async def get_detection_detail(
     detection's location.  When no weather data is available, ``weather``
     is ``null`` with a ``weather_unavailable_reason`` string.
     """
-    detection = repo.get_fire_detection_by_id(detection_id)
+    detection = await repo.async_get_fire_detection_by_id(detection_id)
     if detection is None:
         raise HTTPException(status_code=404, detail="Detection not found")
 
@@ -316,7 +316,7 @@ async def get_events(
         raise InvalidBoundingBoxError(str(e)) from e
 
     try:
-        result = repo.list_fire_events_bbox_time(
+        result = await repo.async_list_fire_events_bbox_time(
             bbox=(min_lon, min_lat, max_lon, max_lat),
             start_time=start_time,
             end_time=end_time,
@@ -364,7 +364,7 @@ async def get_fronts(
         raise InvalidBoundingBoxError(str(e)) from e
 
     try:
-        result = repo.list_fire_fronts_bbox_time(
+        result = await repo.async_list_fire_fronts_bbox_time(
             bbox=(min_lon, min_lat, max_lon, max_lat),
             start_time=start_time,
             end_time=end_time,

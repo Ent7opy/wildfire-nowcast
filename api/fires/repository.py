@@ -102,6 +102,90 @@ class FireRepository:
     def get_fire_detection_by_id(self, detection_id: int) -> dict | None:
         return _repo.get_fire_detection_by_id(detection_id)
 
+    # ------------------------------------------------------------------
+    # Async methods — used by migrated async route handlers
+    # ------------------------------------------------------------------
+
+    async def async_list_fire_detections_bbox_time(
+        self,
+        bbox: _repo.BBox,
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        columns: Iterable[str] = ("lat", "lon", "acq_time"),
+        limit: int | None = None,
+        order: Literal["asc", "desc"] = "asc",
+        include_noise: bool = False,
+        include_masked: bool = False,
+        min_confidence: float | None = None,
+        min_fire_likelihood: float | None = None,
+        cursor: str | None = None,
+        offset: int | None = None,
+    ) -> dict:
+        return await _repo.async_list_fire_detections_bbox_time(
+            bbox,
+            start_time,
+            end_time,
+            columns=columns,
+            limit=limit,
+            order=order,
+            include_noise=include_noise,
+            include_masked=include_masked,
+            min_confidence=min_confidence,
+            min_fire_likelihood=min_fire_likelihood,
+            cursor=cursor,
+            offset=offset,
+        )
+
+    async def async_get_fire_detection_by_id(self, detection_id: int) -> dict | None:
+        return await _repo.async_get_fire_detection_by_id(detection_id)
+
+    async def async_list_fire_events_bbox_time(
+        self,
+        bbox: _repo.BBox,
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        min_event_score: float | None = None,
+        include_review_required: bool = True,
+        limit: int = 1000,
+        cursor: str | None = None,
+        offset: int | None = None,
+    ) -> dict:
+        return await _repo.async_list_fire_events_bbox_time(
+            bbox,
+            start_time,
+            end_time,
+            min_event_score=min_event_score,
+            include_review_required=include_review_required,
+            limit=limit,
+            cursor=cursor,
+            offset=offset,
+        )
+
+    async def async_list_fire_fronts_bbox_time(
+        self,
+        bbox: _repo.BBox,
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        min_event_score: float | None = None,
+        include_review_required: bool = True,
+        limit: int = 2000,
+        cursor: str | None = None,
+        offset: int | None = None,
+    ) -> dict:
+        return await _repo.async_list_fire_fronts_bbox_time(
+            bbox,
+            start_time,
+            end_time,
+            min_event_score=min_event_score,
+            include_review_required=include_review_required,
+            limit=limit,
+            cursor=cursor,
+            offset=offset,
+        )
+
     def get_fire_front_by_id(
         self,
         front_id: str,
