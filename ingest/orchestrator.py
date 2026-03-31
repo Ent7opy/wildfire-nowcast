@@ -577,6 +577,28 @@ def _run_terrain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _auto_close_review_queue() -> None:
+    """Post-perimeter-ingest: auto-resolve open review queue items matched by fresh perimeters.
+
+    Runs fire-and-forget after each perimeter commit.  Logs each closure for
+    auditability (event_id, resolved_by, perimeter_ref).  Never raises — the
+    ingest pipeline must continue regardless of outcome.
+    """
+    try:
+        from api.fires.repo import auto_close_review_queue_by_perimeters  # noqa: PLC0415
+
+        results = auto_close_review_queue_by_perimeters()
+        for row in results:
+            LOGGER.info(
+                "auto_close_review_queue: event_id=%s resolved_by=%s perimeter_ref=%s",
+                row["event_id"],
+                row["resolved_by"],
+                row["perimeter_ref"],
+            )
+    except Exception:
+        LOGGER.warning("auto_close_review_queue failed (non-fatal)", exc_info=True)
+
+
 def _run_perimeters(args: argparse.Namespace) -> int:
     years = args.perimeters_year or [datetime.now(timezone.utc).year]
     bbox = tuple(args.perimeters_bbox) if args.perimeters_bbox else None
@@ -595,6 +617,7 @@ def _run_perimeters(args: argparse.Namespace) -> int:
         years,
         total_inserted,
     )
+    _auto_close_review_queue()
     return 0
 
 
