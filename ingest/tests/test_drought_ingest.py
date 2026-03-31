@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -46,7 +45,7 @@ class TestCheckStaleness(unittest.TestCase):
             logging.getLogger("drought_ingest").info("probe")  # ensure logger fires
             _check_staleness(latest)
 
-        warning_lines = [l for l in cm.output if "WARNING" in l and "stale" in l.lower()]
+        warning_lines = [line for line in cm.output if "WARNING" in line and "stale" in line.lower()]
         self.assertEqual([], warning_lines)
 
     def test_stale_run_logs_warning(self):

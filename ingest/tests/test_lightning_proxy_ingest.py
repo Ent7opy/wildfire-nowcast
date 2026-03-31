@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 
 def _utc() -> datetime:
