@@ -664,5 +664,69 @@ class TestFuelJobs(unittest.TestCase):
         self.assertEqual(["lfmc"], calls)  # downstream did not run
 
 
+class TestPerimeterAutoClose(unittest.TestCase):
+    """Tests for the _auto_close_review_queue hook called after perimeter ingest."""
+
+    def test_auto_close_called_after_perimeters_ingest(self):
+        """_run_perimeters must call _auto_close_review_queue after the DB commit."""
+        from ingest.orchestrator import _run_perimeters
+
+        args = argparse.Namespace(
+            perimeters_year=None,
+            perimeters_bbox=None,
+            perimeters_timeout_seconds=30,
+        )
+
+        called: list[bool] = []
+
+        def _fake_fetch(*_a, **_kw):
+            return []
+
+        def _fake_ingest(_features):
+            return 0
+
+        def _fake_auto_close():
+            called.append(True)
+
+        with (
+            patch("ingest.orchestrator.fetch_nifc_perimeters", side_effect=_fake_fetch),
+            patch("ingest.orchestrator.ingest_perimeters", side_effect=_fake_ingest),
+            patch("ingest.orchestrator._auto_close_review_queue", side_effect=_fake_auto_close),
+        ):
+            code = _run_perimeters(args)
+
+        self.assertEqual(0, code)
+        self.assertEqual([True], called, "_auto_close_review_queue must be called exactly once")
+
+    def test_auto_close_exception_does_not_propagate(self):
+        """Errors in _auto_close_review_queue must never fail the ingest job."""
+        from ingest.orchestrator import _auto_close_review_queue
+
+        with patch("api.fires.repo.auto_close_review_queue_by_perimeters", side_effect=RuntimeError("DB error")):
+            _auto_close_review_queue()  # must not raise
+
+    def test_auto_close_logs_each_closed_item(self):
+        """Closed items must be logged individually with event_id and resolved_by."""
+        import logging
+        from ingest.orchestrator import _auto_close_review_queue
+
+        closed_rows = [
+            {"queue_id": 1, "event_id": "evt_a", "perimeter_ref": "10", "resolved_by": "auto:perimeter:wfigs"},
+            {"queue_id": 2, "event_id": "evt_b", "perimeter_ref": "20", "resolved_by": "auto:perimeter:cwfis"},
+        ]
+
+        with (
+            patch("api.fires.repo.auto_close_review_queue_by_perimeters", return_value=closed_rows),
+            self.assertLogs("ingest_orchestrator", level=logging.INFO) as log_ctx,
+        ):
+            _auto_close_review_queue()
+
+        log_text = "\n".join(log_ctx.output)
+        self.assertIn("evt_a", log_text)
+        self.assertIn("auto:perimeter:wfigs", log_text)
+        self.assertIn("evt_b", log_text)
+        self.assertIn("auto:perimeter:cwfis", log_text)
+
+
 if __name__ == "__main__":
     unittest.main()

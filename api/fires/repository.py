@@ -251,3 +251,6 @@ class FireRepository:
             resolved_by=resolved_by,
             resolved_notes=resolved_notes,
         )
+
+    def auto_close_review_queue_by_perimeters(self, lookback_seconds: int = 7200) -> list[dict]:
+        return _repo.auto_close_review_queue_by_perimeters(lookback_seconds)

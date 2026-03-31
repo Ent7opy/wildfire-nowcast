@@ -1679,3 +1679,80 @@ def resolve_denoiser_review_event(
             },
         )
     return int(result.rowcount or 0)
+
+
+def auto_close_review_queue_by_perimeters(lookback_seconds: int = 7200) -> list[dict]:
+    """Auto-resolve open review queue items whose event centroid intersects a recently
+    ingested perimeter.
+
+    Checks both ``authoritative_perimeters`` (WFIGS, CWFIS, Copernicus EMS) and
+    ``fire_perimeters`` (NIFC).  Returns one dict per closed queue row for audit
+    logging: ``{queue_id, event_id, perimeter_ref, resolved_by}``.
+
+    ``resolved_by`` is set to ``auto:perimeter:<source>`` so auto-closures are
+    distinguishable from operator resolutions in query history.
+    """
+    stmt = text(
+        """
+        WITH auth_matches AS (
+            SELECT DISTINCT ON (rq.event_id)
+                rq.id          AS queue_id,
+                rq.event_id,
+                ap.perimeter_id::text AS perimeter_ref,
+                'auto:perimeter:' || CASE
+                    WHEN ap.source_profile LIKE 'wfigs%'      THEN 'wfigs'
+                    WHEN ap.source_profile LIKE 'cwfis%'      THEN 'cwfis'
+                    WHEN ap.source_profile LIKE 'copernicus%' THEN 'copernicus_ems'
+                    ELSE ap.source_profile
+                END AS resolved_by
+            FROM denoiser_review_queue rq
+            JOIN fire_events fe ON fe.event_id = rq.event_id
+            JOIN authoritative_perimeters ap
+                ON ST_Within(ST_Centroid(fe.geom), ap.geom)
+            WHERE rq.status = 'open'
+              AND ap.last_seen_at > NOW() - (:lookback_seconds * INTERVAL '1 second')
+            ORDER BY rq.event_id, ap.perimeter_id
+        ),
+        nifc_matches AS (
+            SELECT DISTINCT ON (rq.event_id)
+                rq.id          AS queue_id,
+                rq.event_id,
+                fp.id::text    AS perimeter_ref,
+                'auto:perimeter:' || fp.source AS resolved_by
+            FROM denoiser_review_queue rq
+            JOIN fire_events fe ON fe.event_id = rq.event_id
+            JOIN fire_perimeters fp
+                ON ST_Within(ST_Centroid(fe.geom), fp.geom)
+            WHERE rq.status = 'open'
+              AND fp.created_at > NOW() - (:lookback_seconds * INTERVAL '1 second')
+            ORDER BY rq.event_id, fp.id
+        ),
+        all_matches AS (
+            SELECT * FROM auth_matches
+            UNION ALL
+            SELECT * FROM nifc_matches
+        ),
+        first_match AS (
+            SELECT DISTINCT ON (event_id) *
+            FROM all_matches
+            ORDER BY event_id, queue_id
+        ),
+        updated AS (
+            UPDATE denoiser_review_queue q
+            SET
+                status         = 'resolved',
+                resolved_by    = m.resolved_by,
+                resolved_notes = 'confirmed_fire',
+                resolved_at    = NOW(),
+                updated_at     = NOW()
+            FROM first_match m
+            WHERE q.id = m.queue_id
+              AND q.status = 'open'
+            RETURNING q.id AS queue_id, q.event_id, m.perimeter_ref, m.resolved_by
+        )
+        SELECT * FROM updated
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(stmt, {"lookback_seconds": lookback_seconds}).mappings().all()
+    return [dict(r) for r in rows]
