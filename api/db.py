@@ -54,7 +54,10 @@ def get_async_engine() -> AsyncEngine:
     global _async_engine
     if _async_engine is None:
         connect_args: dict = {}
-        if settings.db_ssl_require:
+        # Use effective_db_ssl_require so that SSL is automatically enabled
+        # for cloud-hosted databases (Railway, RDS, etc.) even when
+        # DB_SSL_REQUIRE is not explicitly set in the environment.
+        if settings.effective_db_ssl_require:
             connect_args["ssl"] = "require"
         _async_engine = create_async_engine(
             settings.async_database_url,
