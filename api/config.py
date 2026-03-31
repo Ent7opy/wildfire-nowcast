@@ -111,11 +111,47 @@ class AppSettings(BaseSettings):
 
     @property
     def async_database_url(self) -> str:
-        """Async connection URL for asyncpg.  Derived from *database_url* by swapping the dialect."""
+        """Async connection URL for asyncpg.  Derived from *database_url* by swapping the dialect.
+
+        Explicitly reconstructs the URL to guarantee that credentials are
+        preserved after the dialect swap.  make_url().set() can silently drop
+        the password in some SQLAlchemy 2.x builds when the original URL was
+        produced by a third-party provider (e.g. Railway) that encodes special
+        characters differently.
+        """
         from sqlalchemy.engine import make_url
 
-        url = make_url(self.database_url)
-        return str(url.set(drivername="postgresql+asyncpg"))
+        parsed = make_url(self.database_url)
+
+        # Rebuild with an explicit drivername so credentials are never lost.
+        async_url = parsed.set(drivername="postgresql+asyncpg")
+
+        # Sanity-check: if the password was dropped during the conversion,
+        # fall back to a fully manual reconstruction from the parsed components.
+        if parsed.password and not async_url.password:
+            async_url = async_url.set(
+                username=parsed.username,
+                password=parsed.password,
+            )
+
+        return str(async_url)
+
+    def _is_cloud_database(self) -> bool:
+        """Return True when the database host looks like a managed cloud provider."""
+        from sqlalchemy.engine import make_url
+
+        try:
+            host = make_url(self.database_url).host or ""
+        except Exception:
+            host = ""
+        cloud_indicators = ("railway", "amazonaws", "rds.", "azure", "supabase", "neon")
+        return any(indicator in host.lower() for indicator in cloud_indicators)
+
+    @property
+    def effective_db_ssl_require(self) -> bool:
+        """True when SSL should be required — either explicitly configured or
+        auto-detected because the host is a known cloud provider."""
+        return self.db_ssl_require or self._is_cloud_database()
 
     # TiTiler settings
     titiler_public_base_url: str = Field(
