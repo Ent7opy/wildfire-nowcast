@@ -51,28 +51,6 @@ function getReasonMeta(reason: string) {
   );
 }
 
-const PERIMETER_SOURCE_LABELS: Record<string, string> = {
-  wfigs: "WFIGS",
-  cwfis: "CWFIS",
-  copernicus_ems: "Copernicus EMS",
-  nifc: "NIFC",
-};
-
-/** Format a resolved_by value for display in resolved-history contexts.
- *  "auto:perimeter:wfigs" → "Auto-confirmed: WFIGS perimeter"
- *  "operator" / anything else → returned as-is
- */
-function formatResolvedBy(resolvedBy: string | null | undefined): string {
-  if (!resolvedBy) return "operator";
-  const prefix = "auto:perimeter:";
-  if (resolvedBy.startsWith(prefix)) {
-    const key = resolvedBy.slice(prefix.length);
-    const label = PERIMETER_SOURCE_LABELS[key] ?? key.toUpperCase();
-    return `Auto-confirmed: ${label} perimeter`;
-  }
-  return resolvedBy;
-}
-
 function formatTimestamp(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
