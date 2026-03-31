@@ -33,13 +33,15 @@ JOB_FIRMS = "firms"
 JOB_WEATHER = "weather"
 JOB_LFMC = "lfmc"
 JOB_LULC = "lulc"
+JOB_DROUGHT = "drought"
+JOB_LIGHTNING_PROXY = "lightning_proxy"
 JOB_TERRAIN = "terrain"
 JOB_PERIMETERS = "perimeters"
 JOB_INDUSTRIAL = "industrial"
 JOB_DENOISER_DRIFT = "denoiser_drift"
 JOB_CLEANUP = "cleanup"
 JOB_AOI_WATCH = "aoi_watch"
-JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP, JOB_AOI_WATCH)
+JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_DROUGHT, JOB_LIGHTNING_PROXY, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP, JOB_AOI_WATCH)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 # Watermarks whose source name ends with _NRT are near-real-time feeds.
@@ -210,6 +212,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=10080.0,
         help="LULC WorldCover backfill interval in minutes (loop mode). Weekly; tiles are static.",
+    )
+    parser.add_argument(
+        "--drought-interval-minutes",
+        type=float,
+        default=1440.0,
+        help=(
+            "Drought index (Copernicus GDO) ingest interval in minutes (loop mode). "
+            "Data is weekly; daily checks detect new releases promptly."
+        ),
+    )
+    parser.add_argument(
+        "--lightning-proxy-interval-minutes",
+        type=float,
+        default=360.0,
+        help=(
+            "Lightning proxy (MeteoAlarm thunderstorm warnings) ingest interval in minutes (loop mode). "
+            "Aligned to GFS cycles (~6h) to keep the ignition signal fresh."
+        ),
     )
     parser.add_argument(
         "--cleanup-interval-minutes",
@@ -456,6 +476,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--weather-interval-minutes", args.weather_interval_minutes),
         ("--lfmc-interval-minutes", args.lfmc_interval_minutes),
         ("--lulc-interval-minutes", args.lulc_interval_minutes),
+        ("--drought-interval-minutes", args.drought_interval_minutes),
+        ("--lightning-proxy-interval-minutes", args.lightning_proxy_interval_minutes),
         ("--terrain-interval-minutes", args.terrain_interval_minutes),
         ("--perimeters-interval-minutes", args.perimeters_interval_minutes),
         ("--industrial-interval-minutes", args.industrial_interval_minutes),
@@ -561,6 +583,24 @@ def _run_lulc(args: argparse.Namespace) -> int:
     )
     LOGGER.info("LULC WorldCover backfill complete: %s", result)
     return 0
+
+
+def _run_drought(args: argparse.Namespace) -> int:
+    """Run Copernicus GDO drought index ingest.
+
+    Missing CDSAPI_KEY is a WARNING (not a BLOCKER) — the orchestrator
+    continues normally and the ignition probability model degrades gracefully.
+    """
+    from ingest.drought_ingest import run_drought_ingest  # noqa: PLC0415
+
+    return run_drought_ingest()
+
+
+def _run_lightning_proxy(args: argparse.Namespace) -> int:
+    """Materialise the thunderstorm-active grid from MeteoAlarm warnings."""
+    from ingest.lightning_proxy_ingest import run_lightning_proxy_ingest  # noqa: PLC0415
+
+    return run_lightning_proxy_ingest()
 
 
 def _run_terrain(args: argparse.Namespace) -> int:
@@ -796,6 +836,8 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_WEATHER: lambda: _run_weather(args),
         JOB_LFMC: lambda: _run_lfmc(args),
         JOB_LULC: lambda: _run_lulc(args),
+        JOB_DROUGHT: lambda: _run_drought(args),
+        JOB_LIGHTNING_PROXY: lambda: _run_lightning_proxy(args),
         JOB_TERRAIN: lambda: _run_terrain(args),
         JOB_PERIMETERS: lambda: _run_perimeters(args),
         JOB_INDUSTRIAL: lambda: _run_industrial(args),
@@ -809,6 +851,8 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_WEATHER: args.weather_interval_minutes * 60.0,
         JOB_LFMC: args.lfmc_interval_minutes * 60.0,
         JOB_LULC: args.lulc_interval_minutes * 60.0,
+        JOB_DROUGHT: args.drought_interval_minutes * 60.0,
+        JOB_LIGHTNING_PROXY: args.lightning_proxy_interval_minutes * 60.0,
         JOB_TERRAIN: args.terrain_interval_minutes * 60.0,
         JOB_PERIMETERS: args.perimeters_interval_minutes * 60.0,
         JOB_INDUSTRIAL: args.industrial_interval_minutes * 60.0,
