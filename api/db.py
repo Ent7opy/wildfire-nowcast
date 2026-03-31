@@ -53,6 +53,9 @@ def get_async_engine() -> AsyncEngine:
     """
     global _async_engine
     if _async_engine is None:
+        connect_args: dict = {}
+        if settings.db_ssl_require:
+            connect_args["ssl"] = "require"
         _async_engine = create_async_engine(
             settings.async_database_url,
             pool_size=settings.db_pool_size,
@@ -60,6 +63,7 @@ def get_async_engine() -> AsyncEngine:
             pool_recycle=settings.db_pool_recycle_seconds,
             pool_pre_ping=True,
             echo=settings.environment == "dev",
+            connect_args=connect_args,
         )
     return _async_engine
 

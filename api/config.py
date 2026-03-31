@@ -64,6 +64,7 @@ class AppSettings(BaseSettings):
     db_pool_recycle_seconds: int = Field(
         default=1800, validation_alias="DB_POOL_RECYCLE_SECONDS"
     )
+    db_ssl_require: bool = Field(default=False, validation_alias="DB_SSL_REQUIRE")
 
     # Database settings. Accept POSTGRES_* (local/docker) or PG* / DATABASE_URL (e.g. Railway PostGIS).
     database_url_override: str | None = Field(
