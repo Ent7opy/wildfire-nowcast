@@ -347,7 +347,7 @@ async def denoiser_drift(limit: int = 50) -> dict:
 
 
 @internal_router.get("/internal/denoiser/review-queue")
-async def denoiser_review_queue(limit: int = 200, status: str = "open") -> dict:
+async def denoiser_review_queue(limit: int = 10, status: str = "open") -> dict:
     """Return denoiser review queue items."""
     as_of = datetime.now(timezone.utc).isoformat()
     try:

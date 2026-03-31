@@ -1372,7 +1372,7 @@ def _format_nearest_place(name: str | None, dist_km: float | None, bearing_deg: 
     return f"{int(dist_km)} km {_COMPASS[idx]} of {name}"
 
 
-def list_denoiser_review_queue(limit: int = 200, status: str = "open") -> list[dict]:
+def list_denoiser_review_queue(limit: int = 10, status: str = "open") -> list[dict]:
     """List denoiser review queue rows enriched with location context."""
     stmt = text(
         """
@@ -1392,7 +1392,7 @@ def list_denoiser_review_queue(limit: int = 200, status: str = "open") -> list[d
                 updated_at
             FROM denoiser_review_queue
             WHERE status = :status
-            ORDER BY created_at DESC, id DESC
+            ORDER BY (payload_json->>'frp_max')::float DESC NULLS LAST, created_at DESC, id DESC
             LIMIT :limit
         ),
         event_centroids AS (

@@ -7,7 +7,7 @@ import type {
 import { getJson, postJson } from "./http";
 
 export async function getDenoiserReviewQueue(): Promise<ReviewQueueResponse> {
-  return getJson<ReviewQueueResponse>("/internal/denoiser/review-queue", { limit: 200, status: "open" });
+  return getJson<ReviewQueueResponse>("/internal/denoiser/review-queue", { limit: 10, status: "open" });
 }
 
 export async function resolveDenoiserReviewItem(args: {
