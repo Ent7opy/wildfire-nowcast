@@ -110,29 +110,39 @@ class AppSettings(BaseSettings):
         )
 
     @property
+    def async_db_username(self) -> str | None:
+        """Username extracted from the database URL, for explicit asyncpg credential passing."""
+        from sqlalchemy.engine import make_url
+
+        return make_url(self.database_url).username
+
+    @property
+    def async_db_password(self) -> str | None:
+        """Password extracted from the database URL, for explicit asyncpg credential passing."""
+        from sqlalchemy.engine import make_url
+
+        return make_url(self.database_url).password
+
+    @property
     def async_database_url(self) -> str:
         """Async connection URL for asyncpg.  Derived from *database_url* by swapping the dialect.
 
-        Explicitly reconstructs the URL to guarantee that credentials are
-        preserved after the dialect swap.  make_url().set() can silently drop
-        the password in some SQLAlchemy 2.x builds when the original URL was
-        produced by a third-party provider (e.g. Railway) that encodes special
-        characters differently.
+        Credentials are intentionally stripped from the URL and passed to
+        asyncpg via explicit ``connect_args`` in db.py instead.  This avoids
+        URL-parsing fragility (special characters, encoding differences between
+        providers) that caused asyncpg to fall back to the "postgres" default
+        user and fail authentication.
         """
         from sqlalchemy.engine import make_url
 
         parsed = make_url(self.database_url)
 
-        # Rebuild with an explicit drivername so credentials are never lost.
-        async_url = parsed.set(drivername="postgresql+asyncpg")
-
-        # Sanity-check: if the password was dropped during the conversion,
-        # fall back to a fully manual reconstruction from the parsed components.
-        if parsed.password and not async_url.password:
-            async_url = async_url.set(
-                username=parsed.username,
-                password=parsed.password,
-            )
+        # Build a credential-free URL — credentials are injected via connect_args.
+        async_url = parsed.set(
+            drivername="postgresql+asyncpg",
+            username=None,
+            password=None,
+        )
 
         return str(async_url)
 
