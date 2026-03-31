@@ -1,14 +1,14 @@
 """Tests for GET /fires/detections/{detection_id} with weather context."""
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from api.core.weather import classify_rh_fire_risk
 from api.deps import get_fire_repo
-from api.fires.repository import FireRepository
 from api.main import app
+from api.tests.conftest import make_fire_repo as _make_repo
 
 client = TestClient(app)
 
@@ -83,14 +83,6 @@ _FORECAST_STEPS = [
 ]
 
 
-def _make_repo(**method_overrides) -> FireRepository:
-    repo = MagicMock(spec=FireRepository)
-    repo.validate_bbox.return_value = None
-    for name, value in method_overrides.items():
-        getattr(repo, name).return_value = value
-    return repo
-
-
 # ---------------------------------------------------------------------------
 # Happy path — weather data available
 # ---------------------------------------------------------------------------
@@ -99,7 +91,7 @@ def _make_repo(**method_overrides) -> FireRepository:
 @patch("api.routes.fires.get_weather_context_for_point", return_value=_WEATHER_CONTEXT)
 def test_detection_detail_with_weather(mock_wx, mock_fc, monkeypatch):
     """Full detection detail response includes weather block."""
-    fake_repo = _make_repo(get_fire_detection_by_id=_DETECTION.copy())
+    fake_repo = _make_repo(async_get_fire_detection_by_id=_DETECTION.copy())
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections/42")
@@ -133,7 +125,7 @@ def test_detection_detail_with_weather(mock_wx, mock_fc, monkeypatch):
 @patch("api.routes.fires.get_weather_context_for_point", return_value=_WEATHER_CONTEXT)
 def test_detection_detail_includes_forecast(mock_wx, mock_fc, monkeypatch):
     """Detection detail includes forecast steps when weather is available."""
-    fake_repo = _make_repo(get_fire_detection_by_id=_DETECTION.copy())
+    fake_repo = _make_repo(async_get_fire_detection_by_id=_DETECTION.copy())
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections/42")
@@ -165,7 +157,7 @@ def test_detection_detail_includes_forecast(mock_wx, mock_fc, monkeypatch):
 @patch("api.routes.fires.get_weather_context_for_point", return_value=None)
 def test_detection_detail_weather_null(mock_wx, monkeypatch):
     """When no weather data covers the point, weather and forecast are both null."""
-    fake_repo = _make_repo(get_fire_detection_by_id=_DETECTION.copy())
+    fake_repo = _make_repo(async_get_fire_detection_by_id=_DETECTION.copy())
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections/42")
@@ -186,7 +178,7 @@ def test_detection_detail_weather_null(mock_wx, monkeypatch):
 @patch("api.routes.fires.get_weather_context_for_point", return_value=_WEATHER_CONTEXT)
 def test_detection_detail_forecast_null_when_no_horizon(mock_wx, mock_fc, monkeypatch):
     """Forecast is null when get_weather_forecast_for_point returns None (e.g. short-horizon run)."""
-    fake_repo = _make_repo(get_fire_detection_by_id=_DETECTION.copy())
+    fake_repo = _make_repo(async_get_fire_detection_by_id=_DETECTION.copy())
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections/42")
@@ -203,7 +195,7 @@ def test_detection_detail_forecast_null_when_no_horizon(mock_wx, mock_fc, monkey
 
 def test_detection_detail_not_found(monkeypatch):
     """Unknown detection ID returns 404."""
-    fake_repo = _make_repo(get_fire_detection_by_id=None)
+    fake_repo = _make_repo(async_get_fire_detection_by_id=None)
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections/999999")
@@ -248,7 +240,7 @@ def test_rh_boundary_exactly_25():
 @patch("api.routes.fires.get_weather_context_for_point", return_value=_WEATHER_CONTEXT)
 def test_bias_correction_in_response(mock_wx, mock_fc, monkeypatch):
     """Response weather block includes bias correction metadata."""
-    fake_repo = _make_repo(get_fire_detection_by_id=_DETECTION.copy())
+    fake_repo = _make_repo(async_get_fire_detection_by_id=_DETECTION.copy())
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections/42")
@@ -266,7 +258,7 @@ def test_bias_correction_in_response(mock_wx, mock_fc, monkeypatch):
 
 @patch("api.routes.fires.get_weather_context_for_point", return_value=None)
 def test_detection_detail_cache_header(mock_wx, monkeypatch):
-    fake_repo = _make_repo(get_fire_detection_by_id=_DETECTION.copy())
+    fake_repo = _make_repo(async_get_fire_detection_by_id=_DETECTION.copy())
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections/42")

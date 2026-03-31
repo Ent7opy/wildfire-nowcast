@@ -4,23 +4,10 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from api.deps import get_fire_repo
-from api.fires.repository import FireRepository
 from api.main import app
+from api.tests.conftest import make_fire_repo as _make_repo
 
 client = TestClient(app)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_repo(**method_overrides) -> FireRepository:
-    """Return a MagicMock FireRepository with validate_bbox silenced by default."""
-    repo = MagicMock(spec=FireRepository)
-    repo.validate_bbox.return_value = None
-    for name, value in method_overrides.items():
-        getattr(repo, name).return_value = value
-    return repo
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +20,7 @@ def test_get_detections_endpoint_basic(monkeypatch):
         {"id": 1, "lat": 42.0, "lon": 21.0, "acq_time": datetime(2025, 1, 1, tzinfo=timezone.utc)}
     ]
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={
+        async_list_fire_detections_bbox_time={
             "data": mock_detections,
             "next_cursor": None,
             "has_more": False,
@@ -59,7 +46,7 @@ def test_get_detections_endpoint_basic(monkeypatch):
     assert data["count"] == 1
     assert len(data["detections"]) == 1
 
-    _, kwargs = fake_repo.list_fire_detections_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_detections_bbox_time.call_args
     assert kwargs["include_noise"] is False
     assert kwargs["min_confidence"] is None
     assert "denoised_score" not in kwargs["columns"]
@@ -68,7 +55,7 @@ def test_get_detections_endpoint_basic(monkeypatch):
 def test_get_fires_endpoint_alias(monkeypatch):
     """Test that the /fires endpoint aliases /fires/detections."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -93,7 +80,7 @@ def test_get_fires_endpoint_alias(monkeypatch):
 def test_get_detections_endpoint_with_min_confidence(monkeypatch):
     """Test that min_confidence is passed to repo."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -110,14 +97,14 @@ def test_get_detections_endpoint_with_min_confidence(monkeypatch):
         },
     )
 
-    _, kwargs = fake_repo.list_fire_detections_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_detections_bbox_time.call_args
     assert kwargs["min_confidence"] == 80.0
 
 
 def test_get_detections_endpoint_with_denoiser_fields(monkeypatch):
     """Test that include_denoiser_fields adds columns."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -131,7 +118,7 @@ def test_get_detections_endpoint_with_denoiser_fields(monkeypatch):
         },
     )
 
-    _, kwargs = fake_repo.list_fire_detections_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_detections_bbox_time.call_args
     assert "denoised_score" in kwargs["columns"]
     assert "is_noise" in kwargs["columns"]
     assert "event_id" in kwargs["columns"]
@@ -143,7 +130,7 @@ def test_get_detections_endpoint_with_denoiser_fields(monkeypatch):
 def test_get_detections_endpoint_with_include_noise(monkeypatch):
     """Test that include_noise is passed to repo."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -157,7 +144,7 @@ def test_get_detections_endpoint_with_include_noise(monkeypatch):
         },
     )
 
-    _, kwargs = fake_repo.list_fire_detections_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_detections_bbox_time.call_args
     assert kwargs["include_noise"] is True
 
 
@@ -166,9 +153,9 @@ def test_get_detections_endpoint_with_include_noise(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_get_events_endpoint(monkeypatch):
-    """Test that /fires/events delegates to repo.list_fire_events_bbox_time."""
+    """Test that /fires/events delegates to repo.async_list_fire_events_bbox_time."""
     fake_repo = _make_repo(
-        list_fire_events_bbox_time={"data": [{"event_id": "evt_1", "event_score": 0.95}], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_events_bbox_time={"data": [{"event_id": "evt_1", "event_score": 0.95}], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -193,7 +180,7 @@ def test_get_events_endpoint(monkeypatch):
     assert payload["next_cursor"] is None
     assert payload["has_more"] is False
 
-    _, kwargs = fake_repo.list_fire_events_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_events_bbox_time.call_args
     assert kwargs["min_event_score"] == 0.5
     assert kwargs["include_review_required"] is False
 
@@ -201,7 +188,7 @@ def test_get_events_endpoint(monkeypatch):
 def test_get_events_endpoint_passthrough_geom_geojson(monkeypatch):
     """Test that /fires/events returns event geometry payload when provided by repo."""
     fake_repo = _make_repo(
-        list_fire_events_bbox_time={"data": [
+        async_list_fire_events_bbox_time={"data": [
             {
                 "event_id": "evt_geom_1",
                 "event_score": 0.93,
@@ -233,7 +220,7 @@ def test_get_events_endpoint_passthrough_geom_geojson(monkeypatch):
 def test_get_events_endpoint_passthrough_geom_provenance(monkeypatch):
     """Test that /fires/events preserves geometry provenance fields from repo."""
     fake_repo = _make_repo(
-        list_fire_events_bbox_time={"data": [
+        async_list_fire_events_bbox_time={"data": [
             {
                 "event_id": "evt_geom_2",
                 "geom_source": "estimated",
@@ -274,9 +261,9 @@ def test_get_events_endpoint_passthrough_geom_provenance(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_get_fronts_endpoint(monkeypatch):
-    """Test that /fires/fronts delegates to repo.list_fire_fronts_bbox_time."""
+    """Test that /fires/fronts delegates to repo.async_list_fire_fronts_bbox_time."""
     fake_repo = _make_repo(
-        list_fire_fronts_bbox_time={"data": [{"front_id": "front_1", "event_id": "evt_1"}], "next_cursor": None, "has_more": False, "limit": 800}
+        async_list_fire_fronts_bbox_time={"data": [{"front_id": "front_1", "event_id": "evt_1"}], "next_cursor": None, "has_more": False, "limit": 800}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -301,7 +288,7 @@ def test_get_fronts_endpoint(monkeypatch):
     assert payload["next_cursor"] is None
     assert payload["has_more"] is False
 
-    _, kwargs = fake_repo.list_fire_fronts_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_fronts_bbox_time.call_args
     assert kwargs["min_event_score"] == 0.5
     assert kwargs["include_review_required"] is False
 
@@ -309,7 +296,7 @@ def test_get_fronts_endpoint(monkeypatch):
 def test_get_fronts_endpoint_passthrough_geom_provenance(monkeypatch):
     """Test that /fires/fronts preserves geometry provenance fields from repo."""
     fake_repo = _make_repo(
-        list_fire_fronts_bbox_time={"data": [
+        async_list_fire_fronts_bbox_time={"data": [
             {
                 "front_id": "front_geom_1",
                 "event_id": "evt_geom_2",
@@ -353,7 +340,7 @@ def test_get_fronts_endpoint_passthrough_geom_provenance(monkeypatch):
 def test_detections_cache_control_header(monkeypatch):
     """Verify /fires/detections sets Cache-Control: max-age=60 (E4)."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -373,7 +360,7 @@ def test_detections_cache_control_header(monkeypatch):
 def test_fires_alias_cache_control_header(monkeypatch):
     """Verify /fires alias also sets Cache-Control: max-age=60 (E4)."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -449,7 +436,7 @@ class FakeFireRepo:
     def validate_bbox(self, bbox):
         pass
 
-    def list_fire_detections_bbox_time(self, bbox, start_time, end_time, **kwargs):
+    async def async_list_fire_detections_bbox_time(self, bbox, start_time, end_time, **kwargs):
         return {
             "data": [{"id": 99, "lat": 50.0, "lon": 10.0}],
             "next_cursor": None,
@@ -457,10 +444,10 @@ class FakeFireRepo:
             "limit": 500,
         }
 
-    def list_fire_events_bbox_time(self, bbox, start_time, end_time, **kwargs):
+    async def async_list_fire_events_bbox_time(self, bbox, start_time, end_time, **kwargs):
         return {"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
 
-    def list_fire_fronts_bbox_time(self, bbox, start_time, end_time, **kwargs):
+    async def async_list_fire_fronts_bbox_time(self, bbox, start_time, end_time, **kwargs):
         return {"data": [], "next_cursor": None, "has_more": False, "limit": 2000}
 
 
@@ -503,7 +490,7 @@ _BASE_PARAMS = {
 def test_detections_response_includes_pagination_fields(monkeypatch):
     """Response must include next_cursor and has_more even when empty."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
@@ -518,35 +505,35 @@ def test_detections_response_includes_pagination_fields(monkeypatch):
 
 
 def test_detections_cursor_param_forwarded_to_repo(monkeypatch):
-    """cursor query param must be forwarded to repo.list_fire_detections_bbox_time."""
+    """cursor query param must be forwarded to repo.async_list_fire_detections_bbox_time."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     client.get("/fires/detections", params={**_BASE_PARAMS, "cursor": "abc123"})
 
-    _, kwargs = fake_repo.list_fire_detections_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_detections_bbox_time.call_args
     assert kwargs["cursor"] == "abc123"
 
 
 def test_detections_offset_param_forwarded_to_repo(monkeypatch):
     """Deprecated offset query param must be forwarded to repo."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_detections_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     client.get("/fires/detections", params={**_BASE_PARAMS, "offset": 500})
 
-    _, kwargs = fake_repo.list_fire_detections_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_detections_bbox_time.call_args
     assert kwargs["offset"] == 500
 
 
 def test_detections_response_has_more_true(monkeypatch):
     """When repo signals has_more=True, next_cursor must be non-None in the response."""
     fake_repo = _make_repo(
-        list_fire_detections_bbox_time={
+        async_list_fire_detections_bbox_time={
             "data": [{"id": 42, "lat": 41.0, "lon": 21.0}],
             "next_cursor": "dGVzdGN1cnNvcg==",
             "has_more": True,
@@ -566,7 +553,7 @@ def test_detections_response_has_more_true(monkeypatch):
 def test_detections_invalid_cursor_returns_400(monkeypatch):
     """A malformed cursor must produce HTTP 400."""
     fake_repo = _make_repo()
-    fake_repo.list_fire_detections_bbox_time.side_effect = ValueError("Invalid cursor: ...")
+    fake_repo.async_list_fire_detections_bbox_time.side_effect = ValueError("Invalid cursor: ...")
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     response = client.get("/fires/detections", params={**_BASE_PARAMS, "cursor": "!!!notvalid!!!"})
@@ -577,33 +564,33 @@ def test_detections_invalid_cursor_returns_400(monkeypatch):
 def test_events_cursor_param_forwarded_to_repo(monkeypatch):
     """cursor query param on /fires/events must be forwarded to repo."""
     fake_repo = _make_repo(
-        list_fire_events_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_events_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     client.get("/fires/events", params={**_BASE_PARAMS, "cursor": "evtcursor"})
 
-    _, kwargs = fake_repo.list_fire_events_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_events_bbox_time.call_args
     assert kwargs["cursor"] == "evtcursor"
 
 
 def test_events_offset_param_forwarded_to_repo(monkeypatch):
     """Deprecated offset query param on /fires/events must be forwarded to repo."""
     fake_repo = _make_repo(
-        list_fire_events_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
+        async_list_fire_events_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 1000}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     client.get("/fires/events", params={**_BASE_PARAMS, "offset": 200})
 
-    _, kwargs = fake_repo.list_fire_events_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_events_bbox_time.call_args
     assert kwargs["offset"] == 200
 
 
 def test_events_response_has_more_true(monkeypatch):
     """When repo signals has_more=True, next_cursor must appear in events response."""
     fake_repo = _make_repo(
-        list_fire_events_bbox_time={
+        async_list_fire_events_bbox_time={
             "data": [{"event_id": "evt_x"}],
             "next_cursor": "ZXZ0Y3Vyc29y",
             "has_more": True,
@@ -623,33 +610,33 @@ def test_events_response_has_more_true(monkeypatch):
 def test_fronts_cursor_param_forwarded_to_repo(monkeypatch):
     """cursor query param on /fires/fronts must be forwarded to repo."""
     fake_repo = _make_repo(
-        list_fire_fronts_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 800}
+        async_list_fire_fronts_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 800}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     client.get("/fires/fronts", params={**_BASE_PARAMS, "cursor": "frontcursor"})
 
-    _, kwargs = fake_repo.list_fire_fronts_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_fronts_bbox_time.call_args
     assert kwargs["cursor"] == "frontcursor"
 
 
 def test_fronts_offset_param_forwarded_to_repo(monkeypatch):
     """Deprecated offset query param on /fires/fronts must be forwarded to repo."""
     fake_repo = _make_repo(
-        list_fire_fronts_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 800}
+        async_list_fire_fronts_bbox_time={"data": [], "next_cursor": None, "has_more": False, "limit": 800}
     )
     monkeypatch.setitem(app.dependency_overrides, get_fire_repo, lambda: fake_repo)
 
     client.get("/fires/fronts", params={**_BASE_PARAMS, "offset": 100})
 
-    _, kwargs = fake_repo.list_fire_fronts_bbox_time.call_args
+    _, kwargs = fake_repo.async_list_fire_fronts_bbox_time.call_args
     assert kwargs["offset"] == 100
 
 
 def test_fronts_response_has_more_true(monkeypatch):
     """When repo signals has_more=True, next_cursor must appear in fronts response."""
     fake_repo = _make_repo(
-        list_fire_fronts_bbox_time={
+        async_list_fire_fronts_bbox_time={
             "data": [{"front_id": "front_z"}],
             "next_cursor": "ZnJvbnRjdXJzb3I=",
             "has_more": True,
