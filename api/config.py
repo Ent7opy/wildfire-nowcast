@@ -111,12 +111,10 @@ class AppSettings(BaseSettings):
     @property
     def async_database_url(self) -> str:
         """Async connection URL for asyncpg.  Derived from *database_url* by swapping the dialect."""
-        url = self.database_url
-        if url.startswith("postgresql+psycopg2://"):
-            return url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
-        if url.startswith("postgresql://"):
-            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        return url
+        from sqlalchemy.engine import make_url
+
+        url = make_url(self.database_url)
+        return str(url.set(drivername="postgresql+asyncpg"))
 
     # TiTiler settings
     titiler_public_base_url: str = Field(

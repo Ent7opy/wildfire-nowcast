@@ -76,6 +76,14 @@ async def startup():
             return None
         RateLimiter.__call__ = _noop_rate_limiter
 
+
+@app.on_event("shutdown")
+async def shutdown():
+    from api.db import dispose_async_engine
+
+    await dispose_async_engine()
+
+
 app.add_exception_handler(WildfireError, wildfire_error_handler)
 
 

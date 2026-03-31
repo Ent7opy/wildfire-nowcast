@@ -18,8 +18,10 @@ def test_list_fire_detections_bbox_time_filters_masked_by_default(monkeypatch):
         nonlocal executed_stmt
         context = MagicMock()
 
-        def execute(stmt, params):
+        def execute(stmt, params=None):
             nonlocal executed_stmt
+            if "SET LOCAL statement_timeout" in str(stmt):
+                return MagicMock()
             executed_stmt = stmt
             return MagicMock()
 
@@ -49,8 +51,10 @@ def test_list_fire_detections_bbox_time_includes_masked_when_requested(monkeypat
         nonlocal executed_stmt
         context = MagicMock()
 
-        def execute(stmt, params):
+        def execute(stmt, params=None):
             nonlocal executed_stmt
+            if "SET LOCAL statement_timeout" in str(stmt):
+                return MagicMock()
             executed_stmt = stmt
             return MagicMock()
 
