@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+import pandas as pd
 import sqlalchemy as sa
 import xarray as xr
 
@@ -23,6 +24,7 @@ from ml.weather_bias_correction import (
     resolve_weather_bias_corrector_path,
     WeatherBiasCorrector,
  )
+from ingest.weather_repository import GFS_GRID_DEG as _GFS_GRID_DEG
 
 LOGGER = logging.getLogger(__name__)
 
@@ -205,6 +207,153 @@ def _get_latest_weather_run(
     return dict(row) if row else None
 
 
+def _load_weather_cube_from_cache(
+    ref_time: datetime,
+    window: GridWindow,
+    horizons_hours: Sequence[int],
+    bbox: tuple[float, float, float, float],
+    *,
+    weather_bias_corrector_path: Path | None = None,
+) -> xr.Dataset | None:
+    """Build a weather cube from the ``weather_point_cache`` DB table.
+
+    Queries GFS 0.25° grid points covering *bbox* (with a 1-cell margin for
+    bilinear interpolation), builds a tiny xarray Dataset, then interpolates
+    to the *window*'s 0.01° grid.  Returns ``None`` when no cached data
+    covers the requested region and time.
+    """
+    min_lon, min_lat, max_lon, max_lat = bbox
+    margin = _GFS_GRID_DEG * 2  # 2-cell margin for clean interp at edges
+
+    lat_lo = round(np.floor((min_lat - margin) / _GFS_GRID_DEG) * _GFS_GRID_DEG, 4)
+    lat_hi = round(np.ceil((max_lat + margin) / _GFS_GRID_DEG) * _GFS_GRID_DEG, 4)
+    lon_lo = round(np.floor((min_lon - margin) / _GFS_GRID_DEG) * _GFS_GRID_DEG, 4)
+    lon_hi = round(np.ceil((max_lon + margin) / _GFS_GRID_DEG) * _GFS_GRID_DEG, 4)
+
+    forecast_hours_list = sorted(set(horizons_hours))
+
+    # Use a subquery to find the latest run covering the bbox, then fetch
+    # only that run's rows.  This avoids fetching rows from older runs that
+    # would be discarded in Python.
+    stmt = sa.text("""
+        WITH latest_run AS (
+            SELECT wr.id AS run_id, wr.run_time
+            FROM weather_runs wr
+            WHERE wr.status = 'completed'
+              AND wr.run_time <= :ref_time
+            ORDER BY wr.run_time DESC
+            LIMIT 1
+        )
+        SELECT wpc.forecast_hour, wpc.lat_grid, wpc.lon_grid,
+               wpc.u10, wpc.v10, wpc.t2m, wpc.rh2m, wpc.tp,
+               lr.run_time
+        FROM weather_point_cache wpc
+        JOIN latest_run lr ON lr.run_id = wpc.run_id
+        WHERE wpc.lat_grid BETWEEN :lat_lo AND :lat_hi
+          AND wpc.lon_grid BETWEEN :lon_lo AND :lon_hi
+          AND wpc.forecast_hour = ANY(:fhs)
+    """)
+
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            stmt,
+            {
+                "ref_time": ref_time,
+                "lat_lo": lat_lo,
+                "lat_hi": lat_hi,
+                "lon_lo": lon_lo,
+                "lon_hi": lon_hi,
+                "fhs": forecast_hours_list,
+            },
+        ).mappings().all()
+
+    if not rows:
+        LOGGER.debug("No weather_point_cache rows for bbox=%s ref_time=%s", bbox, ref_time)
+        return None
+
+    best_run_time = rows[0]["run_time"]
+
+    df = pd.DataFrame(rows)
+    lats_unique = np.sort(df["lat_grid"].unique())
+    lons_unique = np.sort(df["lon_grid"].unique())
+
+    if len(lats_unique) < 2 or len(lons_unique) < 2:
+        LOGGER.debug("Not enough GFS grid points for interpolation (%d lat, %d lon)", len(lats_unique), len(lons_unique))
+        return None
+
+    variables = ["u10", "v10", "t2m", "rh2m"]
+    if "tp" in df.columns and df["tp"].notna().any():
+        variables.append("tp")
+
+    # Build per-forecast-hour datasets and concat along time.
+    datasets = []
+    ref_time_utc = ref_time.astimezone(timezone.utc) if ref_time.tzinfo else ref_time.replace(tzinfo=timezone.utc)
+
+    for fh in forecast_hours_list:
+        df_fh = df[df["forecast_hour"] == fh]
+        if df_fh.empty:
+            continue
+
+        target_time = ref_time_utc + timedelta(hours=int(fh))
+        target_time_64 = np.datetime64(target_time.replace(tzinfo=None), "ns")
+
+        # Vectorized grid fill: compute row/col indices once, then assign
+        # per-variable in a single numpy operation (avoids slow iterrows).
+        i_idx = np.searchsorted(lats_unique, df_fh["lat_grid"].values)
+        j_idx = np.searchsorted(lons_unique, df_fh["lon_grid"].values)
+        valid_mask = (i_idx < len(lats_unique)) & (j_idx < len(lons_unique))
+
+        data_vars = {}
+        for var in variables:
+            grid = np.full((len(lats_unique), len(lons_unique)), np.nan, dtype=np.float32)
+            vals = df_fh[var].values
+            var_valid = valid_mask & pd.notna(vals)
+            grid[i_idx[var_valid], j_idx[var_valid]] = vals[var_valid].astype(np.float32)
+            data_vars[var] = (("lat", "lon"), grid)
+
+        ds_fh = xr.Dataset(
+            data_vars=data_vars,
+            coords={"lat": lats_unique, "lon": lons_unique, "time": target_time_64},
+        )
+        datasets.append(ds_fh)
+
+    if not datasets:
+        return None
+
+    ds = xr.concat(datasets, dim="time")
+    ds = ds.assign_coords(lead_time_hours=("time", list(forecast_hours_list[:len(datasets)])))
+
+    # Interpolate from GFS 0.25° to the window's 0.01° grid.
+    try:
+        ds_interp = ds.interp(lat=window.lat, lon=window.lon)
+    except Exception:
+        LOGGER.warning("Interpolation from cache grid to window failed; returning None.")
+        return None
+
+    # Rename tp → precip_24h to match spread contract.
+    if "tp" in ds_interp.data_vars and "precip_24h" not in ds_interp.data_vars:
+        ds_interp = ds_interp.rename({"tp": "precip_24h"})
+
+    ds_interp = ds_interp.load()
+
+    # Apply bias correction and derive moisture fields.
+    ds_interp = _maybe_apply_weather_bias_correction(
+        ds_interp, weather_bias_corrector_path=weather_bias_corrector_path
+    )
+    ds_interp = _add_dfmc_to_weather(ds_interp)
+    ds_interp, _ = _add_lfmc_to_weather(ds_interp, window, ref_time, bbox)
+
+    ds_interp.attrs["weather_fallback_used"] = False
+    ds_interp.attrs["weather_source"] = "point_cache"
+    run_time = best_run_time
+    try:
+        ds_interp.attrs["weather_run_time"] = run_time.isoformat()
+    except Exception:
+        ds_interp.attrs["weather_run_time"] = str(run_time)
+
+    return ds_interp
+
+
 def _load_weather_cube(
     ref_time: datetime,
     window: GridWindow,
@@ -213,12 +362,29 @@ def _load_weather_cube(
     *,
     weather_bias_corrector_path: Path | None = None,
 ) -> xr.Dataset:
-    """Load and align weather data for the requested window and horizons."""
+    """Load and align weather data for the requested window and horizons.
+
+    Tries the DB point cache first (fast, no file I/O).  Falls back to opening
+    a NetCDF file from weather_runs, then to calm-conditions fallback.
+    """
+    # ── 1. Try DB point cache (primary path) ─────────────────────────────
+    try:
+        cached_cube = _load_weather_cube_from_cache(
+            ref_time, window, horizons_hours, bbox,
+            weather_bias_corrector_path=weather_bias_corrector_path,
+        )
+        if cached_cube is not None:
+            LOGGER.info("Weather cube built from point cache for bbox=%s", bbox)
+            return cached_cube
+    except Exception:
+        LOGGER.debug("Point-cache weather cube failed; trying file path.", exc_info=True)
+
+    # ── 2. Try file-based weather run ────────────────────────────────────
     run = _get_latest_weather_run(ref_time, bbox)
 
     if not run:
         LOGGER.warning(
-            "No completed weather run found for ref_time=%s and bbox=%s; using calm fallback.",
+            "No weather data (cache or file) for ref_time=%s and bbox=%s; using calm fallback.",
             ref_time, bbox
         )
         ds = _create_fallback_weather(window, ref_time, horizons_hours)
@@ -286,13 +452,18 @@ def _load_weather_cube(
 
         # 1) Align to AOI window coords.
         #
-        # Weather ingest writes NetCDFs already interpolated onto the shared analysis grid.
-        # Prefer exact label-based selection; fall back to nearest for robustness.
+        # Weather files are stored at native GFS 0.25° resolution (no pre-regrid).
+        # Try exact label-based selection first (works if a file already happens to
+        # be at 0.01°); fall back to bilinear interpolation so the output coords are
+        # exactly window.lat/lon and pass the strict np.allclose check downstream.
+        # interp is also scientifically preferable to nearest for sub-25 km queries.
         try:
             ds_aligned = ds.sel(lat=window.lat, lon=window.lon)
         except Exception:
-            LOGGER.info("Exact lat/lon selection failed for %s; falling back to nearest.", path)
-            ds_aligned = ds.sel(lat=window.lat, lon=window.lon, method="nearest")
+            LOGGER.info(
+                "Exact lat/lon selection failed for %s; interpolating to window grid.", path
+            )
+            ds_aligned = ds.interp(lat=window.lat, lon=window.lon)
 
         # 2) Select requested time horizons (absolute times).
         target_times = [ref_time + timedelta(hours=int(h)) for h in horizons_hours]

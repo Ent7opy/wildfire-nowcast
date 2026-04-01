@@ -46,7 +46,11 @@ TABLE_CONFIG: list[tuple[str, str, int]] = [
     ("fire_fronts",            "created_at",              DEFAULT_RETENTION_DAYS),
     # ---- ML drift metrics --------------------------------------------------
     ("denoiser_drift_metrics", "created_at",              DEFAULT_RETENTION_DAYS),
-    # ---- weather / forecast (existing) -------------------------------------
+    # ---- weather / forecast -------------------------------------------------
+    # weather_point_cache rows CASCADE-delete when their parent weather_runs
+    # row is removed, but an explicit entry here provides secondary cleanup
+    # and ensures the table is VACUUMed after large deletions.
+    ("weather_point_cache",    "created_at",              DEFAULT_RETENTION_DAYS),
     ("weather_runs",           "run_time",                DEFAULT_RETENTION_DAYS),
     ("spread_forecast_runs",   "forecast_reference_time", DEFAULT_RETENTION_DAYS),
     # ---- operational tables with extended retention ------------------------
@@ -206,6 +210,73 @@ def purge_orphan_forecast_files(repo_root: Path, *, dry_run: bool) -> int:
     return len(orphans)
 
 
+def _query_known_weather_storage_paths() -> set[str]:
+    """Return the set of storage_path values currently in weather_runs."""
+    stmt = text("SELECT storage_path FROM weather_runs WHERE storage_path != ''")
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt).fetchall()
+    return {row[0] for row in rows}
+
+
+def purge_orphan_weather_files(repo_root: Path, *, dry_run: bool) -> int:
+    """Delete NetCDF files under data/weather/ with no corresponding weather_runs row.
+
+    After the time-based cleanup deletes old weather_runs rows, their NetCDF files
+    are left on disk.  This function scans data/weather/ and removes any .nc file
+    whose absolute path (or repo-relative equivalent) is not referenced by any
+    remaining row, preventing unbounded disk growth.
+
+    Also removes empty date/hour directories left behind after file deletion.
+
+    Returns:
+        Number of orphaned files found (and deleted when not dry_run).
+    """
+    weather_dir = repo_root / "data" / "weather"
+    if not weather_dir.exists():
+        logger.info("data/weather/ does not exist — nothing to clean.")
+        return 0
+
+    known_raw = _query_known_weather_storage_paths()
+
+    # Normalise known paths: resolve both absolute and repo-relative forms so that
+    # storage_path values written by different working directories are all matched.
+    known_abs: set[str] = set()
+    for raw in known_raw:
+        p = Path(raw)
+        if p.is_absolute():
+            known_abs.add(str(p))
+        else:
+            known_abs.add(str((repo_root / p).resolve()))
+
+    orphans: list[Path] = []
+    for nc in weather_dir.rglob("*.nc"):
+        if str(nc.resolve()) not in known_abs:
+            orphans.append(nc)
+
+    if not orphans:
+        logger.info("No orphaned weather NetCDF files found.")
+        return 0
+
+    action = "Would remove" if dry_run else "Removing"
+    for path in orphans:
+        logger.info("%s orphaned weather file: %s", action, path)
+        if not dry_run:
+            path.unlink(missing_ok=True)
+
+    if not dry_run:
+        # Remove empty leaf directories (year/month/day/hour structure).
+        for d in sorted(weather_dir.rglob("*"), reverse=True):
+            if d.is_dir():
+                try:
+                    d.rmdir()
+                    logger.info("Removed empty weather directory: %s", d)
+                except OSError:
+                    pass  # Not empty — leave it
+
+    logger.info("%s %d orphaned weather NetCDF file(s).", action, len(orphans))
+    return len(orphans)
+
+
 def _cleanup_fire_detections(
     session,
     now: datetime,
@@ -299,10 +370,12 @@ def cleanup(dry_run: bool = False) -> None:
             if deleted > 0:
                 vacuumed_tables.append(table)
 
-    # Clean up orphaned raster files on disk (CASCADE already handled DB child rows).
-    # Runs in both live and dry-run modes — purge_orphan_forecast_files respects dry_run.
+    # Clean up orphaned files on disk — runs in both live and dry-run modes.
     logger.info("%sPurging orphaned spread forecast raster files …", prefix)
     purge_orphan_forecast_files(REPO_ROOT, dry_run=dry_run)
+
+    logger.info("%sPurging orphaned weather NetCDF files …", prefix)
+    purge_orphan_weather_files(REPO_ROOT, dry_run=dry_run)
 
     if dry_run:
         logger.info(f"{prefix}Dry-run complete — no rows were mutated.")

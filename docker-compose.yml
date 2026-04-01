@@ -181,7 +181,7 @@ services:
     command: >
       uv run --project ingest -m ingest.orchestrator
       --loop
-      --jobs firms,perimeters,lfmc,lulc,cleanup
+      --jobs firms,weather,perimeters,lfmc,lulc,cleanup
       --enforce-freshness
       --max-retries 3
       --retry-backoff-seconds 20

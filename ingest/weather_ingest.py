@@ -1086,10 +1086,13 @@ def ingest_weather_for_bbox(
                 selected_run_time,
                 include_precip=include_precipitation,
             )
-            # Crop to original bbox (not download_bbox with margin)
+            # Crop to original bbox (not download_bbox with margin).
+            # Stored at native GFS 0.25° resolution — no regrid here.
+            # Point lookups (fire detail, scoring) use sel(method="nearest") and
+            # work at any resolution.  Spread forecasting interpolates on-load
+            # in ml/spread_features.py::_load_weather_cube so it never needs a
+            # pre-regridded file.  Skipping regrid keeps files ~15–25 MB vs ~50 GB.
             dataset = crop_to_bbox(dataset, settings, target_bbox=bbox)
-            dataset = regrid_to_analysis_grid(dataset, grid_spec)
-            dataset = attach_grid_metadata(dataset, grid_spec)
             _validate_weather_dataset(dataset, settings, canonical_variables)
             storage_path = str(
                 save_dataset_to_netcdf(

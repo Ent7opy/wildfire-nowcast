@@ -21,7 +21,6 @@ from ingest.startup_check import StartupError, run_ingest_startup_checks
 from ingest.firms_ingest import run_firms_ingest
 from ingest.industrial_sources_ingest import run_industrial_ingest
 from ingest.nifc_perimeters_ingest import fetch_nifc_perimeters, ingest_perimeters
-from ingest.weather_ingest import run_weather_ingest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -528,7 +527,14 @@ def _run_firms(args: argparse.Namespace) -> int:
 
 
 def _run_weather(args: argparse.Namespace) -> int:
-    return int(run_weather_ingest(_build_weather_argv(args)))
+    from ingest.weather_point_ingest import ingest_weather_points  # noqa: PLC0415
+
+    try:
+        ingest_weather_points()
+        return 0
+    except Exception:
+        LOGGER.exception("Weather point ingest failed")
+        return 1
 
 
 def _run_lfmc(args: argparse.Namespace) -> int:

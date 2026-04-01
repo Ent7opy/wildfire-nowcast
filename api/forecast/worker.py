@@ -290,7 +290,6 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
             return
 
         from ingest.dem_preprocess import ingest_terrain_for_bbox
-        from ingest.weather_ingest import ingest_weather_for_bbox
 
         # Check for cached terrain with distributed lock to prevent race conditions
         terrain_lock_key = f"jit:terrain:lock:{bbox[0]}:{bbox[1]}:{bbox[2]}:{bbox[3]}"
@@ -332,50 +331,11 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
                         logger.info(f"JIT job {job_id}: terrain ingestion completed, terrain_id={terrain_id}")
                 finally:
                     terrain_lock.release()
-        max_horizon = max(horizons_hours)
-
-        # Check for cached weather (within 6 hour freshness window) with distributed lock
-        weather_lock_key = f"jit:weather:lock:{bbox[0]}:{bbox[1]}:{bbox[2]}:{bbox[3]}:{forecast_time.isoformat()}"
-        cached_weather = repo.find_cached_weather(bbox, freshness_hours=6, required_horizon_hours=max_horizon)
-        
-        if cached_weather:
-            weather_run_id = cached_weather["id"]
-            logger.info(f"JIT job {job_id}: cache hit for weather, weather_run_id={weather_run_id}")
-        else:
-            # Acquire lock to prevent duplicate weather ingestion
-            weather_lock = _acquire_cache_lock(weather_lock_key)
-            if weather_lock is None:
-                logger.warning(f"JIT job {job_id}: could not acquire weather lock, checking cache again")
-                # Another worker may have ingested weather, check cache again
-                cached_weather = repo.find_cached_weather(bbox, freshness_hours=6, required_horizon_hours=max_horizon)
-                if cached_weather:
-                    weather_run_id = cached_weather["id"]
-                    logger.info(f"JIT job {job_id}: cache hit for weather after lock retry, weather_run_id={weather_run_id}")
-                else:
-                    raise RuntimeError("Could not acquire weather lock and no cached weather found")
-            else:
-                try:
-                    # Double-check cache after acquiring lock
-                    cached_weather = repo.find_cached_weather(bbox, freshness_hours=6, required_horizon_hours=max_horizon)
-                    if cached_weather:
-                        weather_run_id = cached_weather["id"]
-                        logger.info(f"JIT job {job_id}: cache hit for weather after lock, weather_run_id={weather_run_id}")
-                    else:
-                        repo.update_jit_job_status(job_id, "ingesting_weather")
-                        logger.info(f"JIT job {job_id}: starting weather ingestion")
-
-                        weather_output_dir = REPO_ROOT / "data" / "weather"
-                        weather_output_dir.mkdir(parents=True, exist_ok=True)
-
-                        weather_run_id = ingest_weather_for_bbox(
-                            bbox=bbox,
-                            forecast_time=forecast_time,
-                            output_dir=weather_output_dir,
-                            horizon_hours=max_horizon,
-                        )
-                        logger.info(f"JIT job {job_id}: weather ingestion completed, weather_run_id={weather_run_id}")
-                finally:
-                    weather_lock.release()
+        # Weather data is sourced from the background weather_point_cache
+        # (populated by the orchestrator's weather job).  The spread model's
+        # _load_weather_cube queries the cache directly — no JIT download needed.
+        # If the cache has no data for this region the spread model falls back
+        # to calm-conditions weather automatically.
 
         repo.update_jit_job_status(job_id, "running_forecast")
         logger.info(f"JIT job {job_id}: starting forecast")
@@ -509,7 +469,7 @@ def run_jit_forecast_pipeline(job_id: UUID, bbox: tuple[float, float, float, flo
 
             result = {
                 "terrain_id": terrain_id,
-                "weather_run_id": weather_run_id,
+                "weather_run_id": None,  # weather sourced from point cache, no single run_id
                 "forecast_run_id": run_id,
                 "run_id": run_id,
                 "tilejson_urls": tilejson_urls,
