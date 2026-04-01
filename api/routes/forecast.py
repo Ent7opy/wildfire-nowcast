@@ -7,6 +7,7 @@ import json
 import os
 from datetime import datetime, timezone
 import re
+from functools import partial
 from typing import Any, AsyncGenerator
 from urllib.parse import quote_plus
 from uuid import UUID
@@ -537,9 +538,10 @@ async def _job_status_event_stream(
             if elapsed > max_duration:
                 yield f"event: timeout\ndata: {json.dumps({'message': 'Stream timeout - check status endpoint'})}\n\n"
                 break
-            
-            # Get current job status
-            job = repo.get_jit_job(job_id)
+
+            # Get current job status (run in thread pool to avoid blocking event loop)
+            loop = asyncio.get_running_loop()
+            job = await loop.run_in_executor(None, partial(repo.get_jit_job, job_id))
             
             if not job:
                 yield f"event: error\ndata: {json.dumps({'message': 'Job not found'})}\n\n"
