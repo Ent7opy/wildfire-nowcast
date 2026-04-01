@@ -528,7 +528,14 @@ def _run_firms(args: argparse.Namespace) -> int:
 
 
 def _run_weather(args: argparse.Namespace) -> int:
-    return int(run_weather_ingest(_build_weather_argv(args)))
+    from ingest.weather_point_ingest import ingest_weather_points  # noqa: PLC0415
+
+    try:
+        ingest_weather_points()
+        return 0
+    except Exception:
+        LOGGER.exception("Weather point ingest failed")
+        return 1
 
 
 def _run_lfmc(args: argparse.Namespace) -> int:
