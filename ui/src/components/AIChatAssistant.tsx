@@ -98,6 +98,7 @@ export default function AIChatAssistant(): JSX.Element {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const lastBriefedEventId = useRef<string | null>(null);
   const lastBriefedPrompt = useRef<string | null>(null);
+  const isBriefingRef = useRef(false);
 
   const selectedEvent = useAppStore((s) => s.selectedEvent);
   const filters = useAppStore((s) => s.filters);
@@ -182,7 +183,8 @@ export default function AIChatAssistant(): JSX.Element {
   );
 
   const triggerBriefing = useCallback(async (prompt: string): Promise<void> => {
-    if (!assistantConfigured || isBriefing) return;
+    if (!assistantConfigured || isBriefingRef.current) return;
+    isBriefingRef.current = true;
     setIsBriefing(true);
     setAutoBriefing(null);
     try {
@@ -213,9 +215,10 @@ export default function AIChatAssistant(): JSX.Element {
       console.error("[AIChatAssistant] auto-briefing failed:", err);
       setCircuitDegraded(true);
     } finally {
+      isBriefingRef.current = false;
       setIsBriefing(false);
     }
-  }, [assistantConfigured, isBriefing, isSafetyMode, viewingContext]);
+  }, [assistantConfigured, isSafetyMode, viewingContext]);
 
   // Auto-briefing when a new event is selected
   useEffect(() => {
@@ -227,8 +230,7 @@ export default function AIChatAssistant(): JSX.Element {
       ? "Give a 2-sentence safety briefing for this fire. Plain language only: risk level and what the person should do right now."
       : "Give a 2-sentence analyst briefing: fire behavior context, intensity interpretation, and spread risk.";
     void triggerBriefing(prompt);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEvent?.event_id]);
+  }, [selectedEvent, selectedEvent?.event_id, assistantConfigured, isSafetyMode, triggerBriefing]);
 
   // Watch for imperatively requested briefings (from FireDetailsPanel "Get Safety Info")
   useEffect(() => {
@@ -237,8 +239,7 @@ export default function AIChatAssistant(): JSX.Element {
     lastBriefedPrompt.current = prompt;
     clearAssistantBriefingPrompt();
     void triggerBriefing(prompt);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [safety.pendingBriefingPrompt]);
+  }, [safety.pendingBriefingPrompt, triggerBriefing, clearAssistantBriefingPrompt]);
 
   useEffect(() => {
     if (!scrollRef.current) {
