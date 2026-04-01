@@ -24,6 +24,7 @@ from ml.weather_bias_correction import (
     resolve_weather_bias_corrector_path,
     WeatherBiasCorrector,
  )
+from ingest.weather_repository import GFS_GRID_DEG as _GFS_GRID_DEG
 
 LOGGER = logging.getLogger(__name__)
 
@@ -204,9 +205,6 @@ def _get_latest_weather_run(
             },
         ).mappings().first()
     return dict(row) if row else None
-
-
-from ingest.weather_repository import GFS_GRID_DEG as _GFS_GRID_DEG
 
 
 def _load_weather_cube_from_cache(

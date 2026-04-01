@@ -21,7 +21,6 @@ from ingest.startup_check import StartupError, run_ingest_startup_checks
 from ingest.firms_ingest import run_firms_ingest
 from ingest.industrial_sources_ingest import run_industrial_ingest
 from ingest.nifc_perimeters_ingest import fetch_nifc_perimeters, ingest_perimeters
-from ingest.weather_ingest import run_weather_ingest
 
 logging.basicConfig(
     level=logging.INFO,
