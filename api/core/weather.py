@@ -19,7 +19,7 @@ import xarray as xr
 from sqlalchemy import text
 
 from api.db import get_engine
-from ingest.weather_repository import GFS_GRID_DEG, snap_to_gfs_grid
+from ingest.weather_repository import snap_to_gfs_grid
 
 LOGGER = logging.getLogger(__name__)
 
