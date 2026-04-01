@@ -28,11 +28,9 @@ import numpy as np
 import xarray as xr
 
 from ingest.config import REPO_ROOT, WeatherIngestSettings, weather_settings
-from ingest.logging_utils import log_event
 from ingest.weather_ingest import (
     GFS_FILTER_LEVELS,
     GFS_FILTER_VARIABLES,
-    SHORT_NAME_MAP,
     build_weather_dataset,
     download_grib_files,
     snap_to_gfs_cycle,
@@ -43,7 +41,6 @@ from ingest.weather_repository import (
     create_weather_run_record,
     finalize_weather_run_record,
     query_fire_detection_grid_points,
-    snap_to_gfs_grid,
 )
 
 # Ensure the API modules are importable when running from ingest/.
