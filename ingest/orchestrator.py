@@ -527,14 +527,44 @@ def _run_firms(args: argparse.Namespace) -> int:
 
 
 def _run_weather(args: argparse.Namespace) -> int:
-    from ingest.weather_point_ingest import ingest_weather_points  # noqa: PLC0415
+    from ingest.hrrr_point_ingest import ingest_hrrr_points          # noqa: PLC0415
+    from ingest.weather_point_ingest import ingest_weather_points     # noqa: PLC0415
+    from ingest.hrrr_ingest import (                                  # noqa: PLC0415
+        HRRR_CONUS_LAT_MIN, HRRR_CONUS_LAT_MAX,
+        HRRR_CONUS_LON_MIN, HRRR_CONUS_LON_MAX,
+    )
+    from ingest.weather_repository import query_fire_detection_grid_points  # noqa: PLC0415
 
+    include_precip = args.weather_include_precip
+
+    # Check whether any active fire detections fall within CONUS.
+    # Each ingest function re-queries internally; this check only decides routing.
+    points = query_fire_detection_grid_points(lookback_hours=48.0)
+    has_conus = any(
+        HRRR_CONUS_LAT_MIN <= lat <= HRRR_CONUS_LAT_MAX
+        and HRRR_CONUS_LON_MIN <= lon <= HRRR_CONUS_LON_MAX
+        for lat, lon in points
+    )
+
+    exit_code = 0
+
+    if has_conus:
+        try:
+            ingest_hrrr_points(include_precipitation=include_precip)
+            LOGGER.info("HRRR point ingest completed.")
+        except Exception:
+            LOGGER.exception("HRRR point ingest failed; GFS will still run.")
+            exit_code = 1
+
+    # GFS always runs: covers non-CONUS fires and acts as global fallback.
     try:
-        ingest_weather_points()
-        return 0
+        ingest_weather_points(include_precipitation=include_precip)
+        LOGGER.info("GFS point ingest completed.")
     except Exception:
-        LOGGER.exception("Weather point ingest failed")
-        return 1
+        LOGGER.exception("GFS point ingest failed.")
+        exit_code = 1
+
+    return exit_code
 
 
 def _run_lfmc(args: argparse.Namespace) -> int:

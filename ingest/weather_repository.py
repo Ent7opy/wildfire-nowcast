@@ -12,6 +12,15 @@ from ingest.repository import get_engine
 
 LOGGER = logging.getLogger(__name__)
 
+# ── Weather run status / format constants ────────────────────────────────────
+FILE_FORMAT_NETCDF = "netcdf"
+FILE_FORMAT_POINT_CACHE = "point_cache"
+STATUS_RUNNING = "running"
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+
+GFS_MODEL_NAME = "gfs_0p25"
+
 
 def create_weather_run_record(
     *,
@@ -21,6 +30,7 @@ def create_weather_run_record(
     step_hours: int,
     bbox: tuple[float | None, float | None, float | None, float | None],
     variables: list[str],
+    file_format: str = FILE_FORMAT_POINT_CACHE,
 ) -> int:
     """Insert a new weather run row and return its ID."""
     metadata: Mapping[str, Any] = {"variables": variables}
@@ -49,31 +59,52 @@ def create_weather_run_record(
             :bbox_min_lat,
             :bbox_max_lon,
             :bbox_max_lat,
-            'netcdf',
+            :file_format,
             '',
-            'running',
+            :status,
             :metadata
         )
+        ON CONFLICT (model, run_time) DO NOTHING
         RETURNING id
         """
     ).bindparams(bindparam("metadata", type_=JSON))
 
+    params = {
+        "model": model,
+        "run_time": run_time,
+        "horizon_hours": horizon_hours,
+        "step_hours": step_hours,
+        "bbox_min_lon": bbox[0],
+        "bbox_min_lat": bbox[1],
+        "bbox_max_lon": bbox[2],
+        "bbox_max_lat": bbox[3],
+        "file_format": file_format,
+        "status": STATUS_RUNNING,
+        "metadata": metadata,
+    }
+
     with get_engine().begin() as conn:
-        result = conn.execute(
-            stmt,
-            {
-                "model": model,
-                "run_time": run_time,
-                "horizon_hours": horizon_hours,
-                "step_hours": step_hours,
-                "bbox_min_lon": bbox[0],
-                "bbox_min_lat": bbox[1],
-                "bbox_max_lon": bbox[2],
-                "bbox_max_lat": bbox[3],
-                "metadata": metadata,
-            },
-        )
-        run_id = result.scalar_one()
+        result = conn.execute(stmt, params)
+        row = result.fetchone()
+        if row is None:
+            # Conflict: a row for this (model, run_time) already exists.
+            existing = conn.execute(
+                text(
+                    "SELECT id FROM weather_runs"
+                    " WHERE model = :model AND run_time = :run_time"
+                ),
+                {"model": model, "run_time": run_time},
+            )
+            run_id = existing.scalar_one()
+            LOGGER.debug(
+                "weather_runs row already exists for model=%s run_time=%s,"
+                " returning existing id=%s",
+                model,
+                run_time,
+                run_id,
+            )
+        else:
+            run_id = row[0]
 
     return int(run_id)
 
@@ -128,6 +159,26 @@ def snap_to_gfs_grid(lat: float, lon: float) -> tuple[float, float]:
     return (
         round(round(lat / GFS_GRID_DEG) * GFS_GRID_DEG, 4),
         round(round(lon / GFS_GRID_DEG) * GFS_GRID_DEG, 4),
+    )
+
+
+def bbox_from_grid_points(
+    grid_points: list[tuple[float, float]],
+    margin_cells: int = 2,
+) -> tuple[float, float, float, float]:
+    """Return a (min_lon, min_lat, max_lon, max_lat) bbox covering *grid_points*.
+
+    Expands by *margin_cells* × ``GFS_GRID_DEG`` on each side so the spread
+    model has room to interpolate at the bbox edges.
+    """
+    lats = [p[0] for p in grid_points]
+    lons = [p[1] for p in grid_points]
+    margin = GFS_GRID_DEG * margin_cells
+    return (
+        min(lons) - margin,
+        min(lats) - margin,
+        max(lons) + margin,
+        max(lats) + margin,
     )
 
 

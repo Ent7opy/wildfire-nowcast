@@ -186,7 +186,8 @@ services:
       --max-retries 3
       --retry-backoff-seconds 20
       --firms-interval-minutes 30
-      --weather-interval-minutes 180
+      --weather-interval-minutes 60
+      --weather-include-precip
       --perimeters-interval-minutes 1440
       --lfmc-interval-minutes 360
       --lulc-interval-minutes 10080

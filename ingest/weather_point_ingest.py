@@ -36,7 +36,9 @@ from ingest.weather_ingest import (
     snap_to_gfs_cycle,
 )
 from ingest.weather_repository import (
-    GFS_GRID_DEG,
+    FILE_FORMAT_POINT_CACHE,
+    GFS_MODEL_NAME,
+    bbox_from_grid_points,
     bulk_insert_weather_point_cache,
     create_weather_run_record,
     finalize_weather_run_record,
@@ -102,14 +104,26 @@ def _extract_records_at_grid_points(
     return records
 
 
+# Representative CONUS GFS grid points used when no fire detections are present.
+# These are evenly distributed across the continental US and are already on the
+# 0.25° GFS grid (each coordinate satisfies x % 0.25 == 0).
+BOOTSTRAP_SEED_POINTS: list[tuple[float, float]] = [
+    (48.0,  -122.0),  # Pacific NW
+    (34.0,  -118.0),  # Southern California
+    (39.75, -105.0),  # Colorado
+    (30.0,   -90.0),  # Gulf Coast
+    (41.75,  -87.75), # Great Lakes
+]
+
+
 def ingest_weather_points(
     *,
     forecast_time: datetime | None = None,
     detection_lookback_hours: float = 48.0,
     horizon_hours: int = 24,
     step_hours: int = 6,
-    model_name: str = "gfs_0p25",
-    include_precipitation: bool = False,
+    model_name: str = GFS_MODEL_NAME,
+    include_precipitation: bool = True,
     request_timeout_seconds: int = 60,
     max_fallback_age_hours: int = 12,
 ) -> int:
@@ -118,6 +132,10 @@ def ingest_weather_points(
     Returns the ``weather_runs.id`` of the created record.
 
     Raises on unrecoverable download failure (after one fallback cycle attempt).
+
+    Note:
+        GFS APCP is unavailable at forecast_hour=0 (analysis step). ``tp`` will
+        be NULL for fh=0 even when ``include_precipitation=True``.
     """
     now = datetime.now(timezone.utc)
     run_time = snap_to_gfs_cycle(forecast_time or now)
@@ -131,22 +149,8 @@ def ingest_weather_points(
             "No fire detections in the last %.0f hours — nothing to cache.",
             detection_lookback_hours,
         )
-        # Still create a weather_runs row so data_status shows the attempt.
-        run_id = create_weather_run_record(
-            model=model_name,
-            run_time=run_time,
-            horizon_hours=horizon_hours,
-            step_hours=step_hours,
-            bbox=(None, None, None, None),
-            variables=[],
-        )
-        finalize_weather_run_record(
-            run_id=run_id,
-            storage_path="",
-            status="completed",
-            extra_metadata={"point_cache_rows": 0, "grid_points": 0},
-        )
-        return run_id
+        LOGGER.warning("Using bootstrap seed points for initial weather coverage.")
+        grid_points = BOOTSTRAP_SEED_POINTS
 
     LOGGER.info(
         "Caching weather for %d unique GFS grid points (detection lookback=%.0fh)",
@@ -155,15 +159,7 @@ def ingest_weather_points(
     )
 
     # ── 2. Determine bbox that covers all grid points (with margin) ──────
-    lats = [p[0] for p in grid_points]
-    lons = [p[1] for p in grid_points]
-    margin = GFS_GRID_DEG * 2  # 2-cell margin for spread model interp
-    bbox = (
-        min(lons) - margin,
-        min(lats) - margin,
-        max(lons) + margin,
-        max(lats) + margin,
-    )
+    bbox = bbox_from_grid_points(grid_points)
 
     # ── 3. Prepare canonical variable lists ──────────────────────────────
     canonical_variables = ["u10", "v10", "t2m", "rh2m"]
@@ -183,6 +179,7 @@ def ingest_weather_points(
         step_hours=step_hours,
         bbox=bbox,
         variables=canonical_variables,
+        file_format=FILE_FORMAT_POINT_CACHE,
     )
 
     # ── 5. Build download settings ───────────────────────────────────────
@@ -233,7 +230,7 @@ def ingest_weather_points(
                 status="completed",
                 run_time=selected_run_time,
                 extra_metadata={
-                    "file_format": "point_cache",
+                    "file_format": FILE_FORMAT_POINT_CACHE,
                     "point_cache_rows": inserted,
                     "grid_points": len(grid_points),
                     "variables": canonical_variables,
