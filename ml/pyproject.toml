@@ -24,6 +24,7 @@ dependencies = [
     "torch>=2.3.0,<3.0.0",
     "onnx>=1.16.0,<2.0.0",
     "onnxruntime>=1.18.0,<2.0.0",
+    "onnxmltools>=1.13.0,<2.0.0",
 ]
 
 [dependency-groups]

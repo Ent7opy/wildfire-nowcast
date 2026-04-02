@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from api.db import get_engine
 
-MODEL_FAMILIES = {"denoiser", "spread"}
+MODEL_FAMILIES = {"denoiser", "spread", "ignition"}
 
 LOGGER = logging.getLogger(__name__)
 
