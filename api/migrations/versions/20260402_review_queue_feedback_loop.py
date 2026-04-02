@@ -23,7 +23,6 @@ Create Date: 2026-04-02
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 revision = "20260402_review_queue_feedback_loop"
 down_revision = "20260402_add_weather_runs_unique_model_run_time"
