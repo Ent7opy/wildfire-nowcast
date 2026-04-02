@@ -40,7 +40,8 @@ JOB_INDUSTRIAL = "industrial"
 JOB_DENOISER_DRIFT = "denoiser_drift"
 JOB_CLEANUP = "cleanup"
 JOB_AOI_WATCH = "aoi_watch"
-JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_DROUGHT, JOB_LIGHTNING_PROXY, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP, JOB_AOI_WATCH)
+JOB_OPERATOR_ACCURACY = "operator_accuracy"
+JOB_ORDER = (JOB_FIRMS, JOB_WEATHER, JOB_LFMC, JOB_LULC, JOB_DROUGHT, JOB_LIGHTNING_PROXY, JOB_TERRAIN, JOB_PERIMETERS, JOB_INDUSTRIAL, JOB_DENOISER_DRIFT, JOB_CLEANUP, JOB_AOI_WATCH, JOB_OPERATOR_ACCURACY)
 DEFAULT_DASHBOARD_PATH = REPO_ROOT / "data" / "ingest" / "orchestrator_dashboard.json"
 
 # Watermarks whose source name ends with _NRT are near-real-time feeds.
@@ -235,6 +236,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1440.0,
         help="Database cleanup run interval in minutes (loop mode).",
+    )
+    parser.add_argument(
+        "--operator-accuracy-interval-minutes",
+        type=float,
+        default=10080.0,
+        help=(
+            "Operator label-quality accuracy job interval in minutes (loop mode). "
+            "Default 10080 = weekly.  Accuracy is retrospective (perimeters arrive "
+            "days after operator decisions), so daily runs are wasteful."
+        ),
     )
 
     parser.add_argument(
@@ -483,6 +494,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         ("--denoiser-drift-interval-minutes", args.denoiser_drift_interval_minutes),
         ("--cleanup-interval-minutes", args.cleanup_interval_minutes),
         ("--aoi-watch-interval-minutes", args.aoi_watch_interval_minutes),
+        ("--operator-accuracy-interval-minutes", args.operator_accuracy_interval_minutes),
     )
     for flag, value in interval_flags:
         if value <= 0:
@@ -807,6 +819,13 @@ def _run_aoi_watch(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_operator_accuracy(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Run one operator label-quality accuracy computation cycle (weekly)."""
+    from ingest.operator_accuracy_job import run_operator_accuracy_job  # noqa: PLC0415
+
+    return run_operator_accuracy_job()
+
+
 def _run_cleanup(args: argparse.Namespace) -> int:
     """Run database cleanup.
 
@@ -880,6 +899,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_DENOISER_DRIFT: lambda: _run_denoiser_drift(args),
         JOB_CLEANUP: lambda: _run_cleanup(args),
         JOB_AOI_WATCH: lambda: _run_aoi_watch(args),
+        JOB_OPERATOR_ACCURACY: lambda: _run_operator_accuracy(args),
     }
 
     intervals_seconds = {
@@ -895,6 +915,7 @@ def build_jobs(args: argparse.Namespace) -> list[ScheduledJob]:
         JOB_DENOISER_DRIFT: args.denoiser_drift_interval_minutes * 60.0,
         JOB_CLEANUP: args.cleanup_interval_minutes * 60.0,
         JOB_AOI_WATCH: args.aoi_watch_interval_minutes * 60.0,
+        JOB_OPERATOR_ACCURACY: args.operator_accuracy_interval_minutes * 60.0,
     }
 
     return [

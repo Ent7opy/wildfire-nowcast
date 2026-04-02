@@ -18,13 +18,14 @@ def load_labeled_data(
     
     safe_label_table = validate_table_reference(label_table)
 
-    # We assume the labels table has fire_detection_id and label (POS/NEG/UNKNOWN)
+    # We assume the labels table has fire_detection_id, label, and label_weight.
     query = text(f"""
-        SELECT 
-            d.id, d.lat, d.lon, d.acq_time, d.confidence, d.frp, 
+        SELECT
+            d.id, d.lat, d.lon, d.acq_time, d.confidence, d.frp,
             d.brightness, d.bright_t31, d.scan, d.track, d.sensor, d.source,
             d.raw_properties,
-            l.label
+            l.label,
+            COALESCE(l.label_weight, 1.0) AS label_weight
         FROM fire_detections d
         JOIN {safe_label_table} l ON d.id = l.fire_detection_id
         WHERE d.acq_time BETWEEN :start AND :end
@@ -78,8 +79,12 @@ def build_dataset(
 
     X = train_df[feature_cols]
     y = train_df["label"].map({"POSITIVE": 1, "NEGATIVE": 0})
-    
-    meta_cols = ["id", "lat", "lon", "acq_time", "sensor", "source", "label"]
+
+    meta_cols = ["id", "lat", "lon", "acq_time", "sensor", "source", "label", "label_weight"]
+    # label_weight may be absent if the caller passed a pre-filtered DataFrame;
+    # train_df is already a copy (from the .copy() filter above), so assign directly.
+    if "label_weight" not in train_df.columns:
+        train_df["label_weight"] = 1.0
     meta = train_df[meta_cols]
-    
+
     return X, y, meta

@@ -105,6 +105,13 @@ def _feature_matrix(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return df[features].astype(np.float32)
 
 
+def _label_weights(df: pd.DataFrame) -> np.ndarray:
+    """Return per-row label_weight as a float array, defaulting to 1.0 if absent."""
+    if "label_weight" in df.columns:
+        return df["label_weight"].fillna(1.0).to_numpy(dtype=np.float32)
+    return np.ones(len(df), dtype=np.float32)
+
+
 def _stratified_downsample(
     df: pd.DataFrame,
     *,
@@ -677,7 +684,8 @@ def _fit_legacy_two_stage(
     y_train_known = y_train[known_train]
 
     class_weight_pos = float(config.get("pos_class_weight", 1.0))
-    sample_weight = np.where(y_train_known == 1, class_weight_pos, 1.0)
+    per_row_weight = _label_weights(train_df.loc[known_train])
+    sample_weight = np.where(y_train_known == 1, class_weight_pos, 1.0) * per_row_weight
     model_stage1.fit(x_train_known, y_train_known, sample_weight=sample_weight)
 
     unknown_mask = y_train == -1
@@ -695,7 +703,8 @@ def _fit_legacy_two_stage(
     model = _build_model(config)
     x_stage2 = _feature_matrix(train_df.loc[stage2_known], features)
     y_stage2_known = y_stage2[stage2_known]
-    sample_weight_stage2 = np.where(y_stage2_known == 1, class_weight_pos, 1.0)
+    per_row_weight_stage2 = _label_weights(train_df.loc[stage2_known])
+    sample_weight_stage2 = np.where(y_stage2_known == 1, class_weight_pos, 1.0) * per_row_weight_stage2
     model.fit(x_stage2, y_stage2_known, sample_weight=sample_weight_stage2)
 
     stats = {

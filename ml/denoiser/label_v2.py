@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
@@ -699,7 +700,8 @@ def _label_single_window(
             source,
             rule_params,
             weak_supervision,
-            labeled_at
+            labeled_at,
+            label_weight
         )
         SELECT
             fire_detection_id,
@@ -709,7 +711,8 @@ def _label_single_window(
             :source,
             CAST(:rule_params AS jsonb),
             weak_supervision,
-            :labeled_at
+            :labeled_at,
+            1.0
         FROM tmp_label_final
         ON CONFLICT (fire_detection_id, rule_version) DO UPDATE SET
             event_id = EXCLUDED.event_id,
@@ -717,7 +720,8 @@ def _label_single_window(
             source = EXCLUDED.source,
             rule_params = EXCLUDED.rule_params,
             weak_supervision = EXCLUDED.weak_supervision,
-            labeled_at = EXCLUDED.labeled_at
+            labeled_at = EXCLUDED.labeled_at,
+            label_weight = EXCLUDED.label_weight
         """
     )
 
@@ -1027,8 +1031,9 @@ def main() -> None:
     start = datetime.strptime(args.start, "%Y-%m-%d")
     end = datetime.strptime(args.end, "%Y-%m-%d") + timedelta(days=1)
 
+    engine = get_engine()
     counts = label_detections_v2(
-        get_engine(),
+        engine,
         tuple(args.bbox),
         start,
         end,
@@ -1041,6 +1046,28 @@ def main() -> None:
         industrial_policy_version=args.industrial_policy_version,
         industrial_negatives_global=args.industrial_negatives_global,
     )
+
+    # Review queue feedback loop (science_grade).
+    # When enabled, resolved operator labels are ingested as training rows.
+    # When disabled, a WARNING is emitted if unprocessed labels exist so the
+    # gap is visible during ops review.
+    feedback_enabled = os.environ.get("REVIEW_QUEUE_FEEDBACK_ENABLED", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    from ml.denoiser.label_review_queue import (  # noqa: PLC0415
+        ingest_review_queue_labels,
+        warn_if_unprocessed_labels_exist,
+    )
+
+    if feedback_enabled:
+        rq_counts = ingest_review_queue_labels(engine)
+        counts["review_queue_inserted"] = rq_counts["inserted"]
+        counts["review_queue_conflicts"] = rq_counts["conflicts"]
+    else:
+        warn_if_unprocessed_labels_exist(engine)
+
     print(json.dumps(counts))
 
 
