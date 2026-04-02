@@ -37,7 +37,6 @@ from ingest.weather_ingest import (
 )
 from ingest.weather_repository import (
     FILE_FORMAT_POINT_CACHE,
-    GFS_GRID_DEG,
     GFS_MODEL_NAME,
     bbox_from_grid_points,
     bulk_insert_weather_point_cache,

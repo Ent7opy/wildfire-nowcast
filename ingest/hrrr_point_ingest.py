@@ -42,7 +42,6 @@ from ingest.hrrr_ingest import (
 from ingest.weather_point_ingest import _extract_records_at_grid_points
 from ingest.weather_repository import (
     FILE_FORMAT_POINT_CACHE,
-    GFS_GRID_DEG,
     STATUS_COMPLETED,
     STATUS_FAILED,
     bbox_from_grid_points,
