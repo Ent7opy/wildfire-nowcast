@@ -173,7 +173,7 @@ class TestIgnitionInferenceEngine:
             df = self._make_feature_df(3)
             fake_proba = np.array([[0.9, 0.1], [0.4, 0.6], [0.3, 0.7]])
 
-            with patch("ml.ignition_inference._load_onnx_session") as mock_load, \
+            with patch("ml.ignition_inference._load_onnx_session"), \
                  patch("ml.ignition_inference._run_onnx_session") as mock_run:
                 mock_run.return_value = fake_proba[:, 1]
                 result = engine.predict(df)
