@@ -26,6 +26,7 @@ import xarray as xr
 from ingest.config import REPO_ROOT
 from ingest.logging_utils import log_event
 from ingest.weather_repository import (
+    FILE_FORMAT_NETCDF,
     create_weather_run_record,
     finalize_weather_run_record,
 )
@@ -285,7 +286,7 @@ def build_hrrr_dataset(
     run_time: datetime,
     forecast_hour: int,
     *,
-    include_precip: bool = False,
+    include_precip: bool = True,
 ) -> xr.Dataset:
     """Assemble individual HRRR GRIB fragments into a single time-indexed Dataset."""
     arrays: dict[str, xr.DataArray] = {}
@@ -353,7 +354,7 @@ def ingest_hrrr_for_bbox(
     *,
     horizon_hours: int = 18,
     step_hours: int = 1,
-    include_precipitation: bool = False,
+    include_precipitation: bool = True,
     request_timeout_seconds: int = 60,
     max_attempts: int = 3,
 ) -> int:
@@ -431,6 +432,7 @@ def ingest_hrrr_for_bbox(
         step_hours=step_hours,
         bbox=bbox,
         variables=canonical_vars,
+        file_format=FILE_FORMAT_NETCDF,
     )
 
     storage_path = ""

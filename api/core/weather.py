@@ -128,9 +128,9 @@ def _query_point_cache(
             "run_time": row["run_time"],
         }
     except Exception:
-        # Point cache table may not exist yet (pre-migration) or query may
-        # fail for other reasons.  Fall through to file-based path.
-        LOGGER.debug("Point cache query failed; falling through to file path.", exc_info=True)
+        # Migration ships with the code, so pre-migration failures are now
+        # unlikely.  Any exception here is unexpected and should be surfaced.
+        LOGGER.warning("Point cache query failed; falling through to file path.", exc_info=True)
         return None
 
 

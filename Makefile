@@ -1,4 +1,4 @@
-.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places
+.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places ingest-orchestrator ops-start
 
 PYTHON ?= python3
 UV ?= uv
@@ -320,3 +320,27 @@ json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file
 	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_SPREAD_FAMILY) --artifact "$$latest_run" --metrics "@$$registry_metrics"); \
 	echo "Promoting $$model_id"; \
 	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_SPREAD_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-spread pipeline=$(TRAIN_SPREAD_PIPELINE)"
+
+# ── Ingest Operations ──────────────────────────────────────────────────────────
+
+ingest-orchestrator: ## One-shot ingest (FIRMS + weather + perimeters)
+	$(UV) run --project ingest -m ingest.orchestrator \
+	  --jobs firms,weather,perimeters \
+	  --weather-include-precip \
+	  $(if $(ARGS),$(ARGS),)
+
+ops-start: ## Start continuous ingest scheduler
+	$(UV) run --project ingest -m ingest.orchestrator \
+	  --loop \
+	  --jobs firms,weather,perimeters,lfmc,lulc,cleanup \
+	  --enforce-freshness \
+	  --max-retries 3 \
+	  --retry-backoff-seconds 20 \
+	  --firms-interval-minutes 30 \
+	  --weather-interval-minutes 60 \
+	  --weather-include-precip \
+	  --perimeters-interval-minutes 1440 \
+	  --lfmc-interval-minutes 360 \
+	  --lulc-interval-minutes 10080 \
+	  --cleanup-interval-minutes 1440 \
+	  $(if $(ARGS),$(ARGS),)
