@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Alert,
   Box,
@@ -85,6 +85,13 @@ function WatchConfigDialog({ item, open, onClose }: WatchConfigDialogProps) {
   const [intervalMin, setIntervalMin] = useState<number>(item.watch_interval_minutes ?? 30);
   const [threshold, setThreshold] = useState<number>(item.watch_alert_threshold ?? 0.5);
   const queryClient = useQueryClient();
+
+  useEffect(() => {
+    if (open) {
+      setIntervalMin(item.watch_interval_minutes ?? 30);
+      setThreshold(item.watch_alert_threshold ?? 0.5);
+    }
+  }, [open, item.watch_interval_minutes, item.watch_alert_threshold]);
 
   const enable = useMutation({
     mutationFn: () =>
