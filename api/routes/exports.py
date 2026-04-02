@@ -368,10 +368,10 @@ def export_risk(
         rows = []
         for feature in risk_data["features"]:
             props = feature["properties"]
-            # Extract cell center from geometry
-            coords = feature["geometry"]["coordinates"][0]
-            center_lon = sum(c[0] for c in coords[:-1]) / 4
-            center_lat = sum(c[1] for c in coords[:-1]) / 4
+            # Extract cell center from geometry using Shapely for correctness
+            # regardless of vertex count (handles non-rectangular cells).
+            centroid = shapely_shape(feature["geometry"]).centroid
+            center_lon, center_lat = centroid.x, centroid.y
             
             row = {
                 "center_lon": center_lon,
