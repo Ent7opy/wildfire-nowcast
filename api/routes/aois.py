@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
@@ -37,6 +38,11 @@ class UpdateAOIRequest(BaseModel):
     geometry: Optional[dict[str, Any]] = None
     description: Optional[str] = None
     tags: Optional[dict[str, Any]] = None
+
+
+class PauseNotificationsRequest(BaseModel):
+    duration_hours: Annotated[float, Field(ge=0.5, le=168.0)]
+    reason: Optional[str] = None
 
 
 class WatchConfigRequest(BaseModel):
@@ -296,3 +302,39 @@ def delete_aoi(aoi_id: UUID):
     """Delete an AOI."""
     if not repo.delete_aoi(aoi_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
+
+
+@aois_router.post("/{aoi_id}/pause-notifications", dependencies=[Depends(no_cache)])
+def pause_notifications(aoi_id: UUID, request: PauseNotificationsRequest):
+    """Pause watch notifications for an AOI for the given duration.
+
+    Notifications are suppressed until the pause expires; monitoring (forecasts,
+    watermarks) continues uninterrupted.
+    """
+    aoi = repo.get_aoi(aoi_id)
+    if not aoi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
+
+    paused_until = datetime.now(timezone.utc) + timedelta(hours=request.duration_hours)
+    repo.set_aoi_notifications_paused_until(aoi_id, paused_until)
+
+    return {
+        "aoi_id": str(aoi_id),
+        "paused_until": paused_until.isoformat(),
+        "reason": request.reason,
+    }
+
+
+@aois_router.post("/{aoi_id}/resume-notifications", dependencies=[Depends(no_cache)])
+def resume_notifications(aoi_id: UUID):
+    """Resume watch notifications for an AOI by clearing any active pause."""
+    aoi = repo.get_aoi(aoi_id)
+    if not aoi:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
+
+    repo.set_aoi_notifications_paused_until(aoi_id, None)
+
+    return {
+        "aoi_id": str(aoi_id),
+        "resumed_at": datetime.now(timezone.utc).isoformat(),
+    }

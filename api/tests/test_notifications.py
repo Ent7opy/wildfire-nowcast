@@ -10,9 +10,12 @@ from unittest.mock import AsyncMock, patch
 import api.notifications as notif
 from api.notifications import (
     _build_webhook_payload,
+    _burst_tracker,
+    _check_burst,
     _dispatch,
     _is_rate_limited,
     _last_sent,
+    _resolve_webhook_url,
     notify,
 )
 
@@ -189,3 +192,325 @@ class TestNotifyDispatch(unittest.TestCase):
             with patch("api.notifications._post_webhook", new_callable=AsyncMock):
                 notify("ev_sync", "Title", "Body")
                 time.sleep(0.05)  # give the daemon thread time to finish
+
+
+class TestBurstCap(unittest.TestCase):
+    """Per-AOI burst cap suppresses excess simultaneous alerts."""
+
+    def setUp(self):
+        _last_sent.clear()
+        _burst_tracker.clear()
+        # Use a cap of 3 and a large window so tests are deterministic.
+        notif._BURST_CAP = 3
+        notif._BURST_WINDOW_SECONDS = 60
+
+    def tearDown(self):
+        _burst_tracker.clear()
+        _last_sent.clear()
+        # Restore module defaults (env may not be set in tests).
+        notif._BURST_CAP = int(os.getenv("NOTIFICATION_BURST_CAP", "3"))
+        notif._BURST_WINDOW_SECONDS = int(os.getenv("NOTIFICATION_BURST_WINDOW_SECONDS", "60"))
+
+    # ------------------------------------------------------------------
+    # _check_burst unit tests (no I/O, no webhook)
+    # ------------------------------------------------------------------
+
+    def test_burst_cap_allows_first_n_alerts(self):
+        """First _BURST_CAP distinct event_types for the same aoi_id are allowed."""
+        aoi = "aoi-allows"
+        self.assertFalse(_check_burst(aoi, "new_ignition"))
+        self.assertFalse(_check_burst(aoi, "perimeter_breach"))
+        self.assertFalse(_check_burst(aoi, "perimeter_growth"))
+        # Exactly at cap after third — still not suppressed until the 4th.
+        # (The 4th is what triggers suppression.)
+
+    def test_burst_cap_suppresses_nth_plus_one(self):
+        """The (cap+1)th distinct event_type within the window is suppressed."""
+        aoi = "aoi-suppress"
+        _check_burst(aoi, "new_ignition")
+        _check_burst(aoi, "perimeter_breach")
+        _check_burst(aoi, "perimeter_growth")
+        # 4th event tips over the cap → suppressed
+        result = _check_burst(aoi, "spread_trajectory")
+        self.assertTrue(result)
+
+    def test_burst_cap_independent_per_aoi(self):
+        """Burst counts are tracked independently per aoi_id.
+
+        3 events on aoi-1 and 3 events on aoi-2 are each allowed (counts don't
+        bleed across AOIs).  A 4th event on aoi-1 is suppressed without affecting
+        aoi-3, which has only 1 event and must still be allowed.
+        """
+        for et in ("new_ignition", "perimeter_breach", "perimeter_growth"):
+            self.assertFalse(_check_burst("aoi-indep-1", et))
+            self.assertFalse(_check_burst("aoi-indep-2", et))
+        # aoi-indep-1 is at cap — 4th event is suppressed.
+        self.assertTrue(_check_burst("aoi-indep-1", "spread_trajectory"))
+        # aoi-indep-3 has had no events — must not be affected by aoi-indep-1's cap.
+        self.assertFalse(_check_burst("aoi-indep-3", "new_ignition"))
+
+    def test_burst_cap_resets_after_window(self):
+        """After the window expires, a fresh batch of alerts is allowed."""
+        aoi = "aoi-reset"
+        # Fill the window.
+        _check_burst(aoi, "new_ignition")
+        _check_burst(aoi, "perimeter_breach")
+        _check_burst(aoi, "perimeter_growth")
+        # Backdate all entries far into the past so they expire.
+        expired_time = time.monotonic() - 99999
+        notif._burst_tracker[aoi] = [
+            (expired_time, et) for (_, et) in notif._burst_tracker[aoi]
+        ]
+        # First three of a fresh batch must be allowed.
+        self.assertFalse(_check_burst(aoi, "new_ignition"))
+        self.assertFalse(_check_burst(aoi, "perimeter_breach"))
+        self.assertFalse(_check_burst(aoi, "perimeter_growth"))
+
+    def test_burst_cap_skipped_for_none_aoi_id(self):
+        """Events with no aoi_id are never burst-capped."""
+        for _ in range(10):
+            self.assertFalse(_check_burst(None, "new_ignition"))
+            self.assertFalse(_check_burst("", "new_ignition"))
+
+    def test_burst_cap_skipped_for_infrastructure_events(self):
+        """Infrastructure event types are never burst-capped even with an aoi_id."""
+        aoi = "aoi-infra"
+        for _ in range(10):
+            self.assertFalse(_check_burst(aoi, "ingest_job_failed"))
+            self.assertFalse(_check_burst(aoi, "data_stale_critical"))
+            self.assertFalse(_check_burst(aoi, "denoiser_drift_hard"))
+            self.assertFalse(_check_burst(aoi, "burst_digest:aoi-infra"))
+
+    # ------------------------------------------------------------------
+    # Integration test: notify() + webhook dispatch
+    # ------------------------------------------------------------------
+
+    def test_digest_sent_on_cap_exceeded(self):
+        """When cap is exceeded, a digest notification is dispatched with the correct event_type."""
+        aoi = "aoi-digest"
+        dispatched: list[str] = []
+
+        async def run():
+            _last_sent.clear()
+            _burst_tracker.clear()
+            with patch.dict(os.environ, {"NOTIFICATION_WEBHOOK_URL": "http://fake/hook"}):
+                with patch("api.notifications._post_webhook", new_callable=AsyncMock) as mock_post:
+                    mock_post.side_effect = lambda url, payload: dispatched.append(
+                        payload["attachments"][0]["title"]
+                    )
+                    # Send cap events — all should proceed.
+                    for et in ("new_ignition", "perimeter_breach", "perimeter_growth"):
+                        notify(et, "Title", "Body", aoi_id=aoi)
+                    await asyncio.sleep(0.1)
+                    # 4th event tips over the cap → suppressed; digest fires instead.
+                    notify("spread_trajectory", "Title", "Body", aoi_id=aoi)
+                    await asyncio.sleep(0.1)
+
+            # 3 real alerts + 1 digest (burst_digest:aoi-digest).
+            self.assertEqual(len(dispatched), 4)
+            digest_titles = [t for t in dispatched if "Multiple alerts" in t]
+            self.assertEqual(len(digest_titles), 1)
+
+        asyncio.run(run())
+
+
+class TestResolveWebhookUrl(unittest.TestCase):
+    """Unit tests for _resolve_webhook_url severity-based channel routing."""
+
+    _ROUTING_VARS = (
+        "NOTIFICATION_WEBHOOK_URL",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL",
+        "NOTIFICATION_WEBHOOK_URL_WARNING",
+        "NOTIFICATION_WEBHOOK_URL_INFO",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY",
+    )
+
+    def _clean_env(self):
+        """Remove all routing env vars to start from a known-blank state."""
+        for var in self._ROUTING_VARS:
+            os.environ.pop(var, None)
+
+    def setUp(self):
+        self._clean_env()
+
+    def tearDown(self):
+        self._clean_env()
+
+    def test_resolve_webhook_url_returns_none_when_nothing_configured(self):
+        """With no env vars set, _resolve_webhook_url returns None for all severities."""
+        for severity in ("critical", "warning", "info"):
+            self.assertIsNone(_resolve_webhook_url(severity))
+
+    def test_critical_uses_severity_specific_url(self):
+        """When NOTIFICATION_WEBHOOK_URL_CRITICAL is set, critical events use it."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL": "http://critical-channel/hook",
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+            },
+        ):
+            self.assertEqual(_resolve_webhook_url("critical"), "http://critical-channel/hook")
+
+    def test_severity_specific_takes_precedence_over_fallback(self):
+        """Severity-specific URL wins over the global fallback when both are set."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL": "http://critical-specific/hook",
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+            },
+        ):
+            result = _resolve_webhook_url("critical")
+            self.assertEqual(result, "http://critical-specific/hook")
+            self.assertNotEqual(result, "http://fallback/hook")
+
+    def test_warning_falls_back_to_global_when_no_specific(self):
+        """When only the global fallback is set, warning events use it."""
+        with patch.dict(os.environ, {"NOTIFICATION_WEBHOOK_URL": "http://fallback/hook"}):
+            self.assertEqual(_resolve_webhook_url("warning"), "http://fallback/hook")
+
+    def test_info_suppressed_in_critical_only_mode(self):
+        """In critical-only mode, info events return None (webhook suppressed)."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+            },
+        ):
+            self.assertIsNone(_resolve_webhook_url("info"))
+
+    def test_warning_suppressed_in_critical_only_mode(self):
+        """In critical-only mode, warning events return None (webhook suppressed)."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+            },
+        ):
+            self.assertIsNone(_resolve_webhook_url("warning"))
+
+    def test_critical_still_sends_in_critical_only_mode(self):
+        """In critical-only mode, critical events still use the fallback URL."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+            },
+        ):
+            self.assertEqual(_resolve_webhook_url("critical"), "http://fallback/hook")
+
+    def test_critical_only_false_does_not_suppress(self):
+        """NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY=false leaves normal fallback behaviour intact."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "false",
+            },
+        ):
+            self.assertEqual(_resolve_webhook_url("warning"), "http://fallback/hook")
+            self.assertEqual(_resolve_webhook_url("info"), "http://fallback/hook")
+
+
+class TestSeverityRoutingIntegration(unittest.TestCase):
+    """Integration tests: notify() + _post_webhook with severity-based routing."""
+
+    _ROUTING_VARS = (
+        "NOTIFICATION_WEBHOOK_URL",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL",
+        "NOTIFICATION_WEBHOOK_URL_WARNING",
+        "NOTIFICATION_WEBHOOK_URL_INFO",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY",
+        "NOTIFICATION_EMAIL_TO",
+        "NOTIFICATION_SMTP_HOST",
+    )
+
+    def setUp(self):
+        _last_sent.clear()
+        for var in self._ROUTING_VARS:
+            os.environ.pop(var, None)
+
+    def tearDown(self):
+        _last_sent.clear()
+        for var in self._ROUTING_VARS:
+            os.environ.pop(var, None)
+
+    def test_critical_webhook_posted_to_severity_specific_url(self):
+        """notify() POSTs to NOTIFICATION_WEBHOOK_URL_CRITICAL when it is set."""
+        posted_urls: list[str] = []
+
+        async def run():
+            _last_sent.clear()
+            with patch.dict(
+                os.environ,
+                {
+                    "NOTIFICATION_WEBHOOK_URL_CRITICAL": "http://critical/hook",
+                    "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                },
+            ):
+                with patch("api.notifications._post_webhook", new_callable=AsyncMock) as mock_post:
+                    mock_post.side_effect = lambda url, payload: posted_urls.append(url)
+                    notify("ev_crit_routing", "Title", "Body", severity="critical")
+                    await asyncio.sleep(0.05)
+
+            self.assertEqual(len(posted_urls), 1)
+            self.assertEqual(posted_urls[0], "http://critical/hook")
+
+        asyncio.run(run())
+
+    def test_info_suppressed_in_critical_only_mode_no_webhook_call(self):
+        """In critical-only mode, info-severity notify() never calls _post_webhook."""
+        async def run():
+            _last_sent.clear()
+            with patch.dict(
+                os.environ,
+                {
+                    "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                    "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+                    # No email configured either, so notify() exits before dispatch.
+                },
+            ):
+                with patch("api.notifications._post_webhook", new_callable=AsyncMock) as mock_post:
+                    notify("ev_info_suppressed", "Title", "Body", severity="info")
+                    await asyncio.sleep(0.05)
+                    self.assertEqual(mock_post.call_count, 0)
+
+        asyncio.run(run())
+
+    def test_email_always_sends_regardless_of_webhook_routing(self):
+        """Even when the webhook is suppressed (critical-only mode), email is still dispatched."""
+        email_calls: list[dict] = []
+
+        async def fake_email(**kwargs: object) -> None:
+            email_calls.append(dict(kwargs))
+
+        async def run():
+            _last_sent.clear()
+            with patch.dict(
+                os.environ,
+                {
+                    "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                    "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+                    "NOTIFICATION_EMAIL_TO": "ops@example.com",
+                    "NOTIFICATION_SMTP_HOST": "smtp.example.com",
+                },
+            ):
+                with patch("api.notifications._post_webhook", new_callable=AsyncMock) as mock_post:
+                    with patch(
+                        "api.notifications._send_email_blocking",
+                        side_effect=lambda **kw: email_calls.append(kw),
+                    ):
+                        notify("ev_email_always", "Title", "Body", severity="warning")
+                        await asyncio.sleep(0.1)
+
+                # Webhook must NOT have been called (suppressed).
+                self.assertEqual(mock_post.call_count, 0)
+
+            # Email must still have been dispatched.
+            self.assertEqual(len(email_calls), 1)
+
+        asyncio.run(run())

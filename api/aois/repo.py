@@ -29,7 +29,8 @@ _AOI_SELECT = """
     watch_alert_threshold,
     watch_last_checked_at,
     watch_last_alerted_at,
-    watch_last_spread_prob
+    watch_last_spread_prob,
+    watch_notifications_paused_until
 """
 
 
@@ -322,6 +323,22 @@ def list_watched_aois_due(now: datetime) -> list[dict[str, Any]]:
         rows = conn.execute(stmt, {"now": now}).mappings().all()
 
     return [dict(r) for r in rows]
+
+
+def set_aoi_notifications_paused_until(
+    aoi_id: UUID,
+    paused_until: Optional[datetime],
+) -> None:
+    """Set or clear the notification pause timestamp for an AOI.
+
+    Pass ``paused_until=None`` to resume notifications immediately.
+    Pass a future UTC-aware datetime to pause until that time.
+    """
+    stmt = text(
+        "UPDATE aois SET watch_notifications_paused_until = :paused_until WHERE id = :aoi_id"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {"aoi_id": aoi_id, "paused_until": paused_until})
 
 
 def update_aoi_watch_status(
