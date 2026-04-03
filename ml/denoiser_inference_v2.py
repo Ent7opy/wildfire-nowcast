@@ -885,6 +885,7 @@ def run_inference_v2(
             NOW(),
             NOW()
         )
+        ON CONFLICT (event_id) WHERE status IN ('open', 'pending') DO NOTHING
         """
     )
 

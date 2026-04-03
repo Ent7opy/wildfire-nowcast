@@ -361,8 +361,7 @@ def rollback_model(
     if not merged_notes:
         merged_notes = "rollback"
 
-    _notify_model_event("rollback", family_norm, str(rollback_model_id), promoted_by, merged_notes)
-    return promote_model(
+    result = promote_model(
         family=family_norm,
         model_id=str(rollback_model_id),
         promoted_by=promoted_by,
@@ -370,6 +369,8 @@ def rollback_model(
         engine=db,
         _notify=False,
     )
+    _notify_model_event("rollback", family_norm, str(rollback_model_id), promoted_by, merged_notes)
+    return result
 
 
 def resolve_active_model(family: str, *, engine: Engine | None = None) -> dict[str, Any] | None:

@@ -287,6 +287,7 @@ def _load_weather_cube_from_cache(
 
     # Build per-forecast-hour datasets and concat along time.
     datasets = []
+    valid_hours = []  # parallel to datasets — tracks which forecast hours produced a dataset
     ref_time_utc = ref_time.astimezone(timezone.utc) if ref_time.tzinfo else ref_time.replace(tzinfo=timezone.utc)
 
     for fh in forecast_hours_list:
@@ -316,12 +317,13 @@ def _load_weather_cube_from_cache(
             coords={"lat": lats_unique, "lon": lons_unique, "time": target_time_64},
         )
         datasets.append(ds_fh)
+        valid_hours.append(fh)
 
     if not datasets:
         return None
 
     ds = xr.concat(datasets, dim="time")
-    ds = ds.assign_coords(lead_time_hours=("time", list(forecast_hours_list[:len(datasets)])))
+    ds = ds.assign_coords(lead_time_hours=("time", valid_hours))
 
     # Interpolate from GFS 0.25° to the window's 0.01° grid.
     try:
