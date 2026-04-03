@@ -1167,6 +1167,21 @@ def _execute_job(
             overall_state="critical",
             stale_sources=", ".join(critical_sources),
         )
+        # Also fire the user-facing staleness notification (picture_stale:global).
+        try:
+            from api.data_status import notify_staleness_if_degraded  # noqa: PLC0415
+
+            notify_staleness_if_degraded(fresh_snapshot, aoi_id=None)
+        except Exception:
+            LOGGER.debug("notify_staleness_if_degraded skipped: snapshot unavailable")
+    elif fresh_snapshot and str(fresh_snapshot.get("overall_state", "")) == "degraded":
+        # Degraded state: user-facing notification only (no internal ops alert).
+        try:
+            from api.data_status import notify_staleness_if_degraded  # noqa: PLC0415
+
+            notify_staleness_if_degraded(fresh_snapshot, aoi_id=None)
+        except Exception:
+            LOGGER.debug("notify_staleness_if_degraded skipped: snapshot unavailable")
     return code
 
 

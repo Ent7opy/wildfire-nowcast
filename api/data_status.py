@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -9,6 +10,9 @@ from sqlalchemy import Engine, text
 
 from api.config import settings
 from api.db import get_engine
+from api.notifications import notify
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -583,3 +587,86 @@ def build_data_status_snapshot(
             "lulc": lulc["idempotency"],
         }
     return snapshot
+
+
+def notify_staleness_if_degraded(snapshot: dict[str, Any], aoi_id: str | None = None) -> None:
+    """Fire a user-facing notification when the situational picture is degraded or critical.
+
+    Inspects snapshot["overall_state"] and emits a notification when the state
+    is "critical" (severity="critical") or "degraded" (severity="warning").
+    No notification is emitted for "healthy".
+
+    Args:
+        snapshot:  Output of build_data_status_snapshot(include_internal=True).
+        aoi_id:    AOI that triggered the check, if applicable.
+    """
+    overall_state: str = str(snapshot.get("overall_state", "healthy")).lower()
+    if overall_state not in {"critical", "degraded"}:
+        LOGGER.info("data_status: situational picture is healthy — no staleness notification")
+        return
+
+    # Derive age from the oldest stale source's last_seen_at.
+    stale_sources: list[str] = snapshot.get("stale_sources", [])
+    sources: dict[str, Any] = snapshot.get("sources", {})
+    now = _utc_now()
+
+    oldest_last_seen: datetime | None = None
+    for source_name in stale_sources:
+        source_detail = sources.get(source_name, {})
+        raw_last_seen = source_detail.get("last_seen_at")
+        if raw_last_seen is None:
+            continue
+        # last_seen_at is an ISO string inside the snapshot sources dict.
+        if isinstance(raw_last_seen, str):
+            try:
+                last_seen_dt = datetime.fromisoformat(raw_last_seen)
+                if last_seen_dt.tzinfo is None:
+                    last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        elif isinstance(raw_last_seen, datetime):
+            last_seen_dt = raw_last_seen
+            if last_seen_dt.tzinfo is None:
+                last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
+        else:
+            continue
+
+        if oldest_last_seen is None or last_seen_dt < oldest_last_seen:
+            oldest_last_seen = last_seen_dt
+
+    if oldest_last_seen is not None:
+        age_hours = round((now - oldest_last_seen).total_seconds() / 3600.0, 1)
+    else:
+        age_hours = 0.0
+
+    identifier = aoi_id if aoi_id else "global"
+
+    if overall_state == "critical":
+        severity = "critical"
+        title = "Situational picture degraded"
+        body = (
+            f"Ground truth data is {age_hours}h old — confidence in current fire positions is reduced."
+        )
+        LOGGER.warning(
+            "data_status: situational picture is CRITICAL — stale sources: %s",
+            stale_sources,
+        )
+    else:
+        severity = "warning"
+        title = "Situational picture may be outdated"
+        body = (
+            f"Ground truth data is {age_hours}h old — confidence in current fire positions is reduced."
+        )
+        LOGGER.warning(
+            "data_status: situational picture is DEGRADED — stale sources: %s",
+            stale_sources,
+        )
+
+    notify(
+        f"picture_stale:{identifier}",
+        title=title,
+        body=body,
+        severity=severity,  # type: ignore[arg-type]
+        stale_sources=stale_sources,
+        aoi_id=aoi_id,
+    )

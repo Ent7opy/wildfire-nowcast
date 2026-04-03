@@ -22,16 +22,21 @@ Environment variables (optional):
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
 import httpx
 
+from sqlalchemy import text as sa_text
+
 from api.aois.repo import list_watched_aois_due, update_aoi_watch_status
+from api.db import get_engine
 from api.notifications import notify
 
 LOGGER = logging.getLogger(__name__)
@@ -137,6 +142,211 @@ def _should_alert(
     return True
 
 
+# Minimum denoised_score for a detection to qualify as confirmed.
+_IGNITION_MIN_SCORE: float = 0.7
+# Minimum cluster size (number of qualifying detections within proximity).
+_IGNITION_MIN_CLUSTER_SIZE: int = 2
+# Proximity radius for clustering (metres).
+_IGNITION_CLUSTER_RADIUS_M: float = 1000.0
+# Lookback window when watch_last_checked_at is NULL.
+_IGNITION_DEFAULT_LOOKBACK_HOURS: int = 2
+
+
+def check_new_ignition(
+    aoi: dict[str, Any],
+    engine=None,
+    _now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Check for a new confirmed ignition cluster inside an AOI.
+
+    Queries fire_detections for qualifying detections (is_noise=false,
+    false_source_masked=false, denoised_score >= 0.7) within the AOI geometry
+    since watch_last_checked_at (or 2 h ago if null).  Groups detections into
+    proximity clusters (>= 2 within 1 km of each other) that are either
+    unassociated with a fire event or whose event started within the last 2 h
+    (i.e. a genuinely new ignition, not an existing tracked fire).
+
+    If a qualifying cluster is found, fires a "new_ignition:{aoi_id}"
+    notification and returns a dict with cluster details.
+
+    Returns None when no qualifying cluster is found or on any error.
+
+    Args:
+        aoi:    AOI record dict (from list_watched_aois_due).
+        engine: SQLAlchemy engine (defaults to get_engine()). Injectable for testing.
+        _now:   Override for current UTC time (testing only).
+    """
+    aoi_id: UUID = aoi["id"]
+    aoi_name: str = aoi["name"]
+
+    try:
+        now = _now if _now is not None else datetime.now(timezone.utc)
+        last_checked_at: datetime | None = aoi.get("watch_last_checked_at")
+        if last_checked_at is None:
+            since = now - timedelta(hours=_IGNITION_DEFAULT_LOOKBACK_HOURS)
+        else:
+            # Ensure timezone-aware.
+            if last_checked_at.tzinfo is None:
+                since = last_checked_at.replace(tzinfo=timezone.utc)
+            else:
+                since = last_checked_at
+
+        # Serialise AOI geometry to GeoJSON string for PostGIS.
+        geometry = aoi.get("geometry")
+        if not geometry:
+            LOGGER.warning(
+                "aoi_watch: AOI %s (%s) has no geometry — skipping ignition check",
+                aoi_name,
+                aoi_id,
+            )
+            return None
+        geojson_str = json.dumps(geometry)
+
+        db_engine = engine or get_engine()
+        with db_engine.begin() as conn:
+            # Fetch all qualifying detections within the AOI geometry that are
+            # new enough (acquired since the lookback window).
+            rows = conn.execute(
+                sa_text(
+                    """
+                    SELECT
+                        fd.id,
+                        fd.lat,
+                        fd.lon,
+                        fd.denoised_score,
+                        fd.event_id,
+                        fe.started_at AS event_started_at
+                    FROM fire_detections fd
+                    LEFT JOIN fire_events fe ON fe.id = fd.event_id
+                    WHERE fd.is_noise = false
+                      AND fd.false_source_masked = false
+                      AND fd.denoised_score >= :min_score
+                      AND fd.acq_time >= :since
+                      AND ST_Within(
+                            fd.geom,
+                            ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)
+                          )
+                    """
+                ),
+                {
+                    "min_score": _IGNITION_MIN_SCORE,
+                    "since": since,
+                    "geojson": geojson_str,
+                },
+            ).mappings().all()
+
+        detections = [dict(r) for r in rows]
+        LOGGER.info(
+            "aoi_watch: ignition check for AOI %s (%s): %d qualifying detection(s) since %s",
+            aoi_name,
+            aoi_id,
+            len(detections),
+            since.isoformat(),
+        )
+
+        if not detections:
+            return None
+
+        # Filter to detections that represent NEW ignitions: event_id is None, or
+        # the associated event started within the last 2 hours.
+        new_cutoff = now - timedelta(hours=2)
+        new_detections = [
+            d
+            for d in detections
+            if d["event_id"] is None
+            or (
+                d["event_started_at"] is not None
+                and (
+                    d["event_started_at"].replace(tzinfo=timezone.utc)
+                    if d["event_started_at"].tzinfo is None
+                    else d["event_started_at"]
+                )
+                >= new_cutoff
+            )
+        ]
+
+        if not new_detections:
+            LOGGER.info(
+                "aoi_watch: AOI %s — all qualifying detections belong to existing events (> 2 h old)",
+                aoi_name,
+            )
+            return None
+
+        # Cluster by proximity: find the largest cluster where at least two
+        # detections are within _IGNITION_CLUSTER_RADIUS_M of each other.
+        # Simple O(n²) sweep — detection counts per AOI check are small.
+        best_cluster: list[dict[str, Any]] = []
+        for anchor in new_detections:
+            cos_lat = math.cos(math.radians(float(anchor["lat"])))
+            cluster: list[dict[str, Any]] = []
+            for detection in new_detections:
+                dlat_m = (float(detection["lat"]) - float(anchor["lat"])) * 111_000
+                dlon_m = (float(detection["lon"]) - float(anchor["lon"])) * 111_000 * cos_lat
+                dist_m = math.sqrt(dlat_m**2 + dlon_m**2)
+                if dist_m <= _IGNITION_CLUSTER_RADIUS_M:
+                    cluster.append(detection)
+            if len(cluster) > len(best_cluster):
+                best_cluster = cluster
+
+        if len(best_cluster) < _IGNITION_MIN_CLUSTER_SIZE:
+            LOGGER.info(
+                "aoi_watch: AOI %s — largest proximity cluster has %d detection(s) (< %d required)",
+                aoi_name,
+                len(best_cluster),
+                _IGNITION_MIN_CLUSTER_SIZE,
+            )
+            return None
+
+        # Compute cluster centroid and max score.
+        centroid_lat = sum(float(d["lat"]) for d in best_cluster) / len(best_cluster)
+        centroid_lon = sum(float(d["lon"]) for d in best_cluster) / len(best_cluster)
+        max_score = max(float(d["denoised_score"]) for d in best_cluster)
+        detection_count = len(best_cluster)
+
+        LOGGER.warning(
+            "aoi_watch: NEW IGNITION detected in AOI %s — %d detection(s), max_score=%.3f, "
+            "centroid=(%.4f, %.4f)",
+            aoi_name,
+            detection_count,
+            max_score,
+            centroid_lat,
+            centroid_lon,
+        )
+
+        notify(
+            f"new_ignition:{aoi_id}",
+            title=f"New confirmed ignition in {aoi_name}",
+            body=(
+                f"{detection_count} confirmed detection(s) clustered within "
+                f"{_IGNITION_CLUSTER_RADIUS_M / 1000:.0f} km in AOI '{aoi_name}'. "
+                f"Max denoiser confidence: {max_score:.0%}."
+            ),
+            severity="critical",
+            aoi_id=str(aoi_id),
+            denoised_score=round(max_score, 4),
+            detection_count=detection_count,
+            lat=round(centroid_lat, 6),
+            lon=round(centroid_lon, 6),
+        )
+
+        return {
+            "aoi_id": str(aoi_id),
+            "aoi_name": aoi_name,
+            "detection_count": detection_count,
+            "max_denoised_score": max_score,
+            "centroid_lat": centroid_lat,
+            "centroid_lon": centroid_lon,
+        }
+
+    except Exception:
+        LOGGER.exception(
+            "aoi_watch: error during ignition check for AOI %s (%s) — returning None",
+            aoi_name,
+            aoi_id,
+        )
+        return None
+
+
 def run_aoi_watch_cycle(api_base_url: str | None = None) -> int:
     """Run one AOI watchlist check cycle.
 
@@ -219,6 +429,9 @@ def run_aoi_watch_cycle(api_base_url: str | None = None) -> int:
                     "aoi_watch: AOI %s max_spread_prob=%.3f below threshold=%.3f — no alert",
                     aoi_name, max_spread_prob, aoi.get("watch_alert_threshold"),
                 )
+
+            # Run new-ignition check on every cycle pass, independently of spread alerts.
+            check_new_ignition(aoi)
 
             update_aoi_watch_status(
                 aoi_id=aoi_id,
