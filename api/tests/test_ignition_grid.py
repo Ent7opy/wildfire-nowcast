@@ -91,7 +91,6 @@ def test_horizon_24h_offset():
 
     fake_engine = MagicMock()
     now = datetime(2026, 4, 3, 12, 0, tzinfo=timezone.utc)
-    expected_valid_time = "2026-04-04T12:00:00+00:00"
 
     with patch.object(grid_mod, "resolve_active_model", return_value=_make_active_model()), \
          patch.object(grid_mod, "_query_weather_for_cells", return_value={}), \
