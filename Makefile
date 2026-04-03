@@ -1,4 +1,4 @@
-.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places ingest-orchestrator ops-start
+.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread ignition-snapshot ignition-train train-ignition model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places ingest-orchestrator ops-start
 
 PYTHON ?= python3
 UV ?= uv
@@ -201,6 +201,37 @@ spread-champion-challenger: ## Evaluate spread champion vs challenger (pass CONF
 
 weather-bias: ## Run weather bias analysis (pass ARGS="--forecast-nc ... --truth-nc ...")
 	$(UV) run --project ml -m ml.weather_bias_analysis $(ARGS)
+
+ignition-snapshot: ## Export ignition training snapshot (pass ARGS="--bbox ... --start ... --end ... --version ...")
+	$(UV) run --project ml -m ml.ignition.snapshot $(ARGS)
+
+ignition-train: ## Train ignition probability model (pass CONFIG="configs/ignition_train.yaml")
+	$(UV) run --project ml -m ml.train_ignition --config $(if $(CONFIG),$(CONFIG),configs/ignition_train.yaml)
+
+TRAIN_IGNITION_CONFIG ?= configs/ignition_train.yaml
+TRAIN_IGNITION_FAMILY ?= ignition
+TRAIN_IGNITION_ROOT ?= models/ignition
+TRAIN_IGNITION_METRICS_FILE ?= metrics.json
+TRAIN_IGNITION_GATE_REPORT_FILE ?= gate_report.json
+
+train-ignition: ## Train/register/promote ignition champion from latest run
+	@echo "=== Training ignition probability model ==="
+	@if [ ! -f "$(TRAIN_IGNITION_CONFIG)" ]; then echo "Missing config: $(TRAIN_IGNITION_CONFIG)"; exit 1; fi
+	$(UV) run --project ml -m ml.train_ignition --config $(TRAIN_IGNITION_CONFIG)
+	@latest_run=$$(ls -td $(TRAIN_IGNITION_ROOT)/* 2>/dev/null | head -n 1); \
+	if [ -z "$$latest_run" ]; then echo "No ignition run found under $(TRAIN_IGNITION_ROOT)"; exit 1; fi; \
+	metrics_file="$$latest_run/$(TRAIN_IGNITION_METRICS_FILE)"; \
+	gate_file="$$latest_run/$(TRAIN_IGNITION_GATE_REPORT_FILE)"; \
+	if [ ! -f "$$metrics_file" ]; then echo "Missing metrics file: $$metrics_file"; exit 1; fi; \
+	if [ ! -f "$$gate_file" ]; then echo "Missing gate report: $$gate_file"; exit 1; fi; \
+	gate_pass=$$($(PYTHON) -c 'import json,sys; payload=json.load(open(sys.argv[1], "r", encoding="utf-8")); print("true" if bool(payload.get("pass", False)) else "false")' "$$gate_file"); \
+	if [ "$$gate_pass" != "true" ]; then echo "Promotion blocked: gate report failed ($$gate_file)"; exit 1; fi; \
+	registry_metrics="$$latest_run/registry_metrics.json"; \
+	$(PYTHON) -c 'import json, os, sys; metrics_path, gate_path, out_path = sys.argv[1:4]; metrics=json.load(open(metrics_path, "r", encoding="utf-8")); out=dict(metrics) if isinstance(metrics, dict) else {"metrics": metrics}; out["gate_report"]=json.load(open(gate_path, "r", encoding="utf-8")); json.dump(out, open(out_path, "w", encoding="utf-8"), indent=2)' "$$metrics_file" "$$gate_file" "$$registry_metrics"; \
+	echo "Registering $$latest_run"; \
+	model_id=$$($(UV) run --project api scripts/model_registry.py register --id-only --family $(TRAIN_IGNITION_FAMILY) --artifact "$$latest_run/model.onnx" --metrics "@$$registry_metrics" --runtime-contract "@$$latest_run/contract.json"); \
+	echo "Promoting $$model_id"; \
+	$(UV) run --project api scripts/model_registry.py promote --family $(TRAIN_IGNITION_FAMILY) --model-id "$$model_id" --notes "auto-promote from make train-ignition"
 
 # ── Model registry ─────────────────────────────────────────────────────────────
 
