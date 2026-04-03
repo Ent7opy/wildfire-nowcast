@@ -3,9 +3,14 @@
 Detects rapid size increases in official fire perimeters by comparing the two
 most recent perimeter records for each fire.
 
-Thresholds (from NOTIFICATION_CONTRACTS.md):
-  - Growth > 10% AND >= 100 acres absolute → warning
-  - Growth > 25% AND >= 100 acres absolute → critical
+Thresholds use size-tiered dual gates: alert fires on EITHER the absolute OR
+the percentage threshold, whichever is lower for the fire's current size.
+Critical takes precedence when both levels are exceeded.
+
+Tier table (max_current_acres, warn_pct, crit_pct, warn_abs, crit_abs):
+  - Small  (<  1,000 acres): 10%/25%, 50/200 acres absolute
+  - Medium ( 10,000 acres): 7%/15%, 200/750 acres absolute
+  - Large  (>  10,000 acres): 5%/10%, 500/2,000 acres absolute
 """
 
 from __future__ import annotations
@@ -18,9 +23,16 @@ from api.notifications import notify
 
 LOGGER = logging.getLogger(__name__)
 
-_WARN_PCT = 10.0
-_CRITICAL_PCT = 25.0
-_MIN_ACRES = 100.0
+# Thresholds: (max_current_acres, warn_pct, crit_pct, warn_abs, crit_abs)
+# Checked in order; first matching tier applies.
+_GROWTH_THRESHOLDS: list[tuple[float, float, float, float, float]] = [
+    # small fires  (< 1,000 acres)
+    (1_000.0,      10.0, 25.0,   50.0,   200.0),
+    # medium fires (1,000 – 10,000 acres)
+    (10_000.0,      7.0, 15.0,  200.0,   750.0),
+    # large fires  (> 10,000 acres)
+    (float("inf"),  5.0, 10.0,  500.0, 2_000.0),
+]
 
 _ALL_SOURCES = ["nifc_wfigs", "cwfis", "copernicus_ems"]
 
@@ -30,6 +42,46 @@ def _slugify(name: str) -> str:
     slug = name.lower().strip()
     slug = re.sub(r"[^a-z0-9]+", "_", slug)
     return slug.strip("_")
+
+
+def _determine_severity(
+    current_acres: float,
+    abs_growth: float,
+    growth_pct: float,
+) -> str | None:
+    """Return "critical", "warning", or None for the given growth metrics.
+
+    Looks up the size tier by *current_acres*, then fires on EITHER the
+    absolute OR the percentage gate (whichever is lower for this fire size).
+    Critical takes precedence over warning.
+
+    Args:
+        current_acres: Most-recent perimeter size in acres.
+        abs_growth:    Absolute acreage increase (current − previous).
+        growth_pct:    Percentage increase relative to previous size.
+
+    Returns:
+        "critical", "warning", or None.
+    """
+    warn_pct = crit_pct = warn_abs = crit_abs = None
+
+    for max_acres, wp, cp, wa, ca in _GROWTH_THRESHOLDS:
+        if current_acres <= max_acres:
+            warn_pct, crit_pct, warn_abs, crit_abs = wp, cp, wa, ca
+            break
+
+    if warn_pct is None:
+        # Fallback: use largest-fire tier (should never happen given float("inf"))
+        _, warn_pct, crit_pct, warn_abs, crit_abs = _GROWTH_THRESHOLDS[-1]
+
+    is_crit = growth_pct >= crit_pct or abs_growth >= crit_abs
+    is_warn = growth_pct >= warn_pct or abs_growth >= warn_abs
+
+    if is_crit:
+        return "critical"
+    if is_warn:
+        return "warning"
+    return None
 
 
 def check_perimeter_growth(source: str, session: Any) -> list[dict[str, Any]]:
@@ -108,16 +160,17 @@ def check_perimeter_growth(source: str, session: Any) -> list[dict[str, Any]]:
                 continue
 
             growth_pct = (current_acres - prev_acres) / prev_acres * 100.0
-            absolute_growth = current_acres - prev_acres
+            abs_growth = current_acres - prev_acres
 
-            if growth_pct < _WARN_PCT or absolute_growth < _MIN_ACRES:
+            severity = _determine_severity(current_acres, abs_growth, growth_pct)
+
+            if severity is None:
                 LOGGER.info(
                     "perimeter_growth_watch: %s growth=%.1f%% abs=%.0f acres — below threshold",
-                    fire_name, growth_pct, absolute_growth,
+                    fire_name, growth_pct, abs_growth,
                 )
                 continue
 
-            severity = "critical" if growth_pct >= _CRITICAL_PCT else "warning"
             fire_name_slug = _slugify(fire_name)
             event_type = f"perimeter_growth:{source}:{fire_name_slug}"
 
@@ -131,7 +184,8 @@ def check_perimeter_growth(source: str, session: Any) -> list[dict[str, Any]]:
                 title=f"{fire_name} perimeter grew {growth_pct:.0f}%",
                 body=(
                     f"Official perimeter grew from {prev_acres:.0f} to "
-                    f"{current_acres:.0f} acres ({growth_pct:+.0f}%) since last update."
+                    f"{current_acres:.0f} acres "
+                    f"(+{abs_growth:,.0f} acres, {growth_pct:+.0f}%) since last update."
                 ),
                 severity=severity,
                 aoi_id=None,
@@ -139,6 +193,7 @@ def check_perimeter_growth(source: str, session: Any) -> list[dict[str, Any]]:
                 prev_acres=prev_acres,
                 current_acres=current_acres,
                 growth_pct=growth_pct,
+                abs_growth=abs_growth,
             )
 
             results.append(
@@ -148,6 +203,7 @@ def check_perimeter_growth(source: str, session: Any) -> list[dict[str, Any]]:
                     "prev_acres": prev_acres,
                     "current_acres": current_acres,
                     "growth_pct": growth_pct,
+                    "abs_growth": abs_growth,
                     "severity": severity,
                 }
             )

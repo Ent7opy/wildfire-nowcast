@@ -47,6 +47,7 @@ def _make_detection(
     false_source_masked: bool = False,
     event_id: str | None = None,
     event_started_at: datetime | None = None,
+    acq_time: datetime | None = None,
 ) -> dict[str, Any]:
     return {
         "id": str(uuid4()),
@@ -57,6 +58,7 @@ def _make_detection(
         "false_source_masked": false_source_masked,
         "event_id": event_id,
         "event_started_at": event_started_at,
+        "acq_time": acq_time,
     }
 
 
@@ -303,6 +305,83 @@ def test_db_exception_returns_none() -> None:
     mock_notify = MagicMock()
     with patch("ingest.aoi_watch.notify", mock_notify):
         result = check_new_ignition(aoi, engine=_BrokenEngine())
+
+    assert result is None
+    mock_notify.assert_not_called()
+
+
+# ── data_as_of / data_lag_minutes ─────────────────────────────────────────────
+
+_ACQ_TIME = _NOW - timedelta(minutes=90)  # 90 minutes before _NOW
+
+
+def test_data_as_of_in_notification_context() -> None:
+    """notify() receives data_as_of (ISO string) and data_lag_minutes=90."""
+    aoi = _make_aoi()
+    detections = [
+        _make_detection(lat=0.5, lon=0.5, denoised_score=0.90, acq_time=_ACQ_TIME),
+        _make_detection(lat=0.501, lon=0.501, denoised_score=0.80, acq_time=_ACQ_TIME),
+    ]
+    engine = _MockEngine(detections)
+
+    mock_notify = MagicMock()
+    with patch("ingest.aoi_watch.notify", mock_notify):
+        check_new_ignition(aoi, engine=engine, _now=_NOW)
+
+    mock_notify.assert_called_once()
+    call_kwargs = mock_notify.call_args.kwargs
+
+    assert call_kwargs.get("data_as_of") == _ACQ_TIME.isoformat()
+    assert call_kwargs.get("data_lag_minutes") == 90
+
+
+def test_data_lag_in_notification_body() -> None:
+    """The notification body contains a UTC time reference when acq_time is known."""
+    aoi = _make_aoi()
+    detections = [
+        _make_detection(lat=0.5, lon=0.5, denoised_score=0.90, acq_time=_ACQ_TIME),
+        _make_detection(lat=0.501, lon=0.501, denoised_score=0.80, acq_time=_ACQ_TIME),
+    ]
+    engine = _MockEngine(detections)
+
+    mock_notify = MagicMock()
+    with patch("ingest.aoi_watch.notify", mock_notify):
+        check_new_ignition(aoi, engine=engine, _now=_NOW)
+
+    mock_notify.assert_called_once()
+    body: str = mock_notify.call_args.kwargs.get("body", "")
+
+    assert "UTC" in body
+    # The time portion of _ACQ_TIME formatted as %H:%M should appear in the body.
+    assert _ACQ_TIME.strftime("%H:%M") in body
+
+
+def test_data_as_of_in_returned_dict() -> None:
+    """Returned dict from check_new_ignition includes data_as_of and data_lag_minutes."""
+    aoi = _make_aoi()
+    detections = [
+        _make_detection(lat=0.5, lon=0.5, denoised_score=0.90, acq_time=_ACQ_TIME),
+        _make_detection(lat=0.501, lon=0.501, denoised_score=0.80, acq_time=_ACQ_TIME),
+    ]
+    engine = _MockEngine(detections)
+
+    with patch("ingest.aoi_watch.notify"):
+        result = check_new_ignition(aoi, engine=engine, _now=_NOW)
+
+    assert result is not None
+    assert "data_as_of" in result
+    assert result["data_as_of"] == _ACQ_TIME
+    assert result["data_lag_minutes"] == 90
+
+
+def test_data_as_of_none_when_no_detections() -> None:
+    """When there are no qualifying detections the function returns None (existing behaviour)."""
+    aoi = _make_aoi()
+    engine = _MockEngine([])
+
+    mock_notify = MagicMock()
+    with patch("ingest.aoi_watch.notify", mock_notify):
+        result = check_new_ignition(aoi, engine=engine, _now=_NOW)
 
     assert result is None
     mock_notify.assert_not_called()

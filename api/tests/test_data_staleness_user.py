@@ -221,3 +221,174 @@ def test_age_appears_in_body() -> None:
     call_kwargs = mock_notify.call_args.kwargs
     body = call_kwargs.get("body", "")
     assert "h old" in body or "hour" in body
+
+
+# ── source-specific body generation ───────────────────────────────────────────
+
+
+def _firms_stale_snapshot(overall_state: str = "critical") -> dict[str, Any]:
+    """Snapshot with only FIRMS stale, everything else fresh."""
+    firms_last_seen = datetime(2026, 4, 3, 9, 30, 0, tzinfo=timezone.utc).isoformat()
+    fresh_last_seen = datetime(2026, 4, 3, 11, 55, 0, tzinfo=timezone.utc).isoformat()
+    return {
+        "overall_state": overall_state,
+        "stale_sources": ["firms"],
+        "critical_stale_sources": ["firms"] if overall_state == "critical" else [],
+        "as_of": _NOW.isoformat(),
+        "sources": {
+            "firms": {"last_seen_at": firms_last_seen, "state": "stale", "is_stale": True},
+            "weather": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "perimeters": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "terrain": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "lfmc": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "lulc": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+        },
+    }
+
+
+def test_critical_body_names_stale_source() -> None:
+    """critical snapshot with FIRMS stale → body contains human name and UTC timestamp."""
+    snapshot = _firms_stale_snapshot(overall_state="critical")
+    mock_notify = MagicMock()
+
+    with patch("api.data_status.notify", mock_notify):
+        notify_staleness_if_degraded(snapshot)
+
+    body = mock_notify.call_args.kwargs.get("body", "")
+    assert "Satellite detections (FIRMS)" in body
+    assert "09:" in body  # UTC time reference for last_seen 09:30 UTC
+
+
+def test_degraded_body_lists_stale_and_fresh_sources() -> None:
+    """degraded snapshot with weather stale, firms fresh → body separates stale from active."""
+    fresh_last_seen = datetime(2026, 4, 3, 11, 55, 0, tzinfo=timezone.utc).isoformat()
+    weather_last_seen = datetime(2026, 4, 3, 9, 0, 0, tzinfo=timezone.utc).isoformat()
+    snapshot = {
+        "overall_state": "degraded",
+        "stale_sources": ["weather"],
+        "critical_stale_sources": [],
+        "as_of": _NOW.isoformat(),
+        "sources": {
+            "firms": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "weather": {"last_seen_at": weather_last_seen, "state": "stale", "is_stale": True},
+            "perimeters": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "terrain": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "lfmc": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "lulc": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+        },
+    }
+    mock_notify = MagicMock()
+
+    with patch("api.data_status.notify", mock_notify):
+        notify_staleness_if_degraded(snapshot)
+
+    body = mock_notify.call_args.kwargs.get("body", "")
+    assert "Weather forecasts" in body
+    # Weather must appear in the stale section (bullet point)
+    assert "•" in body and "Weather forecasts" in body
+    # Firms must appear in the active sources line
+    assert "Active sources" in body
+    assert "Satellite detections (FIRMS)" in body
+
+
+def test_critical_title_includes_source_count() -> None:
+    """critical with 2 stale sources → title contains '2'."""
+    stale_last_seen = datetime(2026, 4, 3, 8, 0, 0, tzinfo=timezone.utc).isoformat()
+    snapshot = {
+        "overall_state": "critical",
+        "stale_sources": ["firms", "weather"],
+        "critical_stale_sources": ["firms", "weather"],
+        "as_of": _NOW.isoformat(),
+        "sources": {
+            "firms": {"last_seen_at": stale_last_seen, "state": "stale", "is_stale": True},
+            "weather": {"last_seen_at": stale_last_seen, "state": "stale", "is_stale": True},
+        },
+    }
+    mock_notify = MagicMock()
+
+    with patch("api.data_status.notify", mock_notify):
+        notify_staleness_if_degraded(snapshot)
+
+    title = mock_notify.call_args.kwargs.get("title", "")
+    assert "2" in title
+
+
+def test_body_operational_implication_firms() -> None:
+    """FIRMS stale → body mentions 'new ignitions'."""
+    snapshot = _firms_stale_snapshot(overall_state="critical")
+    mock_notify = MagicMock()
+
+    with patch("api.data_status.notify", mock_notify):
+        notify_staleness_if_degraded(snapshot)
+
+    body = mock_notify.call_args.kwargs.get("body", "")
+    assert "new ignitions" in body
+
+
+def test_body_operational_implication_perimeters() -> None:
+    """Perimeters stale → body mentions 'containment boundaries'."""
+    fresh_last_seen = datetime(2026, 4, 3, 11, 55, 0, tzinfo=timezone.utc).isoformat()
+    perimeters_last_seen = datetime(2026, 4, 3, 8, 0, 0, tzinfo=timezone.utc).isoformat()
+    snapshot = {
+        "overall_state": "degraded",
+        "stale_sources": ["perimeters"],
+        "critical_stale_sources": [],
+        "as_of": _NOW.isoformat(),
+        "sources": {
+            "firms": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "weather": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "perimeters": {"last_seen_at": perimeters_last_seen, "state": "stale", "is_stale": True},
+            "terrain": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "lfmc": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+            "lulc": {"last_seen_at": fresh_last_seen, "state": "fresh", "is_stale": False},
+        },
+    }
+    mock_notify = MagicMock()
+
+    with patch("api.data_status.notify", mock_notify):
+        notify_staleness_if_degraded(snapshot)
+
+    body = mock_notify.call_args.kwargs.get("body", "")
+    assert "containment boundaries" in body
+
+
+def test_body_no_fresh_sources_section_when_all_stale() -> None:
+    """All sources stale → no 'Active sources' line in body."""
+    stale_last_seen = datetime(2026, 4, 3, 6, 0, 0, tzinfo=timezone.utc).isoformat()
+    sources = {
+        key: {"last_seen_at": stale_last_seen, "state": "stale", "is_stale": True}
+        for key in ("firms", "weather", "perimeters", "terrain", "lfmc", "lulc")
+    }
+    snapshot = {
+        "overall_state": "critical",
+        "stale_sources": list(sources.keys()),
+        "critical_stale_sources": list(sources.keys()),
+        "as_of": _NOW.isoformat(),
+        "sources": sources,
+    }
+    mock_notify = MagicMock()
+
+    with patch("api.data_status.notify", mock_notify):
+        notify_staleness_if_degraded(snapshot)
+
+    body = mock_notify.call_args.kwargs.get("body", "")
+    assert "Active sources" not in body
+
+
+def test_stale_source_details_in_kwargs() -> None:
+    """notify() receives stale_source_details as a list of dicts with required keys."""
+    snapshot = _firms_stale_snapshot(overall_state="critical")
+    mock_notify = MagicMock()
+
+    with patch("api.data_status.notify", mock_notify):
+        notify_staleness_if_degraded(snapshot)
+
+    call_kwargs = mock_notify.call_args.kwargs
+    assert "stale_source_details" in call_kwargs
+    details = call_kwargs["stale_source_details"]
+    assert isinstance(details, list)
+    assert len(details) == 1
+    detail = details[0]
+    assert detail["source"] == "firms"
+    assert isinstance(detail["age_hours"], float)
+    assert "last_seen_at" in detail

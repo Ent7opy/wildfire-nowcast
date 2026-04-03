@@ -589,6 +589,111 @@ def build_data_status_snapshot(
     return snapshot
 
 
+_SOURCE_DISPLAY_NAMES: dict[str, str] = {
+    "firms": "Satellite detections (FIRMS)",
+    "weather": "Weather forecasts",
+    "perimeters": "Fire perimeters",
+    "terrain": "Terrain data",
+    "lfmc": "Fuel moisture",
+    "lulc": "Land cover",
+}
+
+_BATCH_IMPLICATION_SOURCES = {"terrain", "lfmc", "lulc"}
+
+
+def _format_staleness_body(snapshot: dict[str, Any], overall_state: str) -> str:
+    """Build a source-specific, operationally meaningful notification body.
+
+    Args:
+        snapshot:      Output of build_data_status_snapshot(include_internal=True).
+        overall_state: "critical" or "degraded".
+
+    Returns:
+        A multi-line string suitable for SMS/pager/webhook delivery.
+    """
+    sources: dict[str, Any] = snapshot.get("sources", {})
+    now = _utc_now()
+
+    stale_entries: list[dict[str, Any]] = []
+    fresh_display_names: list[str] = []
+
+    for key, detail in sources.items():
+        is_stale: bool = bool(detail.get("is_stale")) or str(detail.get("state", "")).lower() in {"stale", "missing"}
+        display_name = _SOURCE_DISPLAY_NAMES.get(key, key)
+        raw_last_seen = detail.get("last_seen_at")
+
+        if is_stale:
+            # Parse last_seen_at to compute age.
+            last_seen_dt: datetime | None = None
+            if isinstance(raw_last_seen, str):
+                try:
+                    last_seen_dt = datetime.fromisoformat(raw_last_seen)
+                    if last_seen_dt.tzinfo is None:
+                        last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    last_seen_dt = None
+            elif isinstance(raw_last_seen, datetime):
+                last_seen_dt = raw_last_seen
+                if last_seen_dt.tzinfo is None:
+                    last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
+
+            age_hours = round((now - last_seen_dt).total_seconds() / 3600.0, 1) if last_seen_dt is not None else None
+            last_seen_iso = last_seen_dt.strftime("%H:%M UTC") if last_seen_dt is not None else "unknown"
+            stale_entries.append({
+                "key": key,
+                "display_name": display_name,
+                "age_hours": age_hours,
+                "last_seen_at": last_seen_dt.isoformat() if last_seen_dt is not None else None,
+                "last_seen_hhmm": last_seen_iso,
+            })
+        else:
+            fresh_display_names.append(display_name)
+
+    if overall_state == "critical":
+        opening = "CRITICAL: Ground truth is degraded — fire positions may be significantly out of date."
+    else:
+        opening = "WARNING: Some data sources are outdated — picture may be incomplete."
+
+    lines: list[str] = [opening, "", "Stale data sources:"]
+
+    # Batch-implication sources (terrain/lfmc/lulc) share one implication clause
+    # if multiple are stale, to keep the body concise.
+    batch_stale: list[dict[str, Any]] = []
+    for entry in stale_entries:
+        key = entry["key"]
+        age_str = f"{entry['age_hours']}h old" if entry["age_hours"] is not None else "age unknown"
+
+        if key == "firms":
+            implication = f"new ignitions since {entry['last_seen_hhmm']} may not be visible"
+            lines.append(f"• {entry['display_name']}: {age_str} — {implication}")
+        elif key == "weather":
+            implication = "fire weather context may be outdated"
+            lines.append(f"• {entry['display_name']}: {age_str} — {implication}")
+        elif key == "perimeters":
+            implication = "official containment boundaries may be outdated"
+            lines.append(f"• {entry['display_name']}: {age_str} — {implication}")
+        elif key in _BATCH_IMPLICATION_SOURCES:
+            batch_stale.append(entry)
+        else:
+            # Unknown source — emit a generic line.
+            implication = "forecast accuracy may be reduced"
+            lines.append(f"• {entry['display_name']}: {age_str} — {implication}")
+
+    # Emit batched terrain/lfmc/lulc entries.
+    for entry in batch_stale:
+        age_str = f"{entry['age_hours']}h old" if entry["age_hours"] is not None else "age unknown"
+        lines.append(f"• {entry['display_name']}: {age_str} — forecast accuracy may be reduced")
+
+    if not stale_entries:
+        lines.append("  (none identified)")
+
+    if fresh_display_names:
+        lines.append("")
+        lines.append(f"Active sources: {', '.join(fresh_display_names)}")
+
+    return "\n".join(lines)
+
+
 def notify_staleness_if_degraded(snapshot: dict[str, Any], aoi_id: str | None = None) -> None:
     """Fire a user-facing notification when the situational picture is degraded or critical.
 
@@ -605,58 +710,49 @@ def notify_staleness_if_degraded(snapshot: dict[str, Any], aoi_id: str | None = 
         LOGGER.info("data_status: situational picture is healthy — no staleness notification")
         return
 
-    # Derive age from the oldest stale source's last_seen_at.
     stale_sources: list[str] = snapshot.get("stale_sources", [])
     sources: dict[str, Any] = snapshot.get("sources", {})
     now = _utc_now()
 
-    oldest_last_seen: datetime | None = None
+    # Build stale_source_details for programmatic consumers.
+    stale_source_details: list[dict[str, Any]] = []
     for source_name in stale_sources:
         source_detail = sources.get(source_name, {})
         raw_last_seen = source_detail.get("last_seen_at")
-        if raw_last_seen is None:
-            continue
-        # last_seen_at is an ISO string inside the snapshot sources dict.
+        last_seen_dt: datetime | None = None
         if isinstance(raw_last_seen, str):
             try:
                 last_seen_dt = datetime.fromisoformat(raw_last_seen)
                 if last_seen_dt.tzinfo is None:
                     last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
             except ValueError:
-                continue
+                last_seen_dt = None
         elif isinstance(raw_last_seen, datetime):
             last_seen_dt = raw_last_seen
             if last_seen_dt.tzinfo is None:
                 last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
-        else:
-            continue
 
-        if oldest_last_seen is None or last_seen_dt < oldest_last_seen:
-            oldest_last_seen = last_seen_dt
+        age_hours = round((now - last_seen_dt).total_seconds() / 3600.0, 1) if last_seen_dt is not None else None
+        stale_source_details.append({
+            "source": source_name,
+            "age_hours": age_hours,
+            "last_seen_at": last_seen_dt.isoformat() if last_seen_dt is not None else None,
+        })
 
-    if oldest_last_seen is not None:
-        age_hours = round((now - oldest_last_seen).total_seconds() / 3600.0, 1)
-    else:
-        age_hours = 0.0
-
+    n_stale = len(stale_sources)
     identifier = aoi_id if aoi_id else "global"
+    body = _format_staleness_body(snapshot, overall_state)
 
     if overall_state == "critical":
         severity = "critical"
-        title = "Situational picture degraded"
-        body = (
-            f"Ground truth data is {age_hours}h old — confidence in current fire positions is reduced."
-        )
+        title = f"Situational picture degraded ({n_stale} source{'s' if n_stale != 1 else ''} stale)"
         LOGGER.warning(
             "data_status: situational picture is CRITICAL — stale sources: %s",
             stale_sources,
         )
     else:
         severity = "warning"
-        title = "Situational picture may be outdated"
-        body = (
-            f"Ground truth data is {age_hours}h old — confidence in current fire positions is reduced."
-        )
+        title = f"Situational picture may be outdated ({n_stale} source{'s' if n_stale != 1 else ''} stale)"
         LOGGER.warning(
             "data_status: situational picture is DEGRADED — stale sources: %s",
             stale_sources,
@@ -668,5 +764,6 @@ def notify_staleness_if_degraded(snapshot: dict[str, Any], aoi_id: str | None = 
         body=body,
         severity=severity,  # type: ignore[arg-type]
         stale_sources=stale_sources,
+        stale_source_details=stale_source_details,
         aoi_id=aoi_id,
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
@@ -10,7 +11,9 @@ from uuid import uuid4
 import pytest
 
 from ingest.spread_trajectory_watch import (
+    _last_alerted_state,
     check_spread_trajectory,
+    reset_trajectory_state,
     run_spread_trajectory_checks,
 )
 from ingest.weather_threshold_watch import (
@@ -48,18 +51,32 @@ def _make_spread_session(
     centroid_rows: dict[int, tuple[float, float] | None],
     older_run_row: tuple | None = None,
     dist_deg: float = 0.1,
+    horizons: list[int] | None = None,
 ) -> MagicMock:
     """Build a mock SQLAlchemy session for spread trajectory tests.
 
-    centroid_rows maps run_id -> (cx, cy) or None.
-    SQL calls are dispatched in order:
-      1. runs query  → run_rows
-      2. centroid for curr_run_id
-      3. centroid for prev_run_id
-      4. ST_Distance query
-      5. older run query  → older_run_row
-      6. centroid for older_run_id (if older_run_row is not None)
+    centroid_rows maps run_id -> (cx, cy) or None (applies to every horizon).
+    horizons controls which horizons get real centroid data.  Horizons NOT in
+    this list return None for the curr centroid (simulating a missing contour).
+
+    New SQL call order (matches refactored implementation):
+      1.  runs query        → fetchall → run_rows
+      2.  older run query   → fetchone → older_run_row
+      For each horizon in _REQUIRED_HORIZONS:
+        If horizon IS in horizons:
+          3.  centroid for curr_run_id  → fetchone
+          4.  centroid for prev_run_id  → fetchone
+          5.  ST_Distance               → fetchone
+          If older_run_row is not None:
+            6.  centroid for older_run_id → fetchone
+        Else (missing horizon):
+          3.  centroid for curr_run_id  → fetchone (None) → code skips via continue
     """
+    from ingest.spread_trajectory_watch import _REQUIRED_HORIZONS
+
+    if horizons is None:
+        horizons = list(_REQUIRED_HORIZONS)
+
     session = MagicMock()
     call_results: list = []
 
@@ -72,40 +89,58 @@ def _make_spread_session(
         curr_run_id = run_rows[0][0]
         prev_run_id = run_rows[1][0]
 
-        # 2. centroid for curr
-        curr_cent = centroid_rows.get(curr_run_id)
-        curr_mock = MagicMock()
-        curr_mock.fetchone.return_value = (
-            (curr_cent[0], curr_cent[1], 12) if curr_cent else None
-        )
-        call_results.append(curr_mock)
-
-        # 3. centroid for prev
-        prev_cent = centroid_rows.get(prev_run_id)
-        prev_mock = MagicMock()
-        prev_mock.fetchone.return_value = (
-            (prev_cent[0], prev_cent[1], 12) if prev_cent else None
-        )
-        call_results.append(prev_mock)
-
-        # 4. ST_Distance
-        dist_mock = MagicMock()
-        dist_mock.fetchone.return_value = (dist_deg,)
-        call_results.append(dist_mock)
-
-        # 5. older run
+        # 2. older run query
         older_mock = MagicMock()
         older_mock.fetchone.return_value = older_run_row
         call_results.append(older_mock)
 
-        if older_run_row is not None:
-            older_run_id = older_run_row[0]
-            older_cent = centroid_rows.get(older_run_id)
-            older_cent_mock = MagicMock()
-            older_cent_mock.fetchone.return_value = (
-                (older_cent[0], older_cent[1], 12) if older_cent else None
+        older_run_id = older_run_row[0] if older_run_row is not None else None
+
+        for h in _REQUIRED_HORIZONS:
+            if h not in horizons:
+                # Missing horizon: only the curr centroid query fires (returns None)
+                # The code then logs a warning and calls `continue`.
+                missing_mock = MagicMock()
+                missing_mock.fetchone.return_value = None
+                call_results.append(missing_mock)
+                continue
+
+            # curr centroid
+            curr_cent = centroid_rows.get(curr_run_id)
+            curr_mock = MagicMock()
+            curr_mock.fetchone.return_value = (
+                (curr_cent[0], curr_cent[1]) if curr_cent else None
             )
-            call_results.append(older_cent_mock)
+            call_results.append(curr_mock)
+
+            if curr_cent is None:
+                # If curr is None the code also logs warning and continues
+                continue
+
+            # prev centroid
+            prev_cent = centroid_rows.get(prev_run_id)
+            prev_mock = MagicMock()
+            prev_mock.fetchone.return_value = (
+                (prev_cent[0], prev_cent[1]) if prev_cent else None
+            )
+            call_results.append(prev_mock)
+
+            if prev_cent is None:
+                continue
+
+            # ST_Distance
+            dist_mock = MagicMock()
+            dist_mock.fetchone.return_value = (dist_deg,)
+            call_results.append(dist_mock)
+
+            # older centroid (only if older run exists)
+            if older_run_id is not None:
+                older_cent = centroid_rows.get(older_run_id)
+                older_cent_mock = MagicMock()
+                older_cent_mock.fetchone.return_value = (
+                    (older_cent[0], older_cent[1]) if older_cent else None
+                )
+                call_results.append(older_cent_mock)
 
     session.execute.side_effect = call_results
     return session
@@ -117,6 +152,10 @@ def _bearing(from_lon: float, from_lat: float, to_lon: float, to_lat: float) -> 
 
 class TestSpreadTrajectory:
     """Feature 4: spread trajectory deviation."""
+
+    def setup_method(self) -> None:
+        """Clear module-level gate state before every test."""
+        _last_alerted_state.clear()
 
     def test_direction_40deg_is_warning(self) -> None:
         """Direction rotates 40° → notify called with severity='warning'."""
@@ -151,10 +190,12 @@ class TestSpreadTrajectory:
             result = check_spread_trajectory(aoi, session)
 
         assert result is not None
-        mock_notify.assert_called_once()
-        # event_type is passed as first positional arg; other fields are kwargs
-        assert mock_notify.call_args.args[0] == f"spread_trajectory_shift:{aoi_id}"
-        call_kw = mock_notify.call_args.kwargs
+        assert len(result) > 0
+        mock_notify.assert_called()
+        # event_type includes aoi_id and horizon
+        event_types = [c.args[0] for c in mock_notify.call_args_list]
+        assert any(str(aoi_id) in et for et in event_types)
+        call_kw = mock_notify.call_args_list[0].kwargs
         assert call_kw["severity"] == "warning"
         assert call_kw["aoi_id"] == str(aoi_id)
 
@@ -185,8 +226,9 @@ class TestSpreadTrajectory:
             result = check_spread_trajectory(aoi, session)
 
         assert result is not None
-        mock_notify.assert_called_once()
-        call_kw = mock_notify.call_args.kwargs
+        assert len(result) > 0
+        mock_notify.assert_called()
+        call_kw = mock_notify.call_args_list[0].kwargs
         assert call_kw["severity"] == "critical"
 
     def test_speed_increase_60pct_is_warning(self) -> None:
@@ -216,8 +258,9 @@ class TestSpreadTrajectory:
             result = check_spread_trajectory(aoi, session)
 
         assert result is not None
-        mock_notify.assert_called_once()
-        call_kw = mock_notify.call_args.kwargs
+        assert len(result) > 0
+        mock_notify.assert_called()
+        call_kw = mock_notify.call_args_list[0].kwargs
         assert call_kw["severity"] == "warning"
 
     def test_only_one_run_returns_none(self) -> None:
@@ -237,7 +280,7 @@ class TestSpreadTrajectory:
         mock_notify.assert_not_called()
 
     def test_no_significant_change_does_not_notify(self) -> None:
-        """Direction < 30° and speed change < 50% → notify NOT called."""
+        """Direction < 30° and speed change < 50% → notify NOT called, returns []."""
         aoi = _make_aoi()
 
         # 10° direction change, same speed
@@ -263,7 +306,8 @@ class TestSpreadTrajectory:
         with patch("ingest.spread_trajectory_watch.notify") as mock_notify:
             result = check_spread_trajectory(aoi, session)
 
-        assert result is None
+        # Runs exist but no horizon triggered → empty list, not None
+        assert result == []
         mock_notify.assert_not_called()
 
     def test_run_spread_trajectory_checks_aggregates(self) -> None:
@@ -274,12 +318,186 @@ class TestSpreadTrajectory:
         with patch(
             "ingest.spread_trajectory_watch.check_spread_trajectory"
         ) as mock_check:
-            mock_check.side_effect = [{"aoi_name": "AOI 1"}, None]
+            # check_spread_trajectory now returns list[dict] | None
+            mock_check.side_effect = [[{"aoi_name": "AOI 1"}], None]
             session = MagicMock()
             results = run_spread_trajectory_checks([aoi1, aoi2], session)
 
         assert len(results) == 1
         assert results[0]["aoi_name"] == "AOI 1"
+
+    # ── Transition gate tests (Fix 1) ─────────────────────────────────────────
+
+    def test_trajectory_suppresses_repeat_with_same_bearing(self) -> None:
+        """First alert at bearing 45°, second call with same bearing → suppressed."""
+        aoi = _make_aoi()
+        aoi_id = str(aoi["id"])
+
+        # Pre-populate gate state as if a prior alert fired at bearing 45° for h=12
+        _last_alerted_state[f"{aoi_id}:12"] = {
+            "bearing": 45.0,
+            "run_id": 99,
+            "severity": "warning",
+        }
+
+        # Construct a 40° direction change (triggers 'warning') landing at ~45° bearing
+        angle_rad = math.radians(45.0)
+        older_cent = (-119.5, 37.4)
+        prev_cent = (-119.5, 37.5)
+        curr_cent = (
+            -119.5 + 0.1 * math.sin(angle_rad),
+            37.5 + 0.1 * math.cos(angle_rad),
+        )
+
+        run_rows = [(1, _T2), (2, _T1)]
+        older_run_row = (3, _T0)
+        centroids = {1: curr_cent, 2: prev_cent, 3: older_cent}
+
+        # Only h=12 is served with real data; 24/48/72 missing (return None)
+        session = _make_spread_session(
+            run_rows=run_rows,
+            centroid_rows=centroids,
+            older_run_row=older_run_row,
+            dist_deg=0.1,
+            horizons=[12],
+        )
+
+        with patch("ingest.spread_trajectory_watch.notify") as mock_notify:
+            result = check_spread_trajectory(aoi, session)
+
+        # The 12h horizon is suppressed (same bearing, same severity) → no notify
+        mock_notify.assert_not_called()
+        assert result == []
+
+    def test_trajectory_re_alerts_on_additional_shift(self) -> None:
+        """First alert at 45°, second call rotated to 90° (45° additional) → re-alerts."""
+        aoi = _make_aoi()
+        aoi_id = str(aoi["id"])
+
+        # Prior alert was at bearing 45°
+        _last_alerted_state[f"{aoi_id}:12"] = {
+            "bearing": 45.0,
+            "run_id": 99,
+            "severity": "warning",
+        }
+
+        # Now the trajectory has rotated another ~45° (from 45° to ~90°, due east).
+        # older→prev leg points NE (bearing ~45°)
+        # prev→curr leg points E (bearing ~90°)
+        # direction_change ≈ 45° > _DIR_CRIT_DEG (45°) → critical
+        # additional_shift from prior bearing (45°) to current bearing (~90°) = ~45° ≥ 30°
+        older_cent = (-119.5, 37.4)
+        prev_cent = (
+            -119.5 + 0.1 * math.sin(math.radians(45.0)),
+            37.4 + 0.1 * math.cos(math.radians(45.0)),
+        )
+        curr_cent = (
+            prev_cent[0] + 0.1,  # due east from prev
+            prev_cent[1],
+        )
+
+        run_rows = [(1, _T2), (2, _T1)]
+        older_run_row = (3, _T0)
+        centroids = {1: curr_cent, 2: prev_cent, 3: older_cent}
+
+        session = _make_spread_session(
+            run_rows=run_rows,
+            centroid_rows=centroids,
+            older_run_row=older_run_row,
+            dist_deg=0.1,
+            horizons=[12],
+        )
+
+        with patch("ingest.spread_trajectory_watch.notify") as mock_notify:
+            result = check_spread_trajectory(aoi, session)
+
+        # additional_shift ≥ _DIR_WARN_DEG → should re-alert
+        mock_notify.assert_called_once()
+        assert result is not None
+        assert len(result) == 1
+
+    def test_trajectory_multi_horizon_12h_triggers_24h_does_not(self) -> None:
+        """12h contour exceeds threshold, 24h absent → only one notify() call (for 12h)."""
+        aoi = _make_aoi()
+
+        # 40° direction change — exceeds warning threshold
+        angle_rad = math.radians(40.0)
+        older_cent = (-119.5, 37.4)
+        prev_cent = (-119.5, 37.5)
+        curr_cent = (
+            -119.5 + 0.1 * math.sin(angle_rad),
+            37.5 + 0.1 * math.cos(angle_rad),
+        )
+
+        run_rows = [(1, _T2), (2, _T1)]
+        older_run_row = (3, _T0)
+        centroids = {1: curr_cent, 2: prev_cent, 3: older_cent}
+
+        # Only h=12 gets real data; 24/48/72 are missing
+        session = _make_spread_session(
+            run_rows=run_rows,
+            centroid_rows=centroids,
+            older_run_row=older_run_row,
+            dist_deg=0.1,
+            horizons=[12],
+        )
+
+        with patch("ingest.spread_trajectory_watch.notify") as mock_notify:
+            result = check_spread_trajectory(aoi, session)
+
+        # Only h=12 should have triggered → exactly one notify call
+        mock_notify.assert_called_once()
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["horizon_hours"] == 12
+
+    def test_trajectory_horizon_missing_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """48h contour absent → WARNING logged, 48h skipped, other horizons proceed."""
+        aoi = _make_aoi()
+
+        # 40° direction change at h=12
+        angle_rad = math.radians(40.0)
+        older_cent = (-119.5, 37.4)
+        prev_cent = (-119.5, 37.5)
+        curr_cent = (
+            -119.5 + 0.1 * math.sin(angle_rad),
+            37.5 + 0.1 * math.cos(angle_rad),
+        )
+
+        run_rows = [(1, _T2), (2, _T1)]
+        older_run_row = (3, _T0)
+        centroids = {1: curr_cent, 2: prev_cent, 3: older_cent}
+
+        # Serve only h=12; 24/48/72 will be missing (returns None → WARNING logged)
+        session = _make_spread_session(
+            run_rows=run_rows,
+            centroid_rows=centroids,
+            older_run_row=older_run_row,
+            dist_deg=0.1,
+            horizons=[12],
+        )
+
+        with patch("ingest.spread_trajectory_watch.notify"):
+            with caplog.at_level(logging.WARNING, logger="ingest.spread_trajectory_watch"):
+                result = check_spread_trajectory(aoi, session)
+
+        # At least one WARNING about missing ICS outlook must appear
+        warning_msgs = [
+            r.message for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "ICS" in r.message
+            and "outlook unavailable" in r.message
+        ]
+        assert warning_msgs, (
+            "Expected at least one WARNING about missing ICS outlook. "
+            f"Got records: {[r.message for r in caplog.records]}"
+        )
+        # 48h should be explicitly mentioned
+        assert any("48h" in m for m in warning_msgs)
+        # h=12 still ran; result is not None and has an entry
+        assert result is not None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,7 +599,6 @@ class TestWeatherThresholds:
         session = _make_weather_session(curr_metadata=metadata)
 
         with patch("ingest.weather_threshold_watch.notify") as mock_notify:
-            import logging
             with caplog.at_level(logging.WARNING, logger="ingest.weather_threshold_watch"):
                 result = check_weather_thresholds(aoi, session)
 

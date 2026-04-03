@@ -142,6 +142,9 @@ def _should_alert(
     return True
 
 
+# FIRMS near-real-time data latency floor (acquisition to DB availability)
+_FIRMS_LATENCY_FLOOR_MINUTES: int = 60
+
 # Minimum denoised_score for a detection to qualify as confirmed.
 _IGNITION_MIN_SCORE: float = 0.7
 # Minimum cluster size (number of qualifying detections within proximity).
@@ -213,6 +216,7 @@ def check_new_ignition(
                         fd.id,
                         fd.lat,
                         fd.lon,
+                        fd.acq_time,
                         fd.denoised_score,
                         fd.event_id,
                         fe.started_at AS event_started_at
@@ -236,6 +240,23 @@ def check_new_ignition(
             ).mappings().all()
 
         detections = [dict(r) for r in rows]
+
+        # Compute satellite acquisition timestamp and data-currency lag.
+        # _FIRMS_LATENCY_FLOOR_MINUTES documents the minimum expected lag.
+        max_acq_time: datetime | None = max(
+            (d["acq_time"] for d in detections if d.get("acq_time") is not None),
+            default=None,
+        )
+        lag_minutes: int | None = None
+        if max_acq_time is not None:
+            # Ensure timezone-aware before arithmetic.
+            acq_aware = (
+                max_acq_time.replace(tzinfo=timezone.utc)
+                if max_acq_time.tzinfo is None
+                else max_acq_time
+            )
+            lag_minutes = int((now - acq_aware).total_seconds() / 60)
+
         LOGGER.info(
             "aoi_watch: ignition check for AOI %s (%s): %d qualifying detection(s) since %s",
             aoi_name,
@@ -313,6 +334,12 @@ def check_new_ignition(
             centroid_lon,
         )
 
+        _data_suffix = (
+            f" Based on satellite data acquired at "
+            f"{max_acq_time.strftime('%H:%M UTC')} (~{lag_minutes}min ago)."
+            if max_acq_time is not None and lag_minutes is not None
+            else ""
+        )
         notify(
             f"new_ignition:{aoi_id}",
             title=f"New confirmed ignition in {aoi_name}",
@@ -320,6 +347,7 @@ def check_new_ignition(
                 f"{detection_count} confirmed detection(s) clustered within "
                 f"{_IGNITION_CLUSTER_RADIUS_M / 1000:.0f} km in AOI '{aoi_name}'. "
                 f"Max denoiser confidence: {max_score:.0%}."
+                + _data_suffix
             ),
             severity="critical",
             aoi_id=str(aoi_id),
@@ -327,6 +355,8 @@ def check_new_ignition(
             detection_count=detection_count,
             lat=round(centroid_lat, 6),
             lon=round(centroid_lon, 6),
+            data_as_of=max_acq_time.isoformat() if max_acq_time is not None else None,
+            data_lag_minutes=lag_minutes,
         )
 
         return {
@@ -336,6 +366,8 @@ def check_new_ignition(
             "max_denoised_score": max_score,
             "centroid_lat": centroid_lat,
             "centroid_lon": centroid_lon,
+            "data_as_of": max_acq_time,
+            "data_lag_minutes": lag_minutes,
         }
 
     except Exception:

@@ -36,7 +36,29 @@ _KM_PER_DEG = 111.0
 
 # Default contour parameters
 _CONTOUR_THRESHOLD = 0.5
-_PREFERRED_HORIZON_H = 12
+
+# ICS operational planning horizons (hours).  Each horizon is checked
+# independently; a missing contour logs a WARNING and skips that horizon.
+_REQUIRED_HORIZONS: list[int] = [12, 24, 48, 72]
+
+# ── Transition gate state ─────────────────────────────────────────────────────
+# Module-level; best-effort (resets on restart).
+# science_grade target: persist to DB so restarts don't re-fire old alerts.
+# Key: "{aoi_id}:{horizon_hours}"
+# Value: {"bearing": float, "run_id": int, "severity": str}
+_last_alerted_state: dict[str, dict] = {}
+
+
+def reset_trajectory_state(aoi_id: str) -> None:
+    """Remove all transition-gate state for *aoi_id* across every horizon.
+
+    Call this when an AOI's watch is disabled, or from tests to get a clean
+    slate without reloading the module.
+    """
+    prefix = f"{aoi_id}:"
+    keys_to_delete = [k for k in _last_alerted_state if k.startswith(prefix)]
+    for k in keys_to_delete:
+        del _last_alerted_state[k]
 
 
 def _angular_difference(a: float, b: float) -> float:
@@ -64,7 +86,9 @@ def _severity_for(direction_change: float, speed_change_pct: float) -> str | Non
     return "critical" if "critical" in sev else "warning"
 
 
-def check_spread_trajectory(aoi: dict[str, Any], session: Any) -> dict[str, Any] | None:
+def check_spread_trajectory(
+    aoi: dict[str, Any], session: Any
+) -> list[dict[str, Any]] | None:
     """Check for significant trajectory shifts between the two most recent spread runs.
 
     Args:
@@ -72,7 +96,10 @@ def check_spread_trajectory(aoi: dict[str, Any], session: Any) -> dict[str, Any]
         session: SQLAlchemy connection/session obtained from the caller.
 
     Returns:
-        A dict with trajectory metadata if a threshold is exceeded, else None.
+        ``None`` if fewer than 2 completed runs exist (cannot compute a delta).
+        ``[]``   if runs exist but no horizon exceeded a threshold.
+        A list of result dicts (one per horizon that triggered), otherwise.
+        Each dict includes ``horizon_hours``.
     """
     aoi_id: UUID | str = aoi["id"]
     aoi_name: str = aoi["name"]
@@ -131,87 +158,7 @@ def check_spread_trajectory(aoi: dict[str, Any], session: Any) -> dict[str, Any]
         curr_run_id, curr_ref_time = runs[0]
         prev_run_id, prev_ref_time = runs[1]
 
-        # ── Step 2: Fetch contour centroids ──────────────────────────────────────
-        def _get_centroid(run_id: int) -> tuple[float, float] | None:
-            """Return (lon, lat) centroid of the best-matching contour, or None."""
-            # Try preferred horizon first; fall back to smallest available
-            centroid_sql = text(
-                """
-                SELECT
-                    ST_X(ST_Centroid(geom)) AS cx,
-                    ST_Y(ST_Centroid(geom)) AS cy,
-                    horizon_hours
-                FROM spread_forecast_contours
-                WHERE run_id = :run_id
-                  AND threshold = :threshold
-                ORDER BY
-                    ABS(horizon_hours - :preferred_h),
-                    horizon_hours
-                LIMIT 1
-                """
-            )
-            row = session.execute(
-                centroid_sql,
-                {
-                    "run_id": run_id,
-                    "threshold": _CONTOUR_THRESHOLD,
-                    "preferred_h": _PREFERRED_HORIZON_H,
-                },
-            ).fetchone()
-            if row is None:
-                return None
-            return (float(row[0]), float(row[1]))
-
-        curr_centroid = _get_centroid(curr_run_id)
-        prev_centroid = _get_centroid(prev_run_id)
-
-        if curr_centroid is None or prev_centroid is None:
-            LOGGER.info(
-                "spread_trajectory_watch: missing contour centroid for AOI %s "
-                "(curr_run=%s prev_run=%s) — skipping",
-                aoi_name, curr_run_id, prev_run_id,
-            )
-            return None
-
-        # ── Step 3: Compute bearings ──────────────────────────────────────────────
-        prev_lon, prev_lat = prev_centroid
-        curr_lon, curr_lat = curr_centroid
-
-        # Bearing from previous centroid to current centroid
-        delta_lon = curr_lon - prev_lon
-        delta_lat = curr_lat - prev_lat
-        current_bearing = math.degrees(math.atan2(delta_lon, delta_lat)) % 360.0
-
-        # ── Step 4 & 5: Speed proxy ───────────────────────────────────────────────
-        dist_sql = text(
-            """
-            SELECT ST_Distance(
-                ST_SetSRID(ST_MakePoint(:prev_lon, :prev_lat), 4326),
-                ST_SetSRID(ST_MakePoint(:curr_lon, :curr_lat), 4326)
-            ) AS dist_deg
-            """
-        )
-        dist_row = session.execute(
-            dist_sql,
-            {
-                "prev_lon": prev_lon,
-                "prev_lat": prev_lat,
-                "curr_lon": curr_lon,
-                "curr_lat": curr_lat,
-            },
-        ).fetchone()
-        dist_deg: float = float(dist_row[0]) if dist_row else 0.0
-        dist_km: float = dist_deg * _KM_PER_DEG
-
-        hours_between = abs(
-            (curr_ref_time - prev_ref_time).total_seconds() / 3600.0
-        )
-        current_speed_kmh = dist_km / hours_between if hours_between > 0 else 0.0
-
-        # ── Need the previous run's heading to compute direction change ───────────
-        # We need a third (even older) run to get the previous bearing.  Since the
-        # contract only asks us to compare consecutive runs, the "previous heading"
-        # is computed as the vector from the run-before-prev to prev.  Fetch it.
+        # ── Step 2: Fetch an older run for computing the previous heading ─────────
         older_sql = text(
             """
             SELECT id, forecast_reference_time
@@ -240,87 +187,206 @@ def check_spread_trajectory(aoi: dict[str, Any], session: Any) -> dict[str, Any]
             },
         ).fetchone()
 
-        direction_change = 0.0
-        speed_change_pct = 0.0
-        previous_bearing: float | None = None
+        older_run_id = older_run_row[0] if older_run_row is not None else None
+        older_ref_time = older_run_row[1] if older_run_row is not None else None
 
-        if older_run_row is not None:
-            older_run_id = older_run_row[0]
-            older_ref_time = older_run_row[1]
-            older_centroid = _get_centroid(older_run_id)
-
-            if older_centroid is not None:
-                older_lon, older_lat = older_centroid
-                d_lon = prev_lon - older_lon
-                d_lat = prev_lat - older_lat
-                previous_bearing = (
-                    math.degrees(math.atan2(d_lon, d_lat)) % 360.0
-                )
-
-                # Direction change
-                direction_change = _angular_difference(previous_bearing, current_bearing)
-
-                # Previous speed
-                prev_dist_deg = math.sqrt(
-                    (prev_lon - older_lon) ** 2 + (prev_lat - older_lat) ** 2
-                )
-                prev_dist_km = prev_dist_deg * _KM_PER_DEG
-                prev_hours = abs(
-                    (prev_ref_time - older_ref_time).total_seconds() / 3600.0
-                )
-                previous_speed_kmh = (
-                    prev_dist_km / prev_hours if prev_hours > 0 else 0.0
-                )
-
-                if previous_speed_kmh > 0:
-                    speed_change_pct = (
-                        (current_speed_kmh - previous_speed_kmh) / previous_speed_kmh * 100.0
-                    )
-                else:
-                    speed_change_pct = 0.0
-
-        # ── Step 8: Apply thresholds ──────────────────────────────────────────────
-        severity = _severity_for(direction_change, speed_change_pct)
-
-        if severity is None:
-            LOGGER.info(
-                "spread_trajectory_watch: AOI %s — direction_change=%.1f° "
-                "speed_change=%.1f%% — no threshold exceeded",
-                aoi_name, direction_change, speed_change_pct,
+        # ── Step 3: Helper — fetch the centroid for a specific horizon ────────────
+        def _get_centroid_at(
+            run_id: int, horizon_h: int
+        ) -> tuple[float, float] | None:
+            """Return (lon, lat) centroid for the exact horizon, or None."""
+            centroid_sql = text(
+                """
+                SELECT
+                    ST_X(ST_Centroid(geom)) AS cx,
+                    ST_Y(ST_Centroid(geom)) AS cy
+                FROM spread_forecast_contours
+                WHERE run_id = :run_id
+                  AND threshold = :threshold
+                  AND horizon_hours = :horizon_h
+                LIMIT 1
+                """
             )
-            return None
+            row = session.execute(
+                centroid_sql,
+                {
+                    "run_id": run_id,
+                    "threshold": _CONTOUR_THRESHOLD,
+                    "horizon_h": horizon_h,
+                },
+            ).fetchone()
+            if row is None:
+                return None
+            return (float(row[0]), float(row[1]))
 
-        # ── Step 9: Notify ────────────────────────────────────────────────────────
-        LOGGER.warning(
-            "spread_trajectory_watch: AOI %s — direction_change=%.1f° "
-            "speed_change=%.1f%% — severity=%s",
-            aoi_name, direction_change, speed_change_pct, severity,
-        )
-        notify(
-            f"spread_trajectory_shift:{aoi_id}",
-            title=f"Spread trajectory shifted for {aoi_name}",
-            body=(
-                f"Projected spread direction rotated {direction_change:.0f}° "
-                f"and speed changed {speed_change_pct:+.0f}% vs previous model run."
-            ),
-            severity=severity,
-            denoised_score=None,
-            aoi_id=str(aoi_id),
-            direction_change_deg=direction_change,
-            speed_change_pct=speed_change_pct,
-            current_bearing_deg=current_bearing,
-        )
+        # ── Step 4: Loop over required horizons ───────────────────────────────────
+        results: list[dict[str, Any]] = []
 
-        return {
-            "aoi_id": str(aoi_id),
-            "aoi_name": aoi_name,
-            "severity": severity,
-            "direction_change_deg": direction_change,
-            "speed_change_pct": speed_change_pct,
-            "current_bearing_deg": current_bearing,
-            "previous_bearing_deg": previous_bearing,
-            "current_speed_kmh": current_speed_kmh,
-        }
+        for h in _REQUIRED_HORIZONS:
+            curr_centroid = _get_centroid_at(curr_run_id, h)
+            if curr_centroid is None:
+                LOGGER.warning(
+                    "spread_trajectory_watch: no contour at %dh for AOI %s — "
+                    "ICS %dh outlook unavailable",
+                    h, aoi_name, h,
+                )
+                continue
+
+            prev_centroid = _get_centroid_at(prev_run_id, h)
+            if prev_centroid is None:
+                LOGGER.warning(
+                    "spread_trajectory_watch: no contour at %dh for AOI %s — "
+                    "ICS %dh outlook unavailable",
+                    h, aoi_name, h,
+                )
+                continue
+
+            # ── Bearing and speed for curr→prev leg ──────────────────────────────
+            prev_lon, prev_lat = prev_centroid
+            curr_lon, curr_lat = curr_centroid
+
+            delta_lon = curr_lon - prev_lon
+            delta_lat = curr_lat - prev_lat
+            current_bearing = (
+                math.degrees(math.atan2(delta_lon, delta_lat)) % 360.0
+            )
+
+            dist_sql = text(
+                """
+                SELECT ST_Distance(
+                    ST_SetSRID(ST_MakePoint(:prev_lon, :prev_lat), 4326),
+                    ST_SetSRID(ST_MakePoint(:curr_lon, :curr_lat), 4326)
+                ) AS dist_deg
+                """
+            )
+            dist_row = session.execute(
+                dist_sql,
+                {
+                    "prev_lon": prev_lon,
+                    "prev_lat": prev_lat,
+                    "curr_lon": curr_lon,
+                    "curr_lat": curr_lat,
+                },
+            ).fetchone()
+            dist_deg: float = float(dist_row[0]) if dist_row else 0.0
+            dist_km: float = dist_deg * _KM_PER_DEG
+
+            hours_between = abs(
+                (curr_ref_time - prev_ref_time).total_seconds() / 3600.0
+            )
+            current_speed_kmh = (
+                dist_km / hours_between if hours_between > 0 else 0.0
+            )
+
+            # ── Direction change and previous speed (need older run) ──────────────
+            direction_change = 0.0
+            speed_change_pct = 0.0
+            previous_bearing: float | None = None
+
+            if older_run_id is not None:
+                older_centroid = _get_centroid_at(older_run_id, h)
+
+                if older_centroid is not None:
+                    older_lon, older_lat = older_centroid
+
+                    d_lon = prev_lon - older_lon
+                    d_lat = prev_lat - older_lat
+                    previous_bearing = (
+                        math.degrees(math.atan2(d_lon, d_lat)) % 360.0
+                    )
+
+                    direction_change = _angular_difference(
+                        previous_bearing, current_bearing
+                    )
+
+                    prev_dist_deg = math.sqrt(
+                        (prev_lon - older_lon) ** 2 + (prev_lat - older_lat) ** 2
+                    )
+                    prev_dist_km = prev_dist_deg * _KM_PER_DEG
+                    prev_hours = abs(
+                        (prev_ref_time - older_ref_time).total_seconds() / 3600.0
+                    )
+                    previous_speed_kmh = (
+                        prev_dist_km / prev_hours if prev_hours > 0 else 0.0
+                    )
+
+                    if previous_speed_kmh > 0:
+                        speed_change_pct = (
+                            (current_speed_kmh - previous_speed_kmh)
+                            / previous_speed_kmh
+                            * 100.0
+                        )
+
+            # ── Apply thresholds ──────────────────────────────────────────────────
+            severity = _severity_for(direction_change, speed_change_pct)
+
+            if severity is None:
+                LOGGER.info(
+                    "spread_trajectory_watch: AOI %s %dh — direction_change=%.1f° "
+                    "speed_change=%.1f%% — no threshold exceeded",
+                    aoi_name, h, direction_change, speed_change_pct,
+                )
+                continue
+
+            # ── Transition gate: suppress re-alerts on sustained shifts ───────────
+            gate_key = f"{aoi_id}:{h}"
+            prior = _last_alerted_state.get(gate_key)
+            if prior is not None:
+                additional_shift = _angular_difference(
+                    prior["bearing"], current_bearing
+                )
+                if additional_shift < _DIR_WARN_DEG and severity == prior["severity"]:
+                    LOGGER.info(
+                        "spread_trajectory_watch: suppressing re-alert for AOI %s "
+                        "%dh (additional_shift=%.1f°, same severity)",
+                        aoi_name, h, additional_shift,
+                    )
+                    continue
+
+            # ── Notify ────────────────────────────────────────────────────────────
+            LOGGER.warning(
+                "spread_trajectory_watch: AOI %s %dh — direction_change=%.1f° "
+                "speed_change=%.1f%% — severity=%s",
+                aoi_name, h, direction_change, speed_change_pct, severity,
+            )
+            notify(
+                f"spread_trajectory_shift:{aoi_id}:{h}",
+                title=f"Spread trajectory shifted ({h}h outlook) for {aoi_name}",
+                body=(
+                    f"Projected spread direction rotated {direction_change:.0f}° "
+                    f"and speed changed {speed_change_pct:+.0f}% vs previous model run."
+                ),
+                severity=severity,
+                denoised_score=None,
+                aoi_id=str(aoi_id),
+                horizon_hours=h,
+                direction_change_deg=direction_change,
+                speed_change_pct=speed_change_pct,
+                current_bearing_deg=current_bearing,
+            )
+
+            # Update transition gate state
+            _last_alerted_state[gate_key] = {
+                "bearing": current_bearing,
+                "run_id": curr_run_id,
+                "severity": severity,
+            }
+
+            results.append(
+                {
+                    "aoi_id": str(aoi_id),
+                    "aoi_name": aoi_name,
+                    "horizon_hours": h,
+                    "severity": severity,
+                    "direction_change_deg": direction_change,
+                    "speed_change_pct": speed_change_pct,
+                    "current_bearing_deg": current_bearing,
+                    "previous_bearing_deg": previous_bearing,
+                    "current_speed_kmh": current_speed_kmh,
+                }
+            )
+
+        return results
 
     except Exception as exc:
         LOGGER.error(
@@ -342,11 +408,11 @@ def run_spread_trajectory_checks(
         session: SQLAlchemy connection/session.
 
     Returns:
-        List of non-None results from check_spread_trajectory.
+        Flat list of result dicts from all AOIs and all horizons that triggered.
     """
     results: list[dict[str, Any]] = []
     for aoi in aois:
-        result = check_spread_trajectory(aoi, session)
-        if result is not None:
-            results.append(result)
+        horizon_results = check_spread_trajectory(aoi, session)
+        if horizon_results is not None:
+            results.extend(horizon_results)
     return results

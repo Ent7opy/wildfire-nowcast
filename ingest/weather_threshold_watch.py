@@ -10,6 +10,20 @@ Fire weather thresholds (NOTIFICATION_CONTRACTS.md):
     RH < 15%:        Critical
     Wind shift > 30°: Warning
     Wind shift > 45°: Critical
+
+RH Threshold Crossing (Transition Gate):
+    Alerts fire only when RH *crosses* a threshold boundary, not on every run
+    where conditions are already bad.  This prevents alert fatigue when adverse
+    conditions persist unchanged across many hourly runs.
+
+    Rules (compared against prev_rh from the previous run's summary):
+        - prev_rh > 25% AND curr_rh <= 25%  → newly entered Warning territory
+        - prev_rh > 15% AND curr_rh <= 15%  → newly entered Critical territory
+        - prev_rh <= 15% AND curr_rh < prev_rh  → already Critical, worsening
+        - If no previous run exists, falls back to absolute threshold check.
+
+    Wind shift is already delta-based (angular change between runs) and is
+    unchanged by this gate.
 """
 
 from __future__ import annotations
@@ -50,7 +64,10 @@ def check_weather_thresholds(aoi: dict[str, Any], session: Any) -> dict[str, Any
         session: SQLAlchemy connection/session obtained from the caller.
 
     Returns:
-        A dict describing triggered conditions if thresholds are exceeded, else None.
+        A dict describing triggered conditions if thresholds are *newly crossed*
+        or are worsening (see module-level docstring), else None.  Returns None
+        when conditions are already bad but unchanged — use the transition gate
+        to prevent alert fatigue on persistent adverse conditions.
     """
     aoi_id: UUID | str = aoi["id"]
     aoi_name: str = aoi["name"]
@@ -129,26 +146,60 @@ def check_weather_thresholds(aoi: dict[str, Any], session: Any) -> dict[str, Any
 
         triggers: list[tuple[str, str]] = []  # (condition_name, severity)
 
-        # ── Step 3a: RH thresholds ────────────────────────────────────────────────
+        # ── Step 3a: RH threshold-crossing gate ──────────────────────────────────
+        # Pull previous run summary once so we can use it for both RH and wind.
+        prev_summary: dict[str, Any] | None = None
+        if len(runs) >= 2:
+            prev_metadata: dict[str, Any] = runs[1][2] or {}
+            prev_summary = prev_metadata.get("summary")
+
+        prev_rh: float | None = prev_summary.get("rh2m_min") if prev_summary else None
+        rh_body_detail: str = ""
+
         if rh2m_min is not None:
-            if rh2m_min < _RH_CRIT_PCT:
-                triggers.append(("low_rh_critical", "critical"))
-            elif rh2m_min < _RH_WARN_PCT:
-                triggers.append(("low_rh_warning", "warning"))
+            curr_rh = rh2m_min
+            if prev_rh is not None:
+                # Transition gate: only alert on threshold crossings or worsening.
+                if prev_rh > _RH_WARN_PCT and curr_rh <= _RH_WARN_PCT:
+                    # Newly entered Warning territory (may also cross Critical below).
+                    triggers.append(("low_rh_warning", "warning"))
+                    rh_body_detail = (
+                        f"RH dropped below warning threshold "
+                        f"(prev: {prev_rh:.0f}%, now: {curr_rh:.0f}%)"
+                    )
+                if prev_rh > _RH_CRIT_PCT and curr_rh <= _RH_CRIT_PCT:
+                    # Newly crossed Critical threshold (supersedes Warning entry above).
+                    triggers.append(("low_rh_critical", "critical"))
+                    rh_body_detail = (
+                        f"RH dropped below critical threshold "
+                        f"(prev: {prev_rh:.0f}%, now: {curr_rh:.0f}%)"
+                    )
+                elif prev_rh <= _RH_CRIT_PCT and curr_rh < prev_rh:
+                    # Already Critical and still dropping — re-alert.
+                    triggers.append(("low_rh_critical", "critical"))
+                    rh_body_detail = (
+                        f"RH still dropping in critical range "
+                        f"(prev: {prev_rh:.0f}%, now: {curr_rh:.0f}%)"
+                    )
+            else:
+                # No previous run available — fall back to absolute threshold check.
+                if curr_rh <= _RH_CRIT_PCT:
+                    triggers.append(("low_rh_critical", "critical"))
+                    rh_body_detail = f"RH {curr_rh:.0f}%"
+                elif curr_rh <= _RH_WARN_PCT:
+                    triggers.append(("low_rh_warning", "warning"))
+                    rh_body_detail = f"RH {curr_rh:.0f}%"
 
         # ── Step 3b: Wind shift vs previous run ───────────────────────────────────
         wind_shift: float | None = None
-        if wind_bearing_deg is not None and len(runs) >= 2:
-            prev_metadata: dict[str, Any] = runs[1][2] or {}
-            prev_summary = prev_metadata.get("summary")
-            if prev_summary is not None:
-                prev_wind_bearing: float | None = prev_summary.get("wind_bearing_deg")
-                if prev_wind_bearing is not None:
-                    wind_shift = _angular_difference(wind_bearing_deg, prev_wind_bearing)
-                    if wind_shift > _WIND_SHIFT_CRIT_DEG:
-                        triggers.append(("wind_shift_critical", "critical"))
-                    elif wind_shift > _WIND_SHIFT_WARN_DEG:
-                        triggers.append(("wind_shift_warning", "warning"))
+        if wind_bearing_deg is not None and prev_summary is not None:
+            prev_wind_bearing: float | None = prev_summary.get("wind_bearing_deg")
+            if prev_wind_bearing is not None:
+                wind_shift = _angular_difference(wind_bearing_deg, prev_wind_bearing)
+                if wind_shift > _WIND_SHIFT_CRIT_DEG:
+                    triggers.append(("wind_shift_critical", "critical"))
+                elif wind_shift > _WIND_SHIFT_WARN_DEG:
+                    triggers.append(("wind_shift_warning", "warning"))
 
         # ── Step 3c: Evaluate triggers ────────────────────────────────────────────
         if not triggers:
@@ -164,8 +215,8 @@ def check_weather_thresholds(aoi: dict[str, Any], session: Any) -> dict[str, Any
 
         # ── Step 3d: Build human-readable body ────────────────────────────────────
         body_parts: list[str] = []
-        if rh2m_min is not None:
-            body_parts.append(f"RH {rh2m_min:.0f}%")
+        if rh_body_detail:
+            body_parts.append(rh_body_detail)
         if wind_shift is not None:
             body_parts.append(f"wind shift {wind_shift:.0f}°")
         body = (
