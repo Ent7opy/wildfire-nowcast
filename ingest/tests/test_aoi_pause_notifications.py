@@ -77,14 +77,10 @@ def test_paused_aoi_skips_notify_in_new_ignition():
 
 def test_expired_pause_allows_notify():
     """When the pause timestamp is in the past (expired), notify IS called."""
-    from datetime import datetime, timezone
-
     from ingest.aoi_watch import check_new_ignition
 
-    # Use real now() so the expired timestamp is genuinely in the past.
-    real_now = datetime.now(timezone.utc)
     aoi = _make_aoi(
-        watch_notifications_paused_until=real_now - timedelta(hours=1),
+        watch_notifications_paused_until=_NOW - timedelta(hours=1),
     )
 
     mock_rows = [
@@ -177,7 +173,7 @@ def test_spread_trajectory_skips_paused_aoi():
     session = MagicMock()
 
     with patch("ingest.spread_trajectory_watch.check_spread_trajectory") as mock_check:
-        results = run_spread_trajectory_checks([paused_aoi], session)
+        results = run_spread_trajectory_checks([paused_aoi], session, _now=_NOW)
 
     mock_check.assert_not_called()
     assert results == []
@@ -191,7 +187,7 @@ def test_spread_trajectory_runs_for_active_aoi():
     session = MagicMock()
 
     with patch("ingest.spread_trajectory_watch.check_spread_trajectory", return_value=[]) as mock_check:
-        run_spread_trajectory_checks([active_aoi], session)
+        run_spread_trajectory_checks([active_aoi], session, _now=_NOW)
 
     mock_check.assert_called_once_with(active_aoi, session)
 
@@ -208,7 +204,7 @@ def test_weather_threshold_skips_paused_aoi():
     session = MagicMock()
 
     with patch("ingest.weather_threshold_watch.check_weather_thresholds") as mock_check:
-        results = run_weather_threshold_checks([paused_aoi], session)
+        results = run_weather_threshold_checks([paused_aoi], session, _now=_NOW)
 
     mock_check.assert_not_called()
     assert results == []
@@ -222,6 +218,6 @@ def test_weather_threshold_runs_for_active_aoi():
     session = MagicMock()
 
     with patch("ingest.weather_threshold_watch.check_weather_thresholds", return_value=None) as mock_check:
-        run_weather_threshold_checks([active_aoi], session)
+        run_weather_threshold_checks([active_aoi], session, _now=_NOW)
 
     mock_check.assert_called_once_with(active_aoi, session)

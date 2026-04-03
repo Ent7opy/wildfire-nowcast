@@ -342,7 +342,7 @@ def check_new_ignition(
             else ""
         )
 
-        if _is_notifications_paused(aoi):
+        if _is_notifications_paused(aoi, _now=now):
             LOGGER.info(
                 "aoi_watch: notifications paused for AOI %s until %s — skipping alerts",
                 aoi_name,
@@ -446,7 +446,7 @@ def run_aoi_watch_cycle(api_base_url: str | None = None) -> int:
 
             if max_spread_prob is not None and _should_alert(aoi, max_spread_prob, check_time):
                 threshold = aoi["watch_alert_threshold"]
-                if _is_notifications_paused(aoi):
+                if _is_notifications_paused(aoi, _now=now):
                     LOGGER.info(
                         "aoi_watch: notifications paused for AOI %s until %s — skipping alerts",
                         aoi_name,
