@@ -113,6 +113,7 @@ def finalize_ingest_batch(
     fetched: int,
     inserted: int,
     skipped: int,
+    conn: Connection | None = None,
 ) -> None:
     """Update ingest batch metrics and mark completion."""
     stmt = text(
@@ -128,17 +129,18 @@ def finalize_ingest_batch(
         WHERE id = :batch_id
         """
     )
-    with get_engine().begin() as conn:
-        conn.execute(
-            stmt,
-            {
-                "batch_id": batch_id,
-                "status": status,
-                "fetched": fetched,
-                "inserted": inserted,
-                "skipped": skipped,
-            },
-        )
+    params = {
+        "batch_id": batch_id,
+        "status": status,
+        "fetched": fetched,
+        "inserted": inserted,
+        "skipped": skipped,
+    }
+    if conn is not None:
+        conn.execute(stmt, params)
+    else:
+        with get_engine().begin() as new_conn:
+            new_conn.execute(stmt, params)
 
 
 def get_ingest_watermark(source: str, area_key: str) -> dict | None:
@@ -180,6 +182,7 @@ def advance_ingest_watermark(
     area_key: str,
     last_acq_time_utc: datetime,
     last_batch_id: int,
+    conn: Connection | None = None,
 ) -> None:
     """Advance the source+area ingestion watermark after successful batch completion."""
     stmt = text(
@@ -208,17 +211,17 @@ def advance_ingest_watermark(
             updated_at = NOW()
         """
     )
-
-    with get_engine().begin() as conn:
-        conn.execute(
-            stmt,
-            {
-                "source": source,
-                "area_key": area_key,
-                "last_acq_time_utc": _as_utc(last_acq_time_utc),
-                "last_batch_id": int(last_batch_id),
-            },
-        )
+    params = {
+        "source": source,
+        "area_key": area_key,
+        "last_acq_time_utc": _as_utc(last_acq_time_utc),
+        "last_batch_id": int(last_batch_id),
+    }
+    if conn is not None:
+        conn.execute(stmt, params)
+    else:
+        with get_engine().begin() as new_conn:
+            new_conn.execute(stmt, params)
 
 
 def insert_detections(
