@@ -2,7 +2,7 @@ import unittest
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from ingest.firms_client import FirmsValidationSummary
 from ingest.firms_ingest import _filter_detections_by_watermark, run_firms_ingest
@@ -117,6 +117,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
             area_key="20.000000,40.000000,21.000000,41.000000",
             last_acq_time_utc=datetime(2026, 2, 15, 11, 10, tzinfo=timezone.utc),
             last_batch_id=321,
+            conn=ANY,
         )
 
     @patch("ingest.firms_ingest._utc_now", return_value=datetime(2026, 3, 12, 15, 16, tzinfo=timezone.utc))
@@ -183,6 +184,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
             area_key="20.000000,40.000000,21.000000,41.000000",
             last_acq_time_utc=datetime(2026, 3, 12, 13, 10, tzinfo=timezone.utc),
             last_batch_id=654,
+            conn=ANY,
         )
 
     @patch("ingest.firms_ingest._utc_now", return_value=datetime(2026, 3, 12, 15, 16, tzinfo=timezone.utc))
@@ -256,6 +258,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
             area_key="20.000000,40.000000,21.000000,41.000000",
             last_acq_time_utc=datetime(2026, 3, 12, 13, 10, tzinfo=timezone.utc),
             last_batch_id=655,
+            conn=ANY,
         )
 
     @patch("ingest.firms_ingest.repository.advance_ingest_watermark")

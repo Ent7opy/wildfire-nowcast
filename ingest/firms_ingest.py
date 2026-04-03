@@ -510,20 +510,27 @@ def run_firms_ingest(
             if denoiser_ran or config.denoiser_required:
                 _assert_batch_denoiser_complete(batch_id, config=config)
 
-            repository.finalize_ingest_batch(
-                batch_id,
-                status="succeeded",
-                fetched=fetched_count,
-                inserted=inserted,
-                skipped=max(skipped_duplicates, 0),
-            )
-            if watermark_advanced_to is not None and not is_archive_mode:
-                repository.advance_ingest_watermark(
-                    source=source,
-                    area_key=area_key,
-                    last_acq_time_utc=watermark_advanced_to,
-                    last_batch_id=batch_id,
+            # Finalize the batch and advance the watermark atomically so a crash
+            # between the two writes cannot leave the watermark un-advanced while
+            # detections are already persisted (which would cause the next run to
+            # re-fetch the same window and produce temporal continuity gaps).
+            with repository.get_engine().execution_options(isolation_level="SERIALIZABLE").begin() as commit_conn:
+                repository.finalize_ingest_batch(
+                    batch_id,
+                    status="succeeded",
+                    fetched=fetched_count,
+                    inserted=inserted,
+                    skipped=max(skipped_duplicates, 0),
+                    conn=commit_conn,
                 )
+                if watermark_advanced_to is not None and not is_archive_mode:
+                    repository.advance_ingest_watermark(
+                        source=source,
+                        area_key=area_key,
+                        last_acq_time_utc=watermark_advanced_to,
+                        last_batch_id=batch_id,
+                        conn=commit_conn,
+                    )
             log_event(
                 LOGGER,
                 "firms.watermark",
