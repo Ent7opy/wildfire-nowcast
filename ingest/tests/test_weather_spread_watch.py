@@ -500,6 +500,44 @@ class TestSpreadTrajectory:
         assert result is not None
 
 
+    def test_gate_not_advanced_when_notify_suppressed(self) -> None:
+        """Gate state must NOT update when notify() returns False (burst/rate-limit)."""
+        aoi = _make_aoi()
+        aoi_id = str(aoi["id"])
+
+        # 40° direction change triggers warning
+        angle_rad = math.radians(40.0)
+        older_cent = (-119.5, 37.4)
+        prev_cent = (-119.5, 37.5)
+        curr_cent = (
+            -119.5 + 0.1 * math.sin(angle_rad),
+            37.5 + 0.1 * math.cos(angle_rad),
+        )
+        run_rows = [(1, _T2), (2, _T1)]
+        older_run_row = (3, _T0)
+        centroids = {1: curr_cent, 2: prev_cent, 3: older_cent}
+        session = _make_spread_session(
+            run_rows=run_rows,
+            centroid_rows=centroids,
+            older_run_row=older_run_row,
+            dist_deg=0.1,
+            horizons=[12],
+        )
+
+        gate_key = f"{aoi_id}:12"
+        assert gate_key not in _last_alerted_state
+
+        # Simulate burst cap suppression: notify() returns False
+        with patch("ingest.spread_trajectory_watch.notify", return_value=False):
+            result = check_spread_trajectory(aoi, session)
+
+        # Gate state must remain empty — notify was not delivered
+        assert gate_key not in _last_alerted_state
+        # Result still contains the triggered horizon (detection occurred)
+        assert result is not None
+        assert len(result) == 1
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature 5: Critical Weather Threshold at Fire Location
 # ─────────────────────────────────────────────────────────────────────────────

@@ -261,8 +261,14 @@ def notify(
     body: str,
     severity: Literal["info", "warning", "critical"] = "info",
     **context: Any,
-) -> None:
+) -> bool:
     """Fire-and-forget operational notification. Never blocks the caller.
+
+    Returns:
+        True if the notification was dispatched (scheduled for delivery).
+        False if it was suppressed by burst cap, rate limit, or missing channel config.
+        Callers that maintain transition-gate state (e.g. spread_trajectory_watch) MUST
+        check this return value and only advance gate state when True is returned.
 
     Args:
         event_type: Stable identifier used for rate limiting, e.g. ``"ingest_job_failed:firms"``.
@@ -280,16 +286,16 @@ def notify(
     smtp_host = os.getenv("NOTIFICATION_SMTP_HOST", "").strip()
 
     if not webhook_url and not (email_to and smtp_host):
-        return  # No channel configured — silent no-op
+        return False  # No channel configured — silent no-op
 
     aoi_id: str | None = context.get("aoi_id") or None
     if _check_burst(aoi_id, event_type):
         LOGGER.debug("burst cap suppressed event_type=%s for aoi_id=%s", event_type, aoi_id)
-        return
+        return False
 
     if _is_rate_limited(event_type):
         LOGGER.debug("Notification suppressed by rate limit: %s", event_type)
-        return
+        return False
 
     async def _run() -> None:
         await _dispatch(
@@ -306,3 +312,5 @@ def notify(
             asyncio.run(_run())
 
         threading.Thread(target=_thread, daemon=True).start()
+
+    return True

@@ -350,7 +350,7 @@ def check_spread_trajectory(
                 "speed_change=%.1f%% — severity=%s",
                 aoi_name, h, direction_change, speed_change_pct, severity,
             )
-            notify(
+            dispatched = notify(
                 f"spread_trajectory_shift:{aoi_id}:{h}",
                 title=f"Spread trajectory shifted ({h}h outlook) for {aoi_name}",
                 body=(
@@ -366,12 +366,22 @@ def check_spread_trajectory(
                 current_bearing_deg=current_bearing,
             )
 
-            # Update transition gate state
-            _last_alerted_state[gate_key] = {
-                "bearing": current_bearing,
-                "run_id": curr_run_id,
-                "severity": severity,
-            }
+            # Only advance the transition gate when the notification was actually
+            # dispatched.  If notify() returned False (burst cap, rate limit, no
+            # channel), the gate must NOT be updated — the next genuine shift must
+            # still be allowed to fire.
+            if dispatched:
+                _last_alerted_state[gate_key] = {
+                    "bearing": current_bearing,
+                    "run_id": curr_run_id,
+                    "severity": severity,
+                }
+            else:
+                LOGGER.debug(
+                    "spread_trajectory_watch: notify() suppressed for AOI %s %dh — "
+                    "gate state NOT advanced",
+                    aoi_name, h,
+                )
 
             results.append(
                 {
