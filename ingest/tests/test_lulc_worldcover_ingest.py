@@ -1,13 +1,20 @@
 """Unit tests for LULC WorldCover version tracking.
 
 Tests cover pure-function logic (no DB, no S3) — tile ID formatting, tile path
-construction, cache manifest write/check, and the update-param structure.
+construction, cache manifest write/check, the update-param structure, and the
+new CRS / pixel-registration / boundary-coordinate validation helpers.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+from affine import Affine
 
 # ── _format_tile_id ──────────────────────────────────────────────────────────
 
@@ -140,3 +147,132 @@ class TestUpdateParamsIncludeLulcVersion:
         version, year = "v200", 2021
         source_version = f"{version}_{year}"
         assert source_version == "v200_2021"
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _make_src(*, epsg: int | None = 4326, area_or_point: str = "Area", pixel_size: float = 8.333e-05) -> MagicMock:
+    """Return a mock rasterio DatasetReader with the given CRS and transform."""
+    from rasterio.crs import CRS as RasterioCRS
+
+    src = MagicMock()
+    if epsg is None:
+        src.crs = None
+    else:
+        src.crs = RasterioCRS.from_epsg(epsg)
+    # Affine: origin at lon=-180, lat=90; pixel_size wide, -pixel_size tall.
+    src.transform = Affine(pixel_size, 0, -180.0, 0, -pixel_size, 90.0)
+    src.tags.return_value = {"AREA_OR_POINT": area_or_point}
+    return src
+
+
+# ── _validate_tile_crs ────────────────────────────────────────────────────────
+
+class TestValidateTileCrs:
+    def test_epsg_4326_passes(self):
+        from ingest.lulc_worldcover_ingest import _validate_tile_crs
+
+        src = _make_src(epsg=4326)
+        _validate_tile_crs(src, Path("tile.tif"))  # must not raise
+
+    def test_wrong_epsg_raises(self):
+        from ingest.lulc_worldcover_ingest import _validate_tile_crs
+
+        src = _make_src(epsg=32610)
+        with pytest.raises(ValueError, match="STOP"):
+            _validate_tile_crs(src, Path("tile.tif"))
+
+    def test_none_crs_raises(self):
+        from ingest.lulc_worldcover_ingest import _validate_tile_crs
+
+        src = _make_src(epsg=None)
+        with pytest.raises(ValueError, match="STOP"):
+            _validate_tile_crs(src, Path("tile.tif"))
+
+
+# ── _validate_pixel_registration ─────────────────────────────────────────────
+
+class TestValidatePixelRegistration:
+    def test_area_registration_silent(self, caplog):
+        from ingest.lulc_worldcover_ingest import _validate_pixel_registration
+
+        src = _make_src(area_or_point="Area")
+        with caplog.at_level(logging.WARNING, logger="lulc_worldcover_ingest"):
+            _validate_pixel_registration(src, Path("tile.tif"))
+        assert not caplog.records
+
+    def test_point_registration_warns(self, caplog):
+        from ingest.lulc_worldcover_ingest import _validate_pixel_registration
+
+        src = _make_src(area_or_point="Point")
+        with caplog.at_level(logging.WARNING, logger="lulc_worldcover_ingest"):
+            _validate_pixel_registration(src, Path("tile.tif"))
+        assert any("AREA_OR_POINT" in r.message for r in caplog.records)
+        assert any("Mitigation" in r.message for r in caplog.records)
+
+    def test_missing_tag_defaults_to_area_silent(self, caplog):
+        from ingest.lulc_worldcover_ingest import _validate_pixel_registration
+
+        src = _make_src()
+        src.tags.return_value = {}  # no AREA_OR_POINT tag
+        with caplog.at_level(logging.WARNING, logger="lulc_worldcover_ingest"):
+            _validate_pixel_registration(src, Path("tile.tif"))
+        assert not caplog.records
+
+
+# ── _warn_boundary_coords ─────────────────────────────────────────────────────
+
+class TestWarnBoundaryCoords:
+    # pixel_size = 8.333e-05; origin lon=-180, lat=90
+    # A coord at lon=-180.0 (frac_col=0.0) is exactly on the left edge → boundary.
+    # A coord at lon=-180.0 + 0.5*pixel_size is at pixel centre → not boundary.
+
+    def _make_interior_coord(self, pixel_size: float = 8.333e-05) -> tuple[float, float]:
+        """Coordinate at pixel centre — safely away from any boundary."""
+        return (-180.0 + pixel_size * 0.5, 90.0 - pixel_size * 0.5)
+
+    def _make_boundary_coord(self) -> tuple[float, float]:
+        """Coordinate exactly on a pixel edge (frac_col = 0.0)."""
+        return (-180.0, 90.0)
+
+    def test_no_warning_for_interior_coords(self, caplog):
+        from ingest.lulc_worldcover_ingest import _warn_boundary_coords
+
+        src = _make_src()
+        coords = [self._make_interior_coord() for _ in range(5)]
+        with caplog.at_level(logging.WARNING, logger="lulc_worldcover_ingest"):
+            _warn_boundary_coords(src, coords, Path("tile.tif"))
+        assert not caplog.records
+
+    def test_warns_for_boundary_coords(self, caplog):
+        from ingest.lulc_worldcover_ingest import _warn_boundary_coords
+
+        src = _make_src()
+        coords = [self._make_boundary_coord()]
+        with caplog.at_level(logging.WARNING, logger="lulc_worldcover_ingest"):
+            _warn_boundary_coords(src, coords, Path("tile.tif"))
+        assert any("pixel boundary" in r.message for r in caplog.records)
+        assert any("Mitigation" in r.message for r in caplog.records)
+
+    def test_warns_counts_correctly(self, caplog):
+        from ingest.lulc_worldcover_ingest import _warn_boundary_coords
+
+        src = _make_src()
+        pixel_size = 8.333e-05
+        coords = [
+            self._make_boundary_coord(),          # boundary
+            self._make_interior_coord(pixel_size), # interior
+            self._make_boundary_coord(),          # boundary
+        ]
+        with caplog.at_level(logging.WARNING, logger="lulc_worldcover_ingest"):
+            _warn_boundary_coords(src, coords, Path("tile.tif"))
+        # Should report 2/3 boundary coords.
+        assert any("2/3" in r.message for r in caplog.records)
+
+    def test_empty_coords_silent(self, caplog):
+        from ingest.lulc_worldcover_ingest import _warn_boundary_coords
+
+        src = _make_src()
+        with caplog.at_level(logging.WARNING, logger="lulc_worldcover_ingest"):
+            _warn_boundary_coords(src, [], Path("tile.tif"))
+        assert not caplog.records
