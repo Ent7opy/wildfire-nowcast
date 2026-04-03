@@ -32,12 +32,10 @@ def _make_aoi(**overrides) -> dict:
 def test_paused_aoi_skips_notify_in_new_ignition():
     """When notifications are paused, check_new_ignition runs the DB query but
     does NOT call notify()."""
-    from datetime import datetime, timezone
-
     from ingest.aoi_watch import check_new_ignition
 
     aoi = _make_aoi(
-        watch_notifications_paused_until=datetime.now(timezone.utc) + timedelta(hours=2),
+        watch_notifications_paused_until=_NOW + timedelta(hours=2),
     )
 
     # Two qualifying detections within the cluster radius, both new
@@ -167,12 +165,10 @@ def test_no_pause_field_allows_notify():
 
 def test_spread_trajectory_skips_paused_aoi():
     """run_spread_trajectory_checks skips check_spread_trajectory for paused AOIs."""
-    from datetime import datetime, timezone
-
     from ingest.spread_trajectory_watch import run_spread_trajectory_checks
 
     paused_aoi = _make_aoi(
-        watch_notifications_paused_until=datetime.now(timezone.utc) + timedelta(hours=3),
+        watch_notifications_paused_until=_NOW + timedelta(hours=3),
     )
     session = MagicMock()
 
@@ -200,12 +196,10 @@ def test_spread_trajectory_runs_for_active_aoi():
 
 def test_weather_threshold_skips_paused_aoi():
     """run_weather_threshold_checks skips check_weather_thresholds for paused AOIs."""
-    from datetime import datetime, timezone
-
     from ingest.weather_threshold_watch import run_weather_threshold_checks
 
     paused_aoi = _make_aoi(
-        watch_notifications_paused_until=datetime.now(timezone.utc) + timedelta(hours=1),
+        watch_notifications_paused_until=_NOW + timedelta(hours=1),
     )
     session = MagicMock()
 
