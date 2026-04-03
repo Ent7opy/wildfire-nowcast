@@ -150,7 +150,7 @@ export default function FireMap({
   const normalizedSearch = searchQuery.trim().toLowerCase();
 
   const eventsQuery = useQuery({
-    queryKey: ["fire-events", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, filters.clusterPoints, debouncedMapView.zoom, archive.viewMode, archive.archiveDate, archive.archiveTimeframe],
+    queryKey: ["fire-events", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, debouncedMapView.zoom, archive.viewMode, archive.archiveDate, archive.archiveTimeframe],
     queryFn: () =>
       getFireEvents({
         bbox,
@@ -164,7 +164,7 @@ export default function FireMap({
   });
 
   const frontsQuery = useQuery({
-    queryKey: ["fire-fronts", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, filters.activeOnly, debouncedMapView.zoom, archive.viewMode, archive.archiveDate, archive.archiveTimeframe],
+    queryKey: ["fire-fronts", bbox, timeRange.startTime.toISOString(), timeRange.endTime.toISOString(), filters.minLikelihood, debouncedMapView.zoom, archive.viewMode, archive.archiveDate, archive.archiveTimeframe],
     queryFn: () =>
       getFireFronts({
         bbox,

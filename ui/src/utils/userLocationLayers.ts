@@ -8,7 +8,7 @@ import type { UserLocationState } from "../types/state";
  */
 export function buildUserLocationLayers(
   userLocation: UserLocationState,
-  _proximityRadiusKm: number
+  proximityRadiusKm: number
 ): ScatterplotLayer[] {
   const position: [number, number] = [userLocation.lon, userLocation.lat];
 
@@ -30,8 +30,8 @@ export function buildUserLocationLayers(
     id: "user-location-ring",
     data: [{ position }],
     getPosition: (d: { position: [number, number] }) => d.position,
-    getRadius: 18,
-    radiusUnits: "pixels",
+    getRadius: proximityRadiusKm * 1000,
+    radiusUnits: "meters",
     getFillColor: [59, 130, 246, 40],
     getLineColor: [59, 130, 246, 140],
     lineWidthMinPixels: 1.5,

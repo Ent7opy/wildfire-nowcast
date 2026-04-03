@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-
 from api.deps import no_cache
 from pydantic import BaseModel, Field
 from typing import Annotated
@@ -15,6 +15,8 @@ from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
 from api.aois import repo
+
+logger = logging.getLogger(__name__)
 
 aois_router = APIRouter(prefix="/aois", tags=["aois"])
 
@@ -182,12 +184,19 @@ def create_aoi(request: CreateAOIRequest):
 
     # Post-creation validation (using DB-computed area)
     if aoi["area_km2"] > MAX_AOI_AREA_KM2:
-        # Rollback? repo.create_aoi committed.
-        # We should delete it or ideally checked before commit.
-        # Since repo.create_aoi does one transaction, we can't rollback easily without context manager.
-        # For MVP, we'll just delete it and error out, or just warn.
-        # Let's delete it.
-        repo.delete_aoi(aoi["id"])
+        # The AOI was already committed; attempt to delete it to avoid leaving
+        # an invalid record behind. If deletion fails, log and proceed — the
+        # 413 response is returned regardless so the caller is not misled.
+        try:
+            repo.delete_aoi(aoi["id"])
+        except Exception as delete_exc:
+            logger.error(
+                "Failed to delete oversized AOI %s after post-commit area check "
+                "(area=%.1f km²): %s",
+                aoi["id"],
+                aoi["area_km2"],
+                delete_exc,
+            )
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"AOI area ({aoi['area_km2']:.1f} km²) exceeds maximum ({MAX_AOI_AREA_KM2} km²)",
@@ -253,9 +262,14 @@ def update_aoi(aoi_id: UUID, request: UpdateAOIRequest):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AOI not found")
 
     if request.geometry and aoi["area_km2"] > MAX_AOI_AREA_KM2:
-        # Revert update
+        # Revert ALL fields to their pre-update values, not just geometry.
+        # The skip-None pattern in update_aoi means omitting name/description/tags
+        # would leave any metadata changes silently persisted.
         repo.update_aoi(
             aoi_id,
+            name=old_aoi["name"],
+            description=old_aoi.get("description"),
+            tags=old_aoi.get("tags"),
             geom_geojson=old_aoi["geometry"],
         )
         raise HTTPException(
