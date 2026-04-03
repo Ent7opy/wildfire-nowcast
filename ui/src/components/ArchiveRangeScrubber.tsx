@@ -97,10 +97,15 @@ export default function ArchiveRangeScrubber({
       return;
     }
     const nextDate = currentDates[idx + 1];
+    const nextStatus = currentStatusByDate[nextDate];
     // Only advance to dates that have finished ingesting
-    if (currentStatusByDate[nextDate] === "finished") {
+    if (nextStatus === "finished") {
       onScrubRef.current(nextDate);
+    } else if (nextStatus === "failed") {
+      // Dead-end — stop rather than loop forever
+      stopPlayRef.current();
     }
+    // 'started' / 'queued': silently wait and retry on the next interval tick (expected)
   }, []); // stable — intentionally no deps; reads from refs above
 
   // Restart interval only when play state or speed changes (not on every scrub step)
