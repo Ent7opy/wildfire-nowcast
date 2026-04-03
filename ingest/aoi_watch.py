@@ -492,26 +492,27 @@ def run_aoi_watch_cycle(api_base_url: str | None = None) -> int:
     LOGGER.info("aoi_watch: cycle complete — processed %d AOI(s)", processed)
 
     # ── Batch watch checks that require a DB session ──────────────────────────
-    # Run once per cycle (not per-AOI) to keep DB connection lifetime short.
+    # AOI-specific checks only run when AOIs were due; perimeter breach checks
+    # query all active fire_perimeters globally and always run every cycle.
     if due_aois:
-        _run_batch_watch_checks(due_aois)
+        _run_aoi_batch_checks(due_aois)
+    _run_perimeter_checks()
 
     return processed
 
 
-def _run_batch_watch_checks(aois: list[dict[str, Any]]) -> None:
-    """Run weather threshold, spread trajectory, and perimeter breach checks.
+def _run_aoi_batch_checks(aois: list[dict[str, Any]]) -> None:
+    """Run weather threshold and spread trajectory checks for the given AOIs.
 
-    Opens a single DB connection shared across all three check functions.
+    Opens a single read-only DB connection shared across both check functions.
     Errors in any individual check are logged but do not abort others.
     """
     from ingest.weather_threshold_watch import run_weather_threshold_checks  # noqa: PLC0415
     from ingest.spread_trajectory_watch import run_spread_trajectory_checks  # noqa: PLC0415
-    from ingest.perimeter_breach_watch import run_perimeter_breach_checks  # noqa: PLC0415
 
     engine = get_engine()
     try:
-        with engine.begin() as conn:
+        with engine.connect() as conn:
             try:
                 results = run_weather_threshold_checks(aois, conn)
                 LOGGER.info(
@@ -527,13 +528,24 @@ def _run_batch_watch_checks(aois: list[dict[str, Any]]) -> None:
                 )
             except Exception:
                 LOGGER.exception("aoi_watch: spread trajectory checks failed")
-
-            try:
-                results = run_perimeter_breach_checks(conn)
-                LOGGER.info(
-                    "aoi_watch: perimeter breach checks — %d breach(es)", len(results)
-                )
-            except Exception:
-                LOGGER.exception("aoi_watch: perimeter breach checks failed")
     except Exception:
-        LOGGER.exception("aoi_watch: could not open DB connection for batch watch checks")
+        LOGGER.exception("aoi_watch: could not open DB connection for AOI batch checks")
+
+
+def _run_perimeter_checks() -> None:
+    """Run perimeter breach checks against all active fire perimeters.
+
+    Runs every watch cycle regardless of whether any AOIs were due — spot fire
+    detection is not AOI-specific and must not be gated on AOI scheduling.
+    """
+    from ingest.perimeter_breach_watch import run_perimeter_breach_checks  # noqa: PLC0415
+
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            results = run_perimeter_breach_checks(conn)
+            LOGGER.info(
+                "aoi_watch: perimeter breach checks — %d breach(es)", len(results)
+            )
+    except Exception:
+        LOGGER.exception("aoi_watch: perimeter breach checks failed")
