@@ -9,5 +9,6 @@ from .aois import aois_router
 from .tiles import tiles_router
 from .exports import exports_router
 from .risk import risk_router
+from .ignition import ignition_router
 
-__all__ = ["archive_router", "assistant_router", "internal_router", "fires_router", "forecast_router", "aois_router", "tiles_router", "exports_router", "risk_router"]
+__all__ = ["archive_router", "assistant_router", "internal_router", "fires_router", "forecast_router", "aois_router", "tiles_router", "exports_router", "risk_router", "ignition_router"]

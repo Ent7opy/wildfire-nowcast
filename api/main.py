@@ -9,7 +9,7 @@ from redis.asyncio import Redis
 
 from api.config import settings
 from api.errors import ErrorResponse, WildfireError, wildfire_error_handler
-from api.routes import archive_router, assistant_router, internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router
+from api.routes import archive_router, assistant_router, internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router, ignition_router
 from api.startup_check import StartupError, run_api_startup_checks
 
 LOGGER = logging.getLogger(__name__)
@@ -131,4 +131,5 @@ app.include_router(aois_router)
 app.include_router(tiles_router)
 app.include_router(exports_router)
 app.include_router(risk_router)
+app.include_router(ignition_router, prefix="/ignition", tags=["ignition"])
 

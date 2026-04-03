@@ -1,0 +1,1 @@
+"""Ignition probability grid package."""
