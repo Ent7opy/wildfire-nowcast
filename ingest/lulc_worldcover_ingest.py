@@ -19,6 +19,7 @@ from urllib.request import urlopen
 
 import numpy as np
 import rasterio
+from rasterio.crs import CRS as RasterioCRS
 from sqlalchemy import text
 
 from api.db import get_engine
@@ -42,6 +43,13 @@ _CLASS_LABELS: dict[int, str] = {
     95: "Mangroves",
     100: "Moss and lichen",
 }
+
+_EXPECTED_CRS = RasterioCRS.from_epsg(4326)
+
+# Warn when a coordinate falls within this fraction of a pixel edge.
+# At 10 m / ~0.00009°, a 5 % threshold is ~0.5 m — detections this close to a
+# pixel boundary may be assigned to the wrong adjacent pixel due to GPS scatter.
+_BOUNDARY_WARNING_FRACTION = 0.05
 
 # Keep scoring aligned with existing denoiser landcover priors.
 _CLASS_SCORES: dict[int, float] = {
@@ -185,6 +193,86 @@ def _download_tile(*, url: str, local_path: Path, timeout_seconds: int = 120) ->
         tmp.replace(local_path)
 
 
+def _validate_tile_crs(src: rasterio.io.DatasetReader, tile_path: Path) -> None:
+    """Raise if the tile CRS is not EPSG:4326.
+
+    ESA WorldCover tiles ship in WGS-84 geographic coordinates.  Any other CRS
+    means lon/lat fire-detection coordinates cannot be passed directly to
+    rasterio.sample() without reprojection, and landcover assignments would be
+    silently wrong.
+    """
+    if src.crs is None or src.crs != _EXPECTED_CRS:
+        raise ValueError(
+            f"STOP: tile {tile_path.name} CRS is {src.crs!r}, expected EPSG:4326. "
+            "Direct lon/lat sampling would produce incorrect geographic assignments. "
+            "Reproject the tile to EPSG:4326 before sampling."
+        )
+
+
+def _validate_pixel_registration(src: rasterio.io.DatasetReader, tile_path: Path) -> None:
+    """Log a WARNING if pixel registration is not pixel-area (corner-registered).
+
+    ESA WorldCover uses GDAL AREA_OR_POINT=Area: each pixel covers the area
+    whose upper-left corner is at the pixel coordinate.  rasterio.sample()
+    floors the fractional pixel index, which is correct for area registration.
+    Centre-registered tiles (PointRegistration) would require a half-pixel
+    shift before sampling.
+    """
+    area_or_point = src.tags().get("AREA_OR_POINT", "Area")
+    if area_or_point.lower() != "area":
+        pixel_size_deg = abs(src.transform.a)
+        LOGGER.warning(
+            "Tile %s reports AREA_OR_POINT=%s (expected 'Area'). "
+            "Pixel-center registration offsets the effective sample point by ~%.6f deg "
+            "(half a pixel). Landcover assignments near pixel boundaries may be one "
+            "pixel off. Mitigation: shift lon/lat by +0.5 pixel before sampling; "
+            "target: science_grade.",
+            tile_path.name,
+            area_or_point,
+            pixel_size_deg / 2,
+        )
+
+
+def _warn_boundary_coords(
+    src: rasterio.io.DatasetReader,
+    coords: list[tuple[float, float]],
+    tile_path: Path,
+) -> None:
+    """Log a WARNING if any coordinate falls within _BOUNDARY_WARNING_FRACTION of a pixel edge.
+
+    At 10-metre WorldCover resolution (~0.00009°), a detection within 5 % of a
+    pixel boundary is within ~0.5 m of the edge.  Sub-metre GPS scatter means
+    the true ignition point could land in the adjacent pixel.
+    """
+    if not coords:
+        return
+    # One pass over coords: extract lons and lats as contiguous float64 arrays.
+    coords_arr = np.array(coords, dtype=np.float64)
+    lons, lats = coords_arr[:, 0], coords_arr[:, 1]
+    # Fractional column/row offsets within each pixel.
+    # transform.a is positive pixel width; transform.e is negative pixel height.
+    pixel_width = abs(src.transform.a)
+    frac_col = ((lons - src.transform.c) / src.transform.a) % 1.0
+    frac_row = ((lats - src.transform.f) / src.transform.e) % 1.0
+    near_boundary = (
+        (np.minimum(frac_col, 1.0 - frac_col) < _BOUNDARY_WARNING_FRACTION)
+        | (np.minimum(frac_row, 1.0 - frac_row) < _BOUNDARY_WARNING_FRACTION)
+    )
+    count = int(np.sum(near_boundary))
+    if count > 0:
+        LOGGER.warning(
+            "%s: %d/%d coordinates in this batch fall within %.0f%% of a pixel boundary "
+            "(pixel_width=%.6f deg). Adjacent-pixel misassignment is possible. "
+            "Mitigation: snap coordinates to pixel centers before sampling; "
+            "target: science_grade.",
+            tile_path.name,
+            count,
+            len(coords),
+            _BOUNDARY_WARNING_FRACTION * 100,
+            pixel_width,
+        )
+
+
 def _sample_classes(src: rasterio.io.DatasetReader, coords: list[tuple[float, float]]) -> np.ndarray:
     # rasterio returns arrays with one value per coordinate for a single-band raster.
     return np.fromiter((int(v[0]) for v in src.sample(coords)), dtype=np.int32, count=len(coords))
@@ -269,6 +357,9 @@ def _backfill_tile(
         get_engine().connect() as read_conn,
         get_engine().begin() as write_conn,
     ):
+        _validate_tile_crs(src, tile_path)
+        _validate_pixel_registration(src, tile_path)
+
         result = read_conn.execution_options(stream_results=True).execute(select_stmt, params)
         while True:
             chunk = result.fetchmany(query_batch_size)
@@ -278,6 +369,7 @@ def _backfill_tile(
             rows_seen += len(chunk)
             ids = [int(r.id) for r in chunk]
             coords = [(float(r.lon), float(r.lat)) for r in chunk]
+            _warn_boundary_coords(src, coords, tile_path)
             classes = _sample_classes(src, coords)
 
             updates: list[dict] = []
