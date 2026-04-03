@@ -29,6 +29,7 @@ RH Threshold Crossing (Transition Gate):
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -265,19 +266,22 @@ def check_weather_thresholds(aoi: dict[str, Any], session: Any) -> dict[str, Any
 def run_weather_threshold_checks(
     aois: list[dict[str, Any]],
     session: Any,
+    *,
+    _now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Run weather threshold checks for every watched AOI.
 
     Args:
         aois:    List of AOI dicts.
         session: SQLAlchemy connection/session.
+        _now:    Override for current UTC time (testing only).
 
     Returns:
         List of non-None results from check_weather_thresholds.
     """
     results: list[dict[str, Any]] = []
     for aoi in aois:
-        if _is_notifications_paused(aoi):
+        if _is_notifications_paused(aoi, _now=_now):
             LOGGER.info(
                 "weather_threshold_watch: notifications paused for AOI %s — skipping",
                 aoi.get("name"),

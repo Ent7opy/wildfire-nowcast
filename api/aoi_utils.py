@@ -10,12 +10,19 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-def _is_notifications_paused(aoi: dict[str, Any]) -> bool:
+def _is_notifications_paused(
+    aoi: dict[str, Any],
+    *,
+    _now: datetime | None = None,
+) -> bool:
     """Return True if AOI notifications are currently paused.
 
     The column ``watch_notifications_paused_until`` is NULL when active, or set
     to a future TIMESTAMPTZ when paused.  A past timestamp means the pause has
     expired and notifications are treated as active.
+
+    Args:
+        _now: Override for current UTC time (testing only).
     """
     paused_until = aoi.get("watch_notifications_paused_until")
     if paused_until is None:
@@ -25,4 +32,5 @@ def _is_notifications_paused(aoi: dict[str, Any]) -> bool:
     # Normalise to UTC-aware for safe comparison.
     if paused_until.tzinfo is None:
         paused_until = paused_until.replace(tzinfo=timezone.utc)
-    return paused_until > datetime.now(timezone.utc)
+    now = _now if _now is not None else datetime.now(timezone.utc)
+    return paused_until > now

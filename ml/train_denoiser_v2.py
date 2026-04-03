@@ -61,7 +61,19 @@ def _maybe_git_sha() -> Optional[str]:
         return None
 
 
-def _load_snapshot(path: str, *, columns: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _load_snapshot(
+    path: str,
+    *,
+    columns: list[str],
+    train_fraction: float = 0.6,
+    calibration_fraction: float = 0.8,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load snapshot and split into train / calibration / eval using temporal ordering.
+
+    Default fractions: training=first 60%, calibration=middle 20%, eval=final 20%.
+    For directory snapshots (``train.parquet`` + ``eval.parquet``), both files are
+    concatenated before re-splitting so the temporal boundaries are re-established.
+    """
     read_columns = list(dict.fromkeys(columns))
 
     def _read_with_fallback(parquet_path: str) -> pd.DataFrame:
@@ -72,27 +84,25 @@ def _load_snapshot(path: str, *, columns: list[str]) -> tuple[pd.DataFrame, pd.D
             keep = [c for c in read_columns if c in full.columns]
             return full[keep]
 
+    full_columns = list(dict.fromkeys(read_columns + ["start_time"]))
+
     if os.path.isdir(path):
         train_path = os.path.join(path, "train.parquet")
         eval_path = os.path.join(path, "eval.parquet")
-        train = _read_with_fallback(train_path)
-        eval_df = _read_with_fallback(eval_path)
-        return train, eval_df
-    full_columns = list(dict.fromkeys(read_columns + ["start_time"]))
-    try:
-        full = read_parquet_with_fallback(path, columns=full_columns)
-    except Exception:
-        full = read_parquet_with_fallback(path)
-        keep = [c for c in full_columns if c in full.columns]
-        full = full[keep]
-    if "start_time" in full.columns:
-        full = full.sort_values("start_time")
-    split_dt = full["start_time"].quantile(0.8) if "start_time" in full.columns else None
-    if split_dt is not None:
-        return full[full["start_time"] < split_dt].copy(), full[full["start_time"] >= split_dt].copy()
-    n = len(full)
-    cut = int(n * 0.8)
-    return full.iloc[:cut].copy(), full.iloc[cut:].copy()
+        full = pd.concat(
+            [_read_with_fallback(train_path), _read_with_fallback(eval_path)],
+            ignore_index=True,
+            sort=False,
+        )
+    else:
+        try:
+            full = read_parquet_with_fallback(path, columns=full_columns)
+        except Exception:
+            full = read_parquet_with_fallback(path)
+            keep = [c for c in full_columns if c in full.columns]
+            full = full[keep]
+
+    return _temporal_3way_split(full, train_fraction=train_fraction, calibration_fraction=calibration_fraction)
 
 
 def _map_labels(df: pd.DataFrame, label_col: str = "event_label") -> np.ndarray:
@@ -162,21 +172,60 @@ def _stratified_downsample(
     return work.loc[sampled_unique].copy()
 
 
+def _temporal_3way_split(
+    df: pd.DataFrame,
+    *,
+    train_fraction: float = 0.6,
+    calibration_fraction: float = 0.8,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split *df* into (train, calibration, eval) in chronological order.
+
+    Splits at ``start_time`` quantiles when the column is present and quantile
+    boundaries produce non-empty partitions; falls back to positional slicing.
+    The caller is responsible for checking that no returned partition is empty.
+    """
+    if "start_time" in df.columns:
+        ordered = df.sort_values("start_time").reset_index(drop=True)
+        split_train_dt = ordered["start_time"].quantile(train_fraction)
+        split_cal_dt = ordered["start_time"].quantile(calibration_fraction)
+        train = ordered[ordered["start_time"] < split_train_dt].copy()
+        cal = ordered[
+            (ordered["start_time"] >= split_train_dt) & (ordered["start_time"] < split_cal_dt)
+        ].copy()
+        eval_df = ordered[ordered["start_time"] >= split_cal_dt].copy()
+        if not train.empty and not cal.empty and not eval_df.empty:
+            return train, cal, eval_df
+        # Fall through to positional when quantile boundaries collapse (e.g. many duplicate timestamps)
+    else:
+        ordered = df
+
+    n = len(ordered)
+    cut_train = int(n * train_fraction)
+    cut_cal = int(n * calibration_fraction)
+    return (
+        ordered.iloc[:cut_train].copy(),
+        ordered.iloc[cut_train:cut_cal].copy(),
+        ordered.iloc[cut_cal:].copy(),
+    )
+
+
 def _apply_micro_batch(
     *,
     train_df: pd.DataFrame,
+    calibration_df: pd.DataFrame,
     eval_df: pd.DataFrame,
     config: Dict[str, Any],
     label_col: str,
     default_strat_cols: list[str],
     rng: np.random.Generator,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     micro_cfg = dict(config.get("micro_batch", {}))
     if not bool(micro_cfg.get("enabled", False)):
-        return train_df, eval_df, {"enabled": False}
+        return train_df, calibration_df, eval_df, {"enabled": False}
 
-    if "start_time" not in train_df.columns or "start_time" not in eval_df.columns:
-        raise ValueError("micro_batch requires start_time in snapshot.")
+    for name, df in [("train_df", train_df), ("calibration_df", calibration_df), ("eval_df", eval_df)]:
+        if "start_time" not in df.columns:
+            raise ValueError(f"micro_batch requires start_time in {name}.")
 
     start_raw = micro_cfg.get("start")
     end_raw = micro_cfg.get("end")
@@ -187,7 +236,9 @@ def _apply_micro_batch(
     if end <= start:
         raise ValueError(f"Invalid micro_batch window: start={start} end={end}")
 
-    combined = pd.concat([train_df.copy(), eval_df.copy()], ignore_index=True, sort=False)
+    combined = pd.concat(
+        [train_df, calibration_df, eval_df], ignore_index=True, sort=False
+    )
     combined["start_time"] = pd.to_datetime(combined["start_time"], utc=True, errors="coerce")
     micro = combined[(combined["start_time"] >= start) & (combined["start_time"] < end)].copy()
     if micro.empty:
@@ -212,15 +263,13 @@ def _apply_micro_batch(
             f"positive_rows={pos_count}, min_positive_rows={min_pos}."
         )
 
-    split_dt = micro["start_time"].quantile(0.8)
-    micro_train = micro[micro["start_time"] < split_dt].copy()
-    micro_eval = micro[micro["start_time"] >= split_dt].copy()
-    if micro_train.empty or micro_eval.empty:
-        cut = max(1, int(np.floor(len(micro) * 0.8)))
-        micro_train = micro.iloc[:cut].copy()
-        micro_eval = micro.iloc[cut:].copy()
-        if micro_eval.empty:
-            micro_eval = micro_train.tail(min(1000, len(micro_train))).copy()
+    micro_train, micro_cal, micro_eval = _temporal_3way_split(micro)
+    if micro_train.empty or micro_cal.empty or micro_eval.empty:
+        raise ValueError(
+            f"micro_batch 60/20/20 temporal split produced an empty partition "
+            f"(rows={len(micro)}). "
+            "Widen the micro_batch window or reduce min_positive_rows."
+        )
 
     stats = {
         "enabled": True,
@@ -228,6 +277,7 @@ def _apply_micro_batch(
         "end": end.isoformat(),
         "rows_total": int(len(micro)),
         "rows_train": int(len(micro_train)),
+        "rows_calibration": int(len(micro_cal)),
         "rows_eval": int(len(micro_eval)),
         "positive_rows_total": int((micro[label_col] == "POSITIVE").sum()),
         "negative_rows_total": int((micro[label_col] == "NEGATIVE").sum()),
@@ -235,7 +285,7 @@ def _apply_micro_batch(
         "max_rows": int(max_rows),
         "stratify_columns": strat_cols,
     }
-    return micro_train, micro_eval, stats
+    return micro_train, micro_cal, micro_eval, stats
 
 
 def _compute_shap_top_features(
@@ -1348,11 +1398,15 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     required_columns = list(dict.fromkeys(features + [label_col] + slice_cols + ["start_time"]))
     if coverage_scope == "covered":
         required_columns.append("truth_covered_mask")
-    train_df, eval_df = _load_snapshot(config["snapshot_path"], columns=required_columns)
+    train_df, calibration_df, eval_df = _load_snapshot(
+        config["snapshot_path"], columns=required_columns
+    )
     train_df = _ensure_slice_columns(train_df, slice_cols)
+    calibration_df = _ensure_slice_columns(calibration_df, slice_cols)
     eval_df = _ensure_slice_columns(eval_df, slice_cols)
-    train_df, eval_df, micro_batch_stats = _apply_micro_batch(
+    train_df, calibration_df, eval_df, micro_batch_stats = _apply_micro_batch(
         train_df=train_df,
+        calibration_df=calibration_df,
         eval_df=eval_df,
         config=config,
         label_col=label_col,
@@ -1363,12 +1417,16 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     for col in features:
         if col not in train_df.columns:
             train_df[col] = np.nan
+        if col not in calibration_df.columns:
+            calibration_df[col] = np.nan
         if col not in eval_df.columns:
             eval_df[col] = np.nan
     train_df = _ensure_slice_columns(train_df, slice_cols)
+    calibration_df = _ensure_slice_columns(calibration_df, slice_cols)
     eval_df = _ensure_slice_columns(eval_df, slice_cols)
 
     train_scope = _select_scope(train_df, coverage_scope)
+    calibration_scope = _select_scope(calibration_df, coverage_scope)
     eval_scope = _select_scope(eval_df, coverage_scope)
 
     y_train = _map_labels(train_scope, label_col)
@@ -1417,34 +1475,39 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         rng=rng,
     )
 
-    eval_known_mask = _map_labels(eval_scope, label_col) >= 0
-    eval_known_df = eval_scope.loc[eval_known_mask].copy()
-    if eval_known_df.empty:
-        raise ValueError("No known labels in eval scope; cannot calibrate or compute promotion gates.")
+    cal_known_mask = _map_labels(calibration_scope, label_col) >= 0
+    calibration_known_df = calibration_scope.loc[cal_known_mask].copy()
+    if calibration_known_df.empty:
+        raise ValueError("No known labels in calibration scope; cannot calibrate.")
 
-    calibration_fraction = float(config.get("calibration_holdout_fraction", 0.5))
-    calibration_df, eval_holdout_df = _split_calibration_eval_holdout(
-        eval_known_df,
-        calibration_fraction=calibration_fraction,
-    )
-    if eval_holdout_df.empty:
-        eval_holdout_df = calibration_df.copy()
+    eval_known_mask = _map_labels(eval_scope, label_col) >= 0
+    eval_known_holdout = eval_scope.loc[eval_known_mask].copy()
+    if eval_known_holdout.empty:
+        raise ValueError("No known labels in eval scope; cannot compute promotion gates.")
+
+    # Temporal non-overlap assertion: every calibration timestamp must precede every eval timestamp.
+    if "start_time" in calibration_known_df.columns and "start_time" in eval_known_holdout.columns:
+        cal_max = calibration_known_df["start_time"].max()
+        eval_min = eval_known_holdout["start_time"].min()
+        if cal_max >= eval_min:
+            raise ValueError(
+                f"Temporal leakage detected: calibration max timestamp ({cal_max}) "
+                f">= eval min timestamp ({eval_min}). "
+                "Ensure the snapshot covers a wide enough time range for a 60/20/20 split."
+            )
 
     global_calibrator, slice_calibrators, y_cal, raw_cal = _calibrate(
         config=config,
         model=model,
-        calibration_df=calibration_df,
+        calibration_df=calibration_known_df,
         features=features,
         slice_cols=slice_cols,
         label_col=label_col,
     )
 
-    y_eval = _map_labels(eval_holdout_df, label_col)
-    known_eval_mask = y_eval >= 0
-    eval_known_holdout = eval_holdout_df.loc[known_eval_mask].copy()
-    y_eval_known = y_eval[known_eval_mask]
+    y_eval_known = _map_labels(eval_known_holdout, label_col)
     if len(eval_known_holdout) == 0:
-        raise ValueError("No known labels in eval holdout after split.")
+        raise ValueError("No known labels in eval holdout.")
 
     raw_eval = _predict_raw(model, _feature_matrix(eval_known_holdout, features))
     calibrated_scores = _apply_slice_calibration(
@@ -1606,6 +1669,8 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "train_rows": int(len(train_df)),
         "train_scope_rows": int(len(train_scope)),
         "train_fit_rows": int(len(fit_train_df)),
+        "calibration_rows": int(len(calibration_df)),
+        "calibration_scope_rows": int(len(calibration_scope)),
         "eval_rows": int(len(eval_df)),
         "eval_scope_rows": int(len(eval_scope)),
         "train_known_rows": int(known_train.sum()),

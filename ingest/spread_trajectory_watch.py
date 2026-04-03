@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -411,19 +412,22 @@ def check_spread_trajectory(
 def run_spread_trajectory_checks(
     aois: list[dict[str, Any]],
     session: Any,
+    *,
+    _now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Run spread trajectory checks for every watched AOI.
 
     Args:
         aois:    List of AOI dicts (same shape as produced by list_watched_aois_due).
         session: SQLAlchemy connection/session.
+        _now:    Override for current UTC time (testing only).
 
     Returns:
         Flat list of result dicts from all AOIs and all horizons that triggered.
     """
     results: list[dict[str, Any]] = []
     for aoi in aois:
-        if _is_notifications_paused(aoi):
+        if _is_notifications_paused(aoi, _now=_now):
             LOGGER.info(
                 "spread_trajectory_watch: notifications paused for AOI %s — skipping",
                 aoi.get("name"),
