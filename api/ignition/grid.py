@@ -446,10 +446,14 @@ def compute_ignition_grid(
                 cell_values[feat] = _STATIC_DEFAULTS.get(feat, float("nan"))
             elif alias is not None:
                 raw = w.get(alias)
-                cell_values[feat] = float(raw) if raw is not None else _STATIC_DEFAULTS.get(feat, float("nan"))
+                cell_values[feat] = (
+                    float(raw) if raw is not None else _STATIC_DEFAULTS.get(feat, float("nan"))
+                )
             else:
                 raw = w.get(feat)
-                cell_values[feat] = float(raw) if raw is not None else _STATIC_DEFAULTS.get(feat, float("nan"))
+                cell_values[feat] = (
+                    float(raw) if raw is not None else _STATIC_DEFAULTS.get(feat, float("nan"))
+                )
 
         row: list[float] = []
         for feat in required_features:
@@ -457,9 +461,9 @@ def compute_ignition_grid(
             if val != val:  # NaN check
                 if missing_feature_policy == "BLOCKER":
                     LOGGER.error(
-                        "BLOCKER [ignition-grid] Required feature %r is missing/NaN for cell (%.4f, %.4f). "
-                        "Feature contract mismatch between train and infer. "
-                        "TARGET_STAGE: science_grade", feat, lat, lon
+                        "BLOCKER [ignition-grid] Feature %r missing/NaN at (%.4f, %.4f). "
+                        "Train/infer contract mismatch. TARGET_STAGE: science_grade",
+                        feat, lat, lon,
                     )
                     raise IgnitionInferenceFailed(
                         f"Required feature {feat!r} is missing from assembled cell data."
@@ -486,7 +490,7 @@ def compute_ignition_grid(
 
     cells: list[dict] = []
     for idx, (lat, lon, prob) in enumerate(zip(cell_lats, cell_lons, probabilities)):
-        # Reconstruct raw_signals from the feature_matrix row (authoritative values used for inference)
+        # raw_signals from feature_matrix (the authoritative inference input values)
         raw_signals = {
             feat: float(feature_matrix[idx][i])
             for i, feat in enumerate(required_features)

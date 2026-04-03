@@ -14,7 +14,9 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_active_model(top_features=None, thresholds=None, artifact_uri="models/ignition/model.onnx"):
+def _make_active_model(
+    top_features=None, thresholds=None, artifact_uri="models/ignition/model.onnx"
+):
     if top_features is None:
         top_features = [
             "temperature_c", "relative_humidity", "wind_speed_kmh",
@@ -44,8 +46,14 @@ def _call_compute(horizon="now", monkeypatch=None, active_model=None, env_overri
 
     with patch.object(grid_mod, "resolve_active_model", return_value=model), \
          patch.object(grid_mod, "_query_weather_for_cells", return_value={}), \
-         patch.object(grid_mod, "_query_latest_weather_run_time", return_value=datetime(2026, 4, 3, 12, 0, tzinfo=timezone.utc)), \
-         patch.object(grid_mod, "_query_drought_index_freshness", return_value=datetime(2026, 4, 1, tzinfo=timezone.utc)), \
+         patch.object(
+             grid_mod, "_query_latest_weather_run_time",
+             return_value=datetime(2026, 4, 3, 12, 0, tzinfo=timezone.utc),
+         ), \
+         patch.object(
+             grid_mod, "_query_drought_index_freshness",
+             return_value=datetime(2026, 4, 1, tzinfo=timezone.utc),
+         ), \
          patch.object(grid_mod, "_query_thunderstorm_present", return_value=True), \
          patch.object(grid_mod, "_check_gfs_48h_available", return_value=True), \
          patch.object(grid_mod, "_run_onnx_inference", return_value=np.full(9, 0.15)):
@@ -159,7 +167,9 @@ def test_stale_drought_index_emits_warning():
             engine=fake_engine,
         )
 
-    drought_warnings = [w for w in result["coverage_warnings"] if w.startswith("drought_index_stale:")]
+    drought_warnings = [
+        w for w in result["coverage_warnings"] if w.startswith("drought_index_stale:")
+    ]
     assert len(drought_warnings) == 1
 
 
@@ -247,7 +257,10 @@ def test_onnx_inference_failure_returns_503():
          patch.object(grid_mod, "_query_drought_index_freshness", return_value=now), \
          patch.object(grid_mod, "_query_thunderstorm_present", return_value=True), \
          patch.object(grid_mod, "_check_gfs_48h_available", return_value=True), \
-         patch.object(grid_mod, "_run_onnx_inference", side_effect=RuntimeError("ONNX session failed")), \
+         patch.object(
+             grid_mod, "_run_onnx_inference",
+             side_effect=RuntimeError("ONNX session failed"),
+         ), \
          patch("api.ignition.grid.datetime") as mock_dt:
         mock_dt.now.return_value = now
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -294,7 +307,7 @@ def test_missing_drought_index_emits_warning():
 
 
 def test_ignition_required_false_no_model_returns_503():
-    """With IGNITION_REQUIRED=false and no model, must raise IgnitionModelUnavailable (not return zeros)."""
+    """No model + IGNITION_REQUIRED=false must raise IgnitionModelUnavailable, not return zeros."""
     from api.ignition import grid as grid_mod
     from api.ignition.grid import IgnitionModelUnavailable
 

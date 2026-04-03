@@ -33,7 +33,10 @@ def get_ignition(
     if horizon not in _VALID_HORIZONS:
         return JSONResponse(
             status_code=422,
-            content={"error": "invalid_horizon", "detail": f"horizon must be one of {sorted(_VALID_HORIZONS)}"},
+            content={
+                "error": "invalid_horizon",
+                "detail": f"horizon must be one of {sorted(_VALID_HORIZONS)}",
+            },
         )
 
     try:
