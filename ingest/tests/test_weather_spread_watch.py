@@ -13,7 +13,6 @@ import pytest
 from ingest.spread_trajectory_watch import (
     _last_alerted_state,
     check_spread_trajectory,
-    reset_trajectory_state,
     run_spread_trajectory_checks,
 )
 from ingest.weather_threshold_watch import (

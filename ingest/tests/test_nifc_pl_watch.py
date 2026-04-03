@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-import ingest.nifc_pl_watch as _mod
 from ingest.nifc_pl_watch import (
     clear_cache,
     get_preparedness_level,
