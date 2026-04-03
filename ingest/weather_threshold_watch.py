@@ -34,6 +34,7 @@ from uuid import UUID
 
 from sqlalchemy import text
 
+from api.aoi_utils import _is_notifications_paused
 from api.notifications import notify
 
 LOGGER = logging.getLogger(__name__)
@@ -276,6 +277,12 @@ def run_weather_threshold_checks(
     """
     results: list[dict[str, Any]] = []
     for aoi in aois:
+        if _is_notifications_paused(aoi):
+            LOGGER.info(
+                "weather_threshold_watch: notifications paused for AOI %s — skipping",
+                aoi.get("name"),
+            )
+            continue
         result = check_weather_thresholds(aoi, session)
         if result is not None:
             results.append(result)

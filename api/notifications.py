@@ -6,7 +6,14 @@ Rate-limited to at most one notification per event_type per window (default 900 
 Silently no-ops when no channel is configured.
 
 Environment variables:
-    NOTIFICATION_WEBHOOK_URL            Slack/Discord-compatible incoming webhook URL.
+    NOTIFICATION_WEBHOOK_URL            Slack/Discord-compatible incoming webhook URL (fallback).
+    NOTIFICATION_WEBHOOK_URL_CRITICAL   Webhook URL for critical-severity events only.
+    NOTIFICATION_WEBHOOK_URL_WARNING    Webhook URL for warning-severity events only.
+    NOTIFICATION_WEBHOOK_URL_INFO       Webhook URL for info-severity events only.
+    NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY
+                                        If "true", the fallback NOTIFICATION_WEBHOOK_URL is only
+                                        used for critical events; info/warning events are dropped
+                                        when no severity-specific URL is configured.
     NOTIFICATION_EMAIL_TO               Recipient address for email alerts.
     NOTIFICATION_SMTP_HOST              SMTP server hostname (required for email).
     NOTIFICATION_SMTP_PORT              SMTP port (default: 587).
@@ -49,6 +56,36 @@ _BURST_EXEMPT_PREFIXES: tuple[str, ...] = (
     "denoiser_drift_hard",
     "burst_digest:",
 )
+
+
+# ROUTING ARCHITECTURE (mvp_operational → science_grade):
+# Current implementation supports severity-based channel routing via env vars.
+# Target: per-AOI channel configuration stored in the aois table, allowing
+# incident commanders to configure separate Slack channels per AOI or fire event.
+# See audit gap: "No routing architecture — all notifications go to one global webhook."
+
+
+def _resolve_webhook_url(severity: str) -> str | None:
+    """Return the webhook URL to use for a given severity level.
+
+    Checks severity-specific URL first, falls back to NOTIFICATION_WEBHOOK_URL.
+    Returns None if no webhook is configured for this severity.
+    """
+    specific = {
+        "critical": os.getenv("NOTIFICATION_WEBHOOK_URL_CRITICAL", "").strip(),
+        "warning": os.getenv("NOTIFICATION_WEBHOOK_URL_WARNING", "").strip(),
+        "info": os.getenv("NOTIFICATION_WEBHOOK_URL_INFO", "").strip(),
+    }.get(severity, "")
+
+    if specific:
+        return specific
+
+    critical_only = os.getenv("NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY", "").strip().lower() == "true"
+    if critical_only and severity != "critical":
+        return None  # suppress non-critical when in critical-only mode
+
+    fallback = os.getenv("NOTIFICATION_WEBHOOK_URL", "").strip()
+    return fallback if fallback else None
 
 
 def _rate_limit_seconds() -> int:
@@ -127,7 +164,7 @@ async def _dispatch(
     body: str,
     severity: Literal["info", "warning", "critical"],
     context: dict[str, Any],
-    webhook_url: str,
+    webhook_url: str | None,
     email_to: str,
     smtp_host: str,
 ) -> None:
@@ -238,7 +275,7 @@ def notify(
     Rate-limited: at most one notification per *event_type* per ``NOTIFICATION_RATE_LIMIT_SECONDS``
     (default 900 s / 15 min).
     """
-    webhook_url = os.getenv("NOTIFICATION_WEBHOOK_URL", "").strip()
+    webhook_url = _resolve_webhook_url(severity)
     email_to = os.getenv("NOTIFICATION_EMAIL_TO", "").strip()
     smtp_host = os.getenv("NOTIFICATION_SMTP_HOST", "").strip()
 

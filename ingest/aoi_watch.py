@@ -35,6 +35,7 @@ import httpx
 
 from sqlalchemy import text as sa_text
 
+from api.aoi_utils import _is_notifications_paused
 from api.aois.repo import list_watched_aois_due, update_aoi_watch_status
 from api.db import get_engine
 from api.notifications import notify
@@ -340,24 +341,32 @@ def check_new_ignition(
             if max_acq_time is not None and lag_minutes is not None
             else ""
         )
-        notify(
-            f"new_ignition:{aoi_id}",
-            title=f"New confirmed ignition in {aoi_name}",
-            body=(
-                f"{detection_count} confirmed detection(s) clustered within "
-                f"{_IGNITION_CLUSTER_RADIUS_M / 1000:.0f} km in AOI '{aoi_name}'. "
-                f"Max denoiser confidence: {max_score:.0%}."
-                + _data_suffix
-            ),
-            severity="critical",
-            aoi_id=str(aoi_id),
-            denoised_score=round(max_score, 4),
-            detection_count=detection_count,
-            lat=round(centroid_lat, 6),
-            lon=round(centroid_lon, 6),
-            data_as_of=max_acq_time.isoformat() if max_acq_time is not None else None,
-            data_lag_minutes=lag_minutes,
-        )
+
+        if _is_notifications_paused(aoi):
+            LOGGER.info(
+                "aoi_watch: notifications paused for AOI %s until %s — skipping alerts",
+                aoi_name,
+                aoi.get("watch_notifications_paused_until"),
+            )
+        else:
+            notify(
+                f"new_ignition:{aoi_id}",
+                title=f"New confirmed ignition in {aoi_name}",
+                body=(
+                    f"{detection_count} confirmed detection(s) clustered within "
+                    f"{_IGNITION_CLUSTER_RADIUS_M / 1000:.0f} km in AOI '{aoi_name}'. "
+                    f"Max denoiser confidence: {max_score:.0%}."
+                    + _data_suffix
+                ),
+                severity="critical",
+                aoi_id=str(aoi_id),
+                denoised_score=round(max_score, 4),
+                detection_count=detection_count,
+                lat=round(centroid_lat, 6),
+                lon=round(centroid_lon, 6),
+                data_as_of=max_acq_time.isoformat() if max_acq_time is not None else None,
+                data_lag_minutes=lag_minutes,
+            )
 
         return {
             "aoi_id": str(aoi_id),
@@ -437,25 +446,32 @@ def run_aoi_watch_cycle(api_base_url: str | None = None) -> int:
 
             if max_spread_prob is not None and _should_alert(aoi, max_spread_prob, check_time):
                 threshold = aoi["watch_alert_threshold"]
-                notify(
-                    event_type=f"aoi_watch_alert:{aoi_id}",
-                    title=f"Spread alert: {aoi_name}",
-                    body=(
-                        f"AOI '{aoi_name}' has reached spread probability "
-                        f"{max_spread_prob:.0%} (threshold: {threshold:.0%})."
-                    ),
-                    severity="warning",
-                    aoi_id=str(aoi_id),
-                    aoi_name=aoi_name,
-                    max_spread_prob=f"{max_spread_prob:.3f}",
-                    threshold=f"{threshold:.3f}",
-                    job_id=job_id,
-                )
-                alerted_at = check_time
-                LOGGER.info(
-                    "aoi_watch: alert fired for AOI %s max_spread_prob=%.3f threshold=%.3f",
-                    aoi_name, max_spread_prob, threshold,
-                )
+                if _is_notifications_paused(aoi):
+                    LOGGER.info(
+                        "aoi_watch: notifications paused for AOI %s until %s — skipping alerts",
+                        aoi_name,
+                        aoi.get("watch_notifications_paused_until"),
+                    )
+                else:
+                    notify(
+                        event_type=f"aoi_watch_alert:{aoi_id}",
+                        title=f"Spread alert: {aoi_name}",
+                        body=(
+                            f"AOI '{aoi_name}' has reached spread probability "
+                            f"{max_spread_prob:.0%} (threshold: {threshold:.0%})."
+                        ),
+                        severity="warning",
+                        aoi_id=str(aoi_id),
+                        aoi_name=aoi_name,
+                        max_spread_prob=f"{max_spread_prob:.3f}",
+                        threshold=f"{threshold:.3f}",
+                        job_id=job_id,
+                    )
+                    alerted_at = check_time
+                    LOGGER.info(
+                        "aoi_watch: alert fired for AOI %s max_spread_prob=%.3f threshold=%.3f",
+                        aoi_name, max_spread_prob, threshold,
+                    )
             elif max_spread_prob is not None:
                 LOGGER.info(
                     "aoi_watch: AOI %s max_spread_prob=%.3f below threshold=%.3f — no alert",

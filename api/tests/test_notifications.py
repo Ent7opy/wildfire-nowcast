@@ -15,6 +15,7 @@ from api.notifications import (
     _dispatch,
     _is_rate_limited,
     _last_sent,
+    _resolve_webhook_url,
     notify,
 )
 
@@ -309,5 +310,207 @@ class TestBurstCap(unittest.TestCase):
             self.assertEqual(len(dispatched), 4)
             digest_titles = [t for t in dispatched if "Multiple alerts" in t]
             self.assertEqual(len(digest_titles), 1)
+
+        asyncio.run(run())
+
+
+class TestResolveWebhookUrl(unittest.TestCase):
+    """Unit tests for _resolve_webhook_url severity-based channel routing."""
+
+    _ROUTING_VARS = (
+        "NOTIFICATION_WEBHOOK_URL",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL",
+        "NOTIFICATION_WEBHOOK_URL_WARNING",
+        "NOTIFICATION_WEBHOOK_URL_INFO",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY",
+    )
+
+    def _clean_env(self):
+        """Remove all routing env vars to start from a known-blank state."""
+        for var in self._ROUTING_VARS:
+            os.environ.pop(var, None)
+
+    def setUp(self):
+        self._clean_env()
+
+    def tearDown(self):
+        self._clean_env()
+
+    def test_resolve_webhook_url_returns_none_when_nothing_configured(self):
+        """With no env vars set, _resolve_webhook_url returns None for all severities."""
+        for severity in ("critical", "warning", "info"):
+            self.assertIsNone(_resolve_webhook_url(severity))
+
+    def test_critical_uses_severity_specific_url(self):
+        """When NOTIFICATION_WEBHOOK_URL_CRITICAL is set, critical events use it."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL": "http://critical-channel/hook",
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+            },
+        ):
+            self.assertEqual(_resolve_webhook_url("critical"), "http://critical-channel/hook")
+
+    def test_severity_specific_takes_precedence_over_fallback(self):
+        """Severity-specific URL wins over the global fallback when both are set."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL": "http://critical-specific/hook",
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+            },
+        ):
+            result = _resolve_webhook_url("critical")
+            self.assertEqual(result, "http://critical-specific/hook")
+            self.assertNotEqual(result, "http://fallback/hook")
+
+    def test_warning_falls_back_to_global_when_no_specific(self):
+        """When only the global fallback is set, warning events use it."""
+        with patch.dict(os.environ, {"NOTIFICATION_WEBHOOK_URL": "http://fallback/hook"}):
+            self.assertEqual(_resolve_webhook_url("warning"), "http://fallback/hook")
+
+    def test_info_suppressed_in_critical_only_mode(self):
+        """In critical-only mode, info events return None (webhook suppressed)."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+            },
+        ):
+            self.assertIsNone(_resolve_webhook_url("info"))
+
+    def test_warning_suppressed_in_critical_only_mode(self):
+        """In critical-only mode, warning events return None (webhook suppressed)."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+            },
+        ):
+            self.assertIsNone(_resolve_webhook_url("warning"))
+
+    def test_critical_still_sends_in_critical_only_mode(self):
+        """In critical-only mode, critical events still use the fallback URL."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+            },
+        ):
+            self.assertEqual(_resolve_webhook_url("critical"), "http://fallback/hook")
+
+    def test_critical_only_false_does_not_suppress(self):
+        """NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY=false leaves normal fallback behaviour intact."""
+        with patch.dict(
+            os.environ,
+            {
+                "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "false",
+            },
+        ):
+            self.assertEqual(_resolve_webhook_url("warning"), "http://fallback/hook")
+            self.assertEqual(_resolve_webhook_url("info"), "http://fallback/hook")
+
+
+class TestSeverityRoutingIntegration(unittest.TestCase):
+    """Integration tests: notify() + _post_webhook with severity-based routing."""
+
+    _ROUTING_VARS = (
+        "NOTIFICATION_WEBHOOK_URL",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL",
+        "NOTIFICATION_WEBHOOK_URL_WARNING",
+        "NOTIFICATION_WEBHOOK_URL_INFO",
+        "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY",
+        "NOTIFICATION_EMAIL_TO",
+        "NOTIFICATION_SMTP_HOST",
+    )
+
+    def setUp(self):
+        _last_sent.clear()
+        for var in self._ROUTING_VARS:
+            os.environ.pop(var, None)
+
+    def tearDown(self):
+        _last_sent.clear()
+        for var in self._ROUTING_VARS:
+            os.environ.pop(var, None)
+
+    def test_critical_webhook_posted_to_severity_specific_url(self):
+        """notify() POSTs to NOTIFICATION_WEBHOOK_URL_CRITICAL when it is set."""
+        posted_urls: list[str] = []
+
+        async def run():
+            _last_sent.clear()
+            with patch.dict(
+                os.environ,
+                {
+                    "NOTIFICATION_WEBHOOK_URL_CRITICAL": "http://critical/hook",
+                    "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                },
+            ):
+                with patch("api.notifications._post_webhook", new_callable=AsyncMock) as mock_post:
+                    mock_post.side_effect = lambda url, payload: posted_urls.append(url)
+                    notify("ev_crit_routing", "Title", "Body", severity="critical")
+                    await asyncio.sleep(0.05)
+
+            self.assertEqual(len(posted_urls), 1)
+            self.assertEqual(posted_urls[0], "http://critical/hook")
+
+        asyncio.run(run())
+
+    def test_info_suppressed_in_critical_only_mode_no_webhook_call(self):
+        """In critical-only mode, info-severity notify() never calls _post_webhook."""
+        async def run():
+            _last_sent.clear()
+            with patch.dict(
+                os.environ,
+                {
+                    "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                    "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+                    # No email configured either, so notify() exits before dispatch.
+                },
+            ):
+                with patch("api.notifications._post_webhook", new_callable=AsyncMock) as mock_post:
+                    notify("ev_info_suppressed", "Title", "Body", severity="info")
+                    await asyncio.sleep(0.05)
+                    self.assertEqual(mock_post.call_count, 0)
+
+        asyncio.run(run())
+
+    def test_email_always_sends_regardless_of_webhook_routing(self):
+        """Even when the webhook is suppressed (critical-only mode), email is still dispatched."""
+        email_calls: list[dict] = []
+
+        async def fake_email(**kwargs: object) -> None:
+            email_calls.append(dict(kwargs))
+
+        async def run():
+            _last_sent.clear()
+            with patch.dict(
+                os.environ,
+                {
+                    "NOTIFICATION_WEBHOOK_URL": "http://fallback/hook",
+                    "NOTIFICATION_WEBHOOK_URL_CRITICAL_ONLY": "true",
+                    "NOTIFICATION_EMAIL_TO": "ops@example.com",
+                    "NOTIFICATION_SMTP_HOST": "smtp.example.com",
+                },
+            ):
+                with patch("api.notifications._post_webhook", new_callable=AsyncMock) as mock_post:
+                    with patch(
+                        "api.notifications._send_email_blocking",
+                        side_effect=lambda **kw: email_calls.append(kw),
+                    ):
+                        notify("ev_email_always", "Title", "Body", severity="warning")
+                        await asyncio.sleep(0.1)
+
+                # Webhook must NOT have been called (suppressed).
+                self.assertEqual(mock_post.call_count, 0)
+
+            # Email must still have been dispatched.
+            self.assertEqual(len(email_calls), 1)
 
         asyncio.run(run())

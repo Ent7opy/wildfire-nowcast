@@ -21,6 +21,7 @@ from uuid import UUID
 
 from sqlalchemy import text
 
+from api.aoi_utils import _is_notifications_paused
 from api.notifications import notify
 
 LOGGER = logging.getLogger(__name__)
@@ -412,6 +413,12 @@ def run_spread_trajectory_checks(
     """
     results: list[dict[str, Any]] = []
     for aoi in aois:
+        if _is_notifications_paused(aoi):
+            LOGGER.info(
+                "spread_trajectory_watch: notifications paused for AOI %s — skipping",
+                aoi.get("name"),
+            )
+            continue
         horizon_results = check_spread_trajectory(aoi, session)
         if horizon_results is not None:
             results.extend(horizon_results)
