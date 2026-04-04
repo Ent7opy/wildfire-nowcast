@@ -14,6 +14,10 @@ Environment variables:
                                         If "true", the fallback NOTIFICATION_WEBHOOK_URL is only
                                         used for critical events; info/warning events are dropped
                                         when no severity-specific URL is configured.
+    WEBHOOK_SECRET                      HMAC-SHA256 signing secret for outgoing webhooks.
+                                        When set, each request includes X-Signature and
+                                        X-Timestamp headers for payload authenticity and
+                                        replay protection.
     NOTIFICATION_EMAIL_TO               Recipient address for email alerts.
     NOTIFICATION_SMTP_HOST              SMTP server hostname (required for email).
     NOTIFICATION_SMTP_PORT              SMTP port (default: 587).
@@ -27,6 +31,9 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
 import smtplib
@@ -34,6 +41,7 @@ import threading
 import time
 from email.message import EmailMessage
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -63,6 +71,56 @@ _BURST_EXEMPT_PREFIXES: tuple[str, ...] = (
 # Target: per-AOI channel configuration stored in the aois table, allowing
 # incident commanders to configure separate Slack channels per AOI or fire event.
 # See audit gap: "No routing architecture — all notifications go to one global webhook."
+
+
+_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _validate_webhook_url(url: str) -> str | None:
+    """Validate webhook URL scheme and return the URL if valid, else None.
+
+    Rules:
+    - ``https://`` is always accepted.
+    - ``http://`` is only accepted for localhost targets (development).
+    - All other schemes (or malformed URLs) are rejected with a warning log.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        LOGGER.warning("Webhook URL rejected: failed to parse URL")
+        return None
+
+    scheme = (parsed.scheme or "").lower()
+    hostname = (parsed.hostname or "").lower()
+
+    if scheme == "https":
+        return url
+
+    if scheme == "http" and hostname in _LOCALHOST_HOSTS:
+        return url
+
+    if scheme == "http":
+        LOGGER.warning(
+            "Webhook URL rejected: http:// is only allowed for localhost targets, "
+            "got host=%r. Use https:// for non-local webhooks.",
+            hostname,
+        )
+        return None
+
+    LOGGER.warning("Webhook URL rejected: unsupported scheme %r (must be https://)", scheme)
+    return None
+
+
+def _get_webhook_secret() -> str | None:
+    """Return WEBHOOK_SECRET from env, or None if unset."""
+    secret = os.getenv("WEBHOOK_SECRET", "").strip()
+    return secret if secret else None
+
+
+def _sign_payload(payload_bytes: bytes, timestamp: str, secret: str) -> str:
+    """Compute HMAC-SHA256 signature over ``timestamp.payload_bytes``."""
+    message = f"{timestamp}.".encode() + payload_bytes
+    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
 def _resolve_webhook_url(severity: str) -> str | None:
@@ -128,8 +186,31 @@ def _build_webhook_payload(
 
 
 async def _post_webhook(url: str, payload: dict[str, Any]) -> None:
+    validated_url = _validate_webhook_url(url)
+    if validated_url is None:
+        LOGGER.warning("Webhook send skipped: URL failed validation url=%s", url)
+        return
+
+    payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    timestamp = str(int(time.time()))
+
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "X-Timestamp": timestamp,
+    }
+
+    secret = _get_webhook_secret()
+    if secret:
+        signature = _sign_payload(payload_bytes, timestamp, secret)
+        headers["X-Signature"] = f"hmac-sha256={signature}"
+
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(validated_url, content=payload_bytes, headers=headers)
+        LOGGER.info(
+            "Webhook POST status=%d url=%s",
+            resp.status_code,
+            validated_url,
+        )
         resp.raise_for_status()
 
 
