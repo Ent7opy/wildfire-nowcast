@@ -73,7 +73,7 @@ _BURST_EXEMPT_PREFIXES: tuple[str, ...] = (
 # See audit gap: "No routing architecture — all notifications go to one global webhook."
 
 
-_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _validate_webhook_url(url: str) -> str | None:
@@ -194,7 +194,10 @@ async def _post_webhook(url: str, payload: dict[str, Any]) -> None:
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     timestamp = str(int(time.time()))
 
-    headers: dict[str, str] = {"X-Timestamp": timestamp}
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "X-Timestamp": timestamp,
+    }
 
     secret = _get_webhook_secret()
     if secret:
@@ -202,10 +205,7 @@ async def _post_webhook(url: str, payload: dict[str, Any]) -> None:
         headers["X-Signature"] = f"hmac-sha256={signature}"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(validated_url, content=payload_bytes, headers={
-            "Content-Type": "application/json",
-            **headers,
-        })
+        resp = await client.post(validated_url, content=payload_bytes, headers=headers)
         LOGGER.info(
             "Webhook POST status=%d url=%s",
             resp.status_code,
