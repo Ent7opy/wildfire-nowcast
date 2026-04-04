@@ -24,12 +24,15 @@ export interface FiltersState {
   clusterPoints: boolean;
 }
 
+export type IgnitionHorizon = 'now' | '+24h' | '+48h';
+
 export interface LayersState {
   showFires: boolean;
   showFronts: boolean;
   showForecast: boolean;
   showRisk: boolean;
   showWarnings: boolean;
+  showIgnition: boolean;
   basemap: 'dark' | 'light' | 'satellite';
 }
 

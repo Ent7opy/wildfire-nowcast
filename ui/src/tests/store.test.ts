@@ -22,6 +22,7 @@ describe("app store filters", () => {
         showForecast: true,
         showRisk: false,
         showWarnings: false,
+        showIgnition: false,
         basemap: 'dark' as const
       }
     });

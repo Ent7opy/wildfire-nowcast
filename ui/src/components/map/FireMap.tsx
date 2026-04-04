@@ -33,6 +33,8 @@ import type { Feature } from "geojson";
 import { apiPublicBaseUrl } from "../../config/runtime";
 import { getFireEvents, getFireFronts, getRiskGrid } from "../../api/client";
 import { getWeatherWarnings } from "../../api/fires";
+import { getIgnitionGrid } from "../../api/ignition";
+import { ApiError } from "../../api/http";
 import { useAppStore } from "../../state/store";
 import type { FireEvent } from "../../types/api";
 import {
@@ -68,6 +70,7 @@ import {
 } from "./layers/layerConfig";
 import { toFiniteNumber } from "../../utils/priorityFeed";
 import { geometryProvenanceLabel } from "../fire-details/types";
+import type { IgnitionCell } from "../../types/api";
 
 type ConfidenceFilter = "All" | "High";
 
@@ -86,6 +89,19 @@ const WARNING_SEVERITY_RGB: Record<string, [number, number, number]> = {
 function warningSeverityColor(sev: string, alpha: number): [number, number, number, number] {
   const [r, g, b] = WARNING_SEVERITY_RGB[sev] ?? WARNING_SEVERITY_RGB.yellow;
   return [r, g, b, alpha];
+}
+
+// Ignition risk colour palette — distinct hue family from the risk grid
+// (risk grid: green/gold/crimson; ignition: amber/orange-red/magenta)
+const IGNITION_LEVEL_COLOR: Record<string, [number, number, number, number]> = {
+  low:      [0, 0, 0, 0],           // invisible
+  elevated: [245, 158, 11, 110],    // amber
+  high:     [249, 115, 22, 175],    // orange-red
+  critical: [220, 38, 127, 210],    // deep magenta
+};
+
+function ignitionCellColor(cell: IgnitionCell): [number, number, number, number] {
+  return IGNITION_LEVEL_COLOR[cell.level] ?? IGNITION_LEVEL_COLOR.low;
 }
 
 function isHighConfidence(event: FireEvent): boolean {
@@ -121,6 +137,7 @@ export default function FireMap({
   const selectedEvent = useAppStore((s) => s.selectedEvent);
   const archive = useAppStore((s) => s.archive);
   const safety = useAppStore((s) => s.safety);
+  const ignitionHorizon = useAppStore((s) => s.ignitionHorizon);
   const { requestLocation } = useGeolocation();
   const setMapView = useAppStore((s) => s.setMapView);
   const setSelectedEvent = useAppStore((s) => s.setSelectedEvent);
@@ -129,6 +146,8 @@ export default function FireMap({
   const setFrontIndexByEvent = useAppStore((s) => s.setFrontIndexByEvent);
   const setLayersState = useAppStore((s) => s.setLayersState);
   const exitToLiveMode = useAppStore((s) => s.exitToLiveMode);
+  const setIgnitionHorizon = useAppStore((s) => s.setIgnitionHorizon);
+  const setIgnitionData = useAppStore((s) => s.setIgnitionData);
 
   const isArchiveMode = archive.viewMode === "archive";
 
@@ -192,6 +211,23 @@ export default function FireMap({
     staleTime: 15 * 60 * 1000,  // MeteoAlarm feed updates every ~15 min
     placeholderData: (prev) => prev
   });
+
+  const ignitionQuery = useQuery({
+    queryKey: ["ignition", bbox, ignitionHorizon],
+    queryFn: () => getIgnitionGrid({ bbox, horizon: ignitionHorizon }),
+    enabled: layersState.showIgnition,
+    staleTime: 6 * 60 * 60 * 1000,  // 6h — matches server cache cadence
+    placeholderData: (prev) => prev,
+    retry: (failureCount, error) => {
+      // Don't retry 503 — model is explicitly unavailable
+      if (error instanceof ApiError && error.statusCode === 503) return false;
+      return failureCount < 2;
+    }
+  });
+
+  useEffect(() => {
+    setIgnitionData(ignitionQuery.data ?? null);
+  }, [ignitionQuery.data, setIgnitionData]);
 
   const normalizedEvents = useMemo(() => {
     const source = eventsQuery.data?.events || [];
@@ -486,6 +522,27 @@ export default function FireMap({
       );
     }
 
+    // Ignition probability layer
+    if (layersState.showIgnition && ignitionQuery.data) {
+      const visibleCells = ignitionQuery.data.cells.filter((c) => c.level !== 'low');
+      if (visibleCells.length > 0) {
+        deckLayers.push(
+          new ScatterplotLayer<IgnitionCell>({
+            id: `ignition-${ignitionHorizon}-${visibleCells.length}`,
+            data: visibleCells,
+            pickable: false,
+            filled: true,
+            stroked: false,
+            getPosition: (c) => [c.lon, c.lat],
+            getFillColor: ignitionCellColor,
+            getRadius: 10000,  // ~10 km radius per cell; distinct at zoom 5+
+            radiusMinPixels: 3,
+            radiusMaxPixels: 20
+          })
+        );
+      }
+    }
+
     // User location layers (safety mode)
     if (safety.enabled && safety.userLocation) {
       const locationLayers = buildUserLocationLayers(safety.userLocation, safety.proximityRadiusKm);
@@ -496,9 +553,12 @@ export default function FireMap({
   }, [
     filters.clusterPoints,
     forecast.lastForecast?.run.id,
+    ignitionHorizon,
+    ignitionQuery.data,
     layersState.showFires,
     layersState.showFronts,
     layersState.showForecast,
+    layersState.showIgnition,
     layersState.showRisk,
     layersState.showWarnings,
     mapView.zoom,
@@ -584,6 +644,18 @@ export default function FireMap({
       {(eventsQuery.isError || frontsQuery.isError || riskQuery.isError) && (
         <Alert severity="warning" sx={{ position: "absolute", top: 12, left: 12, right: 12, zIndex: 20 }}>
           Live map data is partially unavailable; showing last successful snapshot where possible.
+        </Alert>
+      )}
+
+      {layersState.showIgnition && ignitionQuery.isError && (
+        <Alert severity="info" sx={{ position: "absolute", top: 12, left: 12, right: 260, zIndex: 20 }}>
+          Ignition model unavailable — layer hidden.
+        </Alert>
+      )}
+
+      {layersState.showIgnition && !ignitionQuery.isError && ignitionQuery.data?.coverage_warnings && ignitionQuery.data.coverage_warnings.length > 0 && (
+        <Alert severity="warning" icon={false} sx={{ position: "absolute", bottom: 52, left: 12, right: 12, zIndex: 20, py: 0.5, fontSize: 11 }}>
+          {ignitionQuery.data.coverage_warnings.join(' · ')}
         </Alert>
       )}
 
@@ -731,8 +803,69 @@ export default function FireMap({
         <FormControlLabel
           control={<Switch size="small" checked={layersState.showWarnings} onChange={(e) => setLayersState({ showWarnings: e.target.checked })} />}
           label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Weather Warnings <Typography component="span" sx={{ fontSize: 10, color: "#6b7280" }}>(Europe)</Typography></Typography>}
+          sx={{ display: "flex", mx: 0, mb: 0.25 }}
+        />
+        <FormControlLabel
+          control={<Switch size="small" checked={layersState.showIgnition} onChange={(e) => setLayersState({ showIgnition: e.target.checked })} />}
+          label={<Typography sx={{ fontSize: 13, color: "#d1d5db" }}>Ignition Risk</Typography>}
           sx={{ display: "flex", mx: 0 }}
         />
+
+        {layersState.showIgnition && (
+          <Box sx={{ mt: 1, pl: 0.5 }}>
+            <Typography sx={{ fontSize: 11, color: "#6b7280", mb: 0.5 }}>Horizon</Typography>
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={ignitionHorizon}
+              onChange={(_, v) => { if (v) setIgnitionHorizon(v); }}
+              sx={{ width: "100%" }}
+            >
+              {(['now', '+24h', '+48h'] as const).map((h) => (
+                <ToggleButton
+                  key={h}
+                  value={h}
+                  sx={{
+                    flex: 1,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: "#9ca3af",
+                    borderColor: "rgba(255,255,255,0.12)",
+                    "&.Mui-selected": { bgcolor: "rgba(245,158,11,0.18)", color: "#f59e0b", borderColor: "rgba(245,158,11,0.4)" }
+                  }}
+                >
+                  {h}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+            {ignitionHorizon === '+48h' && (
+              <Typography sx={{ fontSize: 10, color: "#9ca3af", mt: 0.5, fontStyle: "italic" }}>
+                Lower confidence — 48h forecast
+              </Typography>
+            )}
+          </Box>
+        )}
+
+        {/* Ignition legend — only shown when layer is active */}
+        {layersState.showIgnition && (
+          <Box sx={{ mt: 1, p: 1, bgcolor: "rgba(0,0,0,0.2)", borderRadius: 1.5, border: "1px solid rgba(255,255,255,0.06)" }}>
+            <Typography sx={{ fontSize: 10, fontWeight: 700, color: "#6b7280", letterSpacing: "0.08em", textTransform: "uppercase", mb: 0.75 }}>
+              Ignition Risk
+            </Typography>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+              {[
+                { label: "Critical", color: "#dc2680" },
+                { label: "High",     color: "#f97316" },
+                { label: "Elevated", color: "#f59e0b" },
+              ].map(({ label, color }) => (
+                <Box key={label} sx={{ display: "flex", alignItems: "center", gap: 0.7 }}>
+                  <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: color }} />
+                  <Typography sx={{ fontSize: 10, color: "#d1d5db" }}>{label}</Typography>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+        )}
 
         <Divider sx={{ my: 1.5, borderColor: "rgba(255,255,255,0.08)" }} />
 

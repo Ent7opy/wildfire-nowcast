@@ -296,3 +296,19 @@ export interface WeatherResponse {
   forecast: WeatherForecastStep[] | null;
   warnings: WeatherWarningBrief[] | null;
 }
+
+export type IgnitionLevel = 'low' | 'elevated' | 'high' | 'critical';
+
+export interface IgnitionCell {
+  lat: number;
+  lon: number;
+  probability: number;
+  level: IgnitionLevel;
+}
+
+export interface IgnitionGridResponse {
+  cells: IgnitionCell[];
+  as_of: string;
+  horizon: string;
+  coverage_warnings?: string[];
+}
