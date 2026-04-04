@@ -306,5 +306,8 @@ class AppSettings(BaseSettings):
             if source.strip()
         }
 
+    # Internal API authentication
+    internal_api_key: str = Field(default="", validation_alias="INTERNAL_API_KEY")
+
 
 settings = AppSettings()
