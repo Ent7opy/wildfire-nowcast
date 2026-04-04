@@ -239,7 +239,7 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD-SHELL", "test -f /app/data/ingest/orchestrator_dashboard.json"]
+      test: ["CMD", "python", "/app/scripts/check_data_freshness.py"]
       interval: 30s
       timeout: 5s
       retries: 3

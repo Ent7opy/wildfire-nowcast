@@ -107,6 +107,30 @@ class HealthChecker:
             self.results.append(("Database (via API)", False, str(e)))
             return False
 
+    def check_data_freshness(self) -> bool:
+        """Check if data freshness is healthy."""
+        try:
+            req = urllib.request.Request(f'{self.api_url}/health/data-freshness', method='GET')
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode())
+                    overall = data.get('overall_state')
+                    if overall == 'healthy':
+                        self.results.append(('Data freshness', True, 'OK'))
+                        return True
+                    else:
+                        self.results.append(('Data freshness', False, f'State: {overall}'))
+                        return False
+                else:
+                    self.results.append(('Data freshness', False, f'HTTP {resp.status}'))
+                    return False
+        except urllib.error.HTTPError as e:
+            self.results.append(('Data freshness', False, f'HTTP {e.code}'))
+            return False
+        except Exception as e:
+            self.results.append(('Data freshness', False, str(e)))
+            return False
+
     def run_all_checks(self) -> bool:
         """Run all health checks and return overall status."""
         print("🔍 Checking Wildfire Nowcast stack health...\n")
@@ -114,6 +138,7 @@ class HealthChecker:
         self.check_api()
         self.check_api_version()
         self.check_database()
+        self.check_data_freshness()
         self.check_ui()
 
         return self.print_summary()
