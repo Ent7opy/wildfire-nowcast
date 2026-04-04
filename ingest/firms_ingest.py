@@ -514,16 +514,20 @@ def run_firms_ingest(
             # between the two writes cannot leave the watermark un-advanced while
             # detections are already persisted (which would cause the next run to
             # re-fetch the same window and produce temporal continuity gaps).
+            # If fetched_count is 0 and not archive mode, mark as "no_data" and skip
+            # watermark advancement to signal that this detection window produced no results.
+            batch_status = "no_data" if (fetched_count == 0 and not is_archive_mode) else "succeeded"
             with repository.get_engine().execution_options(isolation_level="SERIALIZABLE").begin() as commit_conn:
                 repository.finalize_ingest_batch(
                     batch_id,
-                    status="succeeded",
+                    status=batch_status,
                     fetched=fetched_count,
                     inserted=inserted,
                     skipped=max(skipped_duplicates, 0),
                     conn=commit_conn,
                 )
-                if watermark_advanced_to is not None and not is_archive_mode:
+                # Only advance watermark if we had data and not in no_data state
+                if watermark_advanced_to is not None and not is_archive_mode and batch_status != "no_data":
                     repository.advance_ingest_watermark(
                         source=source,
                         area_key=area_key,
@@ -531,6 +535,24 @@ def run_firms_ingest(
                         last_batch_id=batch_id,
                         conn=commit_conn,
                     )
+            # Check for consecutive no_data batches and warn if threshold is reached
+            if batch_status == "no_data" and not is_archive_mode:
+                consecutive_no_data = _check_consecutive_no_data_batches(
+                    source=source,
+                    area_key=area_key,
+                    threshold=3,
+                )
+                if consecutive_no_data >= 3:
+                    LOGGER.warning(
+                        "WARNING: %d consecutive no_data batches for source=%s area_key=%s "
+                        "(stage: %s) — FIRMS may be experiencing API issues or network disruptions. "
+                        "Recommend checking external data availability and API status.",
+                        consecutive_no_data,
+                        source,
+                        area_key,
+                        "science_grade",  # Indicate this is an ops-level warning
+                    )
+
             log_event(
                 LOGGER,
                 "firms.watermark",
@@ -626,6 +648,33 @@ def _resolve_sources(value: Optional[str]) -> Optional[List[str]]:
     if not value:
         return None
     return [segment.strip() for segment in value.split(",") if segment.strip()]
+
+
+def _check_consecutive_no_data_batches(
+    source: str,
+    area_key: str,
+    threshold: int = 3,
+) -> int:
+    """Check how many consecutive no_data batches exist for a source+area combo.
+
+    Returns the count of consecutive batches with status='no_data' in reverse
+    chronological order (most recent first). When a non-no_data status is encountered,
+    the count is returned.
+
+    Args:
+        source: The ingest source (e.g., 'VIIRS_SNPP_NRT')
+        area_key: The normalized area bounding box
+        threshold: Return early if count exceeds this value
+
+    Returns:
+        The number of consecutive no_data batches (0 if the most recent is not no_data)
+    """
+    try:
+        count = repository.count_consecutive_no_data_batches(source, area_key, threshold)
+        return count
+    except Exception as exc:
+        LOGGER.warning("Failed to check consecutive no_data batches for %s/%s: %s", source, area_key, exc)
+        return 0
 
 
 def _update_all_scoring_atomic(
