@@ -66,16 +66,18 @@ export async function getJson<T>(
     const firstAttempt = withTimeout(GET_CONNECT_TIMEOUT + GET_READ_TIMEOUT);
     try {
       const response = await fetch(url, { method: "GET", signal: firstAttempt.signal });
-      firstAttempt.cancel();
       if (!response.ok) {
         const text = await response.text();
+        firstAttempt.cancel();
         throw new ApiError("Non-200 response from API", {
           statusCode: response.status,
           url,
           responseText: text
         });
       }
-      return (await response.json()) as T;
+      const data = await response.json();
+      firstAttempt.cancel();
+      return data as T;
     } catch (error) {
       firstAttempt.cancel();
       const aborted = error instanceof DOMException && error.name === "AbortError";
@@ -85,16 +87,18 @@ export async function getJson<T>(
         const secondAttempt = withTimeout(GET_CONNECT_TIMEOUT + GET_RETRY_READ_TIMEOUT);
         try {
           const response = await fetch(url, { method: "GET", signal: secondAttempt.signal });
-          secondAttempt.cancel();
           if (!response.ok) {
             const text = await response.text();
+            secondAttempt.cancel();
             throw new ApiError("Non-200 response from API", {
               statusCode: response.status,
               url,
               responseText: text
             });
           }
-          return (await response.json()) as T;
+          const data = await response.json();
+          secondAttempt.cancel();
+          return data as T;
         } catch (innerErr) {
           secondAttempt.cancel();
           const message = innerErr instanceof Error ? innerErr.message : "API unavailable";
@@ -135,10 +139,10 @@ export async function postJson<T>(path: string, payload: Record<string, unknown>
         body: JSON.stringify(payload),
         signal: timeout.signal
       });
-      timeout.cancel();
 
       if (response.status !== acceptedStatus) {
         const text = await response.text();
+        timeout.cancel();
         let message = `Non-${acceptedStatus} response from API`;
         try {
           const parsed = JSON.parse(text) as { detail?: string; message?: string };
@@ -149,7 +153,9 @@ export async function postJson<T>(path: string, payload: Record<string, unknown>
         throw new ApiError(message, { statusCode: response.status, url, responseText: text });
       }
 
-      return (await response.json()) as T;
+      const data = await response.json();
+      timeout.cancel();
+      return data as T;
     } catch (error) {
       timeout.cancel();
       if (error instanceof ApiError) {
@@ -180,11 +186,12 @@ export async function deleteRequest(path: string): Promise<void> {
     const timeout = withTimeout(10_000);
     try {
       const response = await fetch(url, { method: "DELETE", signal: timeout.signal });
-      timeout.cancel();
       if (!response.ok && response.status !== 204) {
         const text = await response.text();
+        timeout.cancel();
         throw new ApiError("Non-204 response from API", { statusCode: response.status, url, responseText: text });
       }
+      timeout.cancel();
       return;
     } catch (error) {
       timeout.cancel();
