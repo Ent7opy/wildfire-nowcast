@@ -441,6 +441,48 @@ def list_all_watermarks() -> list[dict[str, Any]]:
     return result
 
 
+def expire_stale_running_batches(
+    max_age_minutes: int = 120,
+    *,
+    conn: Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Mark zombie 'running' batches older than *max_age_minutes* as 'failed'.
+
+    Returns a list of dicts ``{"id": …, "source": …, "started_at": …}`` for
+    every batch that was expired so callers can log a per-batch warning.
+    """
+    select_stmt = text(
+        """
+        SELECT id, source, started_at
+        FROM ingest_batches
+        WHERE status = 'running'
+          AND started_at < NOW() - MAKE_INTERVAL(mins => :max_age)
+        ORDER BY id
+        """
+    )
+    update_stmt = text(
+        """
+        UPDATE ingest_batches
+        SET status = 'failed', completed_at = NOW()
+        WHERE status = 'running'
+          AND started_at < NOW() - MAKE_INTERVAL(mins => :max_age)
+        """
+    )
+
+    def _execute(active_conn: Connection) -> list[dict[str, Any]]:
+        rows = active_conn.execute(select_stmt, {"max_age": int(max_age_minutes)}).mappings().all()
+        expired = [dict(r) for r in rows]
+        if expired:
+            active_conn.execute(update_stmt, {"max_age": int(max_age_minutes)})
+        return expired
+
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)
+
+
 def reset_ingest_watermark(*, source: str, area_key: str) -> None:
     """Reset a watermark's last_acq_time_utc to NULL (triggers bootstrap on next ingest)."""
     stmt = text(
