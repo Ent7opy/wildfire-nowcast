@@ -1,4 +1,4 @@
-.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread ignition-snapshot ignition-train train-ignition model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places ingest-orchestrator ops-start
+.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread ignition-snapshot ignition-train train-ignition model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places ingest-orchestrator ops-start backup restore backup-list
 
 PYTHON ?= python3
 UV ?= uv
@@ -144,6 +144,19 @@ revision: ## Create a new migration revision (usage: make revision msg="descript
 	@echo "Creating new migration revision..."
 	$(if $(msg),,$(error Please provide a message with msg='your message'))
 	cd api && $(UV) run alembic revision -m "$(msg)"
+
+backup: ## Create a compressed database backup (stored in data/backups/)
+	@echo "Creating database backup..."
+	@scripts/backup_db.sh
+
+restore: ## Restore database from a backup file (usage: make restore BACKUP=path/to/backup.sql.gz)
+	@echo "Restoring database from $(BACKUP)..."
+	@if [ -z "$(BACKUP)" ]; then echo "Error: BACKUP variable not set"; exit 1; fi
+	@scripts/restore_db.sh "$(BACKUP)"
+
+backup-list: ## List available database backups
+	@echo "Available backups in data/backups/:"
+	@ls -1 data/backups/*.sql.gz 2>/dev/null | head -20 || echo "No backups found."
 
 # ── Ralph ──────────────────────────────────────────────────────────────────────
 
