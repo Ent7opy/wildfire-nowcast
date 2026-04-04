@@ -11,7 +11,9 @@ def test_health_endpoint_returns_ok() -> None:
     """Ensure the internal /health endpoint stays wired up."""
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["sse_connections"] == 0
 
 
 def test_data_freshness_endpoint_returns_snapshot(monkeypatch) -> None:
