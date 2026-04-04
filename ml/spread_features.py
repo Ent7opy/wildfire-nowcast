@@ -288,14 +288,18 @@ def _load_weather_cube_from_cache(
     # Build per-forecast-hour datasets and concat along time.
     datasets = []
     valid_hours = []  # parallel to datasets — tracks which forecast hours produced a dataset
-    ref_time_utc = ref_time.astimezone(timezone.utc) if ref_time.tzinfo else ref_time.replace(tzinfo=timezone.utc)
+    # Use the actual GFS run_time (not the caller's ref_time) for time coordinates.
+    # ref_time can differ from run_time by up to ~18 h because GFS runs every 6 h
+    # and we pick the latest completed run <= ref_time.  Forecast hours are offsets
+    # from the GFS run, so valid-time = run_time + forecast_hour.
+    run_time_utc = best_run_time.astimezone(timezone.utc) if best_run_time.tzinfo else best_run_time.replace(tzinfo=timezone.utc)
 
     for fh in forecast_hours_list:
         df_fh = df[df["forecast_hour"] == fh]
         if df_fh.empty:
             continue
 
-        target_time = ref_time_utc + timedelta(hours=int(fh))
+        target_time = run_time_utc + timedelta(hours=int(fh))
         target_time_64 = np.datetime64(target_time.replace(tzinfo=None), "ns")
 
         # Vectorized grid fill: compute row/col indices once, then assign
