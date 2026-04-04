@@ -147,7 +147,9 @@ def test_archive_ingest_lookback_exceeded_returns_archive_range_error():
     """Date older than FIRMS lookback → ArchiveRangeError with HTTP 400."""
     from api.routes.archive import MAX_FIRMS_LOOKBACK_DAYS
 
-    too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS)).isoformat()
+    # MAX_FIRMS_LOOKBACK_DAYS itself is still within the window (> check, not >=).
+    # Use +1 so this date is genuinely beyond the limit.
+    too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS + 1)).isoformat()
 
     response = client.post(
         "/fires/archive/ingest",

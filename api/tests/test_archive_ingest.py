@@ -106,12 +106,27 @@ class TestTriggerArchiveIngest:
         assert resp.status_code == 422
         assert "future" in _error_text(resp)
 
-    def test_rejects_date_at_lookback_boundary(self, client):
-        too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS)).isoformat()
+    def test_rejects_date_beyond_lookback(self, client):
+        # 11 days ago is one beyond the 10-day FIRMS NRT limit → must be rejected
+        too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS + 1)).isoformat()
         resp = client.post("/fires/archive/ingest", json={"date": too_old, "timeframe": "morning"})
         assert resp.status_code == 400
         assert resp.json()["error"] == "ArchiveRangeError"
         assert str(MAX_FIRMS_LOOKBACK_DAYS) in _error_text(resp)
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_accepts_date_exactly_at_lookback_boundary(self, mock_get_redis, mock_queue_cls, client):
+        # Exactly MAX_FIRMS_LOOKBACK_DAYS days ago is still within the FIRMS NRT window → accepted
+        boundary = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS)).isoformat()
+        mock_job = MagicMock()
+        mock_job.id = "boundary-job-id"
+        mock_queue_cls.return_value.enqueue.return_value = mock_job
+        mock_get_redis.return_value = MagicMock()
+
+        resp = client.post("/fires/archive/ingest", json={"date": boundary, "timeframe": "morning"})
+        assert resp.status_code == 202
+        assert resp.json()["job_id"] == "boundary-job-id"
 
     def test_rejects_invalid_date_format(self, client):
         resp = client.post("/fires/archive/ingest", json={"date": "not-a-date", "timeframe": "morning"})
