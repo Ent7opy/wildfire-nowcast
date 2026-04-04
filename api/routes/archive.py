@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from api.deps import no_cache
 from pydantic import BaseModel
@@ -41,6 +41,60 @@ MAX_FIRMS_LOOKBACK_DAYS = 10
 MAX_ARCHIVE_RANGE_DAYS = int(os.getenv("MAX_ARCHIVE_RANGE_DAYS", "7"))
 INTER_DAY_DELAY_SECONDS: int = int(os.getenv("INTER_DAY_DELAY_SECONDS", "2"))
 RANGE_REDIS_TTL_SECONDS = 7 * 86400  # 7 days
+
+# Rate limiting for archive ingest endpoints
+ARCHIVE_INGEST_RATE_LIMIT_SHORT = 3  # requests per ARCHIVE_INGEST_RATE_WINDOW_SHORT_SECONDS
+ARCHIVE_INGEST_RATE_WINDOW_SHORT_SECONDS = 60
+ARCHIVE_INGEST_RATE_LIMIT_LONG = 1  # requests per ARCHIVE_INGEST_RATE_WINDOW_LONG_SECONDS
+ARCHIVE_INGEST_RATE_WINDOW_LONG_SECONDS = 300  # 5 minutes
+ARCHIVE_RANGE_THRESHOLD_DAYS = 5  # ranges > this use the stricter long-window limit
+
+
+def _check_archive_rate_limit(request: Request, is_large_range: bool = False) -> None:
+    """Check if the client has exceeded the archive ingest rate limit.
+
+    Args:
+        request: The incoming HTTP request (used to extract client IP)
+        is_large_range: If True, enforce stricter limit for multi-day ranges > ARCHIVE_RANGE_THRESHOLD_DAYS
+
+    Raises:
+        HTTPException with status 429 if rate limit exceeded
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    redis = get_redis()
+
+    # Select limit based on range size
+    if is_large_range:
+        limit = ARCHIVE_INGEST_RATE_LIMIT_LONG
+        window = ARCHIVE_INGEST_RATE_WINDOW_LONG_SECONDS
+    else:
+        limit = ARCHIVE_INGEST_RATE_LIMIT_SHORT
+        window = ARCHIVE_INGEST_RATE_WINDOW_SHORT_SECONDS
+
+    # Redis sliding window counter key
+    key = f"archive_ingest_rate_limit:{client_ip}"
+
+    try:
+        # Increment counter
+        count = redis.incr(key)
+
+        # If this is the first increment in this window, set expiration
+        if count == 1:
+            redis.expire(key, window)
+
+        # Check if limit exceeded
+        if count > limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded. Maximum {limit} request(s) per {window} seconds.",
+                headers={"Retry-After": str(window)},
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # If Redis is unavailable, log and allow the request through
+        # (fail open to avoid blocking users when cache is down)
+        logger.warning("Rate limit check failed (Redis error): %s", exc)
 
 
 def _timeframe_window(date_str: str, timeframe: str) -> tuple[datetime, datetime]:
@@ -316,13 +370,17 @@ async def get_archive_ingest_status(job_id: str) -> ArchiveIngestStatusResponse:
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(no_cache)],
 )
-async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> ArchiveRangeIngestResponse:
+async def trigger_archive_ingest_range(request: Request, body: ArchiveRangeIngestRequest) -> ArchiveRangeIngestResponse:
     """Trigger background FIRMS re-ingest for a contiguous date range.
 
     Each day is processed sequentially by a single RQ job.  Per-day progress
     is tracked in Redis and available via ``GET /fires/archive/ingest-range/{range_job_id}/status``.
     Ranges exceeding ``MAX_ARCHIVE_RANGE_DAYS`` (default 7, env-overridable) are rejected.
     Ranges larger than 5 days include a warning about temporary DB size impact.
+
+    Rate limiting:
+    - 3 requests per 60 seconds for any range size (standard limit)
+    - 1 request per 300 seconds for ranges > 5 days (stricter limit)
     """
     try:
         start_d = date.fromisoformat(body.start_date)
@@ -332,6 +390,17 @@ async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> Archi
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid date format: {exc}. Expected YYYY-MM-DD.",
         )
+
+    # Pre-check if the range would be large (to determine rate limit before validating range)
+    try:
+        num_days = (end_d - start_d).days + 1
+        is_large_range = num_days > ARCHIVE_RANGE_THRESHOLD_DAYS
+    except Exception:
+        # If we can't compute days yet, assume not large range
+        is_large_range = False
+
+    # Apply rate limiting
+    _check_archive_rate_limit(request, is_large_range=is_large_range)
 
     if end_d < start_d:
         raise HTTPException(
@@ -353,7 +422,6 @@ async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> Archi
                 f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back."
             )
 
-    num_days = (end_d - start_d).days + 1
     if num_days > MAX_ARCHIVE_RANGE_DAYS:
         raise ArchiveRangeError(
             f"Range of {num_days} days exceeds the maximum of {MAX_ARCHIVE_RANGE_DAYS}. "

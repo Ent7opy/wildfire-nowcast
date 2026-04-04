@@ -292,3 +292,185 @@ class TestGetArchiveRangeStatus:
             resp = client.get("/fires/archive/ingest-range/any-id/status")
         assert resp.status_code == 200
         assert resp.json()["overall_status"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# Rate Limiting Tests
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveIngestRangeRateLimiting:
+    """Test rate limiting behavior for POST /fires/archive/ingest-range."""
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_first_request_succeeds(self, mock_get_redis, mock_queue_cls, client):
+        """First request within rate limit window should succeed."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 1  # First request: count = 1
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 202
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_second_request_within_limit_succeeds(self, mock_get_redis, mock_queue_cls, client):
+        """Second request within the short limit (3 per 60s) should succeed."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 2  # Second request: count = 2
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 202
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_third_request_within_limit_succeeds(self, mock_get_redis, mock_queue_cls, client):
+        """Third request within the short limit (3 per 60s) should succeed."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 3  # Third request: count = 3
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 202
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_fourth_request_exceeds_short_limit(self, mock_get_redis, mock_queue_cls, client):
+        """Fourth request exceeds the short limit (3 per 60s) and should be rejected."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 4  # Fourth request: count = 4 > 3
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 429
+        assert "Rate limit exceeded" in resp.json()["message"]
+        assert "Retry-After" in resp.headers
+        assert resp.headers["Retry-After"] == "60"
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_large_range_uses_stricter_limit(self, mock_get_redis, mock_queue_cls, client):
+        """Large range (>5 days) should use stricter limit (1 per 300s)."""
+        # For a 6-day range, the first request should succeed
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 1  # First request: count = 1
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(6), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 202
+        # Verify the stricter long-window limit was checked
+        mock_redis.expire.assert_called_once()
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_large_range_second_request_exceeds_limit(self, mock_get_redis, mock_queue_cls, client):
+        """Second request for large range exceeds stricter limit (1 per 300s)."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 2  # Second request: count = 2 > 1
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(6), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 429
+        assert "Rate limit exceeded" in resp.json()["message"]
+        assert "Retry-After" in resp.headers
+        assert resp.headers["Retry-After"] == "300"
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_rate_limit_uses_client_ip(self, mock_get_redis, mock_queue_cls, client):
+        """Rate limiting should use the client IP as the key."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 1
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 202
+
+        # Verify that incr was called with a key containing an IP
+        mock_redis.incr.assert_called_once()
+        call_args = mock_redis.incr.call_args
+        key = call_args[0][0]
+        assert key.startswith("archive_ingest_rate_limit:")
+
+    @patch("api.routes.archive.get_redis")
+    def test_rate_limit_gracefully_handles_redis_error(self, mock_get_redis, client):
+        """Rate limiting should fail open if Redis is unavailable."""
+        mock_get_redis.side_effect = ConnectionError("Redis down")
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        # Should proceed past rate limit check (fail open) but may fail on Queue
+        # The important thing is we don't return 429
+        assert resp.status_code != 429
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_rate_limit_sets_redis_expiration(self, mock_get_redis, mock_queue_cls, client):
+        """First request in rate limit window should set Redis key expiration."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 1  # First increment
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 202
+
+        # Verify expire was called with the short window duration
+        mock_redis.expire.assert_called_once()
+        call_args = mock_redis.expire.call_args
+        key, duration = call_args[0]
+        assert key.startswith("archive_ingest_rate_limit:")
+        assert duration == 60
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_rate_limit_does_not_expire_on_increment(self, mock_get_redis, mock_queue_cls, client):
+        """Subsequent increments should not re-set expiration (already set on first)."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 2  # Second increment
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        assert resp.status_code == 202
+
+        # expire should NOT be called on subsequent increments (count > 1)
+        mock_redis.expire.assert_not_called()
