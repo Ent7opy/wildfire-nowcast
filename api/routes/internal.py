@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from api.config import settings
 from api.data_status import build_data_status_snapshot
 from api.db_health import build_db_size_snapshot, read_orchestrator_dashboard
+from api.dead_letter import all_dead_letter_metrics
 from api.model_registry import (
     list_active_models,
     promote_model,
@@ -50,6 +51,21 @@ class RollbackModelRequest(BaseModel):
 async def healthcheck() -> dict:
     """Simple health endpoint used for local dev and readiness checks."""
     return {"status": "ok"}
+
+
+@internal_router.get("/internal/health/dead-letter-queues")
+async def dead_letter_queue_health() -> dict:
+    """Return depth and oldest-job age for each dead-letter queue.
+
+    External monitors can poll this endpoint to alert when failed jobs
+    accumulate (depth > 0) or age beyond an acceptable threshold.
+    """
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        queues = all_dead_letter_metrics()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "queues": {}, "error": str(exc)}
+    return {"as_of": as_of, "queues": queues}
 
 
 @internal_router.get("/health/data-freshness")
@@ -436,6 +452,12 @@ async def ingest_health_dashboard() -> dict:
         db_section = {"database": {"size_bytes": None, "size_pretty": None}, "tables": {}, "retention_policy": {}, "error": str(exc)}
         cleanup_section = {"last_run_at": None, "last_outcome": None, "next_run_at": None, "interval_minutes": None, "source": "error"}
 
+    # --- dead-letter queue depth ---
+    try:
+        dlq_section = all_dead_letter_metrics()
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        dlq_section = {"error": str(exc)}
+
     return {
         "as_of": as_of,
         "orchestrator": {
@@ -445,6 +467,7 @@ async def ingest_health_dashboard() -> dict:
         "data_freshness": freshness_section,
         "db_size": db_section,
         "cleanup": cleanup_section,
+        "dead_letter_queues": dlq_section,
     }
 
 

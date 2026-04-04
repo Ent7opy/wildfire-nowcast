@@ -18,6 +18,7 @@ from sqlalchemy import text
 
 from api.cache import get_redis
 from api.db import get_engine
+from api.dead_letter import move_to_dead_letter_ingest
 from api.errors import ArchiveRangeError
 
 # Add repo root to path so the RQ worker can import ingest module
@@ -274,7 +275,7 @@ async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestRes
         from rq import Queue
 
         q = Queue(connection=get_redis(), default_timeout=600)
-        job = q.enqueue(_run_archive_ingest, body.date, body.timeframe)
+        job = q.enqueue(_run_archive_ingest, body.date, body.timeframe, on_failure=move_to_dead_letter_ingest)
         job_id = str(job.id)
     except Exception as exc:
         logger.error("Failed to enqueue archive ingest job: %s", exc)
@@ -388,7 +389,7 @@ async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> Archi
         )
 
         q = Queue(connection=redis_conn, default_timeout=num_days * 600)  # 10 min per day
-        q.enqueue(_run_archive_ingest_range, range_job_id, dates)
+        q.enqueue(_run_archive_ingest_range, range_job_id, dates, on_failure=move_to_dead_letter_ingest)
 
     except Exception as exc:
         logger.error("Failed to enqueue archive range ingest: %s", exc)
