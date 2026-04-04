@@ -518,3 +518,54 @@ def delete_detections_for_batch(
 
     with get_engine().begin() as new_conn:
         return _execute(new_conn)
+
+
+def count_consecutive_no_data_batches(
+    source: str,
+    area_key: str,
+    threshold: int = 3,
+) -> int:
+    """Count consecutive no_data batches for a source+area combo (most recent first).
+
+    Queries the ingest_batches table for the most recent batches with matching
+    source and area_key (from metadata). Returns the count of consecutive batches
+    with status='no_data', stopping when a non-no_data batch is encountered or
+    the threshold is exceeded.
+
+    Args:
+        source: The ingest source (e.g., 'VIIRS_SNPP_NRT')
+        area_key: The normalized area bounding box
+        threshold: Return early if count exceeds this value
+
+    Returns:
+        The number of consecutive no_data batches (0 if the most recent is not no_data)
+    """
+    select_stmt = text(
+        """
+        SELECT status
+        FROM ingest_batches
+        WHERE source = :source
+          AND metadata->>'area_key' = :area_key
+        ORDER BY completed_at DESC
+        LIMIT :threshold_limit
+        """
+    )
+
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            select_stmt,
+            {
+                "source": source,
+                "area_key": area_key,
+                "threshold_limit": threshold + 1,
+            },
+        ).scalars().all()
+
+    consecutive = 0
+    for status in rows:
+        if status == "no_data":
+            consecutive += 1
+        else:
+            break
+
+    return consecutive

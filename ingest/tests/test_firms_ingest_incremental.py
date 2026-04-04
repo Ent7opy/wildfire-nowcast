@@ -507,6 +507,146 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         self.assertEqual("failed", mock_finalize.call_args.kwargs["status"])
         mock_advance.assert_not_called()
 
+    @patch("ingest.firms_ingest._check_consecutive_no_data_batches", return_value=0)
+    @patch("ingest.firms_ingest._update_all_scoring_atomic")
+    @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
+    @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", return_value=0)
+    @patch("ingest.firms_ingest.repository.insert_detections")
+    @patch("ingest.firms_ingest.repository.get_engine")
+    @patch("ingest.firms_ingest.parse_detection_rows")
+    @patch("ingest.firms_ingest.fetch_csv_rows")
+    @patch("ingest.firms_ingest.repository.create_ingest_batch")
+    @patch("ingest.firms_ingest.repository.get_ingest_watermark")
+    @patch("ingest.firms_ingest.ingest_settings")
+    def test_zero_rows_incremental_mode_marks_batch_no_data_no_watermark_advance(
+        self,
+        mock_settings,
+        mock_get_watermark,
+        mock_create_batch,
+        mock_fetch_rows,
+        mock_parse_rows,
+        mock_get_engine,
+        mock_insert,
+        _mock_incomplete,
+        mock_finalize,
+        mock_advance,
+        _mock_scoring,
+        _mock_check_consecutive,
+    ):
+        """Verify 0-row FIRMS response in incremental mode is marked no_data and watermark is NOT advanced."""
+        mock_settings.map_key = "test-key"
+        mock_settings.resolved_area = "20,40,21,41"
+        mock_settings.day_range = 1
+        mock_settings.sources = ["VIIRS_SNPP_NRT"]
+        mock_settings.request_timeout_seconds = 30.0
+        mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 100000
+        mock_settings.firms_incremental_lookback_minutes = 100000
+        mock_settings.denoiser_enabled = False
+        mock_settings.denoiser_required = False
+        mock_settings.firms_reconcile_unscored_batches = False
+        mock_settings.firms_reconcile_max_batches = 5
+
+        # Existing watermark (incremental mode)
+        mock_get_watermark.return_value = {
+            "last_acq_time_utc": datetime(2026, 2, 15, 11, 0, tzinfo=timezone.utc),
+        }
+        mock_create_batch.return_value = 777
+
+        # Empty response from FIRMS (0 rows)
+        mock_fetch_rows.return_value = []
+        mock_parse_rows.return_value = ([], FirmsValidationSummary(total_rows=0, parsed_rows=0))
+
+        txn_conn = object()
+        mock_get_engine.return_value.begin.return_value = nullcontext(txn_conn)
+        mock_get_engine.return_value.execution_options.return_value.begin.return_value = nullcontext(txn_conn)
+
+        code = run_firms_ingest(day_range=None, area=None, sources=None)
+
+        # Should succeed (exit code 0) despite 0 rows
+        self.assertEqual(0, code)
+
+        # Batch should be marked as "no_data", not "succeeded"
+        mock_finalize.assert_called_once()
+        self.assertEqual("no_data", mock_finalize.call_args.kwargs["status"])
+        self.assertEqual(0, mock_finalize.call_args.kwargs["fetched"])
+
+        # Watermark should NOT be advanced when batch status is "no_data"
+        mock_advance.assert_not_called()
+
+        # Consecutive no_data check should have been called
+        _mock_check_consecutive.assert_called_once_with(
+            source="VIIRS_SNPP_NRT",
+            area_key="20.000000,40.000000,21.000000,41.000000",
+            threshold=3,
+        )
+
+    @patch("ingest.firms_ingest._check_consecutive_no_data_batches", return_value=0)
+    @patch("ingest.firms_ingest._update_all_scoring_atomic")
+    @patch("ingest.firms_ingest.repository.advance_ingest_watermark")
+    @patch("ingest.firms_ingest.repository.finalize_ingest_batch")
+    @patch("ingest.firms_ingest.repository.count_rows_with_null_columns_for_batch", return_value=0)
+    @patch("ingest.firms_ingest.repository.insert_detections")
+    @patch("ingest.firms_ingest.repository.get_engine")
+    @patch("ingest.firms_ingest.parse_detection_rows")
+    @patch("ingest.firms_ingest.fetch_csv_rows")
+    @patch("ingest.firms_ingest.repository.create_ingest_batch")
+    @patch("ingest.firms_ingest.repository.get_ingest_watermark")
+    @patch("ingest.firms_ingest.ingest_settings")
+    def test_zero_rows_archive_mode_still_advances_watermark(
+        self,
+        mock_settings,
+        mock_get_watermark,
+        mock_create_batch,
+        mock_fetch_rows,
+        mock_parse_rows,
+        mock_get_engine,
+        mock_insert,
+        _mock_incomplete,
+        mock_finalize,
+        mock_advance,
+        _mock_scoring,
+        _mock_check_consecutive,
+    ):
+        """Verify 0-row FIRMS response in archive mode is marked succeeded (not no_data)."""
+        mock_settings.map_key = "test-key"
+        mock_settings.resolved_area = "20,40,21,41"
+        mock_settings.day_range = 1
+        mock_settings.sources = ["VIIRS_SNPP_NRT"]
+        mock_settings.request_timeout_seconds = 30.0
+        mock_settings.firms_watermark_grace_minutes = 90
+        mock_settings.firms_initial_lookback_minutes = 100000
+        mock_settings.firms_incremental_lookback_minutes = 100000
+        mock_settings.archive_start_date = "2026-02-01"
+        mock_settings.archive_end_date = "2026-02-02"
+        mock_settings.denoiser_enabled = False
+        mock_settings.denoiser_required = False
+        mock_settings.firms_reconcile_unscored_batches = False
+        mock_settings.firms_reconcile_max_batches = 5
+
+        mock_get_watermark.return_value = None
+        mock_create_batch.return_value = 888
+
+        # Empty response (0 rows) even in archive mode
+        mock_fetch_rows.return_value = []
+        mock_parse_rows.return_value = ([], FirmsValidationSummary(total_rows=0, parsed_rows=0))
+
+        txn_conn = object()
+        mock_get_engine.return_value.begin.return_value = nullcontext(txn_conn)
+        mock_get_engine.return_value.execution_options.return_value.begin.return_value = nullcontext(txn_conn)
+
+        code = run_firms_ingest(day_range=None, area=None, sources=None)
+
+        self.assertEqual(0, code)
+
+        # In archive mode, batch status should still be "succeeded" (archive is exempt from no_data logic)
+        mock_finalize.assert_called_once()
+        self.assertEqual("succeeded", mock_finalize.call_args.kwargs["status"])
+
+        # Consecutive check should NOT be called in archive mode
+        _mock_check_consecutive.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
