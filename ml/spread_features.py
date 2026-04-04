@@ -241,6 +241,10 @@ def _load_weather_cube_from_cache(
             FROM weather_runs wr
             WHERE wr.status = 'completed'
               AND wr.run_time <= :ref_time
+              AND COALESCE(wr.bbox_min_lon, -180.0) <= :min_lon
+              AND COALESCE(wr.bbox_max_lon,  180.0) >= :max_lon
+              AND COALESCE(wr.bbox_min_lat,  -90.0) <= :min_lat
+              AND COALESCE(wr.bbox_max_lat,   90.0) >= :max_lat
             ORDER BY wr.run_time DESC
             LIMIT 1
         )
@@ -259,6 +263,10 @@ def _load_weather_cube_from_cache(
             stmt,
             {
                 "ref_time": ref_time,
+                "min_lon": min_lon,
+                "max_lon": max_lon,
+                "min_lat": min_lat,
+                "max_lat": max_lat,
                 "lat_lo": lat_lo,
                 "lat_hi": lat_hi,
                 "lon_lo": lon_lo,
