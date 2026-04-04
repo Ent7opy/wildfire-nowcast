@@ -28,7 +28,7 @@ class TestInternalAPIKeyAuth:
                 json={"model_id": "model-123"},
             )
             assert response.status_code == 401
-            assert "X-Internal-API-Key" in response.json()["detail"]
+            assert "X-Internal-API-Key" in response.json()["message"]
 
     def test_promote_with_wrong_key(self):
         """POST /internal/models/{family}/promote returns 401 when key doesn't match."""
@@ -39,7 +39,7 @@ class TestInternalAPIKeyAuth:
                 headers={"X-Internal-API-Key": "wrong-key"},
             )
             assert response.status_code == 401
-            assert "Invalid X-Internal-API-Key" in response.json()["detail"]
+            assert "Invalid X-Internal-API-Key" in response.json()["message"]
 
     def test_promote_with_correct_key(self):
         """POST /internal/models/{family}/promote succeeds with correct key."""
@@ -64,7 +64,7 @@ class TestInternalAPIKeyAuth:
         """POST /internal/models/{family}/promote succeeds when key is not configured (dev mode)."""
         # When key is empty string, endpoints should be accessible but log a warning
         with patch("api.config.settings.internal_api_key", ""), \
-             patch("api.routes.internal.validate_model_gate") as mock_validate, \
+             patch("api.routes.internal.validate_model_gate") as _mock_validate, \
              patch("api.routes.internal.promote_model") as mock_promote:
 
             mock_promote.return_value = {"model_id": "model-123", "status": "active"}
@@ -85,7 +85,7 @@ class TestInternalAPIKeyAuth:
                 json={},
             )
             assert response.status_code == 401
-            assert "X-Internal-API-Key" in response.json()["detail"]
+            assert "X-Internal-API-Key" in response.json()["message"]
 
     def test_rollback_with_correct_key(self):
         """POST /internal/models/{family}/rollback succeeds with correct key."""
