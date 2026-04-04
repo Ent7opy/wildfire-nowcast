@@ -933,6 +933,43 @@ def _is_nrt_source(source: str) -> bool:
     return source.upper().endswith("_NRT")
 
 
+def _reap_zombie_batches(
+    max_age_minutes: int = 120,
+    expire_fn: Callable[[int], list[dict[str, Any]]] | None = None,
+) -> int:
+    """Expire 'running' ingest batches that have exceeded *max_age_minutes*.
+
+    Called once at orchestrator startup so that zombie rows left behind by
+    killed processes do not block the pipeline.
+
+    Returns the number of batches expired.
+    """
+    if expire_fn is None:
+        from ingest.repository import expire_stale_running_batches
+
+        expire_fn = expire_stale_running_batches
+
+    try:
+        expired = expire_fn(max_age_minutes)
+    except Exception:
+        LOGGER.warning("Failed to reap zombie batches — will retry next startup", exc_info=True)
+        return 0
+
+    for batch in expired:
+        LOGGER.warning(
+            "Reaped zombie batch id=%s source=%s started_at=%s (stuck >%d min)",
+            batch.get("id"),
+            batch.get("source"),
+            batch.get("started_at"),
+            max_age_minutes,
+        )
+
+    if expired:
+        LOGGER.info("Expired %d zombie running batch(es) at startup", len(expired))
+
+    return len(expired)
+
+
 def validate_and_reset_watermarks(
     *,
     now_utc: datetime | None = None,
@@ -1297,6 +1334,8 @@ def main(argv: list[str] | None = None) -> None:
     except StartupError as exc:
         LOGGER.critical("STARTUP CONFIG ERROR: %s", exc)
         raise SystemExit(f"Startup check failed: {exc}") from exc
+
+    _reap_zombie_batches()
 
     jobs = build_jobs(args)
     dashboard_path = Path(args.dashboard_path)
