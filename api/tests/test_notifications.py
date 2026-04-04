@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import time
 import unittest
@@ -15,7 +17,10 @@ from api.notifications import (
     _dispatch,
     _is_rate_limited,
     _last_sent,
+    _post_webhook,
     _resolve_webhook_url,
+    _sign_payload,
+    _validate_webhook_url,
     notify,
 )
 
@@ -512,5 +517,156 @@ class TestSeverityRoutingIntegration(unittest.TestCase):
 
             # Email must still have been dispatched.
             self.assertEqual(len(email_calls), 1)
+
+        asyncio.run(run())
+
+
+class TestValidateWebhookUrl(unittest.TestCase):
+    """_validate_webhook_url enforces https:// for non-localhost URLs."""
+
+    def test_https_url_accepted(self):
+        url = "https://hooks.slack.com/services/T00/B00/xxx"
+        self.assertEqual(_validate_webhook_url(url), url)
+
+    def test_http_localhost_accepted(self):
+        self.assertEqual(_validate_webhook_url("http://localhost:9/hook"), "http://localhost:9/hook")
+        self.assertEqual(_validate_webhook_url("http://127.0.0.1:9/hook"), "http://127.0.0.1:9/hook")
+        self.assertEqual(_validate_webhook_url("http://[::1]:9/hook"), "http://[::1]:9/hook")
+
+    def test_http_non_localhost_rejected(self):
+        self.assertIsNone(_validate_webhook_url("http://evil.example.com/hook"))
+
+    def test_ftp_scheme_rejected(self):
+        self.assertIsNone(_validate_webhook_url("ftp://example.com/hook"))
+
+    def test_empty_string_rejected(self):
+        self.assertIsNone(_validate_webhook_url(""))
+
+    def test_no_scheme_rejected(self):
+        self.assertIsNone(_validate_webhook_url("hooks.slack.com/services/T00/B00/xxx"))
+
+
+class TestHmacSigning(unittest.TestCase):
+    """Webhook requests include HMAC-SHA256 signatures when WEBHOOK_SECRET is set."""
+
+    def test_sign_payload_deterministic(self):
+        payload = b'{"key":"value"}'
+        ts = "1700000000"
+        secret = "test-secret"
+        sig1 = _sign_payload(payload, ts, secret)
+        sig2 = _sign_payload(payload, ts, secret)
+        self.assertEqual(sig1, sig2)
+
+    def test_sign_payload_matches_manual_hmac(self):
+        payload = b'{"key":"value"}'
+        ts = "1700000000"
+        secret = "my-secret"
+        expected = hmac.new(
+            secret.encode(),
+            f"{ts}.".encode() + payload,
+            hashlib.sha256,
+        ).hexdigest()
+        self.assertEqual(_sign_payload(payload, ts, secret), expected)
+
+    def test_different_secret_different_signature(self):
+        payload = b'{"key":"value"}'
+        ts = "1700000000"
+        sig_a = _sign_payload(payload, ts, "secret-a")
+        sig_b = _sign_payload(payload, ts, "secret-b")
+        self.assertNotEqual(sig_a, sig_b)
+
+
+class TestPostWebhookSecurity(unittest.TestCase):
+    """_post_webhook adds security headers and validates URLs."""
+
+    def test_signature_and_timestamp_headers_present_when_secret_set(self):
+        """When WEBHOOK_SECRET is set, requests include X-Signature and X-Timestamp."""
+        captured_headers: list[dict] = []
+
+        async def run():
+            with patch.dict(os.environ, {"WEBHOOK_SECRET": "test-secret-123"}):
+                with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                    mock_resp = AsyncMock()
+                    mock_resp.status_code = 200
+                    mock_resp.raise_for_status = lambda: None
+                    mock_post.return_value = mock_resp
+                    await _post_webhook("https://hooks.slack.com/test", {"text": "hello"})
+                    _, kwargs = mock_post.call_args
+                    captured_headers.append(kwargs.get("headers", {}))
+
+            headers = captured_headers[0]
+            self.assertIn("X-Timestamp", headers)
+            self.assertIn("X-Signature", headers)
+            self.assertTrue(headers["X-Signature"].startswith("hmac-sha256="))
+
+        asyncio.run(run())
+
+    def test_no_signature_header_when_secret_unset(self):
+        """When WEBHOOK_SECRET is not set, X-Signature header is absent."""
+        captured_headers: list[dict] = []
+
+        async def run():
+            # Ensure WEBHOOK_SECRET is not set
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("WEBHOOK_SECRET", None)
+                with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                    mock_resp = AsyncMock()
+                    mock_resp.status_code = 200
+                    mock_resp.raise_for_status = lambda: None
+                    mock_post.return_value = mock_resp
+                    await _post_webhook("https://hooks.slack.com/test", {"text": "hello"})
+                    _, kwargs = mock_post.call_args
+                    captured_headers.append(kwargs.get("headers", {}))
+
+            headers = captured_headers[0]
+            self.assertIn("X-Timestamp", headers)
+            self.assertNotIn("X-Signature", headers)
+
+        asyncio.run(run())
+
+    def test_http_non_localhost_url_skipped(self):
+        """_post_webhook does not send when URL is http:// to a non-localhost host."""
+        async def run():
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                await _post_webhook("http://evil.example.com/hook", {"text": "hello"})
+                mock_post.assert_not_called()
+
+        asyncio.run(run())
+
+    def test_timestamp_header_is_recent(self):
+        """X-Timestamp should be a recent unix timestamp (within 5 seconds of now)."""
+        captured_headers: list[dict] = []
+
+        async def run():
+            os.environ.pop("WEBHOOK_SECRET", None)
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_resp = AsyncMock()
+                mock_resp.status_code = 200
+                mock_resp.raise_for_status = lambda: None
+                mock_post.return_value = mock_resp
+                await _post_webhook("https://hooks.slack.com/test", {"text": "hello"})
+                _, kwargs = mock_post.call_args
+                captured_headers.append(kwargs.get("headers", {}))
+
+            ts = int(captured_headers[0]["X-Timestamp"])
+            now = int(time.time())
+            self.assertAlmostEqual(ts, now, delta=5)
+
+        asyncio.run(run())
+
+    def test_webhook_response_status_logged(self):
+        """Webhook POST response status code is logged."""
+        async def run():
+            os.environ.pop("WEBHOOK_SECRET", None)
+            with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+                mock_resp = AsyncMock()
+                mock_resp.status_code = 200
+                mock_resp.raise_for_status = lambda: None
+                mock_post.return_value = mock_resp
+                with patch.object(notif.LOGGER, "info") as mock_log:
+                    await _post_webhook("https://hooks.slack.com/test", {"text": "hello"})
+                    mock_log.assert_called_once()
+                    log_msg = mock_log.call_args[0][0]
+                    self.assertIn("status=", log_msg)
 
         asyncio.run(run())
