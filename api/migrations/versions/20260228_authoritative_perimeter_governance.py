@@ -1,7 +1,7 @@
 """add authoritative perimeter governance tables and coverage provenance
 
 Revision ID: 20260228_authoritative_perimeter_governance
-Revises: 20260224_add_perimeter_coverage_masks
+Revises: 20260225_merge_migration_branches
 Create Date: 2026-02-28 09:00:00.000000
 """
 
@@ -24,7 +24,7 @@ class Geometry(sa.types.UserDefinedType):
 
 # revision identifiers, used by Alembic.
 revision: str = "20260228_authoritative_perimeter_governance"
-down_revision: Union[str, Sequence[str], None] = "20260224_add_perimeter_coverage_masks"
+down_revision: Union[str, Sequence[str], None] = "20260225_merge_migration_branches"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
