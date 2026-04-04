@@ -125,10 +125,26 @@ data/terrain/bulgaria/
 data/weather/gfs_0p25/
 output.nc
 models/*
+# ── Denoiser v2 (active production model) ─────────────────────────────────────
 !models/denoiser_v2/
 models/denoiser_v2/*
 !models/denoiser_v2/20260304_235923_94a9940fee24ef9a8e4914cc8e9b66e3404cb054/
 !models/denoiser_v2/20260304_235923_94a9940fee24ef9a8e4914cc8e9b66e3404cb054/**
+# ── Spread v3 (active production model) ───────────────────────────────────────
+# Only the int8 ONNX (9.5 MB) and metadata are committed; the full-precision
+# model.onnx (30 MB) and training checkpoint model.pt (30 MB) are excluded.
+# NOTE: exclude patterns must come AFTER the include-all /** rule to take precedence.
+!models/spread_v3/
+models/spread_v3/*
+!models/spread_v3/20260308_151315_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/
+!models/spread_v3/20260308_151315_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/**
+models/spread_v3/20260308_151315_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/model.onnx
+models/spread_v3/20260308_151315_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/model.pt
+# ── Spread calibration ────────────────────────────────────────────────────────
+!models/spread_calibration/
+!models/spread_calibration/bbox_47_31_v3/
+!models/spread_calibration/bbox_47_31_v3/20260308_165025_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/
+!models/spread_calibration/bbox_47_31_v3/20260308_165025_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/**
 reports/
 
 # Temporary files

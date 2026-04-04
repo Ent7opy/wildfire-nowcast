@@ -1,0 +1,25 @@
+{
+  "run_id": "20260308_165025_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55",
+  "created_at": "2026-03-08T14:50:25.231628+00:00",
+  "git_sha": "fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55",
+  "method": "isotonic",
+  "p_min": 0.0001,
+  "hindcast_run_dir": "/Users/vanyoivanov/Projects/wildfire-nowcast/data/hindcasts/bbox_47_31_v3_abs/run_20260308_164950",
+  "split_percentile": 1.0,
+  "min_positive_for_isotonic": 5000,
+  "horizons": [
+    24,
+    48,
+    72
+  ],
+  "package_versions": {
+    "sklearn": "1.8.0",
+    "numpy": "1.26.4",
+    "pandas": "2.3.3",
+    "joblib": "1.5.3"
+  },
+  "environment": {
+    "python": "3.11.14 (main, Jan 14 2026, 21:09:41) [Clang 21.1.4 ]",
+    "platform": "macOS-15.7.3-arm64-arm-64bit"
+  }
+}
