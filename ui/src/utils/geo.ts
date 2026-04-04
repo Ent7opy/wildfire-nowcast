@@ -31,6 +31,17 @@ export function nearestFireKm(
   return min;
 }
 
+/**
+ * Returns a [minLon, minLat, maxLon, maxLat] bounding box centred on a point,
+ * extended by radiusKm in all directions using an equirectangular approximation.
+ */
+export function bboxFromPoint(lon: number, lat: number, radiusKm: number): [number, number, number, number] {
+  const latDelta = radiusKm / 111;
+  const lonScale = Math.max(Math.cos((Math.PI / 180) * lat), 0.1);
+  const lonDelta = radiusKm / (111 * lonScale);
+  return [lon - lonDelta, lat - latDelta, lon + lonDelta, lat + latDelta];
+}
+
 /** Filters events to those within radiusKm of a user location. */
 export function eventsWithinRadius(
   userLat: number,

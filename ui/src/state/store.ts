@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { FireEvent } from "../types/api";
+import type { FireEvent, IgnitionGridResponse } from "../types/api";
 import type {
   ArchiveModeState,
   ArchiveSubMode,
@@ -11,6 +11,7 @@ import type {
   ForecastNotification,
   ForecastRequestContext,
   ForecastRunMeta,
+  IgnitionHorizon,
   LayersState,
   MapViewState,
   SafetyModeState,
@@ -35,6 +36,7 @@ const DEFAULT_LAYERS: LayersState = {
   showForecast: true,
   showRisk: false,
   showWarnings: false,
+  showIgnition: false,
   basemap: 'dark'
 };
 
@@ -104,6 +106,8 @@ interface AppStoreState {
   assistantViewContext: AssistantViewContext;
   archive: ArchiveModeState;
   safety: SafetyModeState;
+  ignitionHorizon: IgnitionHorizon;
+  ignitionData: IgnitionGridResponse | null;
   setFilters: (patch: Partial<FiltersState>) => void;
   applyPreset: (preset: { name: string; hoursStart: number; hoursEnd: number; likelihood: number }) => void;
   setLayersState: (patch: Partial<LayersState>) => void;
@@ -137,6 +141,8 @@ interface AppStoreState {
   setSafetyProximityRadius: (km: number) => void;
   requestAssistantBriefing: (prompt: string) => void;
   clearAssistantBriefingPrompt: () => void;
+  setIgnitionHorizon: (horizon: IgnitionHorizon) => void;
+  setIgnitionData: (data: IgnitionGridResponse | null) => void;
 }
 
 function updatePreset(filters: FiltersState): string {
@@ -155,6 +161,8 @@ export const useAppStore = create<AppStoreState>((set) => ({
   assistantViewContext: DEFAULT_ASSISTANT_VIEW_CONTEXT,
   archive: DEFAULT_ARCHIVE_STATE,
   safety: DEFAULT_SAFETY_STATE,
+  ignitionHorizon: 'now' as IgnitionHorizon,
+  ignitionData: null,
 
   setFilters: (patch) => {
     set((state) => {
@@ -384,4 +392,8 @@ export const useAppStore = create<AppStoreState>((set) => ({
   clearAssistantBriefingPrompt: () => set((state) => ({
     safety: { ...state.safety, pendingBriefingPrompt: null }
   })),
+
+  setIgnitionHorizon: (horizon) => set({ ignitionHorizon: horizon }),
+
+  setIgnitionData: (data) => set({ ignitionData: data }),
 }));

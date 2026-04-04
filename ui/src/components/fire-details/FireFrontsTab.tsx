@@ -1,10 +1,14 @@
 import { Alert, Box, Button, Divider, Stack, Typography } from "@mui/material";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import QueryStatsIcon from "@mui/icons-material/QueryStats";
+import WhatshotIcon from "@mui/icons-material/Whatshot";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { FireEvent, ReverseGeocodeResponse } from "../../types/api";
+import type { BBox, FireEvent, ReverseGeocodeResponse } from "../../types/api";
 import { getWeatherForPoint } from "../../api/fires";
-import { haversineKm } from "../../utils/geo";
+import { getIgnitionGrid } from "../../api/ignition";
+import { bboxFromPoint, haversineKm } from "../../utils/geo";
+import { highOrCriticalCellsNear } from "../../utils/ignition";
 import { forecastButtonState } from "../../utils/forecast";
 import { useAppStore } from "../../state/store";
 import {
@@ -87,6 +91,25 @@ export function FireFrontsTab({ selectedEvent, resolvedGeocodes, submitError, fo
     enabled: weatherEnabled,
     staleTime: 5 * 60 * 1000,
   });
+
+  const ignitionBbox: BBox | null = lat !== null && lon !== null
+    ? bboxFromPoint(lon, lat, 50)
+    : null;
+
+  const ignitionLayerActive = useAppStore((s) => s.layers.showIgnition);
+
+  const { data: ignitionContext } = useQuery({
+    queryKey: ["ignition-context", lat, lon],
+    queryFn: () => getIgnitionGrid({ bbox: ignitionBbox!, horizon: 'now' }),
+    enabled: ignitionLayerActive && ignitionBbox !== null,
+    staleTime: 6 * 60 * 60 * 1000,
+  });
+
+  const nearbyHighRiskCount = useMemo(() => {
+    return lat !== null && lon !== null && ignitionContext
+      ? highOrCriticalCellsNear(ignitionContext.cells, lat, lon, 50)
+      : 0;
+  }, [lat, lon, ignitionContext]);
 
   const riskTier = riskTierFromScore(score);
   const distanceToFireKm = isSafetyMode && safety.userLocation && lat !== null && lon !== null
@@ -269,6 +292,24 @@ export function FireFrontsTab({ selectedEvent, resolvedGeocodes, submitError, fo
       />
 
       <WarningsBlock warnings={weatherData?.warnings ?? null} />
+
+      {ignitionLayerActive && nearbyHighRiskCount > 0 && (
+        <Box sx={{ p: 1.5, bgcolor: "rgba(220,38,127,0.10)", border: "1px solid rgba(220,38,127,0.28)", borderRadius: 2.5, display: "flex", alignItems: "flex-start", gap: 0.9 }}>
+          <WhatshotIcon sx={{ fontSize: 15, color: "#dc2680", mt: 0.1, flexShrink: 0 }} />
+          <Box>
+            <Typography sx={{ fontSize: 11, fontWeight: 800, color: "#f9a8d4", letterSpacing: "0.08em", textTransform: "uppercase", mb: 0.3 }}>
+              Ignition Risk
+            </Typography>
+            <Typography sx={{ fontSize: 12, color: "#f9a8d4", lineHeight: 1.55 }}>
+              Conditions in this area are primed for new ignitions.{" "}
+              <Typography component="span" sx={{ fontSize: 12, fontWeight: 800, color: "#f9a8d4" }}>
+                {nearbyHighRiskCount}
+              </Typography>{" "}
+              high-risk cell{nearbyHighRiskCount !== 1 ? "s" : ""} within 50 km.
+            </Typography>
+          </Box>
+        </Box>
+      )}
 
       <Divider sx={{ borderColor: "rgba(255,255,255,0.08)" }} />
 
