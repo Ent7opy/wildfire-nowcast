@@ -110,7 +110,7 @@ class TestInternalAPIKeyAuth:
                 json={"resolved_by": "operator"},
             )
             assert response.status_code == 401
-            assert "X-Internal-API-Key" in response.json()["detail"]
+            assert "X-Internal-API-Key" in response.json()["message"]
 
     def test_review_queue_resolve_with_correct_key(self):
         """POST /internal/denoiser/review-queue/{event_id}/resolve succeeds with correct key."""
@@ -131,7 +131,7 @@ class TestInternalAPIKeyAuth:
     def test_get_endpoints_no_auth_required(self):
         """GET endpoints should not require authentication."""
         # Health endpoints should work without any key
-        response = client.get("/internal/health")
+        response = client.get("/health")
         assert response.status_code == 200
 
         response = client.get("/internal/models/active")
@@ -144,7 +144,7 @@ class TestInternalAPIKeyAuth:
         """GET endpoints should work whether key is provided or not."""
         with patch("api.config.settings.internal_api_key", "correct-key"):
             # Should work without key
-            response = client.get("/internal/health")
+            response = client.get("/health")
             assert response.status_code == 200
 
             # Should also work with key
