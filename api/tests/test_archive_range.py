@@ -92,7 +92,8 @@ class TestTriggerArchiveIngestRange:
         assert "future" in _error_text(resp)
 
     def test_rejects_start_beyond_lookback(self, client):
-        too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS)).isoformat()
+        # 11 days ago exceeds the 10-day FIRMS NRT limit → must be rejected
+        too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS + 1)).isoformat()
         yesterday = _recent_date(1)
         resp = client.post(
             "/fires/archive/ingest-range",
@@ -103,17 +104,30 @@ class TestTriggerArchiveIngestRange:
         assert str(MAX_FIRMS_LOOKBACK_DAYS) in _error_text(resp)
 
     def test_rejects_end_beyond_lookback(self, client):
-        # end_date is within lookback but start is even older — still rejected by end check
-        # Actually both are validated. Use a case where start is valid but end is too old.
-        # With MAX_FIRMS_LOOKBACK_DAYS=10: start=9 days ago (ok), end=10 days ago < start → rejected first.
-        # Let's test: start=10 days ago directly.
-        too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS)).isoformat()
+        # 11 days ago exceeds the 10-day FIRMS NRT limit → must be rejected
+        too_old = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS + 1)).isoformat()
         resp = client.post(
             "/fires/archive/ingest-range",
             json={"start_date": too_old, "end_date": too_old},
         )
         assert resp.status_code == 400
         assert resp.json()["error"] == "ArchiveRangeError"
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_accepts_start_date_exactly_at_lookback_boundary(self, mock_get_redis, mock_queue_cls, client):
+        # Exactly MAX_FIRMS_LOOKBACK_DAYS days ago is still within the FIRMS NRT window → accepted.
+        # The range must also fit within MAX_ARCHIVE_RANGE_DAYS, so use a 1-day range.
+        boundary = (date.today() - timedelta(days=MAX_FIRMS_LOOKBACK_DAYS)).isoformat()
+        mock_get_redis.return_value = MagicMock()
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        resp = client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": boundary, "end_date": boundary},
+        )
+        assert resp.status_code == 202
+        assert resp.json()["dates"] == [boundary]
 
     def test_rejects_range_too_large(self, client):
         # MAX_ARCHIVE_RANGE_DAYS+1 days — but must stay within FIRMS lookback.

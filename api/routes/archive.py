@@ -263,7 +263,7 @@ async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestRes
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Cannot ingest future dates.",
         )
-    if days_ago >= MAX_FIRMS_LOOKBACK_DAYS:
+    if days_ago > MAX_FIRMS_LOOKBACK_DAYS:
         raise ArchiveRangeError(
             f"Date {body.date} is {days_ago} days ago. "
             f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back. "
@@ -346,7 +346,7 @@ async def trigger_archive_ingest_range(body: ArchiveRangeIngestRequest) -> Archi
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"{label} {d} is in the future. Cannot ingest future dates.",
             )
-        if days_ago >= MAX_FIRMS_LOOKBACK_DAYS:
+        if days_ago > MAX_FIRMS_LOOKBACK_DAYS:
             raise ArchiveRangeError(
                 f"{label} {d} is {days_ago} days ago. "
                 f"FIRMS NRT API only supports up to {MAX_FIRMS_LOOKBACK_DAYS} days back."
