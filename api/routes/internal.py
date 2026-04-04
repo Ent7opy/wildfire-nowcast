@@ -49,8 +49,14 @@ class RollbackModelRequest(BaseModel):
 
 @internal_router.get("/health")
 async def healthcheck() -> dict:
-    """Simple health endpoint used for local dev and readiness checks."""
-    return {"status": "ok"}
+    """Simple health endpoint used for local dev and readiness checks.
+
+    Includes ``sse_connections`` so operators can monitor for accumulation
+    of leaked SSE streams (see issue #295).
+    """
+    from api.routes.forecast import get_active_sse_connections
+
+    return {"status": "ok", "sse_connections": get_active_sse_connections()}
 
 
 @internal_router.get("/internal/health/dead-letter-queues")

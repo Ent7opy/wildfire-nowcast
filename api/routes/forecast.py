@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 import re
@@ -30,7 +31,21 @@ from api.forecast.worker import queue, run_jit_forecast_pipeline, move_to_dead_l
 from ml.spread.region_key import bbox_region_name
 from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS_ENV
 
+logger = logging.getLogger(__name__)
+
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
+
+# Active SSE connection counter — exposed via /health for monitoring accumulation.
+_active_sse_connections: int = 0
+
+# Heartbeat interval for SSE keepalive comments (seconds).
+_SSE_HEARTBEAT_INTERVAL: float = 15.0
+
+
+def get_active_sse_connections() -> int:
+    """Return the current number of active SSE streaming connections."""
+    return _active_sse_connections
+
 
 # Fire probability colormap: transparent at 0, yellow → orange → red for probabilities 0→1.
 # Keys are integer pixel values 0-255 (after TiTiler rescales the float raster with rescale=0,1).
@@ -507,21 +522,33 @@ async def _job_status_event_stream(
     max_duration: float = 300.0,  # 5 minutes max
 ) -> AsyncGenerator[str, None]:
     """Generate SSE events for JIT forecast job status updates.
-    
+
     Streams job status updates as Server-Sent Events for real-time
-    progress monitoring without polling.
-    
+    progress monitoring without polling.  A ``finally`` block guarantees
+    the active-connection counter is decremented on *any* exit path
+    (normal completion, timeout, ``CancelledError`` from client
+    disconnect, or unexpected exception).
+
+    A ``: keepalive`` SSE comment is emitted every ``_SSE_HEARTBEAT_INTERVAL``
+    seconds of inactivity so that dead TCP connections are detected quickly
+    by the OS / reverse-proxy layer.
+
     Args:
         job_id: UUID of the JIT forecast job to monitor
         poll_interval: Seconds between status checks (default: 2.0)
         max_duration: Maximum seconds to keep stream open (default: 300)
-        
+
     Yields:
         SSE formatted event strings with job status updates
     """
+    global _active_sse_connections
+    _active_sse_connections += 1
+    logger.info("SSE stream opened for job %s (active=%d)", job_id, _active_sse_connections)
+
     start_time = asyncio.get_running_loop().time()
     last_status = None
-    
+    last_heartbeat = start_time
+
     status_messages = {
         "pending": "Job is queued and waiting to start...",
         "ingesting_terrain": "Downloading terrain data...",
@@ -530,57 +557,69 @@ async def _job_status_event_stream(
         "completed": "Forecast complete!",
         "failed": "Job failed"
     }
-    
+
     try:
         while True:
+            now = asyncio.get_running_loop().time()
+
             # Check for timeout
-            elapsed = asyncio.get_running_loop().time() - start_time
+            elapsed = now - start_time
             if elapsed > max_duration:
                 yield f"event: timeout\ndata: {json.dumps({'message': 'Stream timeout - check status endpoint'})}\n\n"
                 break
 
+            # Emit heartbeat keepalive comment to detect dead connections
+            if now - last_heartbeat >= _SSE_HEARTBEAT_INTERVAL:
+                yield ": keepalive\n\n"
+                last_heartbeat = now
+
             # Get current job status (run in thread pool to avoid blocking event loop)
             loop = asyncio.get_running_loop()
             job = await loop.run_in_executor(None, partial(repo.get_jit_job, job_id))
-            
+
             if not job:
                 yield f"event: error\ndata: {json.dumps({'message': 'Job not found'})}\n\n"
                 break
-            
+
             current_status = job["status"]
-            
+
             # Only send update if status changed
             if current_status != last_status:
                 last_status = current_status
-                
+                last_heartbeat = asyncio.get_running_loop().time()
+
                 event_data = {
                     "job_id": str(job_id),
                     "status": current_status,
                     "progress_message": status_messages.get(current_status, "Processing..."),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
-                
+
                 if job.get("result"):
                     event_data["result"] = job["result"]
-                
+
                 if job.get("error"):
                     event_data["error"] = job["error"]
-                
+
                 yield f"event: status\ndata: {json.dumps(event_data)}\n\n"
-                
+
                 # End stream if job is complete or failed
                 if current_status in ("completed", "failed"):
                     break
-            
+
             # Wait before next poll
             await asyncio.sleep(poll_interval)
-            
+
     except asyncio.CancelledError:
-        # Client disconnected
-        yield f"event: close\ndata: {json.dumps({'message': 'Client disconnected'})}\n\n"
+        # Client disconnected — log and re-raise so Starlette tears down properly
+        logger.info("SSE stream cancelled for job %s (client disconnect)", job_id)
         raise
     except Exception as e:
+        logger.exception("SSE stream error for job %s", job_id)
         yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+    finally:
+        _active_sse_connections = max(0, _active_sse_connections - 1)
+        logger.info("SSE stream closed for job %s (active=%d)", job_id, _active_sse_connections)
 
 
 @forecast_router.get(
