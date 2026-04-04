@@ -22,12 +22,15 @@ cors_allow_origins = [
     if origin.strip()
 ]
 
+# Explicit allowlists for CORS methods and headers — wildcards would permit
+# non-standard methods (TRACE, CONNECT) and arbitrary headers, broadening the
+# attack surface.  Only list what the app actually needs.  (Fixes #297)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_allow_origins,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "HEAD", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Request-ID"],
 )
 
 
