@@ -63,7 +63,7 @@ describe("GDELT queryFn signal forwarding (#311)", () => {
     const pending = gdeltQueryFn({ signal: controller.signal }, null);
     controller.abort();
 
-    await expect(pending).rejects.toThrow("AbortError");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("passes time range params when gdeltTimeParam is provided", async () => {
