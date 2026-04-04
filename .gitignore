@@ -143,8 +143,13 @@ models/spread_v3/20260308_151315_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/model.
 # ── Spread calibration ────────────────────────────────────────────────────────
 !models/spread_calibration/
 !models/spread_calibration/bbox_47_31_v3/
+models/spread_calibration/bbox_47_31_v3/*
 !models/spread_calibration/bbox_47_31_v3/20260308_165025_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/
 !models/spread_calibration/bbox_47_31_v3/20260308_165025_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/**
+!models/spread_calibration/bbox_47_31_v3_recent/
+models/spread_calibration/bbox_47_31_v3_recent/*
+!models/spread_calibration/bbox_47_31_v3_recent/20260308_171516_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/
+!models/spread_calibration/bbox_47_31_v3_recent/20260308_171516_fe0e5f16d7f0f59da935a7e63d1f64ee624f6f55/**
 reports/
 
 # Temporary files
