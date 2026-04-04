@@ -259,11 +259,12 @@ export default function AIChatAssistant(): JSX.Element {
     setIsSending(true);
 
     try {
+      const systemPrompt = isSafetyMode ? SAFETY_ASSISTANT_SYSTEM_PROMPT : EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT;
       const response = await fetch(`${apiBase}/assistant/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: EARTH_TOOLS_ASSISTANT_SYSTEM_PROMPT }] },
+          systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [
             {
               role: "user",
