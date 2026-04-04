@@ -81,7 +81,7 @@ export function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProps): JSX.
 
   const { data: newsData, isLoading: newsLoading, isError: newsError } = useQuery({
     queryKey: ["gdelt-news", gdeltTimeParam],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const query = encodeURIComponent(
         "(wildfire OR bushfire OR \"forest fire\" OR \"brush fire\" OR \"grass fire\" OR firefighter OR \"fire evacuation\" OR \"fire season\" OR \"fire crews\" OR \"prescribed burn\" OR \"controlled burn\" OR \"fire weather\" OR \"red flag warning\") sourcelang:english"
       );
@@ -89,7 +89,7 @@ export function FireDetailsPanel({ visibleEvents }: FireDetailsPanelProps): JSX.
         ? `&startdatetime=${gdeltTimeParam.startdatetime}&enddatetime=${gdeltTimeParam.enddatetime}`
         : `&timespan=12h`;
       const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${query}&mode=artlist&format=json${timeQuery}&sort=datedesc&maxrecords=75`;
-      const res = await fetch(url);
+      const res = await fetch(url, { signal });
       if (!res.ok) throw new Error("Failed to fetch news");
       const json = await res.json() as { articles?: GdeltArticle[] };
       return (json.articles ?? []).filter((a) => isWildfireArticle(a.title));
