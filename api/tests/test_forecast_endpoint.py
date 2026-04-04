@@ -727,11 +727,8 @@ def test_sse_stream_decrements_counter_on_normal_completion():
     import api.routes.forecast as _mod
 
     job_id = uuid4()
-    call_count = 0
 
     def fake_get_jit_job(jid):
-        nonlocal call_count
-        call_count += 1
         return {
             "id": jid,
             "status": "completed",
@@ -747,7 +744,7 @@ def test_sse_stream_decrements_counter_on_normal_completion():
                 events.append(chunk)
         return events
 
-    events = asyncio.get_event_loop().run_until_complete(_run())
+    events = asyncio.run(_run())
     after = get_active_sse_connections()
 
     assert after == before, "Counter must return to pre-stream value after normal completion"
@@ -760,11 +757,8 @@ def test_sse_stream_decrements_counter_on_cancellation():
     import api.routes.forecast as _mod
 
     job_id = uuid4()
-    call_count = 0
 
     def fake_get_jit_job(jid):
-        nonlocal call_count
-        call_count += 1
         return {"id": jid, "status": "pending"}
 
     before = get_active_sse_connections()
@@ -773,19 +767,17 @@ def test_sse_stream_decrements_counter_on_cancellation():
         events = []
         with patch.object(_mod.repo, "get_jit_job", side_effect=fake_get_jit_job):
             gen = _job_status_event_stream(job_id, poll_interval=0.01)
-            # Consume one event, then cancel
+            # Consume one event, then simulate client disconnect
             first = await gen.__anext__()
             events.append(first)
-            # Simulate client disconnect by throwing CancelledError
             try:
                 await gen.athrow(asyncio.CancelledError())
             except asyncio.CancelledError:
                 pass
-            # Ensure generator is closed
             await gen.aclose()
         return events
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.run(_run())
     after = get_active_sse_connections()
 
     assert after == before, "Counter must return to pre-stream value after cancellation"
@@ -810,7 +802,7 @@ def test_sse_stream_decrements_counter_on_exception():
                 events.append(chunk)
         return events
 
-    events = asyncio.get_event_loop().run_until_complete(_run())
+    events = asyncio.run(_run())
     after = get_active_sse_connections()
 
     assert after == before, "Counter must return to pre-stream value after exception"
@@ -834,22 +826,13 @@ def test_sse_stream_emits_heartbeat():
 
     async def _run():
         events = []
-        # Set heartbeat interval very low to trigger it quickly
         with patch.object(_mod, "_SSE_HEARTBEAT_INTERVAL", 0.0), \
              patch.object(_mod.repo, "get_jit_job", side_effect=fake_get_jit_job):
             async for chunk in _job_status_event_stream(job_id, poll_interval=0.01):
                 events.append(chunk)
         return events
 
-    events = asyncio.get_event_loop().run_until_complete(_run())
+    events = asyncio.run(_run())
 
     heartbeats = [e for e in events if e.strip() == ": keepalive"]
     assert len(heartbeats) > 0, "At least one heartbeat comment should have been emitted"
-
-
-def test_health_endpoint_exposes_sse_connections():
-    """The /health endpoint includes sse_connections field."""
-    response = client.get("/health")
-    # This endpoint is not on the forecast_router test app, so we test
-    # the function directly instead.
-    assert get_active_sse_connections() >= 0

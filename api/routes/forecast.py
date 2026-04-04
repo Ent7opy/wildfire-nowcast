@@ -35,11 +35,21 @@ logger = logging.getLogger(__name__)
 
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
 
-# Active SSE connection counter — exposed via /health for monitoring accumulation.
+# Active SSE connection counter -- exposed via /health for monitoring accumulation.
 _active_sse_connections: int = 0
 
 # Heartbeat interval for SSE keepalive comments (seconds).
 _SSE_HEARTBEAT_INTERVAL: float = 15.0
+
+# Human-readable progress messages keyed by JIT job status.
+_STATUS_MESSAGES: dict[str, str] = {
+    "pending": "Job is queued and waiting to start...",
+    "ingesting_terrain": "Downloading terrain data...",
+    "ingesting_weather": "Fetching weather data...",
+    "running_forecast": "Generating spread forecast...",
+    "completed": "Forecast complete!",
+    "failed": "Job failed",
+}
 
 
 def get_active_sse_connections() -> int:
@@ -490,19 +500,10 @@ def get_jit_forecast_status(job_id: UUID):
             detail="Job not found"
         )
 
-    status_messages = {
-        "pending": "Job is queued and waiting to start...",
-        "ingesting_terrain": "Downloading terrain data...",
-        "ingesting_weather": "Fetching weather data...",
-        "running_forecast": "Generating spread forecast...",
-        "completed": "Forecast complete!",
-        "failed": "Job failed"
-    }
-
     response = {
         "job_id": job["id"],
         "status": job["status"],
-        "progress_message": status_messages.get(job["status"], "Processing..."),
+        "progress_message": _STATUS_MESSAGES.get(job["status"], "Processing..."),
         "created_at": job["created_at"].isoformat() if job.get("created_at") else None,
         "updated_at": job["updated_at"].isoformat() if job.get("updated_at") else None,
     }
@@ -549,15 +550,6 @@ async def _job_status_event_stream(
     last_status = None
     last_heartbeat = start_time
 
-    status_messages = {
-        "pending": "Job is queued and waiting to start...",
-        "ingesting_terrain": "Downloading terrain data...",
-        "ingesting_weather": "Fetching weather data...",
-        "running_forecast": "Generating spread forecast...",
-        "completed": "Forecast complete!",
-        "failed": "Job failed"
-    }
-
     try:
         while True:
             now = asyncio.get_running_loop().time()
@@ -591,7 +583,7 @@ async def _job_status_event_stream(
                 event_data = {
                     "job_id": str(job_id),
                     "status": current_status,
-                    "progress_message": status_messages.get(current_status, "Processing..."),
+                    "progress_message": _STATUS_MESSAGES.get(current_status, "Processing..."),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
