@@ -149,7 +149,7 @@ class TestInternalAPIKeyAuth:
 
             # Should also work with key
             response = client.get(
-                "/internal/health",
+                "/health",
                 headers={"X-Internal-API-Key": "correct-key"},
             )
             assert response.status_code == 200
