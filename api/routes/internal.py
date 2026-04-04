@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from api.deps import verify_internal_api_key
 from api.errors import InvalidBoundingBoxError
 from pydantic import BaseModel
 
@@ -275,7 +276,7 @@ async def family_active_model(family: str) -> dict:
     return {"as_of": as_of, "model": active}
 
 
-@internal_router.post("/internal/models/{family}/promote")
+@internal_router.post("/internal/models/{family}/promote", dependencies=[Depends(verify_internal_api_key)])
 async def promote_family_model(family: str, request: PromoteModelRequest) -> dict:
     """Promote a registered model to active champion after gate report validation.
 
@@ -297,7 +298,7 @@ async def promote_family_model(family: str, request: PromoteModelRequest) -> dic
     return {"as_of": as_of, "action": "promote", "active": active}
 
 
-@internal_router.post("/internal/models/{family}/rollback")
+@internal_router.post("/internal/models/{family}/rollback", dependencies=[Depends(verify_internal_api_key)])
 async def rollback_family_model(family: str, request: RollbackModelRequest) -> dict:
     """Rollback to the previously promoted model for a family.
 
@@ -490,7 +491,7 @@ async def denoiser_review_queue_detail(event_id: str) -> dict:
     return {"as_of": as_of, "detail": detail}
 
 
-@internal_router.post("/internal/denoiser/review-queue/{event_id}/resolve")
+@internal_router.post("/internal/denoiser/review-queue/{event_id}/resolve", dependencies=[Depends(verify_internal_api_key)])
 async def denoiser_review_queue_resolve(event_id: str, request: DenoiserReviewResolveRequest) -> dict:
     """Resolve all open review rows for an event id."""
     as_of = datetime.now(timezone.utc).isoformat()
