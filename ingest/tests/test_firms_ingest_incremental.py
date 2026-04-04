@@ -636,7 +636,7 @@ class TestFirmsIncrementalWatermark(unittest.TestCase):
         mock_get_engine.return_value.begin.return_value = nullcontext(txn_conn)
         mock_get_engine.return_value.execution_options.return_value.begin.return_value = nullcontext(txn_conn)
 
-        code = run_firms_ingest(day_range=None, area=None, sources=None)
+        code = run_firms_ingest(day_range=None, area=None, sources=None, archive_date="2026-02-01")
 
         self.assertEqual(0, code)
 
