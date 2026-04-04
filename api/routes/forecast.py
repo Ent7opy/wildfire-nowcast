@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 import re
@@ -30,7 +31,76 @@ from api.forecast.worker import queue, run_jit_forecast_pipeline, move_to_dead_l
 from ml.spread.region_key import bbox_region_name
 from ml.spread.service import ForecastInputFallbackError, STRICT_FORECAST_INPUTS_ENV
 
+logger = logging.getLogger(__name__)
+
 forecast_router = APIRouter(prefix="/forecast", tags=["forecast"])
+
+
+# ---------------------------------------------------------------------------
+# GeoJSON deserialization helper
+# ---------------------------------------------------------------------------
+
+_VALID_GEOJSON_TYPES = {
+    "Point", "MultiPoint", "LineString", "MultiLineString",
+    "Polygon", "MultiPolygon", "GeometryCollection",
+}
+
+
+def _parse_geojson(raw: str, *, field_name: str, record_id: Any = None) -> dict:
+    """Parse a GeoJSON string from the database with error handling.
+
+    Raises ``HTTPException(422)`` on malformed JSON or invalid GeoJSON
+    schema so that clients receive a user-friendly error instead of
+    an unhandled 500.
+    """
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.error(
+            "Malformed JSON in %s (record_id=%s): %s",
+            field_name, record_id, exc,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"Malformed GeoJSON in database field '{field_name}'"
+                   f" (record {record_id}). Please contact support.",
+        )
+
+    if not isinstance(parsed, dict):
+        logger.error(
+            "GeoJSON is not a dict in %s (record_id=%s): got %s",
+            field_name, record_id, type(parsed).__name__,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid GeoJSON structure in database field '{field_name}'"
+                   f" (record {record_id}). Please contact support.",
+        )
+
+    geom_type = parsed.get("type")
+    if geom_type not in _VALID_GEOJSON_TYPES:
+        logger.error(
+            "Unexpected GeoJSON type '%s' in %s (record_id=%s)",
+            geom_type, field_name, record_id,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid GeoJSON type '{geom_type}' in database field"
+                   f" '{field_name}' (record {record_id}). Please contact support.",
+        )
+
+    if geom_type != "GeometryCollection" and "coordinates" not in parsed:
+        logger.error(
+            "Missing 'coordinates' in %s (record_id=%s)",
+            field_name, record_id,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"GeoJSON missing 'coordinates' in database field '{field_name}'"
+                   f" (record {record_id}). Please contact support.",
+        )
+
+    return parsed
 
 # Fire probability colormap: transparent at 0, yellow → orange → red for probabilities 0→1.
 # Keys are integer pixel values 0-255 (after TiTiler rescales the float raster with rescale=0,1).
@@ -198,7 +268,11 @@ async def get_forecast(
         features.append(
             {
                 "type": "Feature",
-                "geometry": json.loads(c["geom_geojson"]),
+                "geometry": _parse_geojson(
+                    c["geom_geojson"],
+                    field_name="geom_geojson",
+                    record_id=run_id,
+                ),
                 "properties": {
                     "horizon_hours": c["horizon_hours"],
                     "threshold": c["threshold"],
@@ -208,7 +282,11 @@ async def get_forecast(
 
     # Convert run bbox to dict if it exists
     if run.get("bbox_geojson"):
-        run["bbox"] = json.loads(run.pop("bbox_geojson"))
+        run["bbox"] = _parse_geojson(
+            run.pop("bbox_geojson"),
+            field_name="bbox_geojson",
+            record_id=run_id,
+        )
 
     return {
         "run": run,
@@ -873,7 +951,11 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
                 "contours": {"type": "FeatureCollection", "features": [
                     {
                         "type": "Feature",
-                        "geometry": json.loads(c["geom_geojson"]),
+                        "geometry": _parse_geojson(
+                            c["geom_geojson"],
+                            field_name="geom_geojson",
+                            record_id=run_id,
+                        ),
                         "properties": {
                             "horizon_hours": c["horizon_hours"],
                             "threshold": c["threshold"],
@@ -985,7 +1067,11 @@ def generate_forecast_endpoint(request: GenerateForecastRequest):
             "contours": {"type": "FeatureCollection", "features": [
                 {
                     "type": "Feature",
-                    "geometry": json.loads(c["geom_geojson"]),
+                    "geometry": _parse_geojson(
+                        c["geom_geojson"],
+                        field_name="geom_geojson",
+                        record_id=run_id,
+                    ),
                     "properties": {
                         "horizon_hours": c["horizon_hours"],
                         "threshold": c["threshold"],

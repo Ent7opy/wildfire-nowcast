@@ -709,3 +709,139 @@ def test_cache_key_differs_by_model_id():
     assert key_v1 != key_v2, "Different model_id values must produce different cache keys"
     assert key_v1 != key_none, "model_id=None must produce a different key than a named model_id"
     assert key_v2 != key_none
+
+
+# ---------------------------------------------------------------------------
+# GeoJSON deserialization error handling (issue #294)
+# ---------------------------------------------------------------------------
+
+
+def test_get_forecast_malformed_contour_geojson_returns_422():
+    """Corrupt geom_geojson in a contour row must return 422, not crash with 500."""
+    mock_run = {
+        "id": 200,
+        "region_name": "balkans",
+        "status": "completed",
+        "model_name": "TestModel",
+        "model_version": "v1",
+        "forecast_reference_time": "2025-01-01T00:00:00+00:00",
+        "metadata": {},
+        "bbox_geojson": json.dumps({
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+        }),
+    }
+    mock_rasters = []
+    mock_contours = [
+        {
+            "horizon_hours": 24,
+            "threshold": 0.5,
+            "geom_geojson": "NOT-VALID-JSON{{{",
+        }
+    ]
+
+    with patch("api.forecast.repo.get_latest_forecast_run", return_value=mock_run), \
+         patch("api.forecast.repo.list_rasters_for_run", return_value=mock_rasters), \
+         patch("api.forecast.repo.list_contours_for_run", return_value=mock_contours):
+        response = client.get(
+            "/forecast",
+            params={
+                "region_name": "balkans",
+                "min_lon": 0, "min_lat": 0,
+                "max_lon": 1, "max_lat": 1,
+            },
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert "geom_geojson" in body["detail"]
+    assert "200" in body["detail"]  # record id must appear for ops triage
+
+
+def test_get_forecast_malformed_bbox_geojson_returns_422():
+    """Corrupt bbox_geojson on the run row must return 422, not crash with 500."""
+    mock_run = {
+        "id": 201,
+        "region_name": "balkans",
+        "status": "completed",
+        "model_name": "TestModel",
+        "model_version": "v1",
+        "forecast_reference_time": "2025-01-01T00:00:00+00:00",
+        "metadata": {},
+        "bbox_geojson": "{invalid-json",
+    }
+
+    with patch("api.forecast.repo.get_latest_forecast_run", return_value=mock_run), \
+         patch("api.forecast.repo.list_rasters_for_run", return_value=[]), \
+         patch("api.forecast.repo.list_contours_for_run", return_value=[]):
+        response = client.get(
+            "/forecast",
+            params={
+                "region_name": "balkans",
+                "min_lon": 0, "min_lat": 0,
+                "max_lon": 1, "max_lat": 1,
+            },
+        )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert "bbox_geojson" in body["detail"]
+    assert "201" in body["detail"]
+
+
+def test_get_forecast_invalid_geojson_type_returns_422():
+    """A parseable JSON value with an unexpected GeoJSON type must return 422."""
+    mock_run = {
+        "id": 202,
+        "region_name": "balkans",
+        "status": "completed",
+        "model_name": "TestModel",
+        "model_version": "v1",
+        "forecast_reference_time": "2025-01-01T00:00:00+00:00",
+        "metadata": {},
+        "bbox_geojson": json.dumps({"type": "FeatureCollection", "features": []}),
+    }
+
+    with patch("api.forecast.repo.get_latest_forecast_run", return_value=mock_run), \
+         patch("api.forecast.repo.list_rasters_for_run", return_value=[]), \
+         patch("api.forecast.repo.list_contours_for_run", return_value=[]):
+        response = client.get(
+            "/forecast",
+            params={
+                "region_name": "balkans",
+                "min_lon": 0, "min_lat": 0,
+                "max_lon": 1, "max_lat": 1,
+            },
+        )
+
+    assert response.status_code == 422
+    assert "FeatureCollection" in response.json()["detail"]
+
+
+def test_get_forecast_geojson_missing_coordinates_returns_422():
+    """A GeoJSON geometry type missing 'coordinates' must return 422."""
+    mock_run = {
+        "id": 203,
+        "region_name": "balkans",
+        "status": "completed",
+        "model_name": "TestModel",
+        "model_version": "v1",
+        "forecast_reference_time": "2025-01-01T00:00:00+00:00",
+        "metadata": {},
+        "bbox_geojson": json.dumps({"type": "Polygon"}),
+    }
+
+    with patch("api.forecast.repo.get_latest_forecast_run", return_value=mock_run), \
+         patch("api.forecast.repo.list_rasters_for_run", return_value=[]), \
+         patch("api.forecast.repo.list_contours_for_run", return_value=[]):
+        response = client.get(
+            "/forecast",
+            params={
+                "region_name": "balkans",
+                "min_lon": 0, "min_lat": 0,
+                "max_lon": 1, "max_lat": 1,
+            },
+        )
+
+    assert response.status_code == 422
+    assert "coordinates" in response.json()["detail"]
