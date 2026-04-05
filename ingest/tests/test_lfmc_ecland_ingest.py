@@ -83,6 +83,7 @@ class TestParseRunTime:
         assert result.tzinfo == timezone.utc
 
 
+@pytest.mark.integration
 class TestCreateRunRecord:
     """Tests for _create_run_record."""
 
@@ -105,6 +106,7 @@ class TestCreateRunRecord:
         assert row["remote_job_id"] is None  # Initially None
 
 
+@pytest.mark.integration
 class TestUpdateRunRecordRemoteJobId:
     """Tests for _update_run_record_remote_job_id."""
 
@@ -124,6 +126,7 @@ class TestUpdateRunRecordRemoteJobId:
         assert row["remote_job_id"] == job_id
 
 
+@pytest.mark.integration
 class TestFinalizeRunRecord:
     """Tests for _finalize_run_record."""
 
@@ -240,6 +243,7 @@ class TestCancelJob:
             )
 
 
+@pytest.mark.integration
 class TestCheckOrphanedJobs:
     """Tests for _check_orphaned_jobs."""
 
@@ -399,6 +403,7 @@ class TestPollJobUntilReady:
             )
 
 
+@pytest.mark.integration
 class TestIngestLfmcEclandForBbox:
     """Integration tests for ingest_lfmc_ecland_for_bbox."""
 
