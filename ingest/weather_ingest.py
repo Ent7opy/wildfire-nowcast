@@ -228,6 +228,18 @@ def _validate_temporal_metadata(
             f"no 'valid_time' variable and missing ('time', 'step') pair"
         )
 
+    # Normalize timezone awareness for comparison:
+    # numpy datetime64 → datetime conversion always produces naive (UTC) datetimes,
+    # but expected_valid_time may be timezone-aware if run_time has tzinfo.
+    if expected_valid_time.tzinfo is not None and (
+        not hasattr(valid_time, "tzinfo") or valid_time.tzinfo is None
+    ):
+        expected_valid_time = expected_valid_time.replace(tzinfo=None)
+    elif expected_valid_time.tzinfo is None and (
+        hasattr(valid_time, "tzinfo") and valid_time.tzinfo is not None
+    ):
+        valid_time = valid_time.replace(tzinfo=None)
+
     # Check if valid_time is within 2 hours of expected
     time_diff = abs((valid_time - expected_valid_time).total_seconds())
     max_diff_seconds = 2 * 3600  # 2 hours in seconds

@@ -110,11 +110,11 @@ def test_validate_grib_file_temporal_metadata_valid(caplog):
     # Create mock dataset with valid_time
     mock_ds = MagicMock()
     mock_ds.data_vars = {"u10": MagicMock(), "v10": MagicMock()}
-    expected_valid_time = run_time + np.timedelta64(forecast_hour, "h")
+    expected_valid_time = np.datetime64("2026-04-05T12:00", "ns")
     mock_ds.__getitem__ = lambda self, key: (
         MagicMock(
-            data=np.datetime64(expected_valid_time),
-            item=lambda: np.datetime64(expected_valid_time),
+            data=expected_valid_time,
+            item=lambda: expected_valid_time,
         )
         if key == "valid_time"
         else MagicMock()
@@ -145,11 +145,11 @@ def test_validate_grib_file_temporal_metadata_mismatch_raises(caplog):
     # Create mock dataset with wrong valid_time (off by 6 hours)
     mock_ds = MagicMock()
     mock_ds.data_vars = {"u10": MagicMock()}
-    wrong_valid_time = run_time + np.timedelta64(18, "h")  # Should be 12h
+    wrong_valid_time = np.datetime64("2026-04-05T18:00", "ns")  # Should be 12h
     mock_ds.__getitem__ = lambda self, key: (
         MagicMock(
-            data=np.datetime64(wrong_valid_time),
-            item=lambda: np.datetime64(wrong_valid_time),
+            data=wrong_valid_time,
+            item=lambda: wrong_valid_time,
         )
         if key == "valid_time"
         else MagicMock()
@@ -190,11 +190,11 @@ def test_validate_grib_file_temporal_metadata_within_tolerance(caplog):
     # Create mock dataset with valid_time slightly off (1 hour difference)
     mock_ds = MagicMock()
     mock_ds.data_vars = {"u10": MagicMock()}
-    slightly_off_valid_time = run_time + np.timedelta64(13, "h")  # 1h off
+    slightly_off_valid_time = np.datetime64("2026-04-05T13:00", "ns")  # 1h off
     mock_ds.__getitem__ = lambda self, key: (
         MagicMock(
-            data=np.datetime64(slightly_off_valid_time),
-            item=lambda: np.datetime64(slightly_off_valid_time),
+            data=slightly_off_valid_time,
+            item=lambda: slightly_off_valid_time,
         )
         if key == "valid_time"
         else MagicMock()
@@ -225,16 +225,18 @@ def test_validate_grib_file_temporal_metadata_computed_from_time_step(caplog):
     # Create mock dataset without valid_time, but with time + step
     mock_ds = MagicMock()
     mock_ds.data_vars = {"u10": MagicMock()}
+    time_val = np.datetime64("2026-04-05T00:00", "ns")
+    step_val = np.timedelta64(forecast_hour, "h")
     mock_ds.__getitem__ = lambda self, key: (
         MagicMock(
-            data=np.datetime64(run_time),
-            item=lambda: np.datetime64(run_time),
+            data=time_val,
+            item=lambda: time_val,
         )
         if key == "time"
         else (
             MagicMock(
-                data=np.timedelta64(forecast_hour, "h"),
-                item=lambda: np.timedelta64(forecast_hour, "h"),
+                data=step_val,
+                item=lambda: step_val,
             )
             if key == "step"
             else MagicMock()
