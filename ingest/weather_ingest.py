@@ -155,14 +155,141 @@ def _is_multilevel_grib_error(message: str) -> bool:
     )
 
 
-def _validate_grib_file(path: Path) -> None:
+def _validate_temporal_metadata(
+    ds: xr.Dataset,
+    run_time: datetime,
+    forecast_hour: int,
+    path: Path,
+) -> None:
+    """Validate GRIB valid_time matches the expected forecast valid time.
+
+    Args:
+        ds: Opened xarray dataset from cfgrib
+        run_time: GFS run time (analysis time)
+        forecast_hour: Forecast hour offset from run_time
+        path: GRIB file path (for error messages)
+
+    Raises:
+        ValueError: If valid_time cannot be extracted or does not match expectation
+    """
+    # Expected valid time: run_time + forecast_hour
+    expected_valid_time = run_time + timedelta(hours=forecast_hour)
+
+    # Extract valid_time from the dataset
+    # cfgrib creates either a "valid_time" variable or we compute it from time + step
+    if "valid_time" in ds:
+        valid_time_var = ds["valid_time"]
+        # Extract the scalar or first value
+        if hasattr(valid_time_var, "data"):
+            valid_time_data = valid_time_var.data
+            if hasattr(valid_time_data, "item"):  # numpy scalar
+                valid_time_scalar = valid_time_data.item()
+            else:
+                # Could be an array; take first element
+                valid_time_scalar = (
+                    valid_time_data.flat[0]
+                    if hasattr(valid_time_data, "flat")
+                    else valid_time_data
+                )
+        else:
+            valid_time_scalar = valid_time_var.item()
+
+        # Convert to datetime if it's a numpy datetime64
+        if isinstance(valid_time_scalar, np.datetime64):
+            valid_time = valid_time_scalar.astype("datetime64[ns]").astype(datetime)
+        else:
+            valid_time = valid_time_scalar
+    elif "time" in ds and "step" in ds:
+        # Compute valid_time = time + step
+        time_val = ds["time"].data
+        step_val = ds["step"].data
+
+        if hasattr(time_val, "item"):
+            time_val = time_val.item()
+        if hasattr(step_val, "item"):
+            step_val = step_val.item()
+
+        # Convert time to datetime
+        if isinstance(time_val, np.datetime64):
+            time_dt = time_val.astype("datetime64[ns]").astype(datetime)
+        else:
+            time_dt = time_val
+
+        # Convert step to timedelta
+        if isinstance(step_val, np.timedelta64):
+            step_td = step_val.astype("timedelta64[ns]").astype(timedelta)
+        else:
+            step_td = step_val
+
+        valid_time = time_dt + step_td
+    else:
+        raise ValueError(
+            f"Cannot extract valid_time from GRIB {path}: "
+            f"no 'valid_time' variable and missing ('time', 'step') pair"
+        )
+
+    # Normalize timezone awareness for comparison:
+    # numpy datetime64 → datetime conversion always produces naive (UTC) datetimes,
+    # but expected_valid_time may be timezone-aware if run_time has tzinfo.
+    if expected_valid_time.tzinfo is not None and (
+        not hasattr(valid_time, "tzinfo") or valid_time.tzinfo is None
+    ):
+        expected_valid_time = expected_valid_time.replace(tzinfo=None)
+    elif expected_valid_time.tzinfo is None and (
+        hasattr(valid_time, "tzinfo") and valid_time.tzinfo is not None
+    ):
+        valid_time = valid_time.replace(tzinfo=None)
+
+    # Check if valid_time is within 2 hours of expected
+    time_diff = abs((valid_time - expected_valid_time).total_seconds())
+    max_diff_seconds = 2 * 3600  # 2 hours in seconds
+
+    if time_diff > max_diff_seconds:
+        LOGGER.error(
+            "GRIB temporal metadata mismatch for %s: "
+            "expected valid_time=%s (run_time=%s + %d hours), "
+            "but got valid_time=%s (diff=%s seconds)",
+            path,
+            expected_valid_time,
+            run_time,
+            forecast_hour,
+            valid_time,
+            int(time_diff),
+        )
+        raise ValueError(
+            f"GRIB valid_time mismatch for {path}: "
+            f"expected {expected_valid_time}, got {valid_time} "
+            f"(diff {int(time_diff)} seconds, max allowed 7200)"
+        )
+
+    LOGGER.debug(
+        "GRIB temporal validation passed: %s (valid_time=%s matches f%d)",
+        path,
+        valid_time,
+        forecast_hour,
+    )
+
+
+def _validate_grib_file(
+    path: Path,
+    run_time: datetime | None = None,
+    forecast_hour: int | None = None,
+) -> None:
     """Validate GRIB file integrity by attempting to open it with cfgrib.
 
     This function performs basic validation to detect corrupted or partial
-    downloads before they are processed further.
+    downloads before they are processed further. If run_time and forecast_hour
+    are provided, also validates that the GRIB valid_time matches the expected
+    forecast valid time (within 2 hours tolerance).
+
+    Args:
+        path: Path to the GRIB file
+        run_time: GFS run time (e.g., 2026-04-05 00:00 UTC). Optional.
+        forecast_hour: Forecast hour offset from run_time. Optional.
 
     Raises:
-        ValueError: If the file is corrupted or cannot be read as GRIB
+        ValueError: If the file is corrupted, cannot be read as GRIB, or
+                   temporal metadata does not match expectation
         FileNotFoundError: If the file does not exist
     """
     if not path.exists():
@@ -193,6 +320,11 @@ def _validate_grib_file(path: Path) -> None:
         )
         if len(ds.data_vars) == 0:
             raise ValueError(f"GRIB file contains no data variables: {path}")
+
+        # Validate temporal metadata if run_time and forecast_hour are provided
+        if run_time is not None and forecast_hour is not None:
+            _validate_temporal_metadata(ds, run_time, forecast_hour, path)
+
         ds.close()
         LOGGER.debug("GRIB file validated: %s (%d bytes)", path, file_size)
         return
@@ -220,6 +352,11 @@ def _validate_grib_file(path: Path) -> None:
                 raise ValueError(
                     f"GRIB file contains no data variables (retry {attempt}): {path}"
                 )
+
+            # Validate temporal metadata if run_time and forecast_hour are provided
+            if run_time is not None and forecast_hour is not None:
+                _validate_temporal_metadata(ds, run_time, forecast_hour, path)
+
             ds.close()
             LOGGER.info(
                 "GRIB multi-level validation succeeded on retry %d/%d: %s (%d bytes)",
@@ -250,6 +387,11 @@ def _validate_grib_file(path: Path) -> None:
         datasets = cfgrib.open_datasets(path, indexpath="")
         if not datasets:
             raise ValueError(f"GRIB file produced no dataset groups: {path}")
+
+        # Validate temporal metadata on first dataset (should be same across all)
+        if run_time is not None and forecast_hour is not None and datasets:
+            _validate_temporal_metadata(datasets[0], run_time, forecast_hour, path)
+
         total_vars = sum(len(ds.data_vars) for ds in datasets)
         for ds in datasets:
             ds.close()
@@ -399,7 +541,11 @@ def download_grib_files(
                         
                         # Validate downloaded GRIB file integrity
                         try:
-                            _validate_grib_file(target_path)
+                            _validate_grib_file(
+                                target_path,
+                                run_time=run_time,
+                                forecast_hour=forecast_hour,
+                            )
                         except (ValueError, FileNotFoundError) as validation_exc:
                             LOGGER.error(
                                 "GRIB file validation failed for %s: %s",
