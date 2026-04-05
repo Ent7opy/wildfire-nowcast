@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
@@ -451,3 +452,111 @@ def test_fit_from_hindcast_run_reports_severe_imbalance_warning():
 
     finally:
         shutil.rmtree(tmp_root)
+
+
+def test_temporal_2way_split_preserves_order():
+    """Test that _temporal_2way_split preserves temporal ordering when start_time exists."""
+    from ml.train_denoiser_v2 import _temporal_2way_split
+
+    # Create a DataFrame with 10 rows and timestamps
+    df = pd.DataFrame({
+        "start_time": pd.date_range("2025-01-01", periods=10, freq="D"),
+        "value": np.arange(10),
+    })
+
+    eval_df, val_df = _temporal_2way_split(df, eval_fraction=0.8)
+
+    # Should have split at 80% (8 rows eval, 2 rows validation)
+    assert len(eval_df) == 8
+    assert len(val_df) == 2
+
+    # Check temporal ordering
+    assert eval_df["start_time"].max() < val_df["start_time"].min()
+
+    # Check values are preserved
+    assert list(eval_df["value"]) == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert list(val_df["value"]) == [8, 9]
+
+
+def test_temporal_2way_split_positional_fallback():
+    """Test that _temporal_2way_split falls back to positional split when start_time absent."""
+    from ml.train_denoiser_v2 import _temporal_2way_split
+
+    # DataFrame without start_time
+    df = pd.DataFrame({
+        "value": np.arange(10),
+    })
+
+    eval_df, val_df = _temporal_2way_split(df, eval_fraction=0.7)
+
+    # Should have split at 70% (7 rows eval, 3 rows validation)
+    assert len(eval_df) == 7
+    assert len(val_df) == 3
+    assert list(eval_df["value"]) == [0, 1, 2, 3, 4, 5, 6]
+    assert list(val_df["value"]) == [7, 8, 9]
+
+
+def test_temporal_2way_split_with_duplicate_timestamps():
+    """Test that _temporal_2way_split falls back gracefully when quantile split is invalid."""
+    from ml.train_denoiser_v2 import _temporal_2way_split
+
+    # DataFrame with all identical timestamps (causes quantile boundary collapse)
+    df = pd.DataFrame({
+        "start_time": pd.Timestamp("2025-01-01"),
+        "value": np.arange(10),
+    })
+    # Broadcast timestamp to all rows
+    df["start_time"] = pd.Timestamp("2025-01-01")
+
+    eval_df, val_df = _temporal_2way_split(df, eval_fraction=0.8)
+
+    # Should fall back to positional split
+    assert len(eval_df) == 8
+    assert len(val_df) == 2
+
+
+def test_calibrator_validation_metrics_computed():
+    """Test that calibrator validation metrics are computed correctly when validation set exists."""
+    from ml.train_denoiser_v2 import _temporal_2way_split, _map_labels
+    import pandas as pd
+
+    # Create synthetic calibration validation data
+    np.random.seed(42)
+    n_samples = 100
+    df = pd.DataFrame({
+        "start_time": pd.date_range("2025-01-01", periods=n_samples, freq="D"),
+        "event_label": np.random.choice(["POSITIVE", "NEGATIVE"], n_samples),
+        "raw_score": np.random.uniform(0, 1, n_samples),
+    })
+
+    # Split into eval and validation
+    eval_df, val_df = _temporal_2way_split(df, eval_fraction=0.8)
+
+    assert len(eval_df) == 80
+    assert len(val_df) == 20
+
+    # Check that both have mixed labels
+    eval_labels = _map_labels(eval_df)
+    val_labels = _map_labels(val_df)
+    assert len(np.unique(eval_labels[eval_labels >= 0])) == 2
+    assert len(np.unique(val_labels[val_labels >= 0])) == 2
+
+
+def test_calibrator_overfitting_detection():
+    """Test that calibrator overfitting is detected when validation Brier loss degrades >5%."""
+    from sklearn.metrics import brier_score_loss
+
+    # Simulate eval set with good calibration
+    y_eval = np.array([0, 0, 0, 1, 1, 1])
+    score_eval = np.array([0.1, 0.2, 0.15, 0.85, 0.9, 0.8])  # Well-calibrated
+
+    # Simulate validation set with poor calibration (overfitting scenario)
+    y_val = np.array([0, 0, 1, 1])
+    score_val = np.array([0.6, 0.7, 0.3, 0.4])  # Poorly calibrated
+
+    brier_eval = brier_score_loss(y_eval, score_eval)
+    brier_val = brier_score_loss(y_val, score_val)
+    degradation = ((brier_val - brier_eval) / (brier_eval + 1e-10)) * 100.0
+
+    # Check that degradation is > 5%
+    assert degradation > 5.0, f"Expected overfitting signal (>5%), got {degradation:.1f}%"

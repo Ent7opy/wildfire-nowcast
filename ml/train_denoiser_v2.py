@@ -211,6 +211,42 @@ def _temporal_3way_split(
     )
 
 
+def _temporal_2way_split(
+    df: pd.DataFrame,
+    *,
+    eval_fraction: float = 0.8,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split *df* into (eval, validation) in chronological order.
+
+    Splits at ``start_time`` quantile when the column is present; falls back to positional slicing.
+    Preserves temporal ordering within each partition.
+
+    Args:
+        df: DataFrame to split.
+        eval_fraction: Fraction of data for eval set; remainder goes to validation.
+
+    Returns:
+        (eval_df, validation_df) tuple.
+    """
+    if "start_time" in df.columns:
+        ordered = df.sort_values("start_time").reset_index(drop=True)
+        split_dt = ordered["start_time"].quantile(eval_fraction)
+        eval_df = ordered[ordered["start_time"] < split_dt].copy()
+        val_df = ordered[ordered["start_time"] >= split_dt].copy()
+        if not eval_df.empty and not val_df.empty:
+            return eval_df, val_df
+        # Fall through to positional when quantile boundaries collapse
+    else:
+        ordered = df
+
+    n = len(ordered)
+    cut_eval = int(n * eval_fraction)
+    return (
+        ordered.iloc[:cut_eval].copy(),
+        ordered.iloc[cut_eval:].copy(),
+    )
+
+
 def _apply_micro_batch(
     *,
     train_df: pd.DataFrame,
@@ -1507,18 +1543,55 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         label_col=label_col,
     )
 
-    y_eval_known = _map_labels(eval_known_holdout, label_col)
-    if len(eval_known_holdout) == 0:
+    # Split eval_known_holdout into eval_holdout (80%) and calibrator_validation (20%).
+    # Preserve temporal ordering if start_time exists.
+    eval_holdout, calibrator_validation = _temporal_2way_split(
+        eval_known_holdout, eval_fraction=0.8
+    )
+
+    y_eval_known = _map_labels(eval_holdout, label_col)
+    if len(eval_holdout) == 0:
         raise ValueError("No known labels in eval holdout.")
 
-    raw_eval = _predict_raw(model, _feature_matrix(eval_known_holdout, features))
+    raw_eval = _predict_raw(model, _feature_matrix(eval_holdout, features))
     calibrated_scores = _apply_slice_calibration(
-        eval_df=eval_known_holdout,
+        eval_df=eval_holdout,
         raw_scores=raw_eval,
         slice_cols=slice_cols,
         global_calibrator=global_calibrator,
         slice_calibrators=slice_calibrators,
     )
+
+    # Compute calibrator validation metrics if calibrator_validation is non-empty.
+    calibrator_validation_metrics = None
+    calibrator_overfitting_warning = False
+    if len(calibrator_validation) > 0:
+        y_cal_val = _map_labels(calibrator_validation, label_col)
+        if (y_cal_val >= 0).any():  # Only compute if there are known labels
+            raw_cal_val = _predict_raw(model, _feature_matrix(calibrator_validation, features))
+            calibrated_cal_val = _apply_slice_calibration(
+                eval_df=calibrator_validation,
+                raw_scores=raw_cal_val,
+                slice_cols=slice_cols,
+                global_calibrator=global_calibrator,
+                slice_calibrators=slice_calibrators,
+            )
+            brier_eval = float(brier_score_loss(y_eval_known, np.clip(calibrated_scores, 0.0, 1.0)))
+            brier_val = float(brier_score_loss(y_cal_val, np.clip(calibrated_cal_val, 0.0, 1.0)))
+            brier_degradation_pct = ((brier_val - brier_eval) / (brier_eval + 1e-10)) * 100.0
+            calibrator_validation_metrics = {
+                "n_samples": int(len(calibrator_validation)),
+                "brier_calibrated": brier_val,
+                "brier_degradation_pct": float(brier_degradation_pct),
+            }
+            # Warn if Brier loss increases >5% on validation set (possible overfitting).
+            if brier_degradation_pct > 5.0:
+                calibrator_overfitting_warning = True
+                LOGGER.warning(
+                    f"Calibrator overfitting detected: validation Brier loss {brier_val:.4f} "
+                    f"is {brier_degradation_pct:.1f}% worse than eval Brier loss {brier_eval:.4f}. "
+                    f"Consider using Platt scaling if isotonic regression was selected."
+                )
 
     fallback_threshold = float(config.get("decision_threshold", 0.5))
     target_event_recall = float(config.get("target_event_recall", 0.92))
@@ -1553,6 +1626,8 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
         "brier_raw": float(brier_score_loss(y_eval_known, np.clip(raw_eval, 0.0, 1.0))),
         "brier_calibrated": float(brier_score_loss(y_eval_known, np.clip(calibrated_scores, 0.0, 1.0))),
         "raw_metrics": raw_metrics,
+        "calibrator_validation_metrics": calibrator_validation_metrics,
+        "calibrator_overfitting_warning": bool(calibrator_overfitting_warning),
     }
     shap_cfg = dict(config.get("shap", {}))
     shap_enabled = bool(shap_cfg.get("enabled", False))
@@ -1560,22 +1635,22 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
     if shap_enabled:
         shap_top_features = _compute_shap_top_features(
             model=model,
-            x=_feature_matrix(eval_known_holdout, features),
+            x=_feature_matrix(eval_holdout, features),
             top_k=int(shap_cfg.get("top_k", 5)),
             sample_rows=int(shap_cfg.get("sample_rows", 5000)),
             rng=np.random.default_rng(seed + 303),
         )
 
     # Operational latency estimate: extrapolate per 10k events from eval prediction speed.
-    latency_eval_df = eval_scope if not eval_scope.empty else eval_known_holdout
+    latency_eval_df = eval_scope if not eval_scope.empty else eval_holdout
     start = time.perf_counter()
     _ = _predict_raw(model, _feature_matrix(latency_eval_df, features))
     elapsed = max(1e-6, time.perf_counter() - start)
     latency_per_10k = float(elapsed * (10000.0 / max(1, len(latency_eval_df))))
 
     sensor_bias_pct = None
-    if "sensor" in eval_known_holdout.columns and len(eval_known_holdout["sensor"].dropna().unique()) >= 2:
-        sensor_means = eval_known_holdout.assign(score=calibrated_scores).groupby("sensor")["score"].mean()
+    if "sensor" in eval_holdout.columns and len(eval_holdout["sensor"].dropna().unique()) >= 2:
+        sensor_means = eval_holdout.assign(score=calibrated_scores).groupby("sensor")["score"].mean()
         if not sensor_means.empty:
             sensor_bias_pct = float((sensor_means.max() - sensor_means.min()) * 100.0)
 
