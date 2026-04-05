@@ -15,7 +15,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "20260405_add_lfmc_remote_job_id"
-down_revision: Union[str, Sequence[str], None] = "20260405_add_geometry_srid_constraints"
+down_revision: Union[str, Sequence[str], None] = "20260405_geometry_srid_constraints"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
