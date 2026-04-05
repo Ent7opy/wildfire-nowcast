@@ -136,7 +136,9 @@ def finalize_ingest_batch(
     }
 
     if error_context:
-        params["error_context"] = error_context
+        import json as _json
+
+        params["error_context_json"] = _json.dumps(error_context)
         stmt = text(
             """
             UPDATE ingest_batches
@@ -148,13 +150,13 @@ def finalize_ingest_batch(
                 records_inserted = :inserted,
                 records_skipped_duplicates = :skipped,
                 metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
+                    COALESCE(metadata, CAST('{}' AS jsonb)),
                     '{error_context}',
-                    :error_context::jsonb
+                    CAST(:error_context_json AS jsonb)
                 )
             WHERE id = :batch_id
             """
-        ).bindparams(bindparam("error_context", type_=JSON))
+        )
     else:
         stmt = text(
             """
