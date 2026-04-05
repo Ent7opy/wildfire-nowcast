@@ -358,7 +358,7 @@ def ingest_lfmc_ecland_for_bbox(
             storage_path=str(out_path),
             coverage_fraction=coverage_fraction,
         )
-    except TimeoutError as timeout_err:
+    except TimeoutError:
         # On timeout, attempt to cancel the remote job before marking as failed
         LOGGER.error("LFMC ingestion timed out for run_id=%s, attempting remote job cancellation", run_id)
         if job_id:
