@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
@@ -114,28 +115,62 @@ def finalize_ingest_batch(
     inserted: int,
     skipped: int,
     conn: Connection | None = None,
+    error_context: dict | None = None,
 ) -> None:
-    """Update ingest batch metrics and mark completion."""
-    stmt = text(
-        """
-        UPDATE ingest_batches
-        SET
-            completed_at = NOW(),
-            status = :status,
-            record_count = :inserted,
-            records_fetched = :fetched,
-            records_inserted = :inserted,
-            records_skipped_duplicates = :skipped
-        WHERE id = :batch_id
-        """
-    )
-    params = {
+    """Update ingest batch metrics and mark completion.
+
+    Args:
+        batch_id: The ingest batch ID to finalize
+        status: Status of the batch (e.g., 'succeeded', 'failed', 'no_data')
+        fetched: Number of rows fetched from FIRMS
+        inserted: Number of rows successfully inserted
+        skipped: Number of rows skipped (e.g., duplicates)
+        conn: Optional database connection (uses engine if None)
+        error_context: Optional JSON context for failures (e.g., denoiser errors)
+    """
+    params: dict[str, Any] = {
         "batch_id": batch_id,
         "status": status,
         "fetched": fetched,
         "inserted": inserted,
         "skipped": skipped,
     }
+
+    if error_context:
+        params["error_context"] = error_context
+        stmt = text(
+            """
+            UPDATE ingest_batches
+            SET
+                completed_at = NOW(),
+                status = :status,
+                record_count = :inserted,
+                records_fetched = :fetched,
+                records_inserted = :inserted,
+                records_skipped_duplicates = :skipped,
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{error_context}',
+                    :error_context::jsonb
+                )
+            WHERE id = :batch_id
+            """
+        ).bindparams(bindparam("error_context", type_=JSON))
+    else:
+        stmt = text(
+            """
+            UPDATE ingest_batches
+            SET
+                completed_at = NOW(),
+                status = :status,
+                record_count = :inserted,
+                records_fetched = :fetched,
+                records_inserted = :inserted,
+                records_skipped_duplicates = :skipped
+            WHERE id = :batch_id
+            """
+        )
+
     if conn is not None:
         conn.execute(stmt, params)
     else:
@@ -564,6 +599,96 @@ def count_consecutive_no_data_batches(
     consecutive = 0
     for status in rows:
         if status == "no_data":
+            consecutive += 1
+        else:
+            break
+
+    return consecutive
+
+
+def mark_batch_detections_review_required(
+    batch_id: int,
+    *,
+    conn: Connection | None = None,
+) -> int:
+    """Mark all detections in a batch as review_required (no denoiser results).
+
+    Used when denoiser times out too many times and we need to fall back to raw
+    detections. Sets review_required=true for all rows in the batch.
+
+    Args:
+        batch_id: The ingest batch ID
+        conn: Optional database connection
+
+    Returns:
+        Number of rows updated
+    """
+    stmt = text(
+        """
+        UPDATE fire_detections
+        SET review_required = true
+        WHERE ingest_batch_id = :batch_id
+          AND review_required IS NOT true
+        """
+    )
+
+    def _execute(active_conn: Connection) -> int:
+        result = active_conn.execute(stmt, {"batch_id": int(batch_id)})
+        return int(result.rowcount or 0)
+
+    if conn is not None:
+        return _execute(conn)
+
+    with get_engine().begin() as new_conn:
+        return _execute(new_conn)
+
+
+def count_consecutive_denoiser_timeout_batches(
+    source: str,
+    area_key: str,
+    threshold: int = 3,
+) -> int:
+    """Count consecutive denoiser timeout failures for a source+area combo.
+
+    Queries the ingest_batches table for the most recent batches with matching
+    source and area_key (from metadata). Returns the count of consecutive batches
+    with status='failed' and error_context.denoiser_timeout set to true,
+    stopping when a non-timeout batch is encountered or the threshold is exceeded.
+
+    Args:
+        source: The ingest source (e.g., 'VIIRS_SNPP_NRT')
+        area_key: The normalized area bounding box
+        threshold: Return early if count exceeds this value
+
+    Returns:
+        The number of consecutive denoiser timeout batches (0 if most recent is not a timeout)
+    """
+    select_stmt = text(
+        """
+        SELECT status, metadata->'error_context'->>'denoiser_timeout' AS is_timeout
+        FROM ingest_batches
+        WHERE source = :source
+          AND metadata->>'area_key' = :area_key
+        ORDER BY completed_at DESC
+        LIMIT :threshold_limit
+        """
+    )
+
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            select_stmt,
+            {
+                "source": source,
+                "area_key": area_key,
+                "threshold_limit": threshold + 1,
+            },
+        ).all()
+
+    consecutive = 0
+    for row in rows:
+        status, is_timeout = row
+        # A denoiser timeout is a failed batch with denoiser_timeout=true in error_context
+        if status == "failed" and is_timeout == "true":
             consecutive += 1
         else:
             break

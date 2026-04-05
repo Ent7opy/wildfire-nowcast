@@ -149,6 +149,14 @@ class FIRMSIngestSettings(BaseSettings):
     denoiser from blocking the ingest job indefinitely. Defaults to 180s (3 min).
     Set to 0 to disable (not recommended for production).
     """
+    denoiser_consecutive_timeout_threshold: int = Field(
+        default=3,
+        validation_alias="DENOISER_CONSECUTIVE_TIMEOUT_THRESHOLD",
+    )
+    """Number of consecutive denoiser timeouts before falling back to raw detections.
+    After this many consecutive timeouts on the same source+area, the batch will be
+    marked as having review_required detections instead of being rolled back entirely.
+    """
 
     @field_validator("sources", mode="before")
     @classmethod

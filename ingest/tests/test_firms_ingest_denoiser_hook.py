@@ -142,5 +142,20 @@ class TestFirmsIngestDenoiserHook(unittest.TestCase):
         self.assertNotIn("--threshold", cmd)
         self.assertNotIn("--batch-size", cmd)
 
+    @patch("subprocess.run")
+    def test_run_denoiser_inference_timeout_raises_denoiser_timeout_error_v2(self, mock_run):
+        """Test that denoiser v2 timeout also raises DenoiserTimeoutError."""
+        self.config.denoiser_pipeline_version = "v2"
+        self.config.denoiser_model_run_dir = "/models/v2"
+        self.config.denoiser_subprocess_timeout_seconds = 120
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="uv run -m ml.denoiser_inference_v2", timeout=120)
+
+        with self.assertRaises(DenoiserTimeoutError) as cm:
+            _run_denoiser_inference(batch_id=99, config=self.config)
+
+        self.assertIn("timed out after 120s", str(cm.exception))
+        self.assertIn("batch 99", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
