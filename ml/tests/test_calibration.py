@@ -9,7 +9,11 @@ import xarray as xr
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
-from ml.calibration import SpreadProbabilityCalibrator, fit_from_hindcast_run
+from ml.calibration import (
+    SpreadProbabilityCalibrator,
+    fit_binary_probability_calibrator,
+    fit_from_hindcast_run,
+)
 
 
 def test_calibrator_monotonicity_and_range():
@@ -250,5 +254,200 @@ def test_fit_from_hindcast_run_resolves_legacy_repo_relative_case_paths(monkeypa
         )
 
         assert 24 in calibrator.per_horizon_models
+    finally:
+        shutil.rmtree(tmp_root)
+
+
+def test_fit_binary_probability_calibrator_platt_with_class_weight():
+    """Platt scaling should use balanced class weights."""
+    # Create severely imbalanced data (95% negative, 5% positive, mimicking FIRMS)
+    np.random.seed(42)
+    n_samples = 1000
+    n_positive = int(0.05 * n_samples)
+    n_negative = n_samples - n_positive
+
+    scores = np.concatenate([
+        np.random.uniform(0.3, 0.7, n_negative),  # Mostly low confidence negatives
+        np.random.uniform(0.6, 0.95, n_positive),  # High confidence positives
+    ])
+    labels = np.concatenate([np.zeros(n_negative), np.ones(n_positive)])
+
+    # Shuffle
+    idx = np.random.permutation(n_samples)
+    scores = scores[idx]
+    labels = labels[idx]
+
+    # Fit Platt calibrator
+    calibrator = fit_binary_probability_calibrator(scores, labels, method="platt")
+
+    assert calibrator["type"] == "platt"
+    model = calibrator["model"]
+    assert isinstance(model, LogisticRegression)
+    # Verify that class_weight='balanced' was used
+    assert model.class_weight == "balanced"
+
+    # With balanced class weights, the model should not suppress fire confidence
+    # Test that low confidence fires are not pushed to 0
+    test_scores = np.array([0.65, 0.75, 0.85])
+    calibrated = model.predict_proba(test_scores.reshape(-1, 1))[:, 1]
+    # Even for the lower score (0.65), it shouldn't be heavily suppressed
+    assert calibrated[0] > 0.4, "Balanced class weights should prevent fire confidence suppression"
+
+
+def test_fit_from_hindcast_run_stratified_split_preserves_class_distribution():
+    """Stratified split should preserve class distribution in train/eval sets."""
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        hindcast_dir = tmp_root / "hindcast_run"
+        hindcast_dir.mkdir()
+
+        # Create 6 cases: 3 mostly positive, 3 mostly negative (like a fire-heavy vs fire-sparse period)
+        cases_config = [
+            # Cases 0-2: fire-heavy
+            (np.array([[[0.1, 0.6], [0.2, 0.7]]], dtype=np.float32),
+             np.array([[[0, 1], [0, 1]]], dtype=np.float32)),
+            (np.array([[[0.2, 0.7], [0.3, 0.8]]], dtype=np.float32),
+             np.array([[[0, 1], [1, 1]]], dtype=np.float32)),
+            (np.array([[[0.15, 0.65], [0.25, 0.75]]], dtype=np.float32),
+             np.array([[[1, 1], [0, 1]]], dtype=np.float32)),
+            # Cases 3-5: mostly noise (no fires)
+            (np.array([[[0.05, 0.15], [0.08, 0.12]]], dtype=np.float32),
+             np.array([[[0, 0], [0, 0]]], dtype=np.float32)),
+            (np.array([[[0.06, 0.14], [0.09, 0.11]]], dtype=np.float32),
+             np.array([[[0, 0], [0, 0]]], dtype=np.float32)),
+            (np.array([[[0.07, 0.13], [0.10, 0.10]]], dtype=np.float32),
+             np.array([[[0, 0], [0, 0]]], dtype=np.float32)),
+        ]
+
+        for i, (y_pred, y_obs) in enumerate(cases_config):
+            fire_t0 = np.array([[1, 0], [0, 1]], dtype=np.float32)
+            ds = xr.Dataset(
+                data_vars={
+                    "y_pred": (["time", "lat", "lon"], y_pred),
+                    "y_obs": (["time", "lat", "lon"], y_obs),
+                    "fire_t0": (["lat", "lon"], fire_t0),
+                },
+                coords={
+                    "time": [datetime(2025, 1, 1 + i)],
+                    "lat": [0, 1],
+                    "lon": [0, 1],
+                    "lead_time_hours": ("time", [24]),
+                },
+                attrs={"ref_time": f"2025-01-0{1+i}T00:00:00Z"},
+            )
+            ds.to_netcdf(hindcast_dir / f"case{i}.nc")
+
+        manifest = {
+            "run_id": "test_hindcast_stratified",
+            "cases": [{"path": str(hindcast_dir / f"case{i}.nc")} for i in range(6)],
+        }
+        with open(hindcast_dir / "index.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        fit_from_hindcast_run(
+            hindcast_run_dir=hindcast_dir,
+            method="platt",
+            split_percentile=0.5,
+            out_root=str(tmp_root / "calibration"),
+        )
+
+        # Load metrics to check stratification quality
+        runs = list((tmp_root / "calibration").glob("*"))
+        assert len(runs) == 1
+        metrics_file = runs[0] / "metrics.json"
+        assert metrics_file.exists()
+
+        with open(metrics_file, "r") as f:
+            metrics = json.load(f)
+
+        # Check that we have metrics for horizon 24 (keys are strings in JSON)
+        assert "24" in metrics
+        h24_metrics = metrics["24"]
+
+        # Verify class distribution is reported
+        assert "n_train_positive" in h24_metrics
+        assert "n_train_negative" in h24_metrics
+        assert "n_eval_positive" in h24_metrics
+        assert "n_eval_negative" in h24_metrics
+        assert "train_imbalance_ratio" in h24_metrics
+        assert "eval_imbalance_ratio" in h24_metrics
+
+        # With stratification, both train and eval should have both classes
+        assert h24_metrics["n_train_positive"] > 0
+        assert h24_metrics["n_train_negative"] > 0
+        assert h24_metrics["n_eval_positive"] > 0
+        assert h24_metrics["n_eval_negative"] > 0
+
+    finally:
+        shutil.rmtree(tmp_root)
+
+
+def test_fit_from_hindcast_run_reports_severe_imbalance_warning():
+    """Metrics should flag when class imbalance exceeds 10:1."""
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        hindcast_dir = tmp_root / "hindcast_run"
+        hindcast_dir.mkdir()
+
+        # Create cases with >10:1 imbalance (95% noise, 5% fire)
+        for i in range(4):
+            # Most grid cells are noise
+            y_pred = np.full((1, 10, 10), 0.1, dtype=np.float32)
+            y_obs = np.zeros((1, 10, 10), dtype=np.float32)
+            # Only 2-3 cells are fires (5% of 100 cells)
+            y_pred[0, 0, 0] = 0.8
+            y_obs[0, 0, 0] = 1.0
+            y_pred[0, 1, 1] = 0.75
+            y_obs[0, 1, 1] = 1.0
+
+            fire_t0 = np.zeros((10, 10), dtype=np.float32)
+            fire_t0[0, 0] = 1
+            fire_t0[1, 1] = 1
+
+            ds = xr.Dataset(
+                data_vars={
+                    "y_pred": (["time", "lat", "lon"], y_pred),
+                    "y_obs": (["time", "lat", "lon"], y_obs),
+                    "fire_t0": (["lat", "lon"], fire_t0),
+                },
+                coords={
+                    "time": [datetime(2025, 1, 1 + i)],
+                    "lat": np.arange(10),
+                    "lon": np.arange(10),
+                    "lead_time_hours": ("time", [24]),
+                },
+                attrs={"ref_time": f"2025-01-0{1+i}T00:00:00Z"},
+            )
+            ds.to_netcdf(hindcast_dir / f"case{i}.nc")
+
+        manifest = {
+            "run_id": "test_hindcast_imbalance",
+            "cases": [{"path": str(hindcast_dir / f"case{i}.nc")} for i in range(4)],
+        }
+        with open(hindcast_dir / "index.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        fit_from_hindcast_run(
+            hindcast_run_dir=hindcast_dir,
+            method="platt",
+            split_percentile=0.5,
+            out_root=str(tmp_root / "calibration"),
+        )
+
+        # Load metrics and verify imbalance warning flags
+        runs = list((tmp_root / "calibration").glob("*"))
+        assert len(runs) == 1
+        metrics_file = runs[0] / "metrics.json"
+
+        with open(metrics_file, "r") as f:
+            metrics = json.load(f)
+
+        assert "24" in metrics
+        h24_metrics = metrics["24"]
+
+        # Should flag training set imbalance
+        assert h24_metrics["train_imbalance_warning"] is True
+        assert h24_metrics["train_imbalance_ratio"] > 10.0
+
     finally:
         shutil.rmtree(tmp_root)

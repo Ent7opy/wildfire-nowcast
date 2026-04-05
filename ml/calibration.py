@@ -24,6 +24,7 @@ from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, precision_recall_curve
+from sklearn.model_selection import train_test_split
 
 # Add project root to sys.path if needed
 REPO_ROOT = Path(__file__).parent.parent
@@ -80,7 +81,7 @@ def fit_binary_probability_calibrator(
         model.fit(scores, y)
         return {"type": "isotonic", "model": model}
     if method_norm in {"platt", "logistic"}:
-        model = LogisticRegression(max_iter=1000, solver="lbfgs")
+        model = LogisticRegression(max_iter=1000, solver="lbfgs", class_weight="balanced")
         model.fit(scores.reshape(-1, 1), y)
         return {"type": "platt", "model": model}
 
@@ -400,19 +401,40 @@ def fit_from_hindcast_run(
     for h, data_list in horizon_data.items():
         if not data_list:
             continue
-            
+
         # Convert to DataFrame for easier splitting
         df = pd.DataFrame(data_list)
         df = df.sort_values("ref_time")
-        
-        split_idx = int(len(df) * split_percentile)
-        train_cases = df.iloc[:split_idx]
-        eval_cases = df.iloc[split_idx:]
-        
+
+        # Prepare stratification labels (aggregated per case)
+        # For each case, compute the predominant class across all observations
+        case_labels = []
+        for idx in df.index:
+            y_obs_array = df.loc[idx, "y_obs"]
+            # Stratify by whether positive class is present (>50% of samples)
+            pos_fraction = np.mean(y_obs_array > 0.5)
+            case_labels.append(1 if pos_fraction > 0.5 else 0)
+
+        # Use stratified split to preserve class distribution in both train and eval
+        # Only stratify if we have at least 2 samples per class (sklearn requirement)
+        unique_labels, label_counts = np.unique(case_labels, return_counts=True)
+        can_stratify = (
+            len(unique_labels) > 1 and np.all(label_counts >= 2)
+        )
+        train_indices, eval_indices = train_test_split(
+            range(len(df)),
+            test_size=1.0 - split_percentile,
+            random_state=42,
+            stratify=case_labels if can_stratify else None,
+        )
+
+        train_cases = df.iloc[train_indices]
+        eval_cases = df.iloc[eval_indices]
+
         if train_cases.empty:
             LOGGER.warning(f"No training data for horizon {h}h; skipping.")
             continue
-            
+
         X_train = np.concatenate(train_cases["y_pred"].values)
         y_train = np.concatenate(train_cases["y_obs"].values)
         
@@ -440,12 +462,12 @@ def fit_from_hindcast_run(
             LOGGER.info(f"Only one class in training data for T+{h}h; Isotonic will predict constant value.")
 
         LOGGER.info(f"Fitting {effective_method} calibrator for T+{h}h on {len(X_train)} samples...")
-        
+
         if effective_method == "isotonic":
             model = IsotonicRegression(out_of_bounds="clip")
             model.fit(X_train, y_train)
         elif effective_method == "platt":
-            model = LogisticRegression(solver="lbfgs")
+            model = LogisticRegression(solver="lbfgs", class_weight="balanced")
             # X needs to be (n_samples, 1)
             model.fit(X_train.reshape(-1, 1), y_train)
         else:
@@ -457,26 +479,51 @@ def fit_from_hindcast_run(
         if not eval_cases.empty:
             X_eval = np.concatenate(eval_cases["y_pred"].values)
             y_eval = np.concatenate(eval_cases["y_obs"].values)
-            
+
             # Predict
             if isinstance(model, IsotonicRegression):
                 y_cal = model.predict(X_eval)
             else:
                 y_cal = model.predict_proba(X_eval.reshape(-1, 1))[:, 1]
-            
+
             # Metrics
             brier_raw = brier_score_loss(y_eval, X_eval)
             brier_cal = brier_score_loss(y_eval, y_cal)
-            
+
             # Reliability curve
             prob_true_raw, prob_pred_raw = calibration_curve(y_eval, X_eval, n_bins=10)
             prob_true_cal, prob_pred_cal = calibration_curve(y_eval, y_cal, n_bins=10)
-            
+
+            # Class imbalance diagnostics
+            n_train_positive = int(np.sum(y_train > 0.5))
+            n_train_negative = int(np.sum(y_train <= 0.5))
+            n_eval_positive = int(np.sum(y_eval > 0.5))
+            n_eval_negative = int(np.sum(y_eval <= 0.5))
+
+            # Compute imbalance ratios (majority:minority)
+            train_imbalance_ratio = max(n_train_negative, n_train_positive) / max(
+                min(n_train_negative, n_train_positive), 1
+            )
+            eval_imbalance_ratio = max(n_eval_negative, n_eval_positive) / max(
+                min(n_eval_negative, n_eval_positive), 1
+            )
+
+            # Flag if imbalance exceeds 10:1
+            train_imbalance_warning = train_imbalance_ratio > 10.0
+            eval_imbalance_warning = eval_imbalance_ratio > 10.0
+
             metrics[h] = {
                 "method": effective_method,
                 "n_train": int(X_train.size),
                 "n_eval": int(X_eval.size),
-                "n_train_positive": int(np.sum(y_train > 0.5)),
+                "n_train_positive": n_train_positive,
+                "n_train_negative": n_train_negative,
+                "n_eval_positive": n_eval_positive,
+                "n_eval_negative": n_eval_negative,
+                "train_imbalance_ratio": float(train_imbalance_ratio),
+                "eval_imbalance_ratio": float(eval_imbalance_ratio),
+                "train_imbalance_warning": bool(train_imbalance_warning),
+                "eval_imbalance_warning": bool(eval_imbalance_warning),
                 "brier_raw": float(brier_raw),
                 "brier_cal": float(brier_cal),
                 "improvement": float(brier_raw - brier_cal),
@@ -489,6 +536,20 @@ def fit_from_hindcast_run(
                     "prob_pred": prob_pred_cal.tolist(),
                 }
             }
+
+            # Log warning if imbalance is severe
+            if train_imbalance_warning:
+                LOGGER.warning(
+                    f"T+{h}h training set has severe class imbalance: {train_imbalance_ratio:.1f}:1 "
+                    f"(positive={n_train_positive}, negative={n_train_negative}). "
+                    f"Platt scaling is using class_weight='balanced' to mitigate."
+                )
+            if eval_imbalance_warning:
+                LOGGER.warning(
+                    f"T+{h}h evaluation set has severe class imbalance: {eval_imbalance_ratio:.1f}:1 "
+                    f"(positive={n_eval_positive}, negative={n_eval_negative})."
+                )
+
             LOGGER.info(
                 f"T+{h}h calibration: Brier {brier_raw:.4f} -> {brier_cal:.4f} "
                 f"(diff={brier_raw-brier_cal:.4f})"
