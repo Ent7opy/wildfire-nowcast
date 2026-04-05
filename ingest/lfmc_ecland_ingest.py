@@ -111,6 +111,29 @@ def _create_run_record(
     return int(row["id"])
 
 
+def _update_run_record_remote_job_id(
+    *,
+    run_id: int,
+    remote_job_id: str,
+) -> None:
+    """Update the remote_job_id field in fuel_moisture_runs."""
+    stmt = sa.text(
+        """
+        UPDATE fuel_moisture_runs
+        SET remote_job_id = :remote_job_id
+        WHERE id = :run_id
+        """
+    )
+    with get_engine().begin() as conn:
+        conn.execute(
+            stmt,
+            {
+                "run_id": int(run_id),
+                "remote_job_id": str(remote_job_id),
+            },
+        )
+
+
 def _finalize_run_record(
     *,
     run_id: int,
@@ -135,6 +158,34 @@ def _finalize_run_record(
                 "coverage_fraction": coverage_fraction,
             },
         )
+
+
+def _cancel_job(
+    *,
+    client: httpx.Client,
+    api_url: str,
+    job_id: str,
+) -> None:
+    """Best-effort cancel of remote LFMC job. Logs but does not raise on failure."""
+    try:
+        # Try DELETE first
+        response = client.delete(f"{api_url}/jobs/{job_id}", headers=_auth_headers())
+        response.raise_for_status()
+        LOGGER.info("Cancelled LFMC ecLand job %s via DELETE", job_id)
+    except Exception as delete_err:
+        LOGGER.debug("DELETE failed for job %s, trying POST cancel: %s", job_id, delete_err)
+        try:
+            # Fallback to POST cancel endpoint
+            response = client.post(f"{api_url}/jobs/{job_id}/cancel", headers=_auth_headers())
+            response.raise_for_status()
+            LOGGER.info("Cancelled LFMC ecLand job %s via POST /cancel", job_id)
+        except Exception as post_err:
+            LOGGER.warning(
+                "Failed to cancel LFMC ecLand job %s (DELETE: %s, POST /cancel: %s)",
+                job_id,
+                delete_err,
+                post_err,
+            )
 
 
 def _submit_job(
@@ -205,6 +256,48 @@ def _download_result(
                 fh.write(chunk)
 
 
+def _check_orphaned_jobs(
+    *,
+    client: httpx.Client,
+    api_url: str,
+    timeout_seconds: int = 1800,
+) -> None:
+    """Query for running jobs older than timeout threshold and attempt cancellation.
+
+    Reconciles orphaned remote jobs from previous timeout events.
+    """
+    stmt = sa.text(
+        """
+        SELECT id, remote_job_id
+        FROM fuel_moisture_runs
+        WHERE status = 'running'
+          AND remote_job_id IS NOT NULL
+          AND created_at < NOW() - INTERVAL '1 second' * :timeout_seconds
+        """
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(
+            stmt,
+            {"timeout_seconds": int(timeout_seconds)},
+        ).mappings().fetchall()
+
+    for row in rows:
+        run_id = int(row["id"])
+        job_id = str(row["remote_job_id"])
+        LOGGER.info("Found orphaned LFMC job %s (run_id=%s), attempting cancellation", job_id, run_id)
+        try:
+            _cancel_job(client=client, api_url=api_url, job_id=job_id)
+            _finalize_run_record(
+                run_id=run_id,
+                status="failed",
+                storage_path="",
+                coverage_fraction=None,
+            )
+            LOGGER.info("Marked orphaned run %s as failed after remote cancellation", run_id)
+        except Exception as e:
+            LOGGER.warning("Error processing orphaned job %s: %s", job_id, e)
+
+
 def ingest_lfmc_ecland_for_bbox(
     *,
     bbox: tuple[float, float, float, float],
@@ -222,10 +315,24 @@ def ingest_lfmc_ecland_for_bbox(
     out_path = out_root / out_name
     run_id = _create_run_record(run_time=resolved_time, bbox=bbox, storage_path=f"pending://{out_name}")
     coverage_fraction: float | None = None
+    job_id: str | None = None
 
     try:
         with httpx.Client(timeout=120.0) as client:
+            # Check for orphaned jobs from previous timeout events before starting new work
+            try:
+                _check_orphaned_jobs(
+                    client=client,
+                    api_url=api_url,
+                    timeout_seconds=int(timeout_seconds),
+                )
+            except Exception as e:
+                LOGGER.warning("Error checking for orphaned jobs: %s", e)
+
             job_id = _submit_job(client=client, api_url=api_url, run_time=resolved_time, bbox=bbox)
+            # Persist the remote job_id in case of timeout
+            _update_run_record_remote_job_id(run_id=run_id, remote_job_id=job_id)
+
             body = _poll_job_until_ready(
                 client=client,
                 api_url=api_url,
@@ -251,7 +358,19 @@ def ingest_lfmc_ecland_for_bbox(
             storage_path=str(out_path),
             coverage_fraction=coverage_fraction,
         )
-    except Exception:
+    except TimeoutError as timeout_err:
+        # On timeout, attempt to cancel the remote job before marking as failed
+        LOGGER.error("LFMC ingestion timed out for run_id=%s, attempting remote job cancellation", run_id)
+        if job_id:
+            try:
+                with httpx.Client(timeout=30.0) as cancel_client:
+                    _cancel_job(client=cancel_client, api_url=api_url, job_id=job_id)
+            except Exception as cancel_err:
+                LOGGER.warning("Error cancelling remote job %s: %s", job_id, cancel_err)
+        _finalize_run_record(run_id=run_id, status="failed", storage_path=str(out_path), coverage_fraction=None)
+        raise
+    except Exception as e:
+        LOGGER.error("LFMC ingestion failed for run_id=%s: %s", run_id, e)
         _finalize_run_record(run_id=run_id, status="failed", storage_path=str(out_path), coverage_fraction=None)
         raise
 
