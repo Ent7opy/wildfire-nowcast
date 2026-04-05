@@ -577,28 +577,108 @@ def run_firms_ingest(
                 inserted,
                 skipped_duplicates,
             )
-        except DenoiserTimeoutError:
+        except DenoiserTimeoutError as timeout_err:
             LOGGER.error(
-                "Denoiser timed out for source=%s batch=%s — rolling back inserted detections",
+                "Denoiser timed out for source=%s batch=%s — checking consecutive timeout count",
                 source,
                 batch_id,
             )
-            try:
-                deleted = repository.delete_detections_for_batch(batch_id)
-                LOGGER.warning(
-                    "Rolled back %s detections for timed-out denoiser batch %s",
-                    deleted,
-                    batch_id,
-                )
-            except Exception:
-                LOGGER.exception("Failed to rollback detections for timed-out batch %s", batch_id)
-            repository.finalize_ingest_batch(
-                batch_id,
-                status="failed",
-                fetched=fetched_count,
-                inserted=0,
-                skipped=0,
+            # Check how many consecutive timeouts have occurred for this source+area
+            consecutive_timeouts = repository.count_consecutive_denoiser_timeout_batches(
+                source=source,
+                area_key=area_key,
+                threshold=int(config.denoiser_consecutive_timeout_threshold),
             )
+            consecutive_timeouts += 1  # Include the current timeout
+
+            timeout_context = {
+                "denoiser_timeout": True,
+                "timeout_seconds": config.denoiser_subprocess_timeout_seconds,
+                "consecutive_timeout_count": consecutive_timeouts,
+                "threshold": config.denoiser_consecutive_timeout_threshold,
+                "error_message": str(timeout_err),
+            }
+
+            if consecutive_timeouts >= config.denoiser_consecutive_timeout_threshold:
+                # Critical: Fall back to raw detections with review_required flag
+                log_event(
+                    LOGGER,
+                    "firms.denoiser_critical",
+                    f"CRITICAL: Denoiser has timed out {consecutive_timeouts} times "
+                    f"for source={source} area_key={area_key}. Falling back to raw detections "
+                    f"with review_required flag.",
+                    level="critical",
+                    source=source,
+                    area_key=area_key,
+                    batch_id=batch_id,
+                    consecutive_timeout_count=consecutive_timeouts,
+                    threshold=config.denoiser_consecutive_timeout_threshold,
+                )
+                # Mark all detections as requiring review and finalize with success
+                try:
+                    mark_count = repository.mark_batch_detections_review_required(batch_id)
+                    LOGGER.info(
+                        "Marked %s detections as review_required after denoiser timeout fallback",
+                        mark_count,
+                    )
+                    with repository.get_engine().execution_options(isolation_level="SERIALIZABLE").begin() as commit_conn:
+                        repository.finalize_ingest_batch(
+                            batch_id,
+                            status="succeeded",
+                            fetched=fetched_count,
+                            inserted=inserted,
+                            skipped=max(skipped_duplicates, 0),
+                            conn=commit_conn,
+                            error_context=timeout_context,
+                        )
+                        if watermark_advanced_to is not None and not is_archive_mode:
+                            repository.advance_ingest_watermark(
+                                source=source,
+                                area_key=area_key,
+                                last_acq_time_utc=watermark_advanced_to,
+                                last_batch_id=batch_id,
+                                conn=commit_conn,
+                            )
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to apply review_required fallback for timed-out batch %s",
+                        batch_id,
+                    )
+                    repository.finalize_ingest_batch(
+                        batch_id,
+                        status="failed",
+                        fetched=fetched_count,
+                        inserted=0,
+                        skipped=0,
+                        error_context=timeout_context,
+                    )
+                    return 1
+            else:
+                # Under threshold: Roll back and retry
+                LOGGER.warning(
+                    "Denoiser timeout %d/%d for source=%s area_key=%s — rolling back inserted detections",
+                    consecutive_timeouts,
+                    config.denoiser_consecutive_timeout_threshold,
+                    source,
+                    area_key,
+                )
+                try:
+                    deleted = repository.delete_detections_for_batch(batch_id)
+                    LOGGER.warning(
+                        "Rolled back %s detections for timed-out denoiser batch %s",
+                        deleted,
+                        batch_id,
+                    )
+                except Exception:
+                    LOGGER.exception("Failed to rollback detections for timed-out batch %s", batch_id)
+                repository.finalize_ingest_batch(
+                    batch_id,
+                    status="failed",
+                    fetched=fetched_count,
+                    inserted=0,
+                    skipped=0,
+                    error_context=timeout_context,
+                )
             return 1
         except Exception as e:  # pragma: no cover - defensive logging
             LOGGER.exception("Ingest failed for source=%s batch=%s — exception details: %s", source, batch_id, str(e))
