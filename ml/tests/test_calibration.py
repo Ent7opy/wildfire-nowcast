@@ -5,7 +5,6 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import pytest
 import xarray as xr
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
@@ -345,7 +344,7 @@ def test_fit_from_hindcast_run_stratified_split_preserves_class_distribution():
         with open(hindcast_dir / "index.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f)
 
-        calibrator = fit_from_hindcast_run(
+        fit_from_hindcast_run(
             hindcast_run_dir=hindcast_dir,
             method="platt",
             split_percentile=0.5,
@@ -428,7 +427,7 @@ def test_fit_from_hindcast_run_reports_severe_imbalance_warning():
         with open(hindcast_dir / "index.json", "w", encoding="utf-8") as f:
             json.dump(manifest, f)
 
-        calibrator = fit_from_hindcast_run(
+        fit_from_hindcast_run(
             hindcast_run_dir=hindcast_dir,
             method="platt",
             split_percentile=0.5,
