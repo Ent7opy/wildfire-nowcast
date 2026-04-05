@@ -137,6 +137,7 @@ services:
     build:
       context: ./api
     command: uv run rq worker
+    restart: unless-stopped
     volumes:
       - ./api:/app/api:delegated
       - ./data:/app/data
@@ -173,7 +174,10 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      disable: true
+      test: ["CMD", "redis-cli", "-h", "redis", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   ingest_scheduler:
     build:
