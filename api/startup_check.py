@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.config import AppSettings
+from api.db import get_engine
 
 LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +96,72 @@ def validate_spread_model_artifact_paths() -> None:
                     )
 
 
+def validate_geometry_srid_constraints() -> None:
+    """Verify that geometry columns have SRID 4326 (WGS84) at runtime.
+
+    This check ensures that geometries stored with SRID -1 (unknown) or any
+    other non-4326 SRID are caught before they cause silent failures in
+    spatial queries.
+
+    Logs a WARNING if any geometry column is found with SRID != 4326.
+    Does not raise StartupError — the DB constraint added in migration
+    20260405_geometry_srid_constraints will prevent future bad inserts.
+    """
+    # Tables and their geometry columns to check
+    geometry_columns = [
+        ("fire_detections", "geom"),
+        ("fire_events", "geom"),
+        ("fire_fronts", "geom"),
+        ("fire_perimeters", "geom"),
+        ("perimeter_coverage_masks", "geom"),
+        ("authoritative_perimeters", "geom"),
+        ("aois", "geom"),
+        ("aois", "bbox"),
+        ("industrial_sources", "geom"),
+        ("industrial_no_go_zones", "geom"),
+        ("ne_populated_places", "geom"),
+        ("spread_forecast_runs", "bbox"),
+        ("spread_forecast_contours", "geom"),
+        ("terrain_metadata", "bbox"),
+        ("terrain_features_metadata", "bbox"),
+        ("jit_forecast_jobs", "bbox"),
+    ]
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            bad_srids = []
+
+            # Check each geometry column
+            for table_name, col_name in geometry_columns:
+                try:
+                    # Use a simple query to check if table/column exists and its SRID
+                    query = f"SELECT ST_SRID({col_name}) FROM {table_name} LIMIT 1"
+                    result = conn.execute(query)
+                    row = result.fetchone()
+                    if row is not None:
+                        srid = row[0]
+                        if srid is not None and srid != 4326:
+                            bad_srids.append(f"{table_name}.{col_name} (SRID={srid})")
+                except Exception:
+                    # Table or column doesn't exist yet (OK before migrations run)
+                    pass
+
+            if bad_srids:
+                LOGGER.warning(
+                    "GEOMETRY SRID MISMATCH: The following geometry columns have SRID != 4326. "
+                    "This may cause silent failures in spatial queries. "
+                    "Check the database and ensure all geometries use SRID 4326 (WGS84): %s",
+                    ", ".join(bad_srids),
+                )
+    except Exception as e:
+        LOGGER.warning(
+            "Could not validate geometry SRIDs at startup: %s. "
+            "Spatial queries may fail if geometries use incorrect SRIDs.",
+            e,
+        )
+
+
 def warn_optional_config(gemini_api_key: str) -> None:
     """Log warnings for optional config that won't block startup."""
     if not gemini_api_key or not gemini_api_key.strip():
@@ -108,8 +175,9 @@ def run_api_startup_checks(settings: AppSettings) -> None:
     """Run all API startup checks.
 
     Raises StartupError on fatal misconfiguration.
-    Logs WARNING for optional missing config.
+    Logs WARNING for optional missing config and geometry SRID mismatches.
     """
     validate_database_url(settings.database_url)
     validate_spread_model_artifact_paths()
+    validate_geometry_srid_constraints()
     warn_optional_config(settings.gemini_api_key)

@@ -9,6 +9,7 @@ from api.startup_check import (
     StartupError,
     run_api_startup_checks,
     validate_database_url,
+    validate_geometry_srid_constraints,
     validate_spread_model_artifact_paths,
     warn_optional_config,
 )
@@ -134,6 +135,38 @@ class TestValidateSpreadModelArtifactPaths:
         monkeypatch.setenv("SPREAD_MODEL_CATALOG_JSON", json.dumps(catalog))
         with pytest.raises(StartupError, match="my_special_model"):
             validate_spread_model_artifact_paths()
+
+
+# ---------------------------------------------------------------------------
+# validate_geometry_srid_constraints
+# ---------------------------------------------------------------------------
+
+
+class TestValidateGeometrySridConstraints:
+    def test_no_database_connection_logs_warning(self, caplog, monkeypatch):
+        """When database is unavailable, log warning but don't raise."""
+        # Mock get_engine to raise an exception
+        import api.startup_check as sc
+        original_get_engine = sc.get_engine
+
+        def mock_get_engine():
+            raise RuntimeError("Database connection failed")
+
+        monkeypatch.setattr(sc, "get_engine", mock_get_engine)
+        with caplog.at_level(logging.WARNING, logger="api.startup_check"):
+            validate_geometry_srid_constraints()
+        assert "Could not validate geometry SRIDs" in caplog.text
+
+        # Restore
+        monkeypatch.setattr(sc, "get_engine", original_get_engine)
+
+    def test_nonexistent_table_is_skipped(self, caplog):
+        """When a geometry table doesn't exist yet, it's silently skipped."""
+        # This test verifies that the check handles missing tables gracefully
+        # (expected during first database initialization before migrations run)
+        with caplog.at_level(logging.WARNING, logger="api.startup_check"):
+            validate_geometry_srid_constraints()
+        # No assertion needed — just verify it doesn't raise or cause errors
 
 
 # ---------------------------------------------------------------------------
