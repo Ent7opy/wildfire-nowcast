@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ from ml.calibration import (
     optimize_threshold_for_target_recall,
 )
 from ml.denoiser.coverage_authority import get_coverage_freshness, require_coverage_freshness
+from ml.denoiser.runtime_contract import DenoiserRuntimeContract, write_contract
 from ml.parquet_io import read_parquet_with_fallback
 
 try:
@@ -1658,6 +1660,10 @@ def train_denoiser_v2(config: Dict[str, Any]) -> str:
 
     with open(os.path.join(run_dir, "feature_list.json"), "w", encoding="utf-8") as f:
         json.dump(features, f, indent=2)
+
+    # Export runtime contract for inference-time feature validation (Issue #281).
+    contract = DenoiserRuntimeContract(features=tuple(features))
+    write_contract(Path(run_dir) / "runtime_contract.json", contract)
 
     training_summary = {
         "run_id": run_name,

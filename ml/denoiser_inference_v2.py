@@ -20,6 +20,11 @@ from ml.denoiser.eventize import EventizeParams, eventize_detections
 from ml.denoiser.weather_context import WeatherContextParams, append_weather_context_features
 from ml.denoiser.moisture_context import MoistureContextParams, append_moisture_context_features
 from ingest.config import settings as ingest_settings
+from ml.denoiser.runtime_contract import (
+    ContractViolationError,
+    load_contract,
+    validate_feature_alignment,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -306,26 +311,52 @@ def _normalize_static_score(series: pd.Series, neutral_values: tuple[float, ...]
 def _load_bundle(model_run_dir: str) -> dict[str, Any]:
     bundle_path = os.path.join(model_run_dir, "model_bundle.pkl")
     if os.path.exists(bundle_path):
-        return joblib.load(bundle_path)
+        bundle = joblib.load(bundle_path)
+    else:
+        # Minimal compatibility fallback.
+        model = joblib.load(os.path.join(model_run_dir, "model.pkl"))
+        with open(os.path.join(model_run_dir, "feature_list.json"), "r", encoding="utf-8") as f:
+            features = json.load(f)
+        bundle = {
+            "model": model,
+            "features": features,
+            "slice_cols": ["sensor_id", "biome_slice"],
+            "global_calibrator": {"type": "identity", "model": None},
+            "slice_calibrators": {},
+            "thresholds": {
+                "decision": 0.5,
+                "strong_filter": ingest_settings.denoiser_strong_filter_threshold,
+                "downweight": ingest_settings.denoiser_downweight_threshold,
+                "uncertainty_band_low": ingest_settings.denoiser_uncertainty_band_low,
+                "uncertainty_band_high": ingest_settings.denoiser_uncertainty_band_high,
+            },
+        }
 
-    # Minimal compatibility fallback.
-    model = joblib.load(os.path.join(model_run_dir, "model.pkl"))
-    with open(os.path.join(model_run_dir, "feature_list.json"), "r", encoding="utf-8") as f:
-        features = json.load(f)
-    return {
-        "model": model,
-        "features": features,
-        "slice_cols": ["sensor_id", "biome_slice"],
-        "global_calibrator": {"type": "identity", "model": None},
-        "slice_calibrators": {},
-        "thresholds": {
-            "decision": 0.5,
-            "strong_filter": ingest_settings.denoiser_strong_filter_threshold,
-            "downweight": ingest_settings.denoiser_downweight_threshold,
-            "uncertainty_band_low": ingest_settings.denoiser_uncertainty_band_low,
-            "uncertainty_band_high": ingest_settings.denoiser_uncertainty_band_high,
-        },
-    }
+    # --- Runtime contract validation (Issue #281) ---
+    contract_path = os.path.join(model_run_dir, "runtime_contract.json")
+    if os.path.exists(contract_path):
+        try:
+            contract = load_contract(contract_path)
+            validate_feature_alignment(bundle["features"], contract.features)
+            LOGGER.info(
+                "Runtime contract validated: %d features match", contract.n_features
+            )
+        except ContractViolationError:
+            raise  # hard stop — never swallow feature mismatches
+        except Exception:
+            LOGGER.warning(
+                "Failed to validate runtime contract at %s — proceeding without validation",
+                contract_path,
+                exc_info=True,
+            )
+    else:
+        LOGGER.warning(
+            "No runtime_contract.json found at %s — skipping feature validation. "
+            "Re-export model to generate a contract.",
+            model_run_dir,
+        )
+
+    return bundle
 
 
 def _apply_calibrator(cal: dict[str, Any], scores: np.ndarray) -> np.ndarray:
