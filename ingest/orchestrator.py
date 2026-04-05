@@ -238,6 +238,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Database cleanup run interval in minutes (loop mode).",
     )
     parser.add_argument(
+        "--max-batch-age-minutes",
+        type=float,
+        default=120.0,
+        help=(
+            "Maximum age (in minutes) for 'running' ingest batches before they are "
+            "considered stuck (zombie) and expired. Default 120 = 2x default 60-minute "
+            "incremental FIRMS lookback window."
+        ),
+    )
+    parser.add_argument(
         "--operator-accuracy-interval-minutes",
         type=float,
         default=10080.0,
@@ -827,16 +837,27 @@ def _run_operator_accuracy(args: argparse.Namespace) -> int:  # noqa: ARG001
 
 
 def _run_cleanup(args: argparse.Namespace) -> int:
-    """Run database cleanup.
+    """Run database cleanup and zombie batch reaper.
 
     Performs real cleanup by default. Set CLEANUP_DRY_RUN=true to count eligible
     rows without deleting (operator dry-run only; scheduled path always deletes).
+
+    Also runs the zombie batch reaper to expire 'running' batches that have
+    exceeded their timeout (default 2x incremental_lookback_minutes).
     """
     # Lazy import: avoids pulling api.db into module scope at startup.
     from scripts.db_cleanup import cleanup  # noqa: PLC0415
 
     dry_run = os.getenv("CLEANUP_DRY_RUN", "false").lower() in ("1", "true", "yes")
     cleanup(dry_run=dry_run)
+
+    # Reap zombie batches (batches stuck in 'running' state longer than 2x lookback window).
+    # Default is 120 minutes (2 * 60-minute default incremental lookback).
+    max_batch_age_minutes = getattr(args, "max_batch_age_minutes", 120)
+    reaped = _reap_zombie_batches(max_age_minutes=int(max_batch_age_minutes))
+    if reaped > 0:
+        LOGGER.info("Reaped %d zombie batch(es) during cleanup job", reaped)
+
     return 0
 
 

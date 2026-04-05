@@ -864,6 +864,75 @@ class TestExpireStaleRunningBatches(unittest.TestCase):
         count = _reap_zombie_batches(expire_fn=lambda _: [])
         self.assertEqual(0, count)
 
+    def test_cleanup_job_calls_reaper(self):
+        """The _run_cleanup function should call the zombie reaper with configured max_age."""
+        from ingest.orchestrator import _run_cleanup
+
+        reaped_calls: list[int] = []
+
+        def _mock_reaper(max_age_minutes: int) -> int:
+            reaped_calls.append(max_age_minutes)
+            return 1
+
+        args = argparse.Namespace(
+            max_batch_age_minutes=120,
+        )
+
+        with (
+            patch("scripts.db_cleanup.cleanup"),
+            patch("ingest.orchestrator._reap_zombie_batches", side_effect=_mock_reaper),
+        ):
+            exit_code = _run_cleanup(args)
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual([120], reaped_calls)
+
+    def test_cleanup_job_uses_custom_batch_age(self):
+        """The _run_cleanup function should use custom max_batch_age_minutes from args."""
+        from ingest.orchestrator import _run_cleanup
+
+        reaped_calls: list[int] = []
+
+        def _mock_reaper(max_age_minutes: int) -> int:
+            reaped_calls.append(max_age_minutes)
+            return 0
+
+        args = argparse.Namespace(
+            max_batch_age_minutes=240,
+        )
+
+        with (
+            patch("scripts.db_cleanup.cleanup"),
+            patch("ingest.orchestrator._reap_zombie_batches", side_effect=_mock_reaper),
+        ):
+            exit_code = _run_cleanup(args)
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual([240], reaped_calls)
+
+    def test_cleanup_job_logs_when_zombies_reaped(self):
+        """The _run_cleanup function should log when zombies are reaped."""
+        from ingest.orchestrator import _run_cleanup
+
+        def _mock_reaper(max_age_minutes: int) -> int:
+            return 3
+
+        args = argparse.Namespace(
+            max_batch_age_minutes=120,
+        )
+
+        with (
+            patch("scripts.db_cleanup.cleanup"),
+            patch("ingest.orchestrator._reap_zombie_batches", side_effect=_mock_reaper),
+            self.assertLogs("ingest_orchestrator", level="INFO") as log_ctx,
+        ):
+            exit_code = _run_cleanup(args)
+
+        self.assertEqual(0, exit_code)
+        log_text = "\n".join(log_ctx.output)
+        self.assertIn("3", log_text)
+        self.assertIn("zombie", log_text.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

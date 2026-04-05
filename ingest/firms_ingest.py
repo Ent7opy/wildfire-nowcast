@@ -600,8 +600,8 @@ def run_firms_ingest(
                 skipped=0,
             )
             return 1
-        except Exception:  # pragma: no cover - defensive logging
-            LOGGER.exception("Ingest failed for source=%s batch=%s", source, batch_id)
+        except Exception as e:  # pragma: no cover - defensive logging
+            LOGGER.exception("Ingest failed for source=%s batch=%s — exception details: %s", source, batch_id, str(e))
             persisted_after_cleanup = 0
             try:
                 persisted_before_cleanup = repository.count_detections_for_batch(batch_id)
@@ -615,12 +615,15 @@ def run_firms_ingest(
                 persisted_after_cleanup = repository.count_detections_for_batch(batch_id)
             except Exception:
                 LOGGER.exception("Failed to cleanup detections for failed batch %s", batch_id)
+            # For exception cases, we don't have accurate duplicate counts since the error
+            # occurred during processing. Set skipped to 0 since persisted_after_cleanup
+            # represents rows that survived the failure, not duplicates.
             repository.finalize_ingest_batch(
                 batch_id,
                 status="failed",
                 fetched=fetched_count,
                 inserted=persisted_after_cleanup,
-                skipped=max(rows_after_watermark_filter - persisted_after_cleanup, 0),
+                skipped=0,
             )
             return 1
 
