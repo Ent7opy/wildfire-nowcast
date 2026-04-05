@@ -102,6 +102,190 @@ def test_ingest_weather_for_bbox_respects_bbox_overrides():
     assert captured.get("bbox") == requested_bbox
 
 
+def test_validate_grib_file_temporal_metadata_valid(caplog):
+    """Validate that GRIB with correct temporal metadata passes."""
+    run_time = datetime(2026, 4, 5, 0, 0, tzinfo=timezone.utc)
+    forecast_hour = 12
+
+    # Create mock dataset with valid_time
+    mock_ds = MagicMock()
+    mock_ds.data_vars = {"u10": MagicMock(), "v10": MagicMock()}
+    expected_valid_time = run_time + np.timedelta64(forecast_hour, "h")
+    mock_ds.__getitem__ = lambda self, key: (
+        MagicMock(
+            data=np.datetime64(expected_valid_time),
+            item=lambda: np.datetime64(expected_valid_time),
+        )
+        if key == "valid_time"
+        else MagicMock()
+    )
+    mock_ds.__contains__ = lambda self, key: key == "valid_time"
+
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with patch(
+            "ingest.weather_ingest.xr.open_dataset",
+            return_value=mock_ds,
+        ):
+            # Should not raise
+            _validate_grib_file(
+                Path(tmp.name),
+                run_time=run_time,
+                forecast_hour=forecast_hour,
+            )
+
+
+def test_validate_grib_file_temporal_metadata_mismatch_raises(caplog):
+    """Validate that GRIB with mismatched valid_time raises ValueError."""
+    run_time = datetime(2026, 4, 5, 0, 0, tzinfo=timezone.utc)
+    forecast_hour = 12
+
+    # Create mock dataset with wrong valid_time (off by 6 hours)
+    mock_ds = MagicMock()
+    mock_ds.data_vars = {"u10": MagicMock()}
+    wrong_valid_time = run_time + np.timedelta64(18, "h")  # Should be 12h
+    mock_ds.__getitem__ = lambda self, key: (
+        MagicMock(
+            data=np.datetime64(wrong_valid_time),
+            item=lambda: np.datetime64(wrong_valid_time),
+        )
+        if key == "valid_time"
+        else MagicMock()
+    )
+    mock_ds.__contains__ = lambda self, key: key == "valid_time"
+
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with (
+            patch(
+                "ingest.weather_ingest.xr.open_dataset",
+                return_value=mock_ds,
+            ),
+            pytest.raises(
+                ValueError, match="GRIB valid_time mismatch"
+            ),
+            caplog.at_level(logging.ERROR, logger="weather_ingest"),
+        ):
+            _validate_grib_file(
+                Path(tmp.name),
+                run_time=run_time,
+                forecast_hour=forecast_hour,
+            )
+
+        # Should log error about mismatch
+        assert any(
+            "temporal metadata mismatch" in r.message for r in caplog.records
+        ), "Expected temporal mismatch error; got: " + str([r.message for r in caplog.records])
+
+
+def test_validate_grib_file_temporal_metadata_within_tolerance(caplog):
+    """Validate that GRIB with valid_time within 2-hour tolerance passes."""
+    run_time = datetime(2026, 4, 5, 0, 0, tzinfo=timezone.utc)
+    forecast_hour = 12
+
+    # Create mock dataset with valid_time slightly off (1 hour difference)
+    mock_ds = MagicMock()
+    mock_ds.data_vars = {"u10": MagicMock()}
+    slightly_off_valid_time = run_time + np.timedelta64(13, "h")  # 1h off
+    mock_ds.__getitem__ = lambda self, key: (
+        MagicMock(
+            data=np.datetime64(slightly_off_valid_time),
+            item=lambda: np.datetime64(slightly_off_valid_time),
+        )
+        if key == "valid_time"
+        else MagicMock()
+    )
+    mock_ds.__contains__ = lambda self, key: key == "valid_time"
+
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with patch(
+            "ingest.weather_ingest.xr.open_dataset",
+            return_value=mock_ds,
+        ):
+            # Should not raise (within 2h tolerance)
+            _validate_grib_file(
+                Path(tmp.name),
+                run_time=run_time,
+                forecast_hour=forecast_hour,
+            )
+
+
+def test_validate_grib_file_temporal_metadata_computed_from_time_step(caplog):
+    """Validate that GRIB without valid_time but with time+step is handled."""
+    run_time = datetime(2026, 4, 5, 0, 0, tzinfo=timezone.utc)
+    forecast_hour = 12
+
+    # Create mock dataset without valid_time, but with time + step
+    mock_ds = MagicMock()
+    mock_ds.data_vars = {"u10": MagicMock()}
+    mock_ds.__getitem__ = lambda self, key: (
+        MagicMock(
+            data=np.datetime64(run_time),
+            item=lambda: np.datetime64(run_time),
+        )
+        if key == "time"
+        else (
+            MagicMock(
+                data=np.timedelta64(forecast_hour, "h"),
+                item=lambda: np.timedelta64(forecast_hour, "h"),
+            )
+            if key == "step"
+            else MagicMock()
+        )
+    )
+    mock_ds.__contains__ = lambda self, key: key in ("time", "step")
+
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with patch(
+            "ingest.weather_ingest.xr.open_dataset",
+            return_value=mock_ds,
+        ):
+            # Should not raise, computing valid_time = time + step
+            _validate_grib_file(
+                Path(tmp.name),
+                run_time=run_time,
+                forecast_hour=forecast_hour,
+            )
+
+
+def test_validate_grib_file_optional_temporal_validation(caplog):
+    """Validate that omitting run_time/forecast_hour skips temporal validation."""
+    mock_ds = MagicMock()
+    mock_ds.data_vars = {"u10": MagicMock()}
+    # Dataset with wrong valid_time, but temporal validation should be skipped
+    wrong_valid_time = datetime(2020, 1, 1, 0, 0, tzinfo=timezone.utc)
+    mock_ds.__getitem__ = lambda self, key: (
+        MagicMock(
+            data=np.datetime64(wrong_valid_time),
+            item=lambda: np.datetime64(wrong_valid_time),
+        )
+        if key == "valid_time"
+        else MagicMock()
+    )
+    mock_ds.__contains__ = lambda self, key: key == "valid_time"
+
+    with tempfile.NamedTemporaryFile(suffix=".grib2") as tmp:
+        tmp.write(b"x" * 256)
+        tmp.flush()
+
+        with patch(
+            "ingest.weather_ingest.xr.open_dataset",
+            return_value=mock_ds,
+        ):
+            # Should not raise because run_time/forecast_hour are not provided
+            _validate_grib_file(Path(tmp.name))
+
+
 def test_validate_grib_file_multilevel_succeeds_via_cfgrib_fallback(caplog):
     """Multi-level GRIB: primary attempt fails, cfgrib.open_datasets fallback validates."""
     mock_ds = MagicMock()
