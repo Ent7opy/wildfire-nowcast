@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -16,7 +14,6 @@ import numpy as np
 
 from api.db import get_engine
 from ingest.lfmc_ecland_ingest import (
-    _auth_headers,
     _cancel_job,
     _check_orphaned_jobs,
     _create_run_record,
@@ -178,7 +175,7 @@ class TestCancelJob:
 
     def test_cancel_job_via_delete(self):
         """Test successful job cancellation via DELETE."""
-        with mock.patch("ingest.lfmc_ecland_ingest.httpx.Client") as mock_client_class:
+        with mock.patch("ingest.lfmc_ecland_ingest.httpx.Client"):
             mock_client = mock.MagicMock()
             mock_response = mock.MagicMock()
             mock_response.raise_for_status.return_value = None
@@ -196,7 +193,7 @@ class TestCancelJob:
 
     def test_cancel_job_fallback_to_post(self):
         """Test job cancellation fallback to POST /cancel."""
-        with mock.patch("ingest.lfmc_ecland_ingest.httpx.Client") as mock_client_class:
+        with mock.patch("ingest.lfmc_ecland_ingest.httpx.Client"):
             mock_client = mock.MagicMock()
             delete_response = mock.MagicMock()
             delete_response.raise_for_status.side_effect = httpx.HTTPStatusError(
@@ -221,7 +218,7 @@ class TestCancelJob:
 
     def test_cancel_job_both_methods_fail_does_not_raise(self):
         """Test that cancellation failure is logged but does not raise."""
-        with mock.patch("ingest.lfmc_ecland_ingest.httpx.Client") as mock_client_class:
+        with mock.patch("ingest.lfmc_ecland_ingest.httpx.Client"):
             mock_client = mock.MagicMock()
             delete_response = mock.MagicMock()
             delete_response.raise_for_status.side_effect = httpx.HTTPStatusError(
