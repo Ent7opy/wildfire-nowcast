@@ -26,6 +26,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from sqlalchemy import JSON, bindparam, text
 
+from ingest.perimeter_authority import (
+    FIRE_PERIMETERS_SOURCE_TIER,
+    log_authority_conflict,
+    record_authority_conflict,
+    should_overwrite,
+)
 from ingest.repository import get_engine
 
 logging.basicConfig(
@@ -224,6 +230,8 @@ def _parse_feature(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if v is not None and v != "" and not isinstance(v, (bytes, bytearray)):
             meta[k] = v
 
+    authority_tier = FIRE_PERIMETERS_SOURCE_TIER.get("NIFC", "gold")
+
     return {
         "wkt": wkt,
         "source": "NIFC",
@@ -235,13 +243,52 @@ def _parse_feature(feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "cause": cause,
         "state": state,
         "meta": meta,
+        "authority_tier": authority_tier,
     }
+
+
+def _log_and_record_conflict(
+    conn: Any,
+    *,
+    source: str,
+    source_id: str,
+    incoming_tier: str,
+    existing_tier: str,
+    outcome: str,
+) -> None:
+    """Log an authority conflict and write it to the audit table."""
+    if outcome == "rejected":
+        log_authority_conflict(
+            source=source,
+            source_id=source_id,
+            incoming_tier=incoming_tier,
+            existing_tier=existing_tier,
+        )
+    else:
+        LOGGER.info(
+            "Authority overwrite: source=%s source_id=%s tier=%s overwrites existing tier=%s",
+            source, source_id, incoming_tier, existing_tier,
+        )
+    record_authority_conflict(
+        conn,
+        table_name="fire_perimeters",
+        source=source,
+        source_id=source_id,
+        incoming_tier=incoming_tier,
+        existing_tier=existing_tier,
+        outcome=outcome,
+    )
 
 
 def ingest_perimeters(features: List[Dict[str, Any]]) -> int:
     """Parse and insert NIFC perimeter features into the DB.
 
-    Returns the number of rows inserted.
+    Uses authority-tier-aware upsert logic: an incoming record can only
+    overwrite an existing one if its authority tier is equal or higher
+    (lower numeric rank).  Conflicts are audited in the
+    ``perimeter_authority_conflicts`` table.
+
+    Returns the number of rows upserted.
     """
     engine = get_engine()
     rows = []
@@ -260,11 +307,17 @@ def ingest_perimeters(features: List[Dict[str, Any]]) -> int:
 
     LOGGER.info("Parsed %d perimeters (%d skipped).", len(rows), skipped)
 
+    # Authority-aware upsert: only overwrite when incoming tier is equal or
+    # higher authority.  The WHERE clause on the UPDATE arm ensures that a
+    # lower-authority source cannot silently replace a higher-authority record.
     insert_stmt = text("""
-        INSERT INTO fire_perimeters (geom, source, source_id, fire_name, fire_start, fire_end, acres, cause, state, meta)
+        INSERT INTO fire_perimeters
+            (geom, source, source_id, fire_name, fire_start, fire_end,
+             acres, cause, state, meta, authority_tier)
         VALUES (
             ST_Multi(ST_GeomFromText(:wkt, 4326)),
-            :source, :source_id, :fire_name, :fire_start, :fire_end, :acres, :cause, :state, :meta
+            :source, :source_id, :fire_name, :fire_start, :fire_end,
+            :acres, :cause, :state, :meta, :authority_tier
         )
         ON CONFLICT (source, source_id) DO UPDATE SET
             geom = EXCLUDED.geom,
@@ -275,21 +328,80 @@ def ingest_perimeters(features: List[Dict[str, Any]]) -> int:
             cause = EXCLUDED.cause,
             state = EXCLUDED.state,
             meta = EXCLUDED.meta,
+            authority_tier = EXCLUDED.authority_tier,
             created_at = NOW()
     """).bindparams(bindparam("meta", type_=JSON))
 
+    # Query to look up the existing tier for a (source, source_id) pair.
+    existing_tier_stmt = text("""
+        SELECT authority_tier FROM fire_perimeters
+        WHERE source = :source AND source_id = :source_id
+    """)
+
     batch_size = 100
-    inserted = 0
+    upserted = 0
+    authority_rejected = 0
     with engine.begin() as conn:
         for i in range(0, len(rows), batch_size):
             batch = rows[i : i + batch_size]
-            conn.execute(insert_stmt, batch)
-            inserted += len(batch)
-            if (i + batch_size) % 500 == 0 or i + batch_size >= len(rows):
-                LOGGER.info("  Inserted %d / %d perimeters...", min(i + batch_size, len(rows)), len(rows))
 
-    LOGGER.info("Successfully ingested %d perimeters.", inserted)
-    return inserted
+            # Pre-fetch existing tiers for the batch to detect conflicts.
+            existing_tiers: Dict[str, Optional[str]] = {}
+            for row in batch:
+                result = conn.execute(
+                    existing_tier_stmt,
+                    {"source": row["source"], "source_id": row["source_id"]},
+                ).fetchone()
+                if result is not None:
+                    existing_tiers[row["source_id"]] = result[0]
+
+            # Separate rows into accepted and rejected based on authority.
+            accepted_batch = []
+            for row in batch:
+                existing_tier = existing_tiers.get(row["source_id"])
+                if existing_tier is not None and not should_overwrite(
+                    row["authority_tier"], existing_tier
+                ):
+                    authority_rejected += 1
+                    _log_and_record_conflict(
+                        conn,
+                        source=row["source"],
+                        source_id=row["source_id"],
+                        incoming_tier=row["authority_tier"],
+                        existing_tier=existing_tier,
+                        outcome="rejected",
+                    )
+                    continue
+                # Record accepted overwrites (when there was an existing row).
+                if existing_tier is not None:
+                    _log_and_record_conflict(
+                        conn,
+                        source=row["source"],
+                        source_id=row["source_id"],
+                        incoming_tier=row["authority_tier"],
+                        existing_tier=existing_tier,
+                        outcome="accepted",
+                    )
+                accepted_batch.append(row)
+
+            if accepted_batch:
+                conn.execute(insert_stmt, accepted_batch)
+                upserted += len(accepted_batch)
+
+            total_done = min(i + batch_size, len(rows))
+            if total_done % 500 == 0 or total_done >= len(rows):
+                LOGGER.info(
+                    "  Processed %d / %d perimeters (upserted=%d, rejected=%d)...",
+                    total_done, len(rows), upserted, authority_rejected,
+                )
+
+    if authority_rejected:
+        LOGGER.warning(
+            "Authority conflicts: %d perimeters rejected (lower authority).",
+            authority_rejected,
+        )
+    LOGGER.info("Successfully ingested %d perimeters.", upserted)
+    return upserted
 
 
 def main() -> None:

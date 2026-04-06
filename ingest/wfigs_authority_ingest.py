@@ -14,6 +14,11 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
+from ingest.perimeter_authority import (
+    log_authority_conflict,
+    record_authority_conflict,
+    should_overwrite,
+)
 from ingest.repository import get_engine
 
 LOGGER = logging.getLogger("wfigs_authority_ingest")
@@ -379,7 +384,11 @@ def _finish_run(
 def _upsert_perimeters(rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
-    stmt = text(
+
+    # Authority-aware upsert: only overwrite when the incoming tier is equal
+    # or higher authority (alphabetically: blocked > bronze > gold > silver,
+    # but we use the WHERE clause to compare by tier rank).
+    insert_stmt = text(
         """
         INSERT INTO authoritative_perimeters (
             source_profile,
@@ -456,9 +465,77 @@ def _upsert_perimeters(rows: list[dict[str, Any]]) -> int:
             updated_at = NOW()
         """
     )
+
+    existing_tier_stmt = text(
+        """
+        SELECT tier FROM authoritative_perimeters
+        WHERE source_profile = :source_profile
+          AND source_layer = :source_layer
+          AND source_object_id = :source_object_id
+        """
+    )
+
+    upserted = 0
+    authority_rejected = 0
     with get_engine().begin() as conn:
-        result = conn.execute(stmt, rows)
-    return int(result.rowcount or 0)
+        accepted: list[dict[str, Any]] = []
+        for row in rows:
+            result = conn.execute(
+                existing_tier_stmt,
+                {
+                    "source_profile": row["source_profile"],
+                    "source_layer": row["source_layer"],
+                    "source_object_id": row["source_object_id"],
+                },
+            ).fetchone()
+            existing_tier = result[0] if result else None
+
+            if existing_tier is not None and not should_overwrite(
+                row["tier"], existing_tier
+            ):
+                authority_rejected += 1
+                log_authority_conflict(
+                    source=row["source_profile"],
+                    source_id=row["source_object_id"],
+                    incoming_tier=row["tier"],
+                    existing_tier=existing_tier,
+                )
+                record_authority_conflict(
+                    conn,
+                    table_name="authoritative_perimeters",
+                    source=row["source_profile"],
+                    source_id=row["source_object_id"],
+                    incoming_tier=row["tier"],
+                    existing_tier=existing_tier,
+                    outcome="rejected",
+                    run_id=row.get("run_id"),
+                )
+                continue
+
+            if existing_tier is not None:
+                record_authority_conflict(
+                    conn,
+                    table_name="authoritative_perimeters",
+                    source=row["source_profile"],
+                    source_id=row["source_object_id"],
+                    incoming_tier=row["tier"],
+                    existing_tier=existing_tier,
+                    outcome="accepted",
+                    run_id=row.get("run_id"),
+                )
+            accepted.append(row)
+
+        if accepted:
+            result = conn.execute(insert_stmt, accepted)
+            upserted = int(result.rowcount or 0)
+
+        if authority_rejected:
+            LOGGER.warning(
+                "WFIGS authority conflicts: %d records rejected (lower authority).",
+                authority_rejected,
+            )
+
+    return upserted
 
 
 def _fetch_features(
