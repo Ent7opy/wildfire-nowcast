@@ -196,7 +196,7 @@ def _validate_temporal_metadata(
 
         # Convert to datetime if it's a numpy datetime64
         if isinstance(valid_time_scalar, np.datetime64):
-            valid_time = valid_time_scalar.astype("datetime64[ns]").astype(datetime)
+            valid_time = valid_time_scalar.astype("datetime64[us]").item()
         else:
             valid_time = valid_time_scalar
     elif "time" in ds and "step" in ds:
@@ -211,13 +211,13 @@ def _validate_temporal_metadata(
 
         # Convert time to datetime
         if isinstance(time_val, np.datetime64):
-            time_dt = time_val.astype("datetime64[ns]").astype(datetime)
+            time_dt = time_val.astype("datetime64[us]").item()
         else:
             time_dt = time_val
 
         # Convert step to timedelta
         if isinstance(step_val, np.timedelta64):
-            step_td = step_val.astype("timedelta64[ns]").astype(timedelta)
+            step_td = step_val.astype("timedelta64[us]").item()
         else:
             step_td = step_val
 
