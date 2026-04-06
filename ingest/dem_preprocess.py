@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from dem_stitcher import stitch_dem
+from scipy.ndimage import gaussian_filter1d
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from rasterio.crs import CRS
@@ -127,8 +128,228 @@ class DemIngestSettings(BaseSettings):
         )
 
 
+# ---------------------------------------------------------------------------
+# Seam blending: Copernicus GLO-30 tiles are 1-degree; boundaries fall on
+# integer degree lines.  After stitching, small elevation jumps at these seams
+# propagate as spurious slope/aspect features.  We detect boundary pixel rows/
+# cols from the geotransform and apply a narrow 1-D Gaussian blur across the
+# seam to smooth discontinuities without degrading the interior.
+# ---------------------------------------------------------------------------
+
+# Default half-width (in pixels) of the corridor blended on each side of a seam.
+_SEAM_BLEND_HALF_WIDTH: int = 3
+# Gaussian sigma (pixels) for seam smoothing.
+_SEAM_BLEND_SIGMA: float = 1.0
+# Slope discontinuity (degrees) threshold for QA warnings at tile seams.
+_SEAM_SLOPE_WARN_THRESHOLD_DEG: float = 5.0
+# GLO-30 tiles are 1-degree on each side.
+_TILE_SIZE_DEG: float = 1.0
+
+
+def _integer_degree_pixel_indices(
+    origin: float,
+    pixel_size: float,
+    n_pixels: int,
+) -> list[int]:
+    """Return pixel indices where integer-degree tile boundaries fall.
+
+    Parameters
+    ----------
+    origin : float
+        Coordinate (lon or lat) of the west or north edge of pixel 0.
+    pixel_size : float
+        Signed pixel size in degrees (negative for north-up rows).
+    n_pixels : int
+        Number of pixels along this axis.
+
+    Returns
+    -------
+    List of pixel indices that straddle an integer-degree line.
+    Only interior boundaries are returned (not the edges of the raster).
+    """
+    abs_size = abs(pixel_size)
+    if abs_size == 0:
+        return []
+
+    indices: list[int] = []
+    for i in range(n_pixels):
+        coord = origin + (i + 0.5) * pixel_size  # center of pixel i
+        # Distance from the nearest integer-degree boundary
+        nearest_int = round(coord)
+        if abs(coord - nearest_int) < abs_size * 0.6:
+            # Exclude raster-edge boundaries (first/last few pixels)
+            if _SEAM_BLEND_HALF_WIDTH < i < n_pixels - _SEAM_BLEND_HALF_WIDTH:
+                indices.append(i)
+    return indices
+
+
+def blend_tile_seams(
+    data: np.ndarray,
+    profile: dict,
+    *,
+    half_width: int = _SEAM_BLEND_HALF_WIDTH,
+    sigma: float = _SEAM_BLEND_SIGMA,
+) -> np.ndarray:
+    """Apply Gaussian smoothing along tile-boundary seam lines.
+
+    Only pixels within *half_width* of an integer-degree boundary are touched.
+    The rest of the DEM is left unchanged.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        2-D elevation array (height x width), float or compatible.
+    profile : dict
+        Rasterio-style profile with ``transform``, ``width``, ``height``.
+    half_width : int
+        Number of pixels on each side of the seam to include in blending.
+    sigma : float
+        Standard deviation (in pixels) for the 1-D Gaussian kernel.
+
+    Returns
+    -------
+    np.ndarray with the same shape and dtype as *data*.
+    """
+    transform = profile["transform"]
+    height, width = data.shape[-2], data.shape[-1]
+
+    # Work on a float copy so we never mutate the caller's array.
+    blended = np.array(data, dtype=np.float64)
+
+    # --- Vertical seam lines (boundaries along longitude = integer degrees) ---
+    col_indices = _integer_degree_pixel_indices(
+        origin=float(transform.c),  # west edge of col 0
+        pixel_size=float(transform.a),  # positive (east)
+        n_pixels=width,
+    )
+    for ci in col_indices:
+        lo = max(ci - half_width, 0)
+        hi = min(ci + half_width + 1, width)
+        strip = blended[:, lo:hi].copy()
+        # 1-D Gaussian along the column (horizontal) axis within the strip.
+        finite_mask = np.isfinite(strip)
+        if finite_mask.any():
+            smoothed = gaussian_filter1d(
+                np.where(finite_mask, strip, 0.0), sigma=sigma, axis=1
+            )
+            blended[:, lo:hi] = np.where(finite_mask, smoothed, strip)
+
+    # --- Horizontal seam lines (boundaries along latitude = integer degrees) ---
+    row_indices = _integer_degree_pixel_indices(
+        origin=float(transform.f),  # north edge of row 0
+        pixel_size=float(transform.e),  # negative (south)
+        n_pixels=height,
+    )
+    for ri in row_indices:
+        lo = max(ri - half_width, 0)
+        hi = min(ri + half_width + 1, height)
+        strip = blended[lo:hi, :].copy()
+        finite_mask = np.isfinite(strip)
+        if finite_mask.any():
+            smoothed = gaussian_filter1d(
+                np.where(finite_mask, strip, 0.0), sigma=sigma, axis=0
+            )
+            blended[lo:hi, :] = np.where(finite_mask, smoothed, strip)
+
+    n_seams = len(col_indices) + len(row_indices)
+    if n_seams:
+        LOGGER.info(
+            "Blended %d tile seam(s) (half_width=%d, sigma=%.1f): "
+            "%d vertical, %d horizontal",
+            n_seams, half_width, sigma,
+            len(col_indices), len(row_indices),
+        )
+    else:
+        LOGGER.debug("No interior tile seams detected; blending skipped.")
+
+    return blended.astype(data.dtype)
+
+
+def check_seam_quality(
+    data: np.ndarray,
+    profile: dict,
+    *,
+    half_width: int = _SEAM_BLEND_HALF_WIDTH,
+    slope_threshold_deg: float = _SEAM_SLOPE_WARN_THRESHOLD_DEG,
+) -> list[dict]:
+    """QA check: flag tile seams where the cross-seam slope exceeds a threshold.
+
+    Computes the pixel-to-pixel elevation difference across each seam line and
+    converts to approximate slope degrees.  Returns a list of warning dicts
+    (empty means all seams are clean).
+    """
+    transform = profile["transform"]
+    height, width = data.shape[-2], data.shape[-1]
+    cell_m = abs(float(transform.a)) * METERS_PER_DEG_AT_EQUATOR  # approx
+
+    warnings: list[dict] = []
+
+    col_indices = _integer_degree_pixel_indices(
+        float(transform.c), float(transform.a), width,
+    )
+    for ci in col_indices:
+        if ci < 1 or ci >= width:
+            continue
+        diff = np.abs(data[:, ci].astype(float) - data[:, ci - 1].astype(float))
+        slope_deg = np.rad2deg(np.arctan2(diff, cell_m))
+        max_slope = float(np.nanmax(slope_deg))
+        if max_slope > slope_threshold_deg:
+            coord = float(transform.c) + ci * float(transform.a)
+            warn = {
+                "axis": "longitude",
+                "boundary_deg": round(coord, 6),
+                "pixel_index": ci,
+                "max_cross_seam_slope_deg": round(max_slope, 2),
+            }
+            warnings.append(warn)
+            log_event(
+                LOGGER,
+                "dem.seam_quality",
+                "Cross-seam slope exceeds threshold",
+                level="warning",
+                **warn,
+                threshold_deg=slope_threshold_deg,
+            )
+
+    row_indices = _integer_degree_pixel_indices(
+        float(transform.f), float(transform.e), height,
+    )
+    for ri in row_indices:
+        if ri < 1 or ri >= height:
+            continue
+        diff = np.abs(data[ri, :].astype(float) - data[ri - 1, :].astype(float))
+        slope_deg = np.rad2deg(np.arctan2(diff, cell_m))
+        max_slope = float(np.nanmax(slope_deg))
+        if max_slope > slope_threshold_deg:
+            coord = float(transform.f) + ri * float(transform.e)
+            warn = {
+                "axis": "latitude",
+                "boundary_deg": round(coord, 6),
+                "pixel_index": ri,
+                "max_cross_seam_slope_deg": round(max_slope, 2),
+            }
+            warnings.append(warn)
+            log_event(
+                LOGGER,
+                "dem.seam_quality",
+                "Cross-seam slope exceeds threshold",
+                level="warning",
+                **warn,
+                threshold_deg=slope_threshold_deg,
+            )
+
+    if not warnings:
+        LOGGER.info("Seam QA passed: no cross-seam slope discontinuities above %.1f°", slope_threshold_deg)
+
+    return warnings
+
+
 def load_raw_dem(bounds: tuple[float, float, float, float]) -> tuple[np.ndarray, dict]:
-    """Fetch Copernicus GLO-30 DEM tiles for the requested bounds."""
+    """Fetch Copernicus GLO-30 DEM tiles for the requested bounds.
+
+    After stitching, applies seam blending along tile boundaries and runs a
+    QA check for residual cross-seam discontinuities.
+    """
     LOGGER.info("Stitching DEM for bounds=%s", bounds)
     data, profile = stitch_dem(
         bounds,
@@ -136,7 +357,15 @@ def load_raw_dem(bounds: tuple[float, float, float, float]) -> tuple[np.ndarray,
         dst_ellipsoidal_height=False,
         dst_area_or_point="Point",
     )
-    return np.asarray(data), profile
+    raw = np.asarray(data)
+
+    # Blend tile-boundary seams to suppress elevation jumps.
+    blended = blend_tile_seams(raw, profile)
+
+    # QA: warn if any seam still has an abnormal discontinuity after blending.
+    check_seam_quality(blended, profile)
+
+    return blended, profile
 
 
 def _grid_transform(grid: GridSpec):
