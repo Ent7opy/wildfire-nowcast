@@ -108,3 +108,117 @@ def record_authority_conflict(
         "run_id": run_id,
         "details": _json.dumps(details) if details else None,
     })
+
+
+def authority_aware_upsert(
+    conn: Any,
+    *,
+    insert_stmt: Any,
+    rows: list[dict[str, Any]],
+    table_name: str = "authoritative_perimeters",
+    source_label: str = "unknown",
+    logger: logging.Logger | None = None,
+) -> tuple[int, int]:
+    """Filter *rows* by authority tier then execute *insert_stmt* for accepted rows.
+
+    For each row the function checks the existing tier in *table_name*.  If the
+    incoming tier does not have equal or higher authority the row is rejected and
+    an audit record is written to ``perimeter_authority_conflicts``.
+
+    Note: SELECT-then-INSERT has no row-level lock.  Safe because ingest jobs
+    are serialized by the orchestrator.  If ingest is ever parallelized, add
+    ``SELECT ... FOR UPDATE``.
+
+    Parameters
+    ----------
+    conn:
+        An active SQLAlchemy connection (inside a transaction).
+    insert_stmt:
+        A ``sqlalchemy.text`` INSERT ... ON CONFLICT statement.
+    rows:
+        Dicts that must contain ``source_profile``, ``source_layer``,
+        ``source_object_id``, ``tier``, and optionally ``run_id``.
+    table_name:
+        The target table name used for the tier lookup and audit trail.
+    source_label:
+        Human-readable label used in log messages (e.g. "WFIGS", "CWFIS").
+    logger:
+        Logger instance; falls back to the module-level ``LOGGER``.
+
+    Returns
+    -------
+    (upserted, authority_rejected)
+    """
+    from sqlalchemy import text as _text
+
+    _log = logger or LOGGER
+
+    existing_tier_stmt = _text(f"""
+        SELECT tier FROM {table_name}
+        WHERE source_profile = :source_profile
+          AND source_layer = :source_layer
+          AND source_object_id = :source_object_id
+    """)
+
+    accepted: list[dict[str, Any]] = []
+    authority_rejected = 0
+
+    for row in rows:
+        result = conn.execute(
+            existing_tier_stmt,
+            {
+                "source_profile": row["source_profile"],
+                "source_layer": row["source_layer"],
+                "source_object_id": row["source_object_id"],
+            },
+        ).fetchone()
+        existing_tier = result[0] if result else None
+
+        if existing_tier is not None and not should_overwrite(
+            row["tier"], existing_tier
+        ):
+            authority_rejected += 1
+            log_authority_conflict(
+                source=row["source_profile"],
+                source_id=row["source_object_id"],
+                incoming_tier=row["tier"],
+                existing_tier=existing_tier,
+            )
+            record_authority_conflict(
+                conn,
+                table_name=table_name,
+                source=row["source_profile"],
+                source_id=row["source_object_id"],
+                incoming_tier=row["tier"],
+                existing_tier=existing_tier,
+                outcome="rejected",
+                run_id=row.get("run_id"),
+            )
+            continue
+
+        if existing_tier is not None:
+            record_authority_conflict(
+                conn,
+                table_name=table_name,
+                source=row["source_profile"],
+                source_id=row["source_object_id"],
+                incoming_tier=row["tier"],
+                existing_tier=existing_tier,
+                outcome="accepted",
+                run_id=row.get("run_id"),
+            )
+        accepted.append(row)
+
+    upserted = 0
+    if accepted:
+        result = conn.execute(insert_stmt, accepted)
+        upserted = int(result.rowcount or 0)
+
+    if authority_rejected:
+        _log.warning(
+            "%s authority conflicts: %d records rejected (lower authority).",
+            source_label,
+            authority_rejected,
+        )
+
+    return upserted, authority_rejected

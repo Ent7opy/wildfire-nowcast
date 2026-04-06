@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import ingest.perimeter_authority as mod
 
 
@@ -72,6 +74,140 @@ def test_log_authority_conflict_emits_warning() -> None:
         incoming_tier="bronze",
         existing_tier="gold",
     )
+
+
+def test_record_authority_conflict_executes_insert() -> None:
+    """Verify record_authority_conflict calls conn.execute with expected params."""
+    mock_conn = MagicMock()
+
+    mod.record_authority_conflict(
+        mock_conn,
+        table_name="authoritative_perimeters",
+        source="wfigs_current",
+        source_id="OBJ-42",
+        incoming_tier="bronze",
+        existing_tier="gold",
+        outcome="rejected",
+        run_id="run_001",
+        details={"reason": "test"},
+    )
+
+    mock_conn.execute.assert_called_once()
+    args, kwargs = mock_conn.execute.call_args
+    # First positional arg is the SQL text object.
+    params = args[1]
+    assert params["table_name"] == "authoritative_perimeters"
+    assert params["source"] == "wfigs_current"
+    assert params["source_id"] == "OBJ-42"
+    assert params["incoming_tier"] == "bronze"
+    assert params["existing_tier"] == "gold"
+    assert params["outcome"] == "rejected"
+    assert params["run_id"] == "run_001"
+    assert '"reason"' in params["details"]
+
+
+def test_authority_aware_upsert_rejects_lower_authority() -> None:
+    """authority_aware_upsert should reject rows with lower authority than existing."""
+    mock_conn = MagicMock()
+    # Simulate an existing gold row for the lookup SELECT.
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = ("gold",)
+    mock_conn.execute.return_value = mock_result
+
+    fake_insert = MagicMock()
+    rows = [
+        {
+            "source_profile": "test_profile",
+            "source_layer": "test_layer",
+            "source_object_id": "id_1",
+            "tier": "bronze",
+            "run_id": "run_x",
+        },
+    ]
+
+    upserted, rejected = mod.authority_aware_upsert(
+        mock_conn,
+        insert_stmt=fake_insert,
+        rows=rows,
+        source_label="Test",
+    )
+
+    assert upserted == 0
+    assert rejected == 1
+    # The INSERT statement should never have been executed (no accepted rows).
+    for c in mock_conn.execute.call_args_list:
+        assert c[0][0] is not fake_insert
+
+
+def test_authority_aware_upsert_accepts_equal_or_higher() -> None:
+    """authority_aware_upsert should accept rows with equal or higher authority."""
+    mock_conn = MagicMock()
+
+    # First call: tier lookup returns silver; second call: the bulk INSERT.
+    lookup_result = MagicMock()
+    lookup_result.fetchone.return_value = ("silver",)
+    insert_result = MagicMock()
+    insert_result.rowcount = 1
+    mock_conn.execute.side_effect = [
+        lookup_result,   # SELECT tier (record_authority_conflict also calls execute)
+        MagicMock(),     # INSERT into perimeter_authority_conflicts (accepted audit)
+        insert_result,   # bulk INSERT ... ON CONFLICT
+    ]
+
+    fake_insert = MagicMock()
+    rows = [
+        {
+            "source_profile": "test_profile",
+            "source_layer": "test_layer",
+            "source_object_id": "id_1",
+            "tier": "gold",
+            "run_id": "run_y",
+        },
+    ]
+
+    upserted, rejected = mod.authority_aware_upsert(
+        mock_conn,
+        insert_stmt=fake_insert,
+        rows=rows,
+        source_label="Test",
+    )
+
+    assert upserted == 1
+    assert rejected == 0
+
+
+def test_authority_aware_upsert_new_row_no_existing() -> None:
+    """When no existing row, accept without audit record."""
+    mock_conn = MagicMock()
+
+    lookup_result = MagicMock()
+    lookup_result.fetchone.return_value = None  # no existing row
+    insert_result = MagicMock()
+    insert_result.rowcount = 1
+    mock_conn.execute.side_effect = [lookup_result, insert_result]
+
+    fake_insert = MagicMock()
+    rows = [
+        {
+            "source_profile": "p",
+            "source_layer": "l",
+            "source_object_id": "id_new",
+            "tier": "silver",
+            "run_id": "run_z",
+        },
+    ]
+
+    upserted, rejected = mod.authority_aware_upsert(
+        mock_conn,
+        insert_stmt=fake_insert,
+        rows=rows,
+        source_label="Test",
+    )
+
+    assert upserted == 1
+    assert rejected == 0
+    # Only 2 execute calls: SELECT tier + bulk INSERT (no audit for brand-new row).
+    assert mock_conn.execute.call_count == 2
 
 
 def test_nifc_parse_feature_includes_authority_tier() -> None:
