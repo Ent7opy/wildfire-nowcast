@@ -11,6 +11,7 @@ import { createElement } from "react";
 
 import { useAppStore } from "../state/store";
 import { useForecastPolling } from "../hooks/useForecastPolling";
+import type { ForecastRequestContext } from "../types/state";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,8 +64,9 @@ const ACTIVE_FORECAST_STATE = {
   activeRequest: {
     lat: 37.5,
     lon: -122.0,
-    locationLabel: "Test Area"
-  },
+    locationLabel: "Test Area",
+    eventSnapshot: {}
+  } as ForecastRequestContext,
   pollCount: 0,
   notification: null,
   lastForecast: null
