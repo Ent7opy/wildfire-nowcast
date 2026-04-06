@@ -179,7 +179,10 @@ export default function FireMap({
         includeReviewRequired: true,
         limit: eventLimitForZoom(debouncedMapView.zoom)
       }),
-    placeholderData: (prev) => prev
+    placeholderData: (prev) => prev,
+    // In live mode, refresh data every 60s. Archive queries are static — no interval needed.
+    refetchInterval: isArchiveMode ? false : 60_000,
+    staleTime: isArchiveMode ? Infinity : 50_000,
   });
 
   const frontsQuery = useQuery({
@@ -194,7 +197,10 @@ export default function FireMap({
         limit: frontLimitForZoom(debouncedMapView.zoom)
       }),
     enabled: shouldLoadFronts(debouncedMapView.zoom),
-    placeholderData: (prev) => prev
+    placeholderData: (prev) => prev,
+    // In live mode, refresh data every 60s. Archive queries are static — no interval needed.
+    refetchInterval: isArchiveMode ? false : 60_000,
+    staleTime: isArchiveMode ? Infinity : 50_000,
   });
 
   const riskQuery = useQuery({
