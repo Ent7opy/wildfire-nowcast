@@ -300,14 +300,25 @@ class TestGetArchiveRangeStatus:
 
 
 class TestArchiveIngestRangeRateLimiting:
-    """Test rate limiting behavior for POST /fires/archive/ingest-range."""
+    """Test rate limiting behavior for POST /fires/archive/ingest-range.
+
+    The rate limiter uses atomic SET NX EX on the first hit so that the TTL is
+    always set in the same operation as the counter creation (fixes #368).
+    Subsequent hits within the same window use INCR.
+
+    Mock contract:
+      - redis.set(..., nx=True) returns a truthy value (e.g. True) when the key
+        did NOT exist (first request in window).
+      - redis.set(..., nx=True) returns None/falsy when the key already existed
+        (subsequent requests in window); in that case redis.incr() is called.
+    """
 
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_first_request_succeeds(self, mock_get_redis, mock_queue_cls, client):
-        """First request within rate limit window should succeed."""
+        """First request in a window: SET NX EX succeeds, count = 1 → allowed."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 1  # First request: count = 1
+        mock_redis.set.return_value = True  # Key created atomically
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -316,13 +327,16 @@ class TestArchiveIngestRangeRateLimiting:
             json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
         )
         assert resp.status_code == 202
+        # INCR must NOT be called on the first hit
+        mock_redis.incr.assert_not_called()
 
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_second_request_within_limit_succeeds(self, mock_get_redis, mock_queue_cls, client):
-        """Second request within the short limit (3 per 60s) should succeed."""
+        """Second request: SET NX EX returns None (key existed), INCR returns 2 → allowed."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 2  # Second request: count = 2
+        mock_redis.set.return_value = None  # Key already existed
+        mock_redis.incr.return_value = 2
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -335,9 +349,10 @@ class TestArchiveIngestRangeRateLimiting:
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_third_request_within_limit_succeeds(self, mock_get_redis, mock_queue_cls, client):
-        """Third request within the short limit (3 per 60s) should succeed."""
+        """Third request within the short limit (3 per 60s): INCR returns 3 → allowed."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 3  # Third request: count = 3
+        mock_redis.set.return_value = None  # Key already existed
+        mock_redis.incr.return_value = 3
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -350,9 +365,10 @@ class TestArchiveIngestRangeRateLimiting:
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_fourth_request_exceeds_short_limit(self, mock_get_redis, mock_queue_cls, client):
-        """Fourth request exceeds the short limit (3 per 60s) and should be rejected."""
+        """Fourth request: INCR returns 4 > short limit (3) → 429."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 4  # Fourth request: count = 4 > 3
+        mock_redis.set.return_value = None  # Key already existed
+        mock_redis.incr.return_value = 4
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -369,10 +385,9 @@ class TestArchiveIngestRangeRateLimiting:
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_large_range_uses_stricter_limit(self, mock_get_redis, mock_queue_cls, client):
-        """Large range (>5 days) should use stricter limit (1 per 300s)."""
-        # For a 6-day range, the first request should succeed
+        """Large range (>5 days): first request uses stricter limit (1 per 300s) → allowed."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 1  # First request: count = 1
+        mock_redis.set.return_value = True  # Key created atomically
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -381,15 +396,22 @@ class TestArchiveIngestRangeRateLimiting:
             json={"start_date": _recent_date(6), "end_date": _recent_date(1)},
         )
         assert resp.status_code == 202
-        # Verify the stricter long-window limit was checked
-        mock_redis.expire.assert_called_once()
+        # Verify atomic SET was called with the long-window TTL (300 s)
+        mock_redis.set.assert_called_once()
+        call_kwargs = mock_redis.set.call_args
+        assert call_kwargs.kwargs.get("ex") == 300 or (
+            len(call_kwargs.args) >= 3 and call_kwargs.args[2] == 300
+        )
+        # INCR must NOT be called on the first hit
+        mock_redis.incr.assert_not_called()
 
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_large_range_second_request_exceeds_limit(self, mock_get_redis, mock_queue_cls, client):
-        """Second request for large range exceeds stricter limit (1 per 300s)."""
+        """Second request for large range: INCR returns 2 > long limit (1) → 429."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 2  # Second request: count = 2 > 1
+        mock_redis.set.return_value = None  # Key already existed
+        mock_redis.incr.return_value = 2
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -404,9 +426,9 @@ class TestArchiveIngestRangeRateLimiting:
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_rate_limit_uses_client_ip(self, mock_get_redis, mock_queue_cls, client):
-        """Rate limiting should use the client IP and tier as the key."""
+        """Rate limiting key must embed the client IP and the tier."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 1
+        mock_redis.set.return_value = True  # First hit
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -416,10 +438,9 @@ class TestArchiveIngestRangeRateLimiting:
         )
         assert resp.status_code == 202
 
-        # Verify that incr was called with a key containing an IP and tier
-        mock_redis.incr.assert_called_once()
-        call_args = mock_redis.incr.call_args
-        key = call_args[0][0]
+        # Verify that SET was called with a key containing an IP and tier
+        mock_redis.set.assert_called_once()
+        key = mock_redis.set.call_args.args[0]
         assert key.startswith("archive_ingest_rate_limit:")
         assert key.endswith(":small")
 
@@ -428,7 +449,7 @@ class TestArchiveIngestRangeRateLimiting:
     def test_small_and_large_ranges_use_separate_redis_keys(self, mock_get_redis, mock_queue_cls, client):
         """Small-range and large-range requests must use different Redis keys."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 1
+        mock_redis.set.return_value = True
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -437,17 +458,17 @@ class TestArchiveIngestRangeRateLimiting:
             "/fires/archive/ingest-range",
             json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
         )
-        small_key = mock_redis.incr.call_args[0][0]
+        small_key = mock_redis.set.call_args.args[0]
 
         mock_redis.reset_mock()
-        mock_redis.incr.return_value = 1
+        mock_redis.set.return_value = True
 
         # Large range (6 days)
         client.post(
             "/fires/archive/ingest-range",
             json={"start_date": _recent_date(6), "end_date": _recent_date(1)},
         )
-        large_key = mock_redis.incr.call_args[0][0]
+        large_key = mock_redis.set.call_args.args[0]
 
         assert small_key != large_key
         assert small_key.endswith(":small")
@@ -468,10 +489,10 @@ class TestArchiveIngestRangeRateLimiting:
 
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
-    def test_rate_limit_sets_redis_expiration(self, mock_get_redis, mock_queue_cls, client):
-        """First request in rate limit window should set Redis key expiration."""
+    def test_first_hit_uses_atomic_set_nx_ex(self, mock_get_redis, mock_queue_cls, client):
+        """First hit must use SET NX EX (atomic), never a separate INCR + EXPIRE pair."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 1  # First increment
+        mock_redis.set.return_value = True  # Key created
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -481,19 +502,23 @@ class TestArchiveIngestRangeRateLimiting:
         )
         assert resp.status_code == 202
 
-        # Verify expire was called with the short window duration
-        mock_redis.expire.assert_called_once()
-        call_args = mock_redis.expire.call_args
-        key, duration = call_args[0]
-        assert key.startswith("archive_ingest_rate_limit:")
-        assert duration == 60
+        # The atomic path: SET called with nx=True and ex=<window>
+        mock_redis.set.assert_called_once()
+        call_kwargs = mock_redis.set.call_args.kwargs
+        assert call_kwargs.get("nx") is True
+        assert "ex" in call_kwargs and call_kwargs["ex"] > 0
+        # EXPIRE must not be called (the TTL is set atomically via SET NX EX)
+        mock_redis.expire.assert_not_called()
+        # INCR must not be called on the first hit
+        mock_redis.incr.assert_not_called()
 
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
-    def test_rate_limit_does_not_expire_on_increment(self, mock_get_redis, mock_queue_cls, client):
-        """Subsequent increments should not re-set expiration (already set on first)."""
+    def test_subsequent_hit_uses_incr_not_set(self, mock_get_redis, mock_queue_cls, client):
+        """Subsequent hits must use INCR (key exists); SET NX EX returns None."""
         mock_redis = MagicMock()
-        mock_redis.incr.return_value = 2  # Second increment
+        mock_redis.set.return_value = None  # Key already existed → NX rejected
+        mock_redis.incr.return_value = 2
         mock_get_redis.return_value = mock_redis
         mock_queue_cls.return_value.enqueue.return_value = MagicMock()
 
@@ -502,6 +527,6 @@ class TestArchiveIngestRangeRateLimiting:
             json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
         )
         assert resp.status_code == 202
-
-        # expire should NOT be called on subsequent increments (count > 1)
+        mock_redis.incr.assert_called_once()
+        # EXPIRE must not be called on subsequent hits either
         mock_redis.expire.assert_not_called()

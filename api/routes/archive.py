@@ -77,12 +77,14 @@ def _check_archive_rate_limit(request: Request, is_large_range: bool = False) ->
     key = f"archive_ingest_rate_limit:{client_ip}:{tier}"
 
     try:
-        # Increment counter
-        count = redis.incr(key)
-
-        # If this is the first increment in this window, set expiration
-        if count == 1:
-            redis.expire(key, window)
+        # Atomically create the key with TTL on the first hit (SET NX EX).
+        # This prevents a permanent-key leak if the process crashes between
+        # INCR and EXPIRE (fixes issue #368).
+        if not redis.set(key, 1, ex=window, nx=True):
+            # Key already existed — safe to INCR without resetting the TTL.
+            count = redis.incr(key)
+        else:
+            count = 1
 
         # Check if limit exceeded
         if count > limit:
