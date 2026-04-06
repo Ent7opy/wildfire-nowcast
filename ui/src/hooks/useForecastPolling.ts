@@ -46,8 +46,8 @@ export function useForecastPolling(): void {
     const { status } = query.data;
     if (status === "completed") {
       const result = query.data.result;
-      const runId = String(result?.run_id || "");
-      if (runId) {
+      if (result?.run_id != null) {
+        const runId = String(result.run_id);
         const weatherRunId = (result?.weather_run_id as string | null | undefined) ?? null;
         const confidenceLevel = (result?.confidence_level as string | null | undefined) ?? null;
         const fallbackUsed = Boolean(result?.fallback_used ?? false);
