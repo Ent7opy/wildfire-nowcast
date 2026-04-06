@@ -142,8 +142,6 @@ _SEAM_BLEND_HALF_WIDTH: int = 3
 _SEAM_BLEND_SIGMA: float = 1.0
 # Slope discontinuity (degrees) threshold for QA warnings at tile seams.
 _SEAM_SLOPE_WARN_THRESHOLD_DEG: float = 5.0
-# GLO-30 tiles are 1-degree on each side.
-_TILE_SIZE_DEG: float = 1.0
 
 
 def _integer_degree_pixel_indices(
@@ -171,16 +169,23 @@ def _integer_degree_pixel_indices(
     if abs_size == 0:
         return []
 
-    indices: list[int] = []
+    # Collect candidates grouped by the integer-degree boundary they belong to.
+    # At native GLO-30 resolution (~0.000278 deg/pixel) multiple pixels may fall
+    # within the 0.6*cell_size threshold for the same boundary; we keep only the
+    # single closest pixel per boundary to avoid overlapping Gaussian applications.
+    best_per_boundary: dict[int, tuple[int, float]] = {}  # nearest_int -> (idx, dist)
     for i in range(n_pixels):
         coord = origin + (i + 0.5) * pixel_size  # center of pixel i
-        # Distance from the nearest integer-degree boundary
         nearest_int = round(coord)
-        if abs(coord - nearest_int) < abs_size * 0.6:
+        dist = abs(coord - nearest_int)
+        if dist < abs_size * 0.6:
             # Exclude raster-edge boundaries (first/last few pixels)
             if _SEAM_BLEND_HALF_WIDTH < i < n_pixels - _SEAM_BLEND_HALF_WIDTH:
-                indices.append(i)
-    return indices
+                prev = best_per_boundary.get(nearest_int)
+                if prev is None or dist < prev[1]:
+                    best_per_boundary[nearest_int] = (i, dist)
+
+    return sorted(idx for idx, _ in best_per_boundary.values())
 
 
 def blend_tile_seams(
@@ -229,8 +234,9 @@ def blend_tile_seams(
         # 1-D Gaussian along the column (horizontal) axis within the strip.
         finite_mask = np.isfinite(strip)
         if finite_mask.any():
+            fill_val = np.nanmean(strip) if finite_mask.any() else 0.0
             smoothed = gaussian_filter1d(
-                np.where(finite_mask, strip, 0.0), sigma=sigma, axis=1
+                np.where(finite_mask, strip, fill_val), sigma=sigma, axis=1
             )
             blended[:, lo:hi] = np.where(finite_mask, smoothed, strip)
 
@@ -246,8 +252,9 @@ def blend_tile_seams(
         strip = blended[lo:hi, :].copy()
         finite_mask = np.isfinite(strip)
         if finite_mask.any():
+            fill_val = np.nanmean(strip) if finite_mask.any() else 0.0
             smoothed = gaussian_filter1d(
-                np.where(finite_mask, strip, 0.0), sigma=sigma, axis=0
+                np.where(finite_mask, strip, fill_val), sigma=sigma, axis=0
             )
             blended[lo:hi, :] = np.where(finite_mask, smoothed, strip)
 
@@ -269,7 +276,6 @@ def check_seam_quality(
     data: np.ndarray,
     profile: dict,
     *,
-    half_width: int = _SEAM_BLEND_HALF_WIDTH,
     slope_threshold_deg: float = _SEAM_SLOPE_WARN_THRESHOLD_DEG,
 ) -> list[dict]:
     """QA check: flag tile seams where the cross-seam slope exceeds a threshold.
@@ -280,7 +286,11 @@ def check_seam_quality(
     """
     transform = profile["transform"]
     height, width = data.shape[-2], data.shape[-1]
-    cell_m = abs(float(transform.a)) * METERS_PER_DEG_AT_EQUATOR  # approx
+    # NOTE: This equatorial approximation overestimates cell width at higher
+    # latitudes (by ~cos(lat)).  Acceptable for a QA threshold check but not
+    # for precise slope computation — see api/terrain/features_math.py for the
+    # lat-corrected version.
+    cell_m = abs(float(transform.a)) * METERS_PER_DEG_AT_EQUATOR
 
     warnings: list[dict] = []
 
@@ -288,9 +298,14 @@ def check_seam_quality(
         float(transform.c), float(transform.a), width,
     )
     for ci in col_indices:
-        if ci < 1 or ci >= width:
+        if ci < 1 or ci >= width - 1:
             continue
-        diff = np.abs(data[:, ci].astype(float) - data[:, ci - 1].astype(float))
+        # Check the max pixel-to-pixel diff in a small corridor around the
+        # boundary pixel (the actual tile edge may be at ci or ci+1).
+        lo = max(ci - 1, 0)
+        hi = min(ci + 2, width)
+        corridor = data[:, lo:hi].astype(float)
+        diff = np.abs(np.diff(corridor, axis=1))
         slope_deg = np.rad2deg(np.arctan2(diff, cell_m))
         max_slope = float(np.nanmax(slope_deg))
         if max_slope > slope_threshold_deg:
@@ -315,9 +330,12 @@ def check_seam_quality(
         float(transform.f), float(transform.e), height,
     )
     for ri in row_indices:
-        if ri < 1 or ri >= height:
+        if ri < 1 or ri >= height - 1:
             continue
-        diff = np.abs(data[ri, :].astype(float) - data[ri - 1, :].astype(float))
+        lo = max(ri - 1, 0)
+        hi = min(ri + 2, height)
+        corridor = data[lo:hi, :].astype(float)
+        diff = np.abs(np.diff(corridor, axis=0))
         slope_deg = np.rad2deg(np.arctan2(diff, cell_m))
         max_slope = float(np.nanmax(slope_deg))
         if max_slope > slope_threshold_deg:

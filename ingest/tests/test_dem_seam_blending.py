@@ -52,6 +52,30 @@ def _seam_dem(
     return data, profile
 
 
+def _horizontal_seam_dem(
+    *,
+    west: float = -120.5,
+    north: float = 41.0,
+    cell: float = 0.01,
+    width: int = 100,
+    height: int = 200,
+    jump: float = 50.0,
+) -> tuple[np.ndarray, dict]:
+    """Create a synthetic DEM with a sharp jump at a *horizontal* (latitude) seam.
+
+    The raster spans from *north* southward.  A horizontal seam at lat=40.0
+    gets a +jump offset on the south side (higher row indices = further south).
+    """
+    profile = _make_profile(west, north, cell, cell, width, height)
+    data = np.full((height, width), 500.0, dtype=np.float64)
+
+    # Integer-degree boundary at lat = 40.0 falls at row =
+    # (north - 40.0) / cell = 100.
+    seam_row = int(round((north - 40.0) / cell))
+    data[seam_row:, :] += jump
+    return data, profile
+
+
 # ---------------------------------------------------------------------------
 # _integer_degree_pixel_indices
 # ---------------------------------------------------------------------------
@@ -108,9 +132,13 @@ class TestBlendTileSeams:
         data, profile = _seam_dem(jump=50.0)
         blended = blend_tile_seams(data, profile)
 
-        # Pixels far from any seam should be identical.
-        assert np.array_equal(blended[:, :90], data[:, :90])
-        assert np.array_equal(blended[:, 110:], data[:, 110:])
+        # Pixels far from *both* seams (vertical at col~100, horizontal at
+        # row~100) should be identical.  Use a corner sub-array that avoids
+        # both corridors.
+        assert np.array_equal(blended[:90, :90], data[:90, :90])
+        assert np.array_equal(blended[:90, 110:], data[:90, 110:])
+        assert np.array_equal(blended[110:, :90], data[110:, :90])
+        assert np.array_equal(blended[110:, 110:], data[110:, 110:])
 
     def test_preserves_dtype(self):
         from ingest.dem_preprocess import blend_tile_seams
@@ -136,6 +164,59 @@ class TestBlendTileSeams:
         data[10, 99:102] = np.nan  # NaN near the seam
         blended = blend_tile_seams(data, profile)
         assert np.isnan(blended[10, 99:102]).all(), "NaN pixels must remain NaN"
+
+    def test_nan_does_not_pull_neighbors_toward_zero(self):
+        """Finite pixels adjacent to NaN must not be dragged toward 0."""
+        from ingest.dem_preprocess import blend_tile_seams
+
+        data, profile = _seam_dem(jump=0.0)  # uniform 500 m surface
+        # Place NaN in the seam corridor
+        data[50, 99] = np.nan
+        blended = blend_tile_seams(data, profile)
+        # Finite neighbours of the NaN pixel should stay close to 500,
+        # NOT be pulled toward 0.
+        neighbours = blended[50, [98, 100]]
+        assert np.all(np.isfinite(neighbours))
+        assert np.all(neighbours > 400.0), (
+            f"Finite pixels near NaN were pulled toward 0: {neighbours}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Horizontal seam blending
+# ---------------------------------------------------------------------------
+
+
+class TestHorizontalSeamBlending:
+    def test_reduces_horizontal_seam_jump(self):
+        from ingest.dem_preprocess import blend_tile_seams
+
+        data, profile = _horizontal_seam_dem(jump=50.0)
+        blended = blend_tile_seams(data, profile)
+
+        seam_row = 100  # approximate location of lat=40.0 boundary
+        orig_diff = np.max(np.abs(np.diff(data[seam_row - 1 : seam_row + 2, :], axis=0)))
+        blend_diff = np.max(np.abs(np.diff(blended[seam_row - 1 : seam_row + 2, :], axis=0)))
+        assert blend_diff < orig_diff, "blending should reduce horizontal seam jump"
+
+    def test_horizontal_interior_unchanged(self):
+        from ingest.dem_preprocess import blend_tile_seams
+
+        data, profile = _horizontal_seam_dem(jump=50.0)
+        blended = blend_tile_seams(data, profile)
+
+        # The raster also has a vertical seam at col~49 (lon=-120.0).
+        # Check corners that are far from both seam corridors.
+        assert np.array_equal(blended[:90, 60:], data[:90, 60:])
+        assert np.array_equal(blended[110:, 60:], data[110:, 60:])
+
+    def test_horizontal_blended_passes_qa(self):
+        from ingest.dem_preprocess import blend_tile_seams, check_seam_quality
+
+        data, profile = _horizontal_seam_dem(jump=20.0)
+        blended = blend_tile_seams(data, profile)
+        warnings = check_seam_quality(blended, profile)
+        assert warnings == [], f"Expected clean QA after blending, got: {warnings}"
 
 
 # ---------------------------------------------------------------------------
