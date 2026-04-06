@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 from sqlalchemy import text
 
+from ingest.perimeter_authority import authority_aware_upsert
 from ingest.repository import get_engine
 
 LOGGER = logging.getLogger("cwfis_authority_ingest")
@@ -234,7 +235,8 @@ def _finish_run(
 def _upsert_perimeters(rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
-    stmt = text(
+
+    insert_stmt = text(
         """
         INSERT INTO authoritative_perimeters (
             source_profile,
@@ -311,9 +313,17 @@ def _upsert_perimeters(rows: list[dict[str, Any]]) -> int:
             updated_at = NOW()
         """
     )
+
     with get_engine().begin() as conn:
-        result = conn.execute(stmt, rows)
-    return int(result.rowcount or 0)
+        upserted, _rejected = authority_aware_upsert(
+            conn,
+            insert_stmt=insert_stmt,
+            rows=rows,
+            source_label="CWFIS",
+            logger=LOGGER,
+        )
+
+    return upserted
 
 
 def _fetch_features(
