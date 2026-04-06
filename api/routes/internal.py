@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.deps import verify_internal_api_key
 from api.errors import InvalidBoundingBoxError
@@ -508,7 +508,7 @@ async def denoiser_review_queue_resolve(event_id: str, request: DenoiserReviewRe
 
 
 @internal_router.post("/internal/review-queue/auto-resolve", dependencies=[Depends(verify_internal_api_key)])
-async def review_queue_auto_resolve(timeout_days: int = 7) -> dict:
+async def review_queue_auto_resolve(timeout_days: int = Query(default=7, ge=1)) -> dict:
     """Auto-resolve open review queue items older than *timeout_days* as confirmed noise.
 
     Stale items with no operator action are resolved with

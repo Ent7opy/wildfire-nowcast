@@ -167,6 +167,15 @@ class TestInternalAPIKeyAuth:
             assert response.json()["timeout_days"] == 14
             mock_resolve.assert_called_once_with(timeout_days=14)
 
+    def test_auto_resolve_rejects_zero_timeout(self):
+        """POST /internal/review-queue/auto-resolve?timeout_days=0 returns 422."""
+        with patch("api.config.settings.internal_api_key", "correct-key"):
+            response = client.post(
+                "/internal/review-queue/auto-resolve?timeout_days=0",
+                headers={"X-Internal-API-Key": "correct-key"},
+            )
+            assert response.status_code == 422
+
     def test_get_endpoints_no_auth_required(self):
         """GET endpoints should not require authentication."""
         # Health endpoints should work without any key
