@@ -182,8 +182,8 @@ export default function AIChatAssistant(): JSX.Element {
     [activePreset, assistantViewContext, eventContext, filters, forecast, layers, mapView, timeRange]
   );
 
-  const triggerBriefing = useCallback(async (prompt: string): Promise<void> => {
-    if (!assistantConfigured || isBriefingRef.current) return;
+  const triggerBriefing = useCallback(async (prompt: string): Promise<boolean> => {
+    if (!assistantConfigured || isBriefingRef.current) return false;
     isBriefingRef.current = true;
     setIsBriefing(true);
     setAutoBriefing(null);
@@ -211,9 +211,11 @@ export default function AIChatAssistant(): JSX.Element {
       const payload = (await response.json()) as unknown;
       const reply = extractReply(payload);
       if (reply) setAutoBriefing(reply);
+      return true;
     } catch (err: unknown) {
       console.error("[AIChatAssistant] auto-briefing failed:", err);
       setCircuitDegraded(true);
+      return true;
     } finally {
       isBriefingRef.current = false;
       setIsBriefing(false);
@@ -225,20 +227,22 @@ export default function AIChatAssistant(): JSX.Element {
     if (!selectedEvent || !assistantConfigured) return;
     const eventId = String(selectedEvent.event_id ?? "");
     if (!eventId || eventId === lastBriefedEventId.current) return;
-    lastBriefedEventId.current = eventId;
     const prompt = isSafetyMode
       ? "Give a 2-sentence safety briefing for this fire. Plain language only: risk level and what the person should do right now."
       : "Give a 2-sentence analyst briefing: fire behavior context, intensity interpretation, and spread risk.";
-    void triggerBriefing(prompt);
+    void triggerBriefing(prompt).then((accepted) => {
+      if (accepted) lastBriefedEventId.current = eventId;
+    });
   }, [selectedEvent, selectedEvent?.event_id, assistantConfigured, isSafetyMode, triggerBriefing]);
 
   // Watch for imperatively requested briefings (from FireDetailsPanel "Get Safety Info")
   useEffect(() => {
     const prompt = safety.pendingBriefingPrompt;
     if (!prompt || prompt === lastBriefedPrompt.current) return;
-    lastBriefedPrompt.current = prompt;
     clearAssistantBriefingPrompt();
-    void triggerBriefing(prompt);
+    void triggerBriefing(prompt).then((accepted) => {
+      if (accepted) lastBriefedPrompt.current = prompt;
+    });
   }, [safety.pendingBriefingPrompt, triggerBriefing, clearAssistantBriefingPrompt]);
 
   useEffect(() => {
