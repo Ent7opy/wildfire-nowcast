@@ -404,7 +404,7 @@ class TestArchiveIngestRangeRateLimiting:
     @patch("rq.Queue")
     @patch("api.routes.archive.get_redis")
     def test_rate_limit_uses_client_ip(self, mock_get_redis, mock_queue_cls, client):
-        """Rate limiting should use the client IP as the key."""
+        """Rate limiting should use the client IP and tier as the key."""
         mock_redis = MagicMock()
         mock_redis.incr.return_value = 1
         mock_get_redis.return_value = mock_redis
@@ -416,11 +416,42 @@ class TestArchiveIngestRangeRateLimiting:
         )
         assert resp.status_code == 202
 
-        # Verify that incr was called with a key containing an IP
+        # Verify that incr was called with a key containing an IP and tier
         mock_redis.incr.assert_called_once()
         call_args = mock_redis.incr.call_args
         key = call_args[0][0]
         assert key.startswith("archive_ingest_rate_limit:")
+        assert key.endswith(":small")
+
+    @patch("rq.Queue")
+    @patch("api.routes.archive.get_redis")
+    def test_small_and_large_ranges_use_separate_redis_keys(self, mock_get_redis, mock_queue_cls, client):
+        """Small-range and large-range requests must use different Redis keys."""
+        mock_redis = MagicMock()
+        mock_redis.incr.return_value = 1
+        mock_get_redis.return_value = mock_redis
+        mock_queue_cls.return_value.enqueue.return_value = MagicMock()
+
+        # Small range (1 day)
+        client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(1), "end_date": _recent_date(1)},
+        )
+        small_key = mock_redis.incr.call_args[0][0]
+
+        mock_redis.reset_mock()
+        mock_redis.incr.return_value = 1
+
+        # Large range (6 days)
+        client.post(
+            "/fires/archive/ingest-range",
+            json={"start_date": _recent_date(6), "end_date": _recent_date(1)},
+        )
+        large_key = mock_redis.incr.call_args[0][0]
+
+        assert small_key != large_key
+        assert small_key.endswith(":small")
+        assert large_key.endswith(":large")
 
     @patch("api.routes.archive.get_redis")
     def test_rate_limit_gracefully_handles_redis_error(self, mock_get_redis, client):

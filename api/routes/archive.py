@@ -71,8 +71,10 @@ def _check_archive_rate_limit(request: Request, is_large_range: bool = False) ->
         limit = ARCHIVE_INGEST_RATE_LIMIT_SHORT
         window = ARCHIVE_INGEST_RATE_WINDOW_SHORT_SECONDS
 
-    # Redis sliding window counter key
-    key = f"archive_ingest_rate_limit:{client_ip}"
+    # Redis sliding window counter key — separate keys per tier so that
+    # small-range and large-range counters are tracked independently.
+    tier = "large" if is_large_range else "small"
+    key = f"archive_ingest_rate_limit:{client_ip}:{tier}"
 
     try:
         # Increment counter
