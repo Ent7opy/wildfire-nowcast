@@ -128,6 +128,54 @@ class TestInternalAPIKeyAuth:
             assert response.json()["updated"] == 3
             mock_resolve.assert_called_once()
 
+    def test_auto_resolve_without_key_when_key_configured(self):
+        """POST /internal/review-queue/auto-resolve returns 401 when key is configured."""
+        with patch("api.config.settings.internal_api_key", "configured-key"):
+            response = client.post("/internal/review-queue/auto-resolve")
+            assert response.status_code == 401
+            assert "X-Internal-API-Key" in response.json()["message"]
+
+    def test_auto_resolve_with_correct_key(self):
+        """POST /internal/review-queue/auto-resolve succeeds with correct key."""
+        with patch("api.routes.internal.auto_resolve_stale_review_queue") as mock_resolve, \
+             patch("api.config.settings.internal_api_key", "correct-key"):
+
+            mock_resolve.return_value = 15
+
+            response = client.post(
+                "/internal/review-queue/auto-resolve",
+                headers={"X-Internal-API-Key": "correct-key"},
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body["resolved"] == 15
+            assert body["timeout_days"] == 7
+            mock_resolve.assert_called_once_with(timeout_days=7)
+
+    def test_auto_resolve_custom_timeout(self):
+        """POST /internal/review-queue/auto-resolve?timeout_days=14 passes timeout through."""
+        with patch("api.routes.internal.auto_resolve_stale_review_queue") as mock_resolve, \
+             patch("api.config.settings.internal_api_key", "correct-key"):
+
+            mock_resolve.return_value = 3
+
+            response = client.post(
+                "/internal/review-queue/auto-resolve?timeout_days=14",
+                headers={"X-Internal-API-Key": "correct-key"},
+            )
+            assert response.status_code == 200
+            assert response.json()["timeout_days"] == 14
+            mock_resolve.assert_called_once_with(timeout_days=14)
+
+    def test_auto_resolve_rejects_zero_timeout(self):
+        """POST /internal/review-queue/auto-resolve?timeout_days=0 returns 422."""
+        with patch("api.config.settings.internal_api_key", "correct-key"):
+            response = client.post(
+                "/internal/review-queue/auto-resolve?timeout_days=0",
+                headers={"X-Internal-API-Key": "correct-key"},
+            )
+            assert response.status_code == 422
+
     def test_get_endpoints_no_auth_required(self):
         """GET endpoints should not require authentication."""
         # Health endpoints should work without any key

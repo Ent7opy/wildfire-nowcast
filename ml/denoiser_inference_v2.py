@@ -900,6 +900,7 @@ def run_inference_v2(
         """
         INSERT INTO denoiser_review_queue (
             event_id,
+            fire_detection_id,
             reason,
             severity,
             status,
@@ -909,6 +910,7 @@ def run_inference_v2(
         )
         VALUES (
             :event_id,
+            :fire_detection_id,
             :reason,
             :severity,
             'open',
@@ -919,6 +921,22 @@ def run_inference_v2(
         ON CONFLICT (event_id) WHERE status IN ('open', 'pending') DO NOTHING
         """
     )
+
+    # Build a lookup of event_id → representative fire_detection_id (max FRP).
+    # This links each review queue entry to the specific detection that most
+    # likely triggered the review, enabling operators to inspect it directly.
+    _det_for_review = detections.copy()
+    _det_for_review["_frp_num"] = pd.to_numeric(_det_for_review["frp"], errors="coerce").fillna(0.0)
+    _rep_det = (
+        _det_for_review
+        .sort_values("_frp_num", ascending=False)
+        .groupby("event_id", dropna=False)
+        .first()
+    )
+    _event_to_detection_id: dict[str, int | None] = {
+        str(eid): int(row["id"]) if pd.notna(row["id"]) else None
+        for eid, row in _rep_det.iterrows()
+    }
 
     update_detection_stmt = text(
         """
@@ -973,6 +991,7 @@ def run_inference_v2(
                     review_upsert_stmt,
                     {
                         "event_id": row.event_id,
+                        "fire_detection_id": _event_to_detection_id.get(str(row.event_id)),
                         "reason": (
                             "fail_closed_hard_bypass"
                             if bool(getattr(row, "fail_closed_hard_bypass", False))

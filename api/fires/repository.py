@@ -254,3 +254,6 @@ class FireRepository:
 
     def auto_close_review_queue_by_perimeters(self, lookback_seconds: int = 7200) -> list[dict]:
         return _repo.auto_close_review_queue_by_perimeters(lookback_seconds)
+
+    def auto_resolve_stale_review_queue(self, timeout_days: int = 7) -> int:
+        return _repo.auto_resolve_stale_review_queue(timeout_days)

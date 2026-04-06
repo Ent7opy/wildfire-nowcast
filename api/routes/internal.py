@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.deps import verify_internal_api_key
 from api.errors import InvalidBoundingBoxError
@@ -27,6 +27,7 @@ from api.fires.repo import (
     list_denoiser_review_queue,
     resolve_denoiser_review_event,
     get_review_event_detail,
+    auto_resolve_stale_review_queue,
 )
 
 internal_router = APIRouter(tags=["internal"])
@@ -504,3 +505,19 @@ async def denoiser_review_queue_resolve(event_id: str, request: DenoiserReviewRe
     except Exception as exc:  # pragma: no cover - defensive fallback
         return {"as_of": as_of, "event_id": event_id, "updated": 0, "error": str(exc)}
     return {"as_of": as_of, "event_id": event_id, "updated": updated}
+
+
+@internal_router.post("/internal/review-queue/auto-resolve", dependencies=[Depends(verify_internal_api_key)])
+async def review_queue_auto_resolve(timeout_days: int = Query(default=7, ge=1)) -> dict:
+    """Auto-resolve open review queue items older than *timeout_days* as confirmed noise.
+
+    Stale items with no operator action are resolved with
+    ``resolved_notes='auto_resolved_timeout'`` and ``resolved_by='auto:timeout'``.
+    Default timeout is 7 days.
+    """
+    as_of = datetime.now(timezone.utc).isoformat()
+    try:
+        resolved_count = auto_resolve_stale_review_queue(timeout_days=timeout_days)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return {"as_of": as_of, "resolved": 0, "timeout_days": timeout_days, "error": str(exc)}
+    return {"as_of": as_of, "resolved": resolved_count, "timeout_days": timeout_days}

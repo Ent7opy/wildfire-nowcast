@@ -1756,3 +1756,42 @@ def auto_close_review_queue_by_perimeters(lookback_seconds: int = 7200) -> list[
     with get_engine().begin() as conn:
         rows = conn.execute(stmt, {"lookback_seconds": lookback_seconds}).mappings().all()
     return [dict(r) for r in rows]
+
+
+_DEFAULT_AUTO_RESOLVE_TIMEOUT_DAYS = 7
+_logger = logging.getLogger(__name__)
+
+
+def auto_resolve_stale_review_queue(
+    timeout_days: int = _DEFAULT_AUTO_RESOLVE_TIMEOUT_DAYS,
+) -> int:
+    """Auto-resolve open review queue items older than *timeout_days* as confirmed noise.
+
+    Items that have been open longer than the timeout without operator action are
+    assumed to be noise.  Each resolved row receives ``resolved_by='auto:timeout'``
+    and ``resolved_notes='auto_resolved_timeout'`` for audit traceability.
+
+    Returns the number of rows resolved.
+    """
+    stmt = text(
+        """
+        UPDATE denoiser_review_queue
+        SET
+            status         = 'resolved',
+            resolved_by    = 'auto:timeout',
+            resolved_notes = 'auto_resolved_timeout',
+            resolved_at    = NOW(),
+            updated_at     = NOW()
+        WHERE status = 'open'
+          AND created_at < NOW() - (:timeout_days * INTERVAL '1 day')
+        """
+    )
+    with get_engine().begin() as conn:
+        result = conn.execute(stmt, {"timeout_days": timeout_days})
+    count = int(result.rowcount or 0)
+    _logger.info(
+        "Auto-resolved %d stale review queue items (timeout_days=%d).",
+        count,
+        timeout_days,
+    )
+    return count
