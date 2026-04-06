@@ -63,10 +63,7 @@ const ACTIVE_FORECAST_STATE = {
   activeRequest: {
     lat: 37.5,
     lon: -122.0,
-    locationLabel: "Test Area",
-    eventId: undefined,
-    eventKey: undefined,
-    eventSnapshot: undefined
+    locationLabel: "Test Area"
   },
   pollCount: 0,
   notification: null,
