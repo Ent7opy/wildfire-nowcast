@@ -1,0 +1,9 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (detect secrets)
+        description: Prevent secrets from being committed
+
+# After cloning the repo, run `pre-commit install` to enable these hooks.
