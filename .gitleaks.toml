@@ -1,0 +1,37 @@
+title = "Wildfire Nowcast gitleaks config"
+
+# Global allowlist — paths that are safe to ignore.
+[allowlist]
+  paths = [
+    '''\.env\.example$''',
+    '''docs/PRODUCTION_SECRETS\.md$''',
+  ]
+
+# ─── Project-specific secret patterns ────────────────────────────────────────
+# Only rules for vendor/project secrets that gitleaks' built-in ruleset does
+# NOT already cover.  Built-in rules handle generic passwords, Google API keys,
+# Slack webhooks, database URLs, SMTP credentials, etc.
+
+[[rules]]
+  id = "firms-map-key"
+  description = "NASA FIRMS API key"
+  regex = '''(?i)FIRMS_MAP_KEY\s*=\s*["\']?([A-Za-z0-9_\-]{20,})["\']?'''
+  tags = ["api-key"]
+
+[[rules]]
+  id = "cdsapi-key"
+  description = "Copernicus CDS API key"
+  regex = '''(?i)CDSAPI_KEY\s*=\s*["\']?(?!your_)([0-9]+:[A-Za-z0-9\-]{20,})["\']?'''
+  tags = ["api-key"]
+
+[[rules]]
+  id = "spread-catalog-signing-key"
+  description = "Spread model catalog HMAC signing key"
+  regex = '''(?i)SPREAD_MODEL_CATALOG_SIGNING_KEY\s*=\s*["\']?(?!\$\{)([^\s"']{8,})["\']?'''
+  tags = ["credential"]
+
+[[rules]]
+  id = "lfmc-ecland-api-token"
+  description = "LFMC ecLand bearer token"
+  regex = '''(?i)LFMC_ECLAND_API_TOKEN\s*=\s*["\']?(?!\$\{)([^\s"']{8,})["\']?'''
+  tags = ["api-key"]
