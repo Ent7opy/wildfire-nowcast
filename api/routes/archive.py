@@ -316,7 +316,7 @@ async def trigger_archive_ingest(body: ArchiveIngestRequest) -> ArchiveIngestRes
             detail=f"Invalid date '{body.date}'. Expected YYYY-MM-DD.",
         )
 
-    days_ago = (date.today() - requested_date).days
+    days_ago = (datetime.now(timezone.utc).date() - requested_date).days
     if days_ago < 0:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -412,7 +412,7 @@ async def trigger_archive_ingest_range(request: Request, body: ArchiveRangeInges
             detail="end_date must be on or after start_date.",
         )
 
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     for d, label in [(start_d, "start_date"), (end_d, "end_date")]:
         days_ago = (today - d).days
         if days_ago < 0:
