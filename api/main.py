@@ -1,4 +1,6 @@
 import logging
+import uuid
+
 from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -9,8 +11,12 @@ from redis.asyncio import Redis
 
 from api.config import settings
 from api.errors import ErrorResponse, WildfireError, wildfire_error_handler
+from api.logging_config import setup_logging, request_id_ctx
 from api.routes import archive_router, assistant_router, internal_router, fires_router, forecast_router, aois_router, tiles_router, exports_router, risk_router, ignition_router
 from api.startup_check import StartupError, run_api_startup_checks
+
+# Configure structured JSON logging before any log statements.
+setup_logging()
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +42,24 @@ app.add_middleware(
 
 # Pre-computed once at startup — settings are static.
 _CSP_HEADER = f"frame-ancestors {settings.frame_ancestors}"
+
+
+@app.middleware("http")
+async def _request_id_middleware(request: Request, call_next):
+    """Attach a request_id to every request for log correlation.
+
+    If the caller supplies an ``X-Request-ID`` header it is reused; otherwise a
+    new UUID4 is generated.  The id is stored in a contextvar so the JSON log
+    formatter can include it automatically, and echoed back in the response.
+    """
+    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    token = request_id_ctx.set(rid)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = rid
+        return response
+    finally:
+        request_id_ctx.reset(token)
 
 
 @app.middleware("http")

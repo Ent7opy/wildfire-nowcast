@@ -17,15 +17,12 @@ from typing import Any, Callable, Sequence
 
 from ingest.config import REPO_ROOT
 from ingest.dem_preprocess import DemIngestSettings, ingest_terrain_for_bbox
+from ingest.logging_config import setup_logging
 from ingest.startup_check import StartupError, run_ingest_startup_checks
 from ingest.firms_ingest import run_firms_ingest
 from ingest.industrial_sources_ingest import run_industrial_ingest
 from ingest.nifc_perimeters_ingest import fetch_nifc_perimeters, ingest_perimeters
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
 LOGGER = logging.getLogger("ingest_orchestrator")
 
 JOB_FIRMS = "firms"
@@ -1348,6 +1345,7 @@ def run_scheduler(
 
 
 def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     args = parse_args(argv)
 
     try:
