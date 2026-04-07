@@ -318,14 +318,15 @@ def _validate_grib_file(
             engine="cfgrib",
             backend_kwargs={"indexpath": ""},
         )
-        if len(ds.data_vars) == 0:
-            raise ValueError(f"GRIB file contains no data variables: {path}")
+        try:
+            if len(ds.data_vars) == 0:
+                raise ValueError(f"GRIB file contains no data variables: {path}")
 
-        # Validate temporal metadata if run_time and forecast_hour are provided
-        if run_time is not None and forecast_hour is not None:
-            _validate_temporal_metadata(ds, run_time, forecast_hour, path)
-
-        ds.close()
+            # Validate temporal metadata if run_time and forecast_hour are provided
+            if run_time is not None and forecast_hour is not None:
+                _validate_temporal_metadata(ds, run_time, forecast_hour, path)
+        finally:
+            ds.close()
         LOGGER.debug("GRIB file validated: %s (%d bytes)", path, file_size)
         return
     except ValueError:
@@ -348,16 +349,17 @@ def _validate_grib_file(
     for attempt, retry_bkw in enumerate(_GRIB_RETRY_BACKEND_KWARGS, start=1):
         try:
             ds = xr.open_dataset(path, engine="cfgrib", backend_kwargs=retry_bkw)
-            if len(ds.data_vars) == 0:
-                raise ValueError(
-                    f"GRIB file contains no data variables (retry {attempt}): {path}"
-                )
+            try:
+                if len(ds.data_vars) == 0:
+                    raise ValueError(
+                        f"GRIB file contains no data variables (retry {attempt}): {path}"
+                    )
 
-            # Validate temporal metadata if run_time and forecast_hour are provided
-            if run_time is not None and forecast_hour is not None:
-                _validate_temporal_metadata(ds, run_time, forecast_hour, path)
-
-            ds.close()
+                # Validate temporal metadata if run_time and forecast_hour are provided
+                if run_time is not None and forecast_hour is not None:
+                    _validate_temporal_metadata(ds, run_time, forecast_hour, path)
+            finally:
+                ds.close()
             LOGGER.info(
                 "GRIB multi-level validation succeeded on retry %d/%d: %s (%d bytes)",
                 attempt,
@@ -385,29 +387,31 @@ def _validate_grib_file(
         import cfgrib  # noqa: PLC0415
 
         datasets = cfgrib.open_datasets(path, indexpath="")
-        if not datasets:
-            raise ValueError(f"GRIB file produced no dataset groups: {path}")
+        try:
+            if not datasets:
+                raise ValueError(f"GRIB file produced no dataset groups: {path}")
 
-        # Validate temporal metadata on first dataset (should be same across all)
-        if run_time is not None and forecast_hour is not None and datasets:
-            _validate_temporal_metadata(datasets[0], run_time, forecast_hour, path)
+            # Validate temporal metadata on first dataset (should be same across all)
+            if run_time is not None and forecast_hour is not None and datasets:
+                _validate_temporal_metadata(datasets[0], run_time, forecast_hour, path)
 
-        total_vars = sum(len(ds.data_vars) for ds in datasets)
-        for ds in datasets:
-            ds.close()
-        if total_vars == 0:
-            raise ValueError(
-                f"GRIB file has no data variables across all groups: {path}"
+            total_vars = sum(len(ds.data_vars) for ds in datasets)
+            if total_vars == 0:
+                raise ValueError(
+                    f"GRIB file has no data variables across all groups: {path}"
+                )
+            LOGGER.info(
+                "GRIB multi-level validation succeeded via cfgrib.open_datasets: "
+                "%s (%d dataset group(s), %d total var(s), %d bytes)",
+                path,
+                len(datasets),
+                total_vars,
+                file_size,
             )
-        LOGGER.info(
-            "GRIB multi-level validation succeeded via cfgrib.open_datasets: "
-            "%s (%d dataset group(s), %d total var(s), %d bytes)",
-            path,
-            len(datasets),
-            total_vars,
-            file_size,
-        )
-        return
+            return
+        finally:
+            for ds in datasets:
+                ds.close()
     except ValueError:
         raise
     except Exception as fallback_exc:
