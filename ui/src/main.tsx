@@ -4,6 +4,7 @@ import { CssBaseline, ThemeProvider } from "@mui/material";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "maplibre-gl/dist/maplibre-gl.css";
 
+import ApiGate from "./components/ApiGate";
 import App from "./App";
 import { wildfireTheme } from "./theme/wildfireTheme";
 
@@ -22,7 +23,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <ThemeProvider theme={wildfireTheme}>
         <CssBaseline />
-        <App />
+        <ApiGate>
+          <App />
+        </ApiGate>
       </ThemeProvider>
     </QueryClientProvider>
   </React.StrictMode>

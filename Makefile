@@ -1,4 +1,4 @@
-.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread ignition-snapshot ignition-train train-ignition model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places ingest-orchestrator ops-start backup restore backup-list
+.PHONY: help doctor health-check install test lint lint-fix clean clean-venv migrate revision widget-build ralph-init ralph-plan ralph-run ralph-status denoiser-label denoiser-snapshot denoiser-train denoiser-eval denoiser-eventize denoiser-label-v2 denoiser-snapshot-v2 denoiser-train-v2 denoiser-eval-v2 train-denoiser train-spread ignition-snapshot ignition-train train-ignition model-register model-promote model-rollback model-update-contract hindcast-build spread-champion-challenger weather-bias seed-ne-places ingest-orchestrator ops-start backup restore backup-list railway-up railway-down railway-down-all
 
 PYTHON ?= python3
 UV ?= uv
@@ -388,3 +388,14 @@ ops-start: ## Start continuous ingest scheduler
 	  --lulc-interval-minutes 10080 \
 	  --cleanup-interval-minutes 1440 \
 	  $(if $(ARGS),$(ARGS),)
+
+# ── Railway ───────────────────────────────────────────────────────────────────
+
+railway-up: ## Start Railway services (scale replicas to 1)
+	@scripts/railway_scale.sh up
+
+railway-down: ## Stop Railway services (scale replicas to 0, keeps databases running)
+	@scripts/railway_scale.sh down
+
+railway-down-all: ## Stop ALL Railway services including databases (scale replicas to 0)
+	@scripts/railway_scale.sh down all
