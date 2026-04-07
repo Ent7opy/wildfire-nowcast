@@ -99,6 +99,7 @@ export default function AIChatAssistant(): JSX.Element {
   const lastBriefedEventId = useRef<string | null>(null);
   const lastBriefedPrompt = useRef<string | null>(null);
   const isBriefingRef = useRef(false);
+  const pendingBriefRef = useRef<{ eventId: string; prompt: string } | null>(null);
 
   const selectedEvent = useAppStore((s) => s.selectedEvent);
   const filters = useAppStore((s) => s.filters);
@@ -182,9 +183,19 @@ export default function AIChatAssistant(): JSX.Element {
     [activePreset, assistantViewContext, eventContext, filters, forecast, layers, mapView, timeRange]
   );
 
-  const triggerBriefing = useCallback(async (prompt: string): Promise<boolean> => {
-    if (!assistantConfigured || isBriefingRef.current) return false;
+  const triggerBriefing = useCallback(async (prompt: string, eventId?: string): Promise<boolean> => {
+    if (!assistantConfigured) return false;
+
+    // If a briefing is already in flight, record this event as pending so the
+    // finally block can re-trigger once the current request completes.
+    if (isBriefingRef.current) {
+      if (eventId) pendingBriefRef.current = { eventId, prompt };
+      return false;
+    }
+
     isBriefingRef.current = true;
+    const requestEventId = eventId ?? null;
+    pendingBriefRef.current = null;
     setIsBriefing(true);
     setAutoBriefing(null);
     try {
@@ -210,7 +221,12 @@ export default function AIChatAssistant(): JSX.Element {
       if (!response.ok) throw new Error(`briefing call failed with ${response.status}`);
       const payload = (await response.json()) as unknown;
       const reply = extractReply(payload);
-      if (reply) setAutoBriefing(reply);
+      // Only apply the briefing if the event hasn't changed while the request was in flight.
+      const currentEvent = useAppStore.getState().selectedEvent;
+      const currentEventId = currentEvent ? String(currentEvent.event_id ?? "") : null;
+      if (reply && requestEventId === currentEventId) {
+        setAutoBriefing(reply);
+      }
       return true;
     } catch (err: unknown) {
       console.error("[AIChatAssistant] auto-briefing failed:", err);
@@ -219,6 +235,16 @@ export default function AIChatAssistant(): JSX.Element {
     } finally {
       isBriefingRef.current = false;
       setIsBriefing(false);
+
+      // If another event was queued while this request was in flight, trigger it now.
+      // Re-read from the ref — the in-flight guard may have written a new value.
+      const pending = pendingBriefRef.current as { eventId: string; prompt: string } | null;
+      if (pending && pending.eventId !== requestEventId) {
+        pendingBriefRef.current = null;
+        void triggerBriefing(pending.prompt, pending.eventId).then((accepted) => {
+          if (accepted) lastBriefedEventId.current = pending.eventId;
+        });
+      }
     }
   }, [assistantConfigured, isSafetyMode, viewingContext]);
 
@@ -230,7 +256,7 @@ export default function AIChatAssistant(): JSX.Element {
     const prompt = isSafetyMode
       ? "Give a 2-sentence safety briefing for this fire. Plain language only: risk level and what the person should do right now."
       : "Give a 2-sentence analyst briefing: fire behavior context, intensity interpretation, and spread risk.";
-    void triggerBriefing(prompt).then((accepted) => {
+    void triggerBriefing(prompt, eventId).then((accepted) => {
       if (accepted) lastBriefedEventId.current = eventId;
     });
   }, [selectedEvent, selectedEvent?.event_id, assistantConfigured, isSafetyMode, triggerBriefing]);
