@@ -101,6 +101,7 @@ export async function getJson<T>(
           return data as T;
         } catch (innerErr) {
           secondAttempt.cancel();
+          if (innerErr instanceof ApiError) throw innerErr;
           const message = innerErr instanceof Error ? innerErr.message : "API unavailable";
           lastUnavailable = new ApiUnavailableError(message, { url });
           continue;
