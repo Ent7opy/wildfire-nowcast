@@ -64,6 +64,16 @@ lerna-debug.log*
 .node_repl_history
 *.tgz
 .yarn-integrity
+.pnpm-debug.log*
+
+# Next.js
+.next/
+out/
+next-env.d.ts.bak
+*.tsbuildinfo
+
+# Vercel
+.vercel
 
 # IDEs
 .vscode/
