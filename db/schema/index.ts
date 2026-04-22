@@ -1,27 +1,31 @@
 /**
- * Stage 1 schema — A' (Fire Stewardship Agent).
+ * A' (Fire Stewardship Agent) — Drizzle schema.
  *
  * Source of truth: `docs/pivot-architecture.md` §3 "The collapsed data model".
  * Spec: `docs/SPEC-A-prime-v1.md` §Data model.
  *
- * Stage 1 (this file): `users`, `aois`, `aoi_rules` — enough for AOI CRUD.
+ * Stages landed in this file:
+ *   - Stage 1: `users`, `aois`, `aoi_rules` — AOI CRUD.
+ *   - Stage 2: `firms_detections`, `aoi_events`, `industrial_mask_static`,
+ *              `job_runs` — FIRMS poll + AOI matcher + cron observability.
  *
  * DEFERRED to later stages (intentionally omitted here):
- *   - `firms_detections`     → Stage 2 (FIRMS poll + match)
- *   - `aoi_events`           → Stage 2 (detection ↔ AOI matches)
  *   - `aoi_briefs`           → Stage 3 (LLM situation briefs)
  *   - `notifications_log`    → Stage 4 (Resend + webhook delivery)
- *   - `industrial_mask_static` → Stage 2 (seeded GeoJSON)
- *   - `job_runs`             → Stage 2 (cron observability)
  *
  * Single-user stub: until Clerk lands in Stage 5, every API call is attributed
  * to STUB_USER_ID = "stub-user-1". The migration seeds that single row.
  */
 import {
+  bigserial,
+  boolean,
   customType,
+  doublePrecision,
+  integer,
   jsonb,
   pgTable,
   real,
+  serial,
   text,
   timestamp,
   uniqueIndex,
@@ -134,3 +138,115 @@ export const aoiRules = pgTable("aoi_rules", {
     .defaultNow(),
 });
 
+// ---------------------------------------------------------------------------
+// Stage 2: FIRMS poll, matcher, cron observability
+// ---------------------------------------------------------------------------
+
+/**
+ * Short-TTL (~14 days) cache of FIRMS pixels relevant to active AOIs.
+ *
+ * Source name uses NASA's enum: VIIRS_NOAA20_NRT, VIIRS_SNPP_NRT, MODIS_NRT.
+ * Dedupe via the unique index on (source, acq_date, acq_time, lat, lon) —
+ * geometry equality on a Point is brittle across drivers, so we use the
+ * lat/lon doubles as the dedupe key and keep the GIST geometry for spatial
+ * queries.
+ */
+export const firmsDetections = pgTable("firms_detections", {
+  id: bigserial("id", { mode: "bigint" }).primaryKey(),
+  source: text("source").notNull(),
+  detectedAt: timestamp("detected_at", { withTimezone: true }).notNull(),
+  geom: geometry("geom", { srid: 4326, subtype: "Point" }).notNull(),
+  lat: doublePrecision("lat").notNull(),
+  lon: doublePrecision("lon").notNull(),
+  frpMw: real("frp_mw"),
+  confidence: text("confidence"),
+  daynight: text("daynight"),
+  /** ISO date as TEXT, mirrors FIRMS CSV column verbatim for traceability. */
+  acqDate: text("acq_date").notNull(),
+  /** "HHMM" string from FIRMS CSV. */
+  acqTime: text("acq_time").notNull(),
+  brightTi4: real("bright_ti4"),
+  brightTi5: real("bright_ti5"),
+  scan: real("scan"),
+  track: real("track"),
+  version: text("version"),
+  /**
+   * Set at insert via STA mask lookup (industrial_mask_static). When true,
+   * matcher skips this detection — it's a known industrial heat source.
+   * NULL means "not yet evaluated"; the matcher treats NULL as false.
+   */
+  isIndustrialStatic: boolean("is_industrial_static"),
+  /** 5°×5° bucket the detection was fetched in. */
+  bucket: text("bucket").notNull(),
+  insertedAt: timestamp("inserted_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
+ * Per-AOI matched events. One row per "event" — defined as a contiguous burst
+ * of detections within a 24h window near the AOI. Re-poll within the window
+ * UPDATEs the existing row (extends last_seen_at, bumps detection_count);
+ * a new window or a moved cluster creates a new row.
+ *
+ * `dedupe_hash` is the de-duplication key: same hash => same event (UPSERT);
+ * different hash => new event (Stage 3 will pick it up for brief generation).
+ */
+export const aoiEvents = pgTable("aoi_events", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  aoiId: uuid("aoi_id")
+    .notNull()
+    .references(() => aois.id, { onDelete: "cascade" }),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+  nearestDistanceKm: real("nearest_distance_km").notNull(),
+  detectionCount: integer("detection_count").notNull().default(1),
+  peakFrpMw: real("peak_frp_mw"),
+  /** sha256 over (aoi_id, bucket, rounded centroid, source, 24h-window). */
+  dedupeHash: text("dedupe_hash").notNull(),
+  /** "new" | "open" | "closed". Stage 3's brief generator picks up "new". */
+  status: text("status").notNull().default("new"),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
+ * Static catalog of industrial / volcanic heat sources to suppress at insert
+ * time. Seeded from `db/seeds/industrial-mask-stage2.json` during migration.
+ * A future stage can ingest the full NASA STA mask layer.
+ */
+export const industrialMaskStatic = pgTable("industrial_mask_static", {
+  id: serial("id").primaryKey(),
+  kind: text("kind").notNull(), // gas_flare | industrial | volcanic | refinery
+  name: text("name").notNull(),
+  geom: geometry("geom", { srid: 4326, subtype: "Polygon" }).notNull(),
+  sourceUrl: text("source_url"),
+  loadedAt: timestamp("loaded_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
+ * Cron observability — one row per `/api/aoi/poll` invocation, plus per-bucket
+ * children when the poll fans out. Feeds the future "last N runs" admin UI.
+ */
+export const jobRuns = pgTable("job_runs", {
+  id: bigserial("id", { mode: "bigint" }).primaryKey(),
+  jobName: text("job_name").notNull(), // "firms-poll" for Stage 2
+  bucket: text("bucket"), // null for the parent run, set for per-bucket children
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  status: text("status").notNull(), // ok | partial | error | running
+  firmsRequestCount: integer("firms_request_count").notNull().default(0),
+  detectionsInserted: integer("detections_inserted").notNull().default(0),
+  eventsCreated: integer("events_created").notNull().default(0),
+  error: text("error"),
+});
+
+export type FirmsDetectionRow = typeof firmsDetections.$inferSelect;
+export type AoiEventRow = typeof aoiEvents.$inferSelect;
+export type JobRunRow = typeof jobRuns.$inferSelect;
