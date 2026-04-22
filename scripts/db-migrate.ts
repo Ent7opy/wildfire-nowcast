@@ -1,18 +1,17 @@
 /**
  * One-shot migrator for the live Neon database.
  *
- * Runs `db/migrations/0000_init.sql` against `DATABASE_URL`. Idempotent:
- * every CREATE statement uses IF NOT EXISTS, and the seed `INSERT` is
- * `ON CONFLICT DO NOTHING`. Safe to re-run.
+ * Applies every `db/migrations/<NNNN>_*.sql` file (skipping `*.test.sql`
+ * variants which are PGlite-only) in lexical order. Idempotent: every CREATE
+ * uses IF NOT EXISTS and seeds use `ON CONFLICT DO NOTHING`. Safe to re-run.
  *
  * Usage:
  *   pnpm db:migrate                # uses .env / DATABASE_URL
  *
- * In Stage 5+ when more migrations land, replace this with `drizzle-kit
- * migrate` against `db/migrations/`. Stage 1 keeps the runner trivial.
+ * In Stage 5+ when migration count grows, replace with `drizzle-kit migrate`.
  */
 import "dotenv/config";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client } from "pg";
 
@@ -22,13 +21,18 @@ async function main(): Promise<void> {
     console.error("DATABASE_URL is not set; nothing to do.");
     process.exit(1);
   }
-  const sqlPath = join(process.cwd(), "db", "migrations", "0000_init.sql");
-  const sql = await readFile(sqlPath, "utf8");
+  const dir = join(process.cwd(), "db", "migrations");
+  const files = (await readdir(dir))
+    .filter((f) => f.endsWith(".sql") && !f.endsWith(".test.sql"))
+    .sort();
   const client = new Client({ connectionString: url });
   await client.connect();
   try {
-    await client.query(sql);
-    console.log("Applied 0000_init.sql");
+    for (const file of files) {
+      const sql = await readFile(join(dir, file), "utf8");
+      await client.query(sql);
+      console.log(`Applied ${file}`);
+    }
   } finally {
     await client.end();
   }
