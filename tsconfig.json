@@ -30,6 +30,7 @@
     "db/**/*.ts",
     "tests/**/*.ts",
     "scripts/db-migrate.ts",
+    "scripts/db-seed-industrial-mask.ts",
     "drizzle.config.ts",
     "vitest.config.ts",
     "next.config.ts",
