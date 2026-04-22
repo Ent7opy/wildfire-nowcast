@@ -20,7 +20,6 @@ const eslintConfig = defineConfig([
     "ui/**",
     "models/**",
     "configs/**",
-    "scripts/**",
     "tools/**",
     "data/**",
     "infra/**",
