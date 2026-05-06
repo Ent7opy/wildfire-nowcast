@@ -1,168 +1,111 @@
 # Production Secrets Guide
 
-How to manage secrets for Wildfire Nowcast deployments.
+How to manage secrets for Wildfire Nowcast deployments on Vercel.
+
+The pre-pivot Python/Docker stack and its secrets (POSTGRES_PASSWORD, INTERNAL_API_KEY, GEMINI_API_KEY, CDSAPI_KEY, SPREAD_MODEL_CATALOG_SIGNING_KEY, etc.) have been removed during the A' pivot (see `pm/decisions/0005-problem-chosen-a-prime.md`). Only the secrets used by the current Next.js / Drizzle / Neon / Vercel-cron stack are documented below.
 
 ## Secret Inventory
 
 | Variable | Required | Rotation frequency | Notes |
 |----------|----------|--------------------|-------|
+| `DATABASE_URL` | Yes | Quarterly (or on Neon credential rotation) | Pooled Neon connection string ending in `-pooler` |
 | `FIRMS_MAP_KEY` | Yes | Yearly / on compromise | NASA FIRMS API key |
-| `POSTGRES_PASSWORD` | Yes | Quarterly | Database password |
-| `INTERNAL_API_KEY` | Yes (prod) | Quarterly | Protects `/internal/*` endpoints |
-| `GEMINI_API_KEY` | No | On compromise | AI assistant; proxied through API |
-| `WEBHOOK_SECRET` | No | Quarterly | HMAC signing for outgoing webhooks |
-| `NOTIFICATION_SMTP_PASSWORD` | No | Quarterly | Email alert delivery |
-| `NOTIFICATION_WEBHOOK_URL` | No | On compromise | Slack/Discord incoming webhook |
-| `CDSAPI_KEY` | No | Yearly | Copernicus CDS drought data |
-| `LFMC_ECLAND_API_TOKEN` | No | On compromise | LFMC ecLand bearer token |
-| `SPREAD_MODEL_CATALOG_SIGNING_KEY` | No | Quarterly | Model catalog HMAC key |
-| `DATABASE_URL` | Alt | Quarterly | Full connection string (alternative to `POSTGRES_*`) |
+| `CRON_SECRET` | Yes | Quarterly | Bearer token shared between GitHub Actions cron and `/api/aoi/poll` |
+| `AI_GATEWAY_API_KEY` | Yes (for briefs) | On compromise | Vercel AI Gateway key for `@ai-sdk/google` |
+| `RESEND_API_KEY` | Yes (for notifications) | Quarterly | Email dispatch via Resend |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Yes (for auth) | On compromise | Browser-facing Clerk key (public by design) |
+| `CLERK_SECRET_KEY` | Yes (for auth) | Quarterly | Server-only Clerk key |
+| `CLERK_WEBHOOK_SIGNING_SECRET` | Yes (for Clerk webhooks) | On webhook endpoint rotation | Svix signing secret used by `/api/webhooks/clerk` to verify payloads; route returns 503 if unset |
+| `NOTIFY_FROM_ADDRESS` | Yes (for notifications) | On verified-domain change | `From:` address used by Resend dispatch; must be on a verified Resend domain. Without it, prod emails ship from a placeholder default and the lib emits a misconfiguration warning |
+| `NEXT_PUBLIC_APP_URL` | Yes (for share links) | On deployed-URL change | Canonical public origin used to format brief share URLs. `NEXT_PUBLIC_*` is baked at build time, so changes require a redeploy |
 
-## Injecting Secrets on Railway
+A canonical example with comments lives in `.env.example`.
 
-Railway is the primary deployment platform. Secrets are set as service variables.
+## Injecting Secrets on Vercel
 
-### Per-service variables
+All production and preview secrets are set via the Vercel dashboard. The current Next.js app reads them from `process.env` at request time (or at build time for `NEXT_PUBLIC_*`).
 
-1. Open the Railway project dashboard.
-2. Select the service (e.g., `api`, `worker`, `ingest_scheduler`).
-3. Go to **Variables** tab.
-4. Add each secret as a key-value pair.
+1. Open the project in the Vercel dashboard.
+2. Navigate to **Settings → Environment Variables**.
+3. Add each secret with the appropriate scope: **Production**, **Preview**, **Development**, or any combination.
+4. Trigger a redeploy for changes to take effect (Vercel does not hot-reload env vars).
 
-### Shared variables (recommended)
+Local development uses `.env.local` (gitignored). Copy `.env.example` and fill in the values you need.
 
-For secrets used by multiple services (database credentials, `FIRMS_MAP_KEY`):
+## Injecting Secrets in GitHub Actions
 
-1. Create a **Shared Variable Group** in Railway project settings.
-2. Add the shared secrets there.
-3. Link the group to each service that needs it.
+The FIRMS poll workflow (`.github/workflows/firms-poll.yml`) needs `CRON_SECRET` so it can authenticate against `/api/aoi/poll`.
 
-### Railway PostGIS reference variables
-
-Railway auto-provisions `DATABASE_URL`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` when you attach a PostGIS plugin. Reference them with `${{ PostGIS.DATABASE_URL }}` syntax in service variables. Do NOT hardcode these.
-
-Set `DB_SSL_REQUIRE=true` on Railway -- asyncpg requires explicit SSL for remote connections.
-
-## Injecting Secrets in Docker Compose (production)
-
-Do NOT use `.env` files in production Docker Compose deployments. Use one of these approaches:
-
-### Option A: Docker secrets (preferred)
-
-```yaml
-# docker-compose.prod.yml
-services:
-  api:
-    environment:
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      FIRMS_MAP_KEY_FILE: /run/secrets/firms_map_key
-    secrets:
-      - postgres_password
-      - firms_map_key
-
-secrets:
-  postgres_password:
-    external: true
-  firms_map_key:
-    external: true
-```
-
-Create secrets with:
-```bash
-echo "your-strong-password" | docker secret create postgres_password -
-echo "your-firms-key" | docker secret create firms_map_key -
-```
-
-Note: The application currently reads from environment variables, not `*_FILE` vars. If using Docker secrets, add a small entrypoint script that exports file contents to env vars:
-
-```bash
-#!/bin/sh
-for f in /run/secrets/*; do
-  var_name=$(basename "$f" | tr '[:lower:]' '[:upper:]')
-  export "$var_name"="$(cat "$f")"
-done
-exec "$@"
-```
-
-### Option B: Environment variables from host
-
-```bash
-export POSTGRES_PASSWORD="strong-password-here"
-export FIRMS_MAP_KEY="your-key-here"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-```
-
-Ensure the shell session or systemd unit that runs `docker compose` has the variables set (e.g., via `/etc/environment` or a systemd `EnvironmentFile` that is root-readable only).
+1. In the GitHub repo, go to **Settings → Secrets and variables → Actions**.
+2. Add `CRON_SECRET` as a repository secret.
+3. The same value must be set on Vercel (Production scope) so the route handler accepts the bearer token.
 
 ## Secret Rotation Procedure
 
-### Database password (`POSTGRES_PASSWORD`)
+### `DATABASE_URL` (Neon)
 
-1. Generate a new password: `openssl rand -base64 32`
-2. Update the password in PostgreSQL: `ALTER USER wildfire WITH PASSWORD 'new-password';`
-3. Update the variable in Railway (or your deployment target) for **every service** that connects to the database: `api`, `worker`, `ingest_scheduler`, `migrate`, `tiles`.
-4. Restart all affected services.
-5. Verify with `make health-check` or `curl http://localhost:8000/health`.
+1. Reset the password in the Neon console (or rotate the role).
+2. Copy the new pooled connection string (host ending in `-pooler`).
+3. Update `DATABASE_URL` in Vercel for Production and Preview scopes.
+4. Redeploy. Verify by hitting an AOI route — a 503 means the value is still missing or wrong.
 
-### API keys (`FIRMS_MAP_KEY`, `GEMINI_API_KEY`, `CDSAPI_KEY`)
+### `FIRMS_MAP_KEY`
 
-1. Generate or request a new key from the provider.
-2. Update the variable in Railway / your deployment target.
-3. Restart the affected service(s).
-4. Verify the ingest or feature still works (e.g., trigger a test ingest run).
-5. Revoke the old key at the provider.
+1. Request a new key at https://firms.modaps.eosdis.nasa.gov/api/.
+2. Update `FIRMS_MAP_KEY` in Vercel and as a GitHub Actions secret if the workflow ever calls FIRMS directly.
+3. Redeploy. Trigger the FIRMS poll workflow manually to verify.
+4. Revoke the old key with NASA.
 
-### `INTERNAL_API_KEY`
+### `CRON_SECRET`
 
-1. Generate a new key: `openssl rand -hex 32`
-2. Update the variable on all services that call `/internal/*` endpoints (typically `ingest_scheduler` and any external automation).
-3. Update the variable on the `api` service.
-4. Restart affected services.
+1. Generate a new value: `openssl rand -hex 32`.
+2. Update **both** the GitHub Actions repo secret **and** the Vercel Production env var **in the same window** — they must match for the cron to authenticate.
+3. Redeploy on Vercel, then re-run the FIRMS poll workflow to verify.
 
-### `WEBHOOK_SECRET`
+### `AI_GATEWAY_API_KEY`
 
-1. Generate a new secret: `openssl rand -hex 32`
-2. Update on the `api` service (sender) and on the receiving side (Slack app / webhook consumer verification config).
-3. Restart the `api` service.
+1. Rotate the key in the Vercel AI Gateway dashboard.
+2. Update the env var on the project.
+3. Redeploy. Verify by triggering a brief generation.
 
-### `NOTIFICATION_SMTP_PASSWORD`
+### `RESEND_API_KEY`
 
-1. Update the password in your email provider.
-2. Update the variable on the `api` service.
-3. Restart and verify by triggering a test notification.
+1. Create a new API key in the Resend dashboard.
+2. Update on Vercel.
+3. Redeploy and trigger a test notification.
+4. Delete the old key in Resend.
 
-### `SPREAD_MODEL_CATALOG_SIGNING_KEY`
+### Clerk keys (`CLERK_SECRET_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`)
 
-**Important:** When rotating this key you must update both the key **and** re-sign every catalog entry in a single deploy. The key and its signatures must always match — deploying a new key without re-signing the catalog (or vice-versa) will cause signature verification failures and block model promotion.
+1. Rotate via the Clerk dashboard. The publishable key is safe to expose to the browser; the secret key is not.
+2. Update both env vars on Vercel.
+3. Redeploy. Active sessions may need to re-authenticate.
 
-1. Generate a new key: `openssl rand -hex 32`
-2. Re-sign the model catalog with the new key.
-3. Update the `SPREAD_MODEL_CATALOG_SIGNING_KEY` variable on all services (`api`, `worker`).
-4. Deploy the re-signed catalog and the new key together.
-5. Verify with a test model promotion.
+### `CLERK_WEBHOOK_SIGNING_SECRET`
+
+1. In the Clerk dashboard, go to **Webhooks** and open the endpoint that points at `/api/webhooks/clerk`.
+2. Copy the endpoint signing key (Svix-format secret).
+3. Update `CLERK_WEBHOOK_SIGNING_SECRET` in Vercel for Production and Preview scopes.
+4. Redeploy. Verify by triggering a Clerk event (e.g. user.created) — the route must return 200 and not 503.
+
+### `NOTIFY_FROM_ADDRESS`
+
+1. In the Resend dashboard, confirm the sender domain is verified (DNS records green).
+2. Pick the address (e.g. `notifications@your-verified-domain`).
+3. Update `NOTIFY_FROM_ADDRESS` in Vercel for Production and Preview scopes.
+4. Redeploy. Trigger a test notification and confirm the `[notify] Resend sender configured: …` log line shows the new address.
+
+### `NEXT_PUBLIC_APP_URL`
+
+1. Set to the deployed origin (e.g. `https://wildfire-nowcast.vercel.app`) — no trailing slash required.
+2. Update in Vercel for Production and Preview scopes.
+3. **Redeploy** — `NEXT_PUBLIC_*` values are inlined at build time, so an env change without a rebuild is a no-op.
+4. Rotation: none required. Update only when the deployed URL changes (custom domain, project rename).
 
 ## What NOT To Do
 
-- **Never commit `.env` to git.** It is in `.gitignore` but accidents happen. The repo has a gitleaks pre-commit hook to catch this -- install it with `pre-commit install`.
-- **Never log secrets.** Do not print or log environment variables that contain keys or passwords. The codebase uses `${VAR:-}` defaults; make sure log statements do not interpolate secret values.
-- **Never embed secrets in Docker images.** Use runtime environment variables or Docker secrets, not build args or `COPY .env`.
-- **Never share secrets in Slack, email, or issue trackers.** Use a secrets manager or share via Railway's variable UI.
-- **Never use the same secret across environments.** Dev, staging, and production must have independent credentials.
-- **Never disable the pre-commit hook.** If gitleaks flags a false positive, add the path or pattern to `.gitleaks.toml` allowlist rather than skipping the hook.
-
-## Pre-commit Hooks
-
-All developers must enable the gitleaks pre-commit hook after cloning the repository. This prevents secrets from being committed to version control.
-
-```bash
-pip install pre-commit   # or: brew install pre-commit
-pre-commit install
-```
-
-This enables the gitleaks hook defined in `.pre-commit-config.yaml`. Every `git commit` will scan staged files for secrets before allowing the commit.
-
-To run manually against all files:
-
-```bash
-pre-commit run gitleaks --all-files
-```
+- **Never commit `.env.local` or any other `.env*` file other than `.env.example` to git.** `.gitignore` covers this; do not bypass it.
+- **Never log secrets.** Do not interpolate env vars that contain keys into log statements.
+- **Never share secrets in Slack, email, or issue trackers.** Use the Vercel and GitHub UIs.
+- **Never use the same secret across environments.** Production, Preview, and local development must each have independent credentials.
+- **Never disable pre-commit hooks if/when added.** Fix the underlying issue.
