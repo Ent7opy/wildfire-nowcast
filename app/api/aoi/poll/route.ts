@@ -38,6 +38,7 @@ import { bucketToBbox, getActiveBuckets } from "@/lib/firms/buckets";
 import { matchDetectionsToAois } from "@/lib/firms/matcher";
 import { generateBriefForEvent, type GenerateOutcome } from "@/lib/ai/generate";
 import { dispatchBrief, type DispatchOutcome } from "@/lib/notify/dispatch";
+import { pruneOldDetections } from "@/lib/firms/prune";
 
 // Test-only injection point: lets the integration suite bypass the live
 // FIRMS call without introducing a DI framework. Production leaves it null.
@@ -177,6 +178,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Parent job_run row.
   const parentRunId = await openJobRun(db, "firms-poll", null, totalStart);
 
+  // Stage 7: 14-day retention sweep. Runs once per poll, before fan-out, so a
+  // failure here surfaces quickly and counts land on the parent run row. The
+  // matcher only reads `inserted_at >= pollStart` and the brief generator only
+  // reads detections inside the event's first/last seen window, both well
+  // inside 14 days — see `lib/firms/prune.ts`.
+  let detectionsPruned = 0;
+  try {
+    detectionsPruned = await pruneOldDetections(db);
+    if (detectionsPruned > 0) {
+      console.info(`[poll] retention sweep removed ${detectionsPruned} firms_detections rows`);
+    }
+  } catch (err) {
+    console.warn(`[poll] retention sweep failed: ${errMessage(err)}`);
+  }
+
   let buckets: string[];
   try {
     if (body.bucket) {
@@ -232,6 +248,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     eventsCreated: totalEventsCreated,
     briefsGenerated: totalBriefsGenerated,
     notificationsSent: totalNotificationsSent,
+    detectionsPruned,
     finishedAt: new Date(),
   });
 
@@ -242,6 +259,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     bucketCount: buckets.length,
     totalBriefsGenerated,
     totalNotificationsSent,
+    detectionsPruned,
   });
 }
 
@@ -430,6 +448,7 @@ type CloseArgs = {
   eventsCreated?: number;
   briefsGenerated?: number;
   notificationsSent?: number;
+  detectionsPruned?: number;
 };
 
 async function closeJobRun(
@@ -448,7 +467,8 @@ async function closeJobRun(
       "detections_inserted" = COALESCE("detections_inserted", 0) + ${args.detectionsInserted ?? 0},
       "events_created" = COALESCE("events_created", 0) + ${args.eventsCreated ?? 0},
       "briefs_generated" = COALESCE("briefs_generated", 0) + ${args.briefsGenerated ?? 0},
-      "notifications_sent" = COALESCE("notifications_sent", 0) + ${args.notificationsSent ?? 0}
+      "notifications_sent" = COALESCE("notifications_sent", 0) + ${args.notificationsSent ?? 0},
+      "detections_pruned" = COALESCE("detections_pruned", 0) + ${args.detectionsPruned ?? 0}
     WHERE "id" = ${id}
   `);
 }
