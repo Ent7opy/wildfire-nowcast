@@ -15,6 +15,9 @@ The pre-pivot Python/Docker stack and its secrets (POSTGRES_PASSWORD, INTERNAL_A
 | `RESEND_API_KEY` | Yes (for notifications) | Quarterly | Email dispatch via Resend |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Yes (for auth) | On compromise | Browser-facing Clerk key (public by design) |
 | `CLERK_SECRET_KEY` | Yes (for auth) | Quarterly | Server-only Clerk key |
+| `CLERK_WEBHOOK_SIGNING_SECRET` | Yes (for Clerk webhooks) | On webhook endpoint rotation | Svix signing secret used by `/api/webhooks/clerk` to verify payloads; route returns 503 if unset |
+| `NOTIFY_FROM_ADDRESS` | Yes (for notifications) | On verified-domain change | `From:` address used by Resend dispatch; must be on a verified Resend domain. Without it, prod emails ship from a placeholder default and the lib emits a misconfiguration warning |
+| `NEXT_PUBLIC_APP_URL` | Yes (for share links) | On deployed-URL change | Canonical public origin used to format brief share URLs. `NEXT_PUBLIC_*` is baked at build time, so changes require a redeploy |
 
 A canonical example with comments lives in `.env.example`.
 
@@ -77,6 +80,27 @@ The FIRMS poll workflow (`.github/workflows/firms-poll.yml`) needs `CRON_SECRET`
 1. Rotate via the Clerk dashboard. The publishable key is safe to expose to the browser; the secret key is not.
 2. Update both env vars on Vercel.
 3. Redeploy. Active sessions may need to re-authenticate.
+
+### `CLERK_WEBHOOK_SIGNING_SECRET`
+
+1. In the Clerk dashboard, go to **Webhooks** and open the endpoint that points at `/api/webhooks/clerk`.
+2. Copy the endpoint signing key (Svix-format secret).
+3. Update `CLERK_WEBHOOK_SIGNING_SECRET` in Vercel for Production and Preview scopes.
+4. Redeploy. Verify by triggering a Clerk event (e.g. user.created) — the route must return 200 and not 503.
+
+### `NOTIFY_FROM_ADDRESS`
+
+1. In the Resend dashboard, confirm the sender domain is verified (DNS records green).
+2. Pick the address (e.g. `notifications@your-verified-domain`).
+3. Update `NOTIFY_FROM_ADDRESS` in Vercel for Production and Preview scopes.
+4. Redeploy. Trigger a test notification and confirm the `[notify] Resend sender configured: …` log line shows the new address.
+
+### `NEXT_PUBLIC_APP_URL`
+
+1. Set to the deployed origin (e.g. `https://wildfire-nowcast.vercel.app`) — no trailing slash required.
+2. Update in Vercel for Production and Preview scopes.
+3. **Redeploy** — `NEXT_PUBLIC_*` values are inlined at build time, so an env change without a rebuild is a no-op.
+4. Rotation: none required. Update only when the deployed URL changes (custom domain, project rename).
 
 ## What NOT To Do
 
