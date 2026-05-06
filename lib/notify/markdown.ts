@@ -44,15 +44,18 @@ function inlineItalics(escaped: string): string {
  * through unchanged (they render as plain escaped text).
  *
  * URL-scheme allow-list: only `http://`, `https://`, `mailto:`, and
- * site-relative URLs (`/...`) emit an anchor. Anything else
- * (`javascript:`, `data:`, `file:`, …) degrades to the plain label text.
- * The threat model is AI-generated brief content that — through model
- * misalignment or prompt injection — slips a `javascript:` URL into the
- * payload and gets rendered as a live anchor in HTML email or the
- * dashboard. Relative URLs are allowed because `lib/share/url.ts` produces
- * them in build-without-blocking (when `NEXT_PUBLIC_APP_URL` is unset).
+ * site-relative URLs (`/...`, but not `//...`) emit an anchor. Anything
+ * else (`javascript:`, `data:`, `file:`, protocol-relative `//evil.com`,
+ * …) degrades to the plain label text. The threat model is AI-generated
+ * brief content that — through model misalignment or prompt injection —
+ * slips a hostile URL into the payload and gets rendered as a live anchor
+ * in HTML email or the dashboard. Protocol-relative URLs are explicitly
+ * blocked because browsers resolve them against the page scheme and will
+ * navigate cross-origin. Relative URLs are allowed because
+ * `lib/share/url.ts` produces them in build-without-blocking (when
+ * `NEXT_PUBLIC_APP_URL` is unset).
  */
-const ALLOWED_SCHEME = /^(?:https?:\/\/|mailto:|\/)/i;
+const ALLOWED_SCHEME = /^(?:https?:\/\/|mailto:|\/(?!\/))/i;
 
 function inlineLinks(escaped: string): string {
   // Operate on the escaped string. Brackets/parens are not in the HTML escape

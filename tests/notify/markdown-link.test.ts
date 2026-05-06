@@ -79,13 +79,32 @@ describe("markdown link rendering", () => {
       expect(out).not.toContain("file:");
     });
 
-    it("rejects scheme with leading whitespace obfuscation", () => {
-      // Regex is anchored, so any non-allowed prefix is rejected.
+    it("rejects upper-case JAVASCRIPT: scheme", () => {
+      // The allow-list uses the `i` flag, so case-folded variants of allowed
+      // schemes still match — but case-folded `javascript:` is not in the
+      // allow-list at all, so it degrades to label text.
       const out = renderMarkdownToHtml("[x](JAVASCRIPT:alert(1))");
       // Note: the closing `)` of `alert(1)` actually terminates the URL match
       // at the first `)`, but even if extracted, `JAVASCRIPT:alert(1` would
       // not match the allow-list and would degrade to label text.
       expect(out).not.toContain("<a ");
+    });
+
+    it("rejects mixed-case JavaScript: scheme", () => {
+      const out = renderMarkdownToHtml("Click [me](JavaScript:alert(1)) now.");
+      expect(out).not.toContain("<a ");
+      expect(out).not.toContain("JavaScript:");
+      expect(out).toContain("me");
+    });
+
+    it("rejects protocol-relative //evil.com URLs", () => {
+      // `//evil.com/path` is resolved by browsers against the page scheme and
+      // navigates cross-origin. The `\/(?!\/)` lookahead in the allow-list
+      // prevents the relative-URL alternative from swallowing the first `/`.
+      const out = renderMarkdownToHtml("Visit [site](//evil.com/path) now.");
+      expect(out).not.toContain("<a ");
+      expect(out).not.toContain("//evil.com");
+      expect(out).toContain("site");
     });
   });
 });
