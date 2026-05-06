@@ -1,6 +1,14 @@
 /**
- * Shared request-handling helpers for the AOI routes. Owns the parse → repo →
- * map-error → response funnel so the route files stay short and uniform.
+ * Shared request-handling helpers for the AOI routes. Owns the parse → auth →
+ * repo → map-error → response funnel so the route files stay short.
+ *
+ * Stage 5: `withDb` is now async and authenticated. It resolves the calling
+ * Clerk user via `requireUserId()`, JIT-provisions a `users` row (covers the
+ * webhook-lag race), and forwards `{ db, userId }` to the route handler.
+ *
+ * Build-without-blocking: when `CLERK_SECRET_KEY` is unset the route returns
+ * a typed 503 `service_unavailable`; the rest of the app continues to build
+ * and start.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { ZodError, type ZodType } from "zod";
@@ -11,7 +19,7 @@ import {
   type ApiErrorBody,
 } from "./errors";
 import { tryGetDb, type AppDb } from "@/lib/db/client";
-import { currentUserId } from "./current-user";
+import { ensureUserExists, requireUserId } from "@/lib/auth/context";
 import {
   AoiAreaTooLargeError,
   AoiNameConflictError,
@@ -28,8 +36,19 @@ export async function withDb<T>(
 ): Promise<NextResponse<T> | NextResponse<ApiErrorBody>> {
   const db = tryGetDb();
   if (!db) return dbUnavailableResponse();
+  const auth = await requireUserId();
+  if (!auth.ok) {
+    if (auth.code === "config_missing") {
+      return apiError(
+        "service_unavailable",
+        "Auth not configured; CLERK_SECRET_KEY is unset",
+      );
+    }
+    return apiError("unauthenticated", "Sign in required");
+  }
   try {
-    return await handler({ db, userId: currentUserId() });
+    await ensureUserExists(db, auth.userId);
+    return await handler({ db, userId: auth.userId });
   } catch (err) {
     return mapDomainError(err);
   }
@@ -68,8 +87,6 @@ function mapDomainError(err: unknown): NextResponse<ApiErrorBody> {
       areaHa: err.areaHa,
     });
   }
-  // Unknown — log via console.error so Vercel surfaces it; respond with a
-  // generic message (no leaking stack traces).
   console.error("[api] unhandled error:", err);
   return apiError("internal_error", "Unexpected server error");
 }

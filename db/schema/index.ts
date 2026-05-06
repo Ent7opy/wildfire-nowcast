@@ -11,9 +11,10 @@
  *   - Stage 3: `aoi_briefs` + `aoi_events.last_brief_at` — LLM situation briefs.
  *   - Stage 4: `notifications_log` + `aoi_briefs.last_notified_at` +
  *              `job_runs.notifications_sent` — Resend email dispatch.
- *
- * Single-user stub: until Clerk lands in Stage 5, every API call is attributed
- * to STUB_USER_ID = "stub-user-1". The migration seeds that single row.
+ *   - Stage 5: Clerk auth — `users.id` now holds the Clerk user_id directly
+ *              (column shape unchanged). The seed stub row is dropped by
+ *              `0004_stage5.sql`; rows are inserted via the Clerk webhook
+ *              (`user.created`/`updated`) and the JIT path in `withDb`.
  */
 import {
   bigserial,
@@ -42,10 +43,8 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => "bytea",
 });
 
-export const STUB_USER_ID = "stub-user-1";
-
 export const users = pgTable("users", {
-  id: text("id").primaryKey(), // Clerk user_id; for now: STUB_USER_ID
+  id: text("id").primaryKey(), // Clerk user_id (e.g. "user_2abc...")
   email: text("email").notNull(),
   displayName: text("display_name"),
   geminiApiKeyEnc: bytea("gemini_api_key_enc"),

@@ -66,11 +66,15 @@ describeIntegration("/api/aoi/poll → brief — PostGIS integration", () => {
     await handle!.pool.query(`DELETE FROM aoi_rules`);
     await handle!.pool.query(`DELETE FROM aois`);
     await handle!.pool.query(`DELETE FROM job_runs`);
+    await handle!.pool.query(
+      `INSERT INTO users (id, email) VALUES ('user_2pollToBriefOwner', 'pollbrief@example.org')
+       ON CONFLICT (id) DO NOTHING`,
+    );
 
     await handle!.pool.query(
       `INSERT INTO aois (user_id, name, polygon, bbox, centroid, region_bucket, area_ha)
        VALUES (
-         'stub-user-1',
+         'user_2pollToBriefOwner',
          'Spring Creek Preserve',
          ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)),
          ST_SetSRID(ST_Envelope(ST_GeomFromGeoJSON($1)), 4326),

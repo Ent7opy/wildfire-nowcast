@@ -67,13 +67,16 @@ describeIntegration("FIRMS matcher — PostGIS integration", () => {
       ctx.skip();
       return;
     }
-    // Wipe everything but keep the stub user row so AOIs can FK to it.
     await handle!.pool.query(`DELETE FROM aoi_events`);
     await handle!.pool.query(`DELETE FROM firms_detections`);
     await handle!.pool.query(`DELETE FROM aoi_rules`);
     await handle!.pool.query(`DELETE FROM aois`);
     await handle!.pool.query(`DELETE FROM industrial_mask_static`);
     await handle!.pool.query(`DELETE FROM job_runs`);
+    await handle!.pool.query(
+      `INSERT INTO users (id, email) VALUES ('user_2matcherIntegOwner', 'matcher@example.org')
+       ON CONFLICT (id) DO NOTHING`,
+    );
 
     // Seed one industrial mask polygon for the Burgan flare.
     const flarePoly = pointBoxToPolygon(FLARE_LON, FLARE_LAT, 8);
@@ -87,7 +90,7 @@ describeIntegration("FIRMS matcher — PostGIS integration", () => {
     await handle!.pool.query(
       `INSERT INTO aois (user_id, name, polygon, bbox, centroid, region_bucket, area_ha)
        VALUES (
-         'stub-user-1',
+         'user_2matcherIntegOwner',
          'Spring Creek Preserve',
          ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)),
          ST_SetSRID(ST_Envelope(ST_GeomFromGeoJSON($1)), 4326),
@@ -166,7 +169,7 @@ describeIntegration("FIRMS matcher — PostGIS integration", () => {
     await handle!.pool.query(
       `INSERT INTO aois (user_id, name, polygon, bbox, centroid, region_bucket, area_ha)
        VALUES (
-         'stub-user-1',
+         'user_2matcherIntegOwner',
          'Kuwait Refuge',
          ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)),
          ST_SetSRID(ST_Envelope(ST_GeomFromGeoJSON($1)), 4326),

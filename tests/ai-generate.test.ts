@@ -60,10 +60,15 @@ async function seedAoiAndEvent(
       ],
     ],
   });
+  await db.execute(sql`
+    INSERT INTO "users" ("id", "email")
+    VALUES ('user_2aiGenOwner', 'owner@example.org')
+    ON CONFLICT ("id") DO NOTHING
+  `);
   const aoiRes = (await db.execute(sql`
     INSERT INTO "aois" (user_id, name, polygon, bbox, centroid, region_bucket, area_ha)
     VALUES (
-      'stub-user-1',
+      'user_2aiGenOwner',
       'Test Preserve',
       ${aoiPolygon},
       ${aoiPolygon},

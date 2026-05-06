@@ -8,7 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeFreshTestDb } from "@/db/test/pglite";
 import { _setTestDb, type AppDb } from "@/lib/db/client";
+import { _setTestAuth } from "@/lib/auth/context";
 import type { PGlite } from "@electric-sql/pglite";
+
+const ROUTE_USER_ID = "user_2abcRouteOwner";
 
 import { GET as aoiList, POST as aoiCreate } from "@/app/api/aoi/route";
 import {
@@ -46,10 +49,12 @@ describe("AOI routes (Next.js App Router handlers)", () => {
   beforeEach(async () => {
     ({ db, pglite } = await makeFreshTestDb());
     _setTestDb(db);
+    _setTestAuth(() => ({ ok: true, userId: ROUTE_USER_ID }));
   });
 
   afterEach(async () => {
     _setTestDb(null);
+    _setTestAuth(null);
     await pglite.close();
   });
 

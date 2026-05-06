@@ -12,11 +12,13 @@ import {
   updateAoi,
   upsertRules,
 } from "@/lib/db/aoi-repository";
-import { STUB_USER_ID } from "@/db/schema";
+import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
 import type { PGlite } from "@electric-sql/pglite";
 
 import type { PolygonalGeom } from "@/lib/validators/geojson";
+
+const TEST_USER_ID = "user_2abcRepoOwner";
 
 const SONOMA_POLY: PolygonalGeom = {
   type: "Polygon",
@@ -63,6 +65,10 @@ describe("aoi repository (PGlite)", () => {
 
   beforeEach(async () => {
     ({ db, pglite } = await makeFreshTestDb());
+    await db.execute(sql`
+      INSERT INTO "users" ("id", "email") VALUES (${TEST_USER_ID}, ${"owner@example.org"})
+      ON CONFLICT ("id") DO NOTHING
+    `);
   });
 
   afterEach(async () => {
@@ -71,7 +77,7 @@ describe("aoi repository (PGlite)", () => {
 
   it("creates → reads → lists → updates → archives an AOI", async () => {
     const created = await createAoi(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       name: "Spring Creek Preserve",
       geometry: SONOMA_POLY,
     });
@@ -79,51 +85,51 @@ describe("aoi repository (PGlite)", () => {
     expect(created.aoi.areaHa).toBeGreaterThan(0);
     expect(created.rules.distanceBufferKm).toBe(25);
 
-    const fetched = await getAoiById(db, STUB_USER_ID, created.aoi.id);
+    const fetched = await getAoiById(db, TEST_USER_ID, created.aoi.id);
     expect(fetched?.name).toBe("Spring Creek Preserve");
     expect(fetched?.polygon.type).toBe("MultiPolygon");
 
-    const list = await listAois(db, STUB_USER_ID);
+    const list = await listAois(db, TEST_USER_ID);
     expect(list).toHaveLength(1);
     expect(list[0].id).toBe(created.aoi.id);
 
     const updated = await updateAoi(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       aoiId: created.aoi.id,
       patch: { name: "Spring Creek Preserve (north unit)" },
     });
     expect(updated.name).toBe("Spring Creek Preserve (north unit)");
 
     const reGeom = await updateAoi(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       aoiId: created.aoi.id,
       patch: { geometry: SOFIA_POLY },
     });
     expect(reGeom.regionBucket).toBe("5x5:E020_N40");
 
-    await archiveAoi(db, { userId: STUB_USER_ID, aoiId: created.aoi.id });
-    const afterArchive = await listAois(db, STUB_USER_ID);
+    await archiveAoi(db, { userId: TEST_USER_ID, aoiId: created.aoi.id });
+    const afterArchive = await listAois(db, TEST_USER_ID);
     expect(afterArchive).toHaveLength(0);
-    const fetchedAfter = await getAoiById(db, STUB_USER_ID, created.aoi.id);
+    const fetchedAfter = await getAoiById(db, TEST_USER_ID, created.aoi.id);
     expect(fetchedAfter).toBeNull();
   });
 
   it("rejects polygons over the 100,000 ha cap", async () => {
     // ~10° × 10° square ≈ 1.2M km² ≈ 120M ha
     await expect(
-      createAoi(db, { userId: STUB_USER_ID, name: "way too big", geometry: HUGE_POLY }),
+      createAoi(db, { userId: TEST_USER_ID, name: "way too big", geometry: HUGE_POLY }),
     ).rejects.toBeInstanceOf(AoiAreaTooLargeError);
   });
 
   it("conflicts on a duplicate active name for the same user", async () => {
     await createAoi(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       name: "Same",
       geometry: SONOMA_POLY,
     });
     await expect(
       createAoi(db, {
-        userId: STUB_USER_ID,
+        userId: TEST_USER_ID,
         name: "Same",
         geometry: SOFIA_POLY,
       }),
@@ -132,13 +138,13 @@ describe("aoi repository (PGlite)", () => {
 
   it("permits reusing a name once the prior AOI is archived", async () => {
     const first = await createAoi(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       name: "Reusable",
       geometry: SONOMA_POLY,
     });
-    await archiveAoi(db, { userId: STUB_USER_ID, aoiId: first.aoi.id });
+    await archiveAoi(db, { userId: TEST_USER_ID, aoiId: first.aoi.id });
     const second = await createAoi(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       name: "Reusable",
       geometry: SOFIA_POLY,
     });
@@ -148,7 +154,7 @@ describe("aoi repository (PGlite)", () => {
   it("update on a non-existent AOI throws AoiNotFoundError", async () => {
     await expect(
       updateAoi(db, {
-        userId: STUB_USER_ID,
+        userId: TEST_USER_ID,
         aoiId: "00000000-0000-0000-0000-000000000000",
         patch: { name: "x" },
       }),
@@ -157,13 +163,13 @@ describe("aoi repository (PGlite)", () => {
 
   it("rules upsert: create then update in place", async () => {
     const created = await createAoi(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       name: "Rules Test",
       geometry: SONOMA_POLY,
     });
 
     const first = await upsertRules(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       aoiId: created.aoi.id,
       rules: {
         distanceBufferKm: 50,
@@ -179,7 +185,7 @@ describe("aoi repository (PGlite)", () => {
     expect(first.notifyChannels).toHaveLength(1);
 
     const second = await upsertRules(db, {
-      userId: STUB_USER_ID,
+      userId: TEST_USER_ID,
       aoiId: created.aoi.id,
       rules: {
         distanceBufferKm: 15,
@@ -200,7 +206,7 @@ describe("aoi repository (PGlite)", () => {
   it("rules upsert against a non-existent AOI throws AoiNotFoundError", async () => {
     await expect(
       upsertRules(db, {
-        userId: STUB_USER_ID,
+        userId: TEST_USER_ID,
         aoiId: "00000000-0000-0000-0000-000000000000",
         rules: {
           distanceBufferKm: 25,
