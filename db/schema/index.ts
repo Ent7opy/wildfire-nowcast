@@ -324,11 +324,72 @@ export const jobRuns = pgTable("job_runs", {
   briefsGenerated: integer("briefs_generated").notNull().default(0),
   /** Stage 4: count of notification rows with status='sent' from this run. */
   notificationsSent: integer("notifications_sent").notNull().default(0),
+  /** Stage 7: count of `firms_detections` rows pruned by this run's retention sweep. */
+  detectionsPruned: integer("detections_pruned"),
   error: text("error"),
 });
+
+// ---------------------------------------------------------------------------
+// Stage 7: launch-readiness — signed-token email actions + brief feedback
+// ---------------------------------------------------------------------------
+
+/**
+ * Bearer-secret tokens minted at email-send time. The token IS the auth — the
+ * recipient clicks a link in their email and the route redeems the row. One
+ * token per (brief, channel, target, action) tuple; a forwarded email does
+ * not grant the recipient permission to mutate the AOI.
+ *
+ * `action`: "snooze" | "pause" | "unsubscribe" | "feedback"
+ * `channel`: currently always "email"; reserved for future webhook actions
+ * `redeemedValue`: only used by `feedback` — "yes" | "no"
+ */
+export const notifyActionTokens = pgTable(
+  "notify_action_tokens",
+  {
+    token: text("token").primaryKey(),
+    aoiId: uuid("aoi_id")
+      .notNull()
+      .references(() => aois.id, { onDelete: "cascade" }),
+    briefId: uuid("brief_id").references(() => aoiBriefs.id, {
+      onDelete: "set null",
+    }),
+    action: text("action").notNull(),
+    channel: text("channel").notNull(),
+    target: text("target").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    redeemedAt: timestamp("redeemed_at", { withTimezone: true }),
+    redeemedValue: text("redeemed_value"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+);
+
+export const briefFeedback = pgTable(
+  "brief_feedback",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    briefId: uuid("brief_id")
+      .notNull()
+      .references(() => aoiBriefs.id, { onDelete: "cascade" }),
+    helpful: boolean("helpful").notNull(),
+    /** FK-by-string to notify_action_tokens.token (kept loose to avoid a cascade lock). */
+    recipientToken: text("recipient_token").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("brief_feedback_brief_token_uniq").on(t.briefId, t.recipientToken),
+  ],
+);
 
 export type FirmsDetectionRow = typeof firmsDetections.$inferSelect;
 export type AoiEventRow = typeof aoiEvents.$inferSelect;
 export type JobRunRow = typeof jobRuns.$inferSelect;
 export type AoiBriefRow = typeof aoiBriefs.$inferSelect;
 export type NotificationsLogRow = typeof notificationsLog.$inferSelect;
+export type NotifyActionTokenRow = typeof notifyActionTokens.$inferSelect;
+export type BriefFeedbackRow = typeof briefFeedback.$inferSelect;

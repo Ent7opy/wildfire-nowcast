@@ -9,8 +9,10 @@ import {
   getAoiById,
   getRulesByAoiId,
   listBriefsForAoi,
+  listMatchedDetectionsForAoi,
 } from "@/lib/db/aoi-repository";
 import { RulesForm } from "../../_components/rules-form";
+import { AoiMapClient } from "../../_components/aoi-map-client";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -29,6 +31,11 @@ export default async function AoiPage({ params }: Params) {
     userId: auth.userId,
     aoiId: id,
     limit: 20,
+  });
+  const detections = await listMatchedDetectionsForAoi(db, {
+    userId: auth.userId,
+    aoiId: id,
+    sinceDays: 90,
   });
 
   const [lon, lat] = aoi.centroid.coordinates;
@@ -52,7 +59,25 @@ export default async function AoiPage({ params }: Params) {
         </dl>
         <div className="mt-3 text-xs text-[color:var(--muted)]">
           BBox: [{bbox[0][0].toFixed(2)}, {bbox[0][1].toFixed(2)}] →{" "}
-          [{bbox[2][0].toFixed(2)}, {bbox[2][1].toFixed(2)}] · TODO v1.1: MapLibre
+          [{bbox[2][0].toFixed(2)}, {bbox[2][1].toFixed(2)}]
+        </div>
+        <div className="mt-4">
+          <AoiMapClient
+            mode="view"
+            polygon={aoi.polygon}
+            bbox={aoi.bbox}
+            centroid={aoi.centroid}
+            detections={detections.map((d) => ({
+              lat: d.lat,
+              lon: d.lon,
+              frpMw: d.frpMw,
+              detectedAt: d.detectedAt.toISOString(),
+              satellite: d.satellite,
+            }))}
+          />
+          <p className="mt-1 text-xs text-[color:var(--muted)]">
+            {detections.length} matched FIRMS detection{detections.length === 1 ? "" : "s"} in the last 90 days.
+          </p>
         </div>
         <div className="mt-3 flex gap-3 text-sm">
           <Link className="underline" href={`/api/aoi/${aoi.id}/export?format=geojson`}>

@@ -723,6 +723,85 @@ export async function listAllBriefsWithPayloadForUser(
   }));
 }
 
+export type MatchedDetectionRow = {
+  lat: number;
+  lon: number;
+  frpMw: number | null;
+  detectedAt: Date;
+  satellite: string;
+};
+
+/**
+ * Stage 7 — detections that fired the matcher for this AOI within the last
+ * `sinceDays` (default 90). Used by the AOI map to plot point markers.
+ *
+ * Joins firms_detections → aoi_events (via region bucket + event window)
+ * → aois (ownership). The 90-day cap is enforced on `detected_at` regardless
+ * of the underlying event's age.
+ *
+ * Detections are not directly FK'd to events (matcher writes events
+ * separately); we approximate "matched" by intersecting the AOI's bucket
+ * with the event window. Same approximation as `fetchEventSatellites` in
+ * `lib/ai/generate.ts`.
+ */
+export async function listMatchedDetectionsForAoi(
+  db: AppDb,
+  args: { userId: string; aoiId: string; sinceDays?: number; now?: Date },
+): Promise<MatchedDetectionRow[]> {
+  const sinceDays = args.sinceDays ?? 90;
+  const now = args.now ?? new Date();
+  const since = new Date(now.getTime() - sinceDays * 86400_000);
+  const aoi = await getAoiById(db, args.userId, args.aoiId);
+  if (!aoi) return [];
+  const result = (await db.execute(sql`
+    SELECT DISTINCT
+      d."lat" AS lat,
+      d."lon" AS lon,
+      d."frp_mw" AS frp_mw,
+      d."detected_at" AS detected_at,
+      d."source" AS source
+    FROM "firms_detections" d
+    WHERE d."bucket" = ${aoi.regionBucket}
+      AND d."detected_at" >= ${since.toISOString()}
+      AND (d."is_industrial_static" IS NULL OR d."is_industrial_static" = FALSE)
+      AND EXISTS (
+        SELECT 1 FROM "aoi_events" e
+        WHERE e."aoi_id" = ${args.aoiId}
+          AND d."detected_at" >= e."first_seen_at"
+          AND d."detected_at" <= e."last_seen_at"
+      )
+    ORDER BY d."detected_at" DESC
+    LIMIT 5000
+  `)) as unknown as {
+    rows?: Array<{
+      lat: number | string;
+      lon: number | string;
+      frp_mw: number | string | null;
+      detected_at: Date | string;
+      source: string;
+    }>;
+  };
+  const rows = (result.rows ?? (result as unknown as Array<{
+    lat: number | string;
+    lon: number | string;
+    frp_mw: number | string | null;
+    detected_at: Date | string;
+    source: string;
+  }>));
+  return rows
+    .map((r) => ({
+      lat: Number(r.lat),
+      lon: Number(r.lon),
+      frpMw: r.frp_mw == null ? null : Number(r.frp_mw),
+      detectedAt:
+        r.detected_at instanceof Date
+          ? r.detected_at
+          : new Date(r.detected_at),
+      satellite: r.source,
+    }))
+    .filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lon));
+}
+
 export async function listBriefsForAoiWithPayload(
   db: AppDb,
   args: { userId: string; aoiId: string; limit?: number },
