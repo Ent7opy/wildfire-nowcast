@@ -39,19 +39,21 @@ History:
 - **Drizzle ORM** + **PostgreSQL 16 / PostGIS 3.5** on **Neon** (autoscale-to-zero).
 - **PGlite** for unit tests; **`@testcontainers/postgresql`** with `postgis/postgis:16-3.5` for spatial integration tests.
 - **GitHub Actions cron** for FIRMS polling (`.github/workflows/firms-poll.yml`).
+- **AI Gateway** (`@ai-sdk/google` via Vercel AI Gateway) for brief generation.
+- **Resend** for notification email dispatch.
+- **Clerk** for auth + per-user AOIs.
 - **TypeScript 5**, **vitest**, **eslint 9**, **pnpm 10**.
-- Future stages: **AI Gateway** (Stage 3 — brief generation), **Resend** (Stage 4 — email), **Clerk** (Stage 5 — auth).
 
 ## Stage status (snapshot — confirm against `pm/backlog.md`)
 
 - Stage 0 — Next.js scaffold ✅ merged.
 - Stage 1 — AOI CRUD + Drizzle schema + PGlite tests ✅ merged.
 - Stage 2 — FIRMS poll + AOI matcher + GitHub Actions cron ✅ merged.
-- Stage 3 — Brief generation (AI Gateway, structured output) — next.
-- Stage 4 — Notification dispatch (Resend).
-- Stage 5 — Auth (Clerk) + per-user AOIs.
-- Stage 6 — Rules UI / export.
-- Stage 7 — Cutover (now done).
+- Stage 3 — Brief generation (AI Gateway, structured output) ✅ merged.
+- Stage 4 — Notification dispatch (Resend) ✅ merged.
+- Stage 5 — Auth (Clerk) + per-user AOIs ✅ merged.
+- Stage 6 — Rules UI / export ✅ merged.
+- Stage 7 — Cutover ✅ merged.
 
 ## Commands
 
