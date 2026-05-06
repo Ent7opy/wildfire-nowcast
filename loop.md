@@ -62,21 +62,18 @@ All agents inherit the AGENTS.md hard rules (no fabricated data, no science-grad
 
 A PR auto-merges iff **every** condition holds:
 
-- Author was `dev` or `scout`. (Vanyo's PRs and `pm`-authored PRs never auto-merge.)
 - All required CI checks green on the head SHA at merge time.
 - A `reviewer` review exists with body starting `LGTM` and **zero** lines starting with `BLOCKER:`.
+- The reviewer was not the same agent as the PR's author (loop.md hard rule #5).
 - Diff touches **none** of:
   - `pm/PM_CLAUDE.md`, `pm/north-star.md`, `pm/decisions/`
-  - `db/migrations/`, `db/schema/`
   - `loop.md`, `.claude/agents/`, `.claude/settings*.json`
   - `CLAUDE.md`, `AGENTS.md`
-  - `.github/workflows/`
-  - `package.json`, `pnpm-lock.yaml` (deps need a human eye)
 - No `needs-human` label.
-- No `stage-pr:*` label. **Stage PRs always require Vanyo per ADR 0006.**
-- Net additions ≤ 600 lines.
 
 Anything failing → label `needs-human`, mention `@Ent7opy` in a single PR comment with the failing condition, stop.
+
+**Why this gate is short:** per Vanyo directive 2026-05-06 + ADR 0007, the loop's autonomy is gated on CI + adversarial reviewer LGTM, not on author identity, file paths, or PR size. The remaining exclusion list is the small set of files that govern the harness itself — letting the loop edit those without Vanyo's eye creates a recursion risk (a bad agent change to `loop.md` cannot self-correct). Schema, migrations, deps, and stage labels are no longer gates; CI failure on a bad migration is the safety net.
 
 ---
 
@@ -119,7 +116,7 @@ Vanyo unblocks by checking `[x]` items in `pm/blockers.md`. Step 4 of the heartb
 3. **`pm/decisions/` is append-only.** ADRs are never edited in place.
 4. **Never bypass CI.** No `--no-verify`, no force-push that drops CI history, no skip-hooks.
 5. **A reviewer cannot approve a PR whose author agent was itself.** Agent identity is recorded in the PR body's `agent: <role>` line.
-6. **Stage PRs always require Vanyo.** ADR 0006 is binding. The auto-merge gate enforces this.
+6. **Stage PRs follow the auto-merge gate like any other PR.** Per ADR 0007 (supersedes ADR 0006), CI green + reviewer LGTM is sufficient. Vanyo's manual review is not required for stage PRs.
 7. **If `loop.md` and `pm/PM_CLAUDE.md` conflict, `pm/PM_CLAUDE.md` wins.** Strategy supersedes mechanism.
 
 ---
