@@ -8,7 +8,7 @@ Update mode: PM_CLAUDE adds entries; Vanyo marks `[x]` when done; PM_CLAUDE remo
 
 ## Active
 
-_(none open at the moment — all stage 1–5 secrets and tooling are wired)_
+- [ ] **2026-05-06 — Stage 5 (Clerk webhook signing secret).** Stage 5 brief 19 needs `CLERK_WEBHOOK_SIGNING_SECRET` for the Svix-verified `/api/webhooks/clerk` route that syncs the `users` table on `user.created` / `user.updated` / `user.deleted`. **What Vanyo does:** in the Clerk dashboard → Webhooks → "Add Endpoint" → URL `https://wildfire-nowcast.vercel.app/api/webhooks/clerk` (and the Preview URL pattern), subscribe to `user.created`, `user.updated`, `user.deleted`, copy the "Signing Secret" (starts with `whsec_`), add to Vercel `wildfire-nowcast` (Preview + Production) as `CLERK_WEBHOOK_SIGNING_SECRET`. Without this, Clerk users sign in but the local `users` table never populates — JIT provisioning will paper over it for the first request, but re-syncs (email change, deletion) will not propagate. PM_CLAUDE verifies via `vercel env ls` after Vanyo checks the box.
 
 ---
 
