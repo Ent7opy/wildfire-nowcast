@@ -1,0 +1,98 @@
+name: FIRMS poll
+
+# IMPORTANT (Vanyo): the `schedule:` trigger below is intentionally commented
+# out at merge time. Per pm/blockers.md "Stage 2 — CRON_SECRET", flip the
+# toggle by un-commenting the two `cron:` lines once these are both set:
+#   1. `CRON_SECRET` on the Vercel `wildfire-nowcast` project (Preview + Prod)
+#   2. `CRON_SECRET` as a GitHub Actions repo secret
+# Until then, leaving `schedule:` active would generate a 503 (CRON_SECRET
+# unset) every 15 minutes and pollute job_runs with noise.
+on:
+  workflow_dispatch:
+    inputs:
+      bucket:
+        description: "Optional 5x5:E### or 5x5:W### bucket key"
+        required: false
+        type: string
+  # schedule:
+  #   - cron: "*/15 * * * *"
+
+# Don't pre-empt a slow run with a fresh tick. If a poll genuinely takes longer
+# than 15 minutes, we want to see it finish and then let the next tick start.
+concurrency:
+  group: firms-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve target URL
+        id: target
+        env:
+          TARGET_URL_OVERRIDE: ${{ vars.FIRMS_POLL_TARGET_URL }}
+        run: |
+          # vars.FIRMS_POLL_TARGET_URL lets Vanyo point at a preview deploy
+          # for verification; default is the production Vercel domain.
+          URL="${TARGET_URL_OVERRIDE:-https://wildfire-nowcast.vercel.app}"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Check CRON_SECRET is configured
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "${CRON_SECRET}" ]; then
+            echo "::error::CRON_SECRET secret is not set on this repo. See pm/blockers.md."
+            exit 1
+          fi
+
+      - name: Build request body
+        id: body
+        env:
+          BUCKET: ${{ inputs.bucket }}
+        run: |
+          if [ -n "${BUCKET}" ]; then
+            BODY=$(printf '{"bucket":"%s"}' "${BUCKET}")
+          else
+            BODY=""
+          fi
+          # Use a delimiter so multi-line / empty bodies survive the env hop.
+          {
+            echo "body<<EOF_BODY"
+            echo "${BODY}"
+            echo "EOF_BODY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: POST /api/aoi/poll
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          TARGET_URL: ${{ steps.target.outputs.url }}
+          REQ_BODY: ${{ steps.body.outputs.body }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="${TARGET_URL%/}/api/aoi/poll"
+          echo "POST ${ENDPOINT}"
+          # One retry on transient failure (network blip / Vercel cold-start).
+          for attempt in 1 2; do
+            HTTP_CODE=$(curl -sS -o /tmp/poll.body -w "%{http_code}" \
+              --max-time 90 \
+              -X POST "${ENDPOINT}" \
+              -H "Authorization: Bearer ${CRON_SECRET}" \
+              -H "Content-Type: application/json" \
+              --data "${REQ_BODY:-}") || HTTP_CODE="000"
+            echo "Attempt ${attempt}: HTTP ${HTTP_CODE}"
+            cat /tmp/poll.body || true
+            echo
+            if [ "${HTTP_CODE}" = "200" ]; then
+              exit 0
+            fi
+            if [ "${HTTP_CODE}" = "401" ] || [ "${HTTP_CODE}" = "400" ] || [ "${HTTP_CODE}" = "503" ]; then
+              # Configuration / auth errors won't fix themselves on retry.
+              echo "::error::Non-retryable status ${HTTP_CODE} from /api/aoi/poll"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "::error::FIRMS poll failed after retries"
+          exit 1

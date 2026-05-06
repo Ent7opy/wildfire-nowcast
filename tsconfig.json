@@ -1,0 +1,63 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "lib/**/*.ts",
+    "db/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/db-migrate.ts",
+    "scripts/db-seed-industrial-mask.ts",
+    "drizzle.config.ts",
+    "vitest.config.ts",
+    "next.config.ts",
+    "postcss.config.mjs",
+    "eslint.config.mjs",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    ".next",
+    "api",
+    "ml",
+    "ingest",
+    "ui",
+    "models",
+    "configs",
+    "scripts",
+    "tools",
+    "data",
+    "infra",
+    "examples",
+    "reports",
+    "test-results",
+    ".venv_ml_sweep",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".playwright-mcp"
+  ]
+}

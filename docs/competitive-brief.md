@@ -3,6 +3,13 @@
 **Purpose:** Product strategy and feature prioritization
 **Scope:** Wildfire detection, situational awareness, and weather integration tools used by incident commanders and fire researchers
 
+> **⚠ 2026-04-21 — PARTIALLY SUPERSEDED.** PM Phase 1 research ([`pm/decisions/0002-phase-1-synthesis.md`](../pm/decisions/0002-phase-1-synthesis.md)) contradicts two load-bearing claims in this brief:
+>
+> 1. **"Detection you can trust" positioning (§Positioning Analysis, line 143)** — contradicted. The denoiser regressed; latest gate report fails (precision 0.124, F1 0.22), prod runs unregistered with a 95% drop rate. Cannot be the wedge without re-validation.
+> 2. **Broad audience framing (ICs + dispatchers + researchers + emergency managers)** — too wide for solo-maintenance and implicitly competes with Watch Duty / Technosylva / ArcGIS on their own terms.
+>
+> The competitive landscape analysis below remains useful as reference. The recommended positioning ("ground truth for active fires") is not binding on the Q2 2026 pivot. See `pm/backlog.md` for current candidate directions.
+
 ---
 
 ## Executive Summary

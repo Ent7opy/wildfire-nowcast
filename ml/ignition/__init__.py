@@ -1,1 +1,0 @@
-"""Ignition probability model package."""

@@ -2,67 +2,35 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, "pivot/**"]
   pull_request:
-    branches: [master]
+    branches: [master, "pivot/**"]
 
 jobs:
-  lint-and-test:
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        project:
-          - api
-          - ml
-          - ingest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        run: python -m pip install --upgrade uv
-
-      - name: Sync ${{ matrix.project }} dependencies
-        working-directory: ${{ matrix.project }}
-        run: uv sync --dev
-
-      - name: Ruff ${{ matrix.project }}
-        working-directory: ${{ matrix.project }}
-        run: uv run ruff check .
-
-      - name: Pytest ${{ matrix.project }}
-        working-directory: ${{ matrix.project }}
-        run: uv run pytest -m "not integration"
-
-  ui:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ui
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: ui/package-lock.json
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm typecheck
 
-      - name: Unit tests
-        run: npm run test:run
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
