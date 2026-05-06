@@ -22,7 +22,7 @@ export default defineConfig({
   test: {
     environment: "node",
     pool: "forks",
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     testTimeout: 20_000,
     hookTimeout: 20_000,
   },

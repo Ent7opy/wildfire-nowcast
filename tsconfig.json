@@ -29,6 +29,7 @@
     "lib/**/*.ts",
     "db/**/*.ts",
     "tests/**/*.ts",
+    "tests/**/*.tsx",
     "scripts/db-migrate.ts",
     "scripts/db-seed-industrial-mask.ts",
     "drizzle.config.ts",

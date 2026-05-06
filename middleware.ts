@@ -15,7 +15,10 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 const isProtectedRoute = createRouteMatcher([
   "/api/aoi/:path*",
+  "/api/brief/:path*",
+  "/api/export/:path*",
   "/api/me",
+  "/dashboard/:path*",
 ]);
 
 const clerkConfigured = Boolean(process.env.CLERK_SECRET_KEY);
