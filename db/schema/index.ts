@@ -8,9 +8,9 @@
  *   - Stage 1: `users`, `aois`, `aoi_rules` — AOI CRUD.
  *   - Stage 2: `firms_detections`, `aoi_events`, `industrial_mask_static`,
  *              `job_runs` — FIRMS poll + AOI matcher + cron observability.
+ *   - Stage 3: `aoi_briefs` + `aoi_events.last_brief_at` — LLM situation briefs.
  *
  * DEFERRED to later stages (intentionally omitted here):
- *   - `aoi_briefs`           → Stage 3 (LLM situation briefs)
  *   - `notifications_log`    → Stage 4 (Resend + webhook delivery)
  *
  * Single-user stub: until Clerk lands in Stage 5, every API call is attributed
@@ -23,6 +23,7 @@ import {
   doublePrecision,
   integer,
   jsonb,
+  numeric,
   pgTable,
   real,
   serial,
@@ -209,6 +210,46 @@ export const aoiEvents = pgTable("aoi_events", {
   /** "new" | "open" | "closed". Stage 3's brief generator picks up "new". */
   status: text("status").notNull().default("new"),
   closedAt: timestamp("closed_at", { withTimezone: true }),
+  /** Set when Stage 3 generates a brief for this event. Used by the gate. */
+  lastBriefAt: timestamp("last_brief_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
+ * Stage 3 — generated situation briefs.
+ *
+ * One row per event that passed the gate. The Zod-validated JSON payload lives
+ * in `payload`; `rendered_markdown` is the email/web body produced by the
+ * deterministic Markdown renderer. `gate_reason` records which of the four
+ * SPEC §Flow 6 conditions fired so we can audit gate pass-rate post-launch.
+ */
+export const aoiBriefs = pgTable("aoi_briefs", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  aoiId: uuid("aoi_id")
+    .notNull()
+    .references(() => aois.id, { onDelete: "cascade" }),
+  eventId: uuid("event_id")
+    .notNull()
+    .references(() => aoiEvents.id, { onDelete: "cascade" }),
+  schemaVersion: integer("schema_version").notNull().default(1),
+  /** Model id used for the generation, e.g. "google/gemini-2.5-flash-lite". */
+  model: text("model").notNull(),
+  /** Prompt template version pinned in `lib/ai/prompt.ts`, e.g. "v1". */
+  promptVersion: text("prompt_version").notNull().default("v1"),
+  /** Gate condition that triggered this brief: see lib/ai/gate.ts GateReason. */
+  gateReason: text("gate_reason").notNull(),
+  payload: jsonb("payload").notNull(),
+  renderedMarkdown: text("rendered_markdown").notNull(),
+  /** Estimated USD cost reported by the AI Gateway response, if available. */
+  costUsdEst: numeric("cost_usd_est", { precision: 10, scale: 6 }),
+  /** Wall-clock latency of the gateway call in milliseconds. */
+  latencyMs: integer("latency_ms"),
+  shareToken: text("share_token"),
+  shareExpiresAt: timestamp("share_expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -244,9 +285,12 @@ export const jobRuns = pgTable("job_runs", {
   firmsRequestCount: integer("firms_request_count").notNull().default(0),
   detectionsInserted: integer("detections_inserted").notNull().default(0),
   eventsCreated: integer("events_created").notNull().default(0),
+  /** Stage 3: count of `aoi_briefs` rows produced by this run. */
+  briefsGenerated: integer("briefs_generated").notNull().default(0),
   error: text("error"),
 });
 
 export type FirmsDetectionRow = typeof firmsDetections.$inferSelect;
 export type AoiEventRow = typeof aoiEvents.$inferSelect;
 export type JobRunRow = typeof jobRuns.$inferSelect;
+export type AoiBriefRow = typeof aoiBriefs.$inferSelect;

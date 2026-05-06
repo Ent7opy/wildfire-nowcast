@@ -78,7 +78,8 @@ async function loadMigrations(): Promise<string> {
   const dir = join(process.cwd(), "db", "migrations");
   const stage1 = await readFile(join(dir, "0000_init.sql"), "utf8");
   const stage2 = await readFile(join(dir, "0001_stage2.sql"), "utf8");
-  return [stage1, stage2].join("\n");
+  const stage3 = await readFile(join(dir, "0002_stage3.sql"), "utf8");
+  return [stage1, stage2, stage3].join("\n");
 }
 
 /**

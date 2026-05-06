@@ -66,6 +66,8 @@ export type MatchResult = {
   detectionsSkippedIndustrial: number;
   eventsCreated: number;
   eventsUpdated: number;
+  /** Event IDs created in this match call — Stage 3 brief generator picks these up. */
+  createdEventIds: string[];
 };
 
 export async function matchDetectionsToAois(
@@ -77,6 +79,7 @@ export async function matchDetectionsToAois(
     detectionsSkippedIndustrial: 0,
     eventsCreated: 0,
     eventsUpdated: 0,
+    createdEventIds: [],
   };
   if (args.detections.length === 0) return result;
 
@@ -100,8 +103,12 @@ export async function matchDetectionsToAois(
   const matches = await findAoiMatches(db, args.bucket, pollStart);
   for (const match of matches) {
     const outcome = await upsertEvent(db, args.bucket, args.source, match);
-    if (outcome === "created") result.eventsCreated += 1;
-    else if (outcome === "updated") result.eventsUpdated += 1;
+    if (outcome.kind === "created") {
+      result.eventsCreated += 1;
+      if (outcome.eventId) result.createdEventIds.push(outcome.eventId);
+    } else if (outcome.kind === "updated") {
+      result.eventsUpdated += 1;
+    }
   }
 
   return result;
@@ -352,7 +359,7 @@ async function upsertEvent(
   bucket: string,
   source: FirmsSource,
   match: PerAoiMatch,
-): Promise<"created" | "updated"> {
+): Promise<{ kind: "created" | "updated"; eventId?: string }> {
   const hash = computeDedupeHash({
     aoiId: match.aoiId,
     bucket,
@@ -410,10 +417,10 @@ async function upsertEvent(
         "status" = CASE WHEN "status" = 'closed' THEN 'closed' ELSE "status" END
       WHERE "id" = ${row.id}
     `);
-    return "updated";
+    return { kind: "updated" };
   }
 
-  await db.execute(sql`
+  const insertResult = (await db.execute(sql`
     INSERT INTO "aoi_events" (
       "aoi_id", "first_seen_at", "last_seen_at",
       "nearest_distance_km", "detection_count", "peak_frp_mw",
@@ -429,8 +436,12 @@ async function upsertEvent(
       'new'
     )
     ON CONFLICT ("aoi_id", "dedupe_hash") DO NOTHING
-  `);
-  return "created";
+    RETURNING "id"
+  `)) as unknown as { rows?: Array<{ id: string }> };
+  const insertRows = (insertResult.rows ?? (insertResult as unknown as Array<{ id: string }>)) as Array<{
+    id: string;
+  }>;
+  return { kind: "created", eventId: insertRows[0]?.id };
 }
 
 // ---------------------------------------------------------------------------
