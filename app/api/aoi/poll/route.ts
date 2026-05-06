@@ -36,6 +36,7 @@ import {
 } from "@/lib/firms/client";
 import { bucketToBbox, getActiveBuckets } from "@/lib/firms/buckets";
 import { matchDetectionsToAois } from "@/lib/firms/matcher";
+import { generateBriefForEvent, type GenerateOutcome } from "@/lib/ai/generate";
 
 // Test-only injection point: lets the integration suite bypass the live
 // FIRMS call without introducing a DI framework. Production leaves it null.
@@ -47,6 +48,14 @@ type FirmsFetchFn = (args: {
 let testFirmsFetch: FirmsFetchFn | null = null;
 export function _setTestFirmsFetch(fn: FirmsFetchFn | null): void {
   testFirmsFetch = fn;
+}
+
+// Test-only injection point for the brief generator. Production calls the real
+// orchestrator which dials the AI Gateway.
+type BriefGenFn = typeof generateBriefForEvent;
+let testBriefGen: BriefGenFn | null = null;
+export function _setTestBriefGen(fn: BriefGenFn | null): void {
+  testBriefGen = fn;
 }
 
 // Hobby max function duration is 60s; we configure to that ceiling so a slow
@@ -76,6 +85,14 @@ type BucketRunOutcome = {
   detectionsSkippedIndustrial: number;
   eventsCreated: number;
   eventsUpdated: number;
+  /** Stage 3: number of `aoi_briefs` rows generated for events created in this bucket. */
+  briefsGenerated: number;
+  /**
+   * Per-event skip reasons keyed by event id, e.g. `"paused"`, `"already_briefed"`,
+   * `"prior_absence"` (pass), `"config_missing"`, etc. Empty when every event
+   * either generated a brief or there were no events.
+   */
+  briefSkipReason: Record<string, string>;
   durationMs: number;
   status: "ok" | "partial" | "error";
   error?: string;
@@ -166,12 +183,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let totalDetectionsInserted = 0;
   let totalEventsCreated = 0;
   let totalFirmsCalls = 0;
+  let totalBriefsGenerated = 0;
 
   for (const bucket of buckets) {
     const outcome = await runOneBucket(db, bucket, source);
     runs.push(outcome);
     totalDetectionsInserted += outcome.detectionsInserted;
     totalEventsCreated += outcome.eventsCreated;
+    totalBriefsGenerated += outcome.briefsGenerated;
     totalFirmsCalls += 1;
   }
 
@@ -194,6 +213,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     totalDurationMs: Date.now() - totalStart,
     source,
     bucketCount: buckets.length,
+    totalBriefsGenerated,
   });
 }
 
@@ -226,6 +246,8 @@ async function runOneBucket(
         detectionsSkippedIndustrial: 0,
         eventsCreated: 0,
         eventsUpdated: 0,
+        briefsGenerated: 0,
+        briefSkipReason: {},
         durationMs: Date.now() - start,
         status: "error",
         error: `${fetchResult.code}: ${fetchResult.message}`,
@@ -238,9 +260,36 @@ async function runOneBucket(
       detections: fetchResult.detections,
     });
 
+    let briefsGenerated = 0;
+    const briefSkipReason: Record<string, string> = {};
+    let briefError: string | null = null;
+    const briefGen = testBriefGen ?? generateBriefForEvent;
+    for (const eventId of matchOutcome.createdEventIds) {
+      let outcome: GenerateOutcome;
+      try {
+        outcome = await briefGen(db, eventId);
+      } catch (err) {
+        outcome = {
+          status: "error",
+          eventId,
+          reason: errMessage(err),
+        };
+      }
+      if (outcome.status === "generated") {
+        briefsGenerated += 1;
+      } else if (outcome.status === "skipped") {
+        briefSkipReason[eventId] = outcome.reason;
+      } else {
+        briefSkipReason[eventId] = `error: ${outcome.reason}`;
+        briefError = outcome.reason;
+      }
+    }
+
+    const status: "ok" | "partial" = briefError ? "partial" : "ok";
+
     await closeJobRun(db, childRunId, {
-      status: "ok",
-      error: null,
+      status,
+      error: briefError,
       firmsRequestCount: 1,
       detectionsInserted: matchOutcome.detectionsInserted,
       eventsCreated: matchOutcome.eventsCreated,
@@ -255,8 +304,11 @@ async function runOneBucket(
       detectionsSkippedIndustrial: matchOutcome.detectionsSkippedIndustrial,
       eventsCreated: matchOutcome.eventsCreated,
       eventsUpdated: matchOutcome.eventsUpdated,
+      briefsGenerated,
+      briefSkipReason,
       durationMs: Date.now() - start,
-      status: "ok",
+      status,
+      error: briefError ?? undefined,
     };
   } catch (err) {
     await closeJobRun(db, childRunId, {
@@ -273,6 +325,8 @@ async function runOneBucket(
       detectionsSkippedIndustrial: 0,
       eventsCreated: 0,
       eventsUpdated: 0,
+      briefsGenerated: 0,
+      briefSkipReason: {},
       durationMs: Date.now() - start,
       status: "error",
       error: errMessage(err),

@@ -15,7 +15,11 @@ import { join } from "node:path";
 import { makePgliteDb, type AppDb } from "@/lib/db/client";
 
 /** Order matters — Stage N depends on Stage N-1. */
-const MIGRATIONS = ["0000_init.test.sql", "0001_stage2.test.sql"] as const;
+const MIGRATIONS = [
+  "0000_init.test.sql",
+  "0001_stage2.test.sql",
+  "0002_stage3.test.sql",
+] as const;
 
 let cachedDDL: string | null = null;
 
