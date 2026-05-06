@@ -55,7 +55,7 @@ export async function parseJson<T>(
   return { ok: true, value: parsed.data };
 }
 
-export function mapDomainError(err: unknown): NextResponse<ApiErrorBody> {
+function mapDomainError(err: unknown): NextResponse<ApiErrorBody> {
   if (err instanceof ZodError) return zodErrorResponse(err);
   if (err instanceof AoiNotFoundError) {
     return apiError("not_found", err.message);
