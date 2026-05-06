@@ -1,4 +1,11 @@
+import Link from "next/link";
+import { POSITIONING_LINE, REPO_URL } from "@/lib/export/positioning";
+
 export default function Home() {
+  const clerkConfigured = Boolean(
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
+  );
+
   return (
     <main className="mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-8 px-6 py-16">
       <header className="flex flex-col gap-4">
@@ -38,15 +45,36 @@ export default function Home() {
         </p>
       </section>
 
-      <footer className="rounded-md border border-[color:var(--muted)]/20 bg-[color:var(--foreground)]/5 p-4 text-sm text-[color:var(--muted)]">
-        <p>
-          <span className="font-medium text-[color:var(--foreground)]">
-            Not ready yet.
-          </span>{" "}
-          This is a placeholder for the A&rsquo; pivot. Fire Stewardship Agent
-          v1 targets Q2 2026 and will launch first inside the Land Trust
-          Alliance Wildfire Resilience Network. No sign-up yet; nothing to
-          click.
+      {clerkConfigured ? (
+        <div className="rounded-md border border-[color:var(--accent)]/40 bg-[color:var(--accent)]/5 p-4 text-sm">
+          <Link
+            href="/sign-in"
+            className="font-medium text-[color:var(--accent)] underline"
+          >
+            Sign in to start watching
+          </Link>
+          .
+        </div>
+      ) : (
+        <footer className="rounded-md border border-[color:var(--muted)]/20 bg-[color:var(--foreground)]/5 p-4 text-sm text-[color:var(--muted)]">
+          <p>
+            <span className="font-medium text-[color:var(--foreground)]">
+              Not ready yet.
+            </span>{" "}
+            This is a placeholder for the A&rsquo; pivot. Fire Stewardship Agent
+            v1 targets Q2 2026 and will launch first inside the Land Trust
+            Alliance Wildfire Resilience Network. No sign-up yet; nothing to
+            click.
+          </p>
+        </footer>
+      )}
+
+      <footer className="border-t border-[color:var(--muted)]/20 pt-4 text-xs text-[color:var(--muted)]">
+        <p>{POSITIONING_LINE}</p>
+        <p className="mt-1">
+          <a className="underline" href={REPO_URL} target="_blank" rel="noreferrer">
+            View source
+          </a>
         </p>
       </footer>
     </main>
