@@ -30,12 +30,12 @@ const linearRing = z
 
 const polygonRings = z.array(linearRing).min(1);
 
-export const polygonSchema = z.object({
+const polygonSchema = z.object({
   type: z.literal("Polygon"),
   coordinates: polygonRings,
 });
 
-export const multiPolygonSchema = z.object({
+const multiPolygonSchema = z.object({
   type: z.literal("MultiPolygon"),
   coordinates: z.array(polygonRings).min(1),
 });

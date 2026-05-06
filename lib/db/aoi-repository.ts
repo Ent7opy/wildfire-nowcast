@@ -25,7 +25,7 @@ import { regionBucketFromLonLat } from "@/lib/geo/region-bucket";
 import type { PolygonalGeom } from "@/lib/validators/geojson";
 import type { RulesUpsert } from "@/lib/validators/aoi";
 
-export const MAX_AREA_HA = 100_000;
+const MAX_AREA_HA = 100_000;
 
 export class AoiAreaTooLargeError extends Error {
   constructor(public readonly areaHa: number) {
