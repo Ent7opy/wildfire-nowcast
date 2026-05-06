@@ -147,13 +147,15 @@ Use a small fixed list of common IANA tz strings for v1
 - Read via a new repository function `getBriefByIdForUser(db, userId,
   briefId)` — joins through `aois` to enforce ownership; returns null
   on miss. RSC.
-- Renders `rendered_markdown` via `marked` (already a Stage 4 dep) into
-  HTML. Sanitize with a tiny allow-list (no script tags; preserve
-  `<a>`, `<strong>`, `<em>`, `<code>`, `<pre>`, `<ul>`, `<ol>`, `<li>`,
-  `<p>`, `<table>` family, `<h1>`–`<h4>`). DOMPurify is heavy; a
-  hand-rolled allow-list using `marked`'s renderer hooks is ~30 LOC.
-  Reuse the brief renderer from Stage 3 if it already produces
-  pre-sanitized HTML; do not double-render.
+- Renders `rendered_markdown` via the existing `lib/notify/markdown.ts`
+  (deterministic, ~50 LOC, escapes HTML, covers the brief shape produced
+  by `lib/ai/render.ts`). Do NOT add `marked` — `lib/notify/markdown.ts`
+  is the in-repo decision per Stage 4 (rationale: brief output shape is
+  deterministic and small; `marked` + sanitizer is heavier than this v1
+  surface needs). Reuse it from the dashboard's brief view; if a future
+  brief surface uses tags the existing renderer doesn't cover (`<a>`,
+  `<code>`, `<pre>`, tables, `<h3>`–`<h4>`), extend `lib/notify/markdown.ts`
+  rather than introducing a new dependency.
 - Provenance footer: model id, prompt version, gate reason, latency,
   cost-est USD — all already on `aoi_briefs`.
 - "Share this brief" toggle (client component): when on, POST to
@@ -467,10 +469,10 @@ on any single error, stop and report. The three known sharp edges:
   these routes use, per the `pg` driver constraint). If the stream
   closes early or the test framework can't consume it, fall back to
   buffered + the 500-brief hard guard. Document the choice.
-- **Markdown sanitization.** `marked` with a hand-rolled allow-list
-  is the path; do NOT add DOMPurify (32 KB of jsdom setup) just for
-  this. If the allow-list grows past ~50 LOC, consider
-  `isomorphic-dompurify` and document.
+- **Markdown rendering.** Reuse `lib/notify/markdown.ts` (existing,
+  deterministic, escapes HTML). Do NOT add `marked` or DOMPurify. If
+  future briefs use tags the renderer doesn't cover, extend
+  `lib/notify/markdown.ts` rather than introduce a dep.
 
 ## Branch + label
 
