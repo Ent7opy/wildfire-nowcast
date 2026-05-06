@@ -30,22 +30,33 @@ Each tick, the orchestrator picks the **first** matching action and executes it.
 6. **Stage ready to start** (prior stage merged, all stage-N entries in `pm/blockers.md` checked, no in-progress stage).
    Spawn `pm` to write the next brief in `pm/briefs/` if missing, update `pm/backlog.md` status, then go to step 5.
 
-7. **Idle — scout chore.** Spawn `scout` for one piece of standing work, in priority order:
-   - dead-code / unused-export audit on a single subtree
-   - dependency upgrade (one package, patch/minor only)
-   - doc drift (e.g. `pm/north-star.md` references a path that moved)
-   - research-log entry for a topic in `pm/PM_CLAUDE.md` § "open questions"
-   - typo / broken-link sweep
-   Cap: **one scout PR per UTC day.** If today's slot is used, fall through to step 8.
+7. **Standing improvement work.** Spawn `scout` for one piece of work from the catalog. **No daily cap.** Multiple scout PRs per day are fine as long as each is concretely defensible (one chore per PR, ≤200 net-added lines). Catalog, in rough priority order — but the orchestrator picks based on signal, not strict ordering:
 
-8. **Idle — product review** (when due). Spawn `product-reviewer` if any of:
+   - **Dead-code / unused-export audit** on a subtree not recently audited.
+   - **Dependency upgrade** — one package, patch/minor.
+   - **Doc drift** — references to moved paths, removed tech (e.g. legacy stack mentions), out-of-date examples in `docs/`, `README.md`, `CLAUDE.md`, `AGENTS.md`.
+   - **Test coverage gaps** — find a module with branches uncovered by the existing suite, add the missing tests. Use `pnpm vitest --coverage` if available, else read code + grep for un-asserted branches.
+   - **Refactor for simplicity** — apply the `simplify` skill to a single file or module that's grown bloated (>400 LOC for what it does). Push back on hand-defensive code, premature abstraction, dead branches.
+   - **Code-quality pass** — tighten types (replace `any` / loose unions), remove `// TODO` items that are actually small, fix lint warnings (not errors — warnings).
+   - **Performance audit** — pick a hot path (cron route, dispatcher, brief-generator) and look for synchronous loops over awaited calls, N+1 queries, redundant re-reads. Document findings in `pm/research-log/` even if no fix lands this PR.
+   - **Accessibility audit** on a UI route — keyboard navigation, focus order, aria-labels, color-contrast.
+   - **Security pass** — input validation, SQL-injection surface, CSRF surface, XSS in user-rendered content.
+   - **Schema documentation** — add table / column comments to `db/schema/index.ts` for tables that have grown organically.
+   - **API documentation** — generate or update OpenAPI for `app/api/*`, document handler contracts.
+   - **Brainstorming notes to `pm/research-log/`** — speculative ideas, half-formed hypotheses, "I noticed X while doing Y" notes. Adversarial framing: write the doc you would want a successor agent to find.
+   - **Legal / hygiene** — `LICENSE` file, security policy, `.editorconfig`, etc., if missing.
+   - **Typo / broken-link sweep** in `pm/`, `docs/`, top-level `*.md`.
+
+   The orchestrator's job is to keep the catalog open. **If `scout` returns "nothing to do" twice in a row, the catalog is wrong, not the repo.** The fix is to expand the catalog (which is what brainstorming notes are for), not to log idle.
+
+8. **Product review when due.** Spawn `product-reviewer` if any of:
    - Three or more stages have merged since the last product review.
    - The most recent file in `pm/product-reviews/` is older than 7 UTC days (or none exists).
-   - A candidate-direction-change ADR is being drafted (i.e. `pm` is about to write to `pm/decisions/`).
+   - A candidate-direction-change ADR is being drafted.
 
-   The reviewer reads strategy + spec + recent merges + the actual code surface and writes one structured review to `pm/product-reviews/YYYY-MM-DD.md`. The orchestrator opens a chore PR for the review file (label `needs-review`); it is gate-eligible under ADR 0007. Cap: **one product review per UTC week.** If this week's slot is used, fall through to step 9.
+   The reviewer reads strategy + spec + recent merges + the actual code surface and writes one structured review to `pm/product-reviews/YYYY-MM-DD.md`. The orchestrator opens a chore PR for the review file (label `needs-review`); it is gate-eligible under ADR 0007. Cap: **one product review per UTC week.** If this week's slot is used, fall through to step 7 — there is always more standing improvement work.
 
-9. **Nothing to do.** Append a one-line entry to `pm/loop-log/YYYY-MM-DD.md` and exit. Three consecutive idle ticks → escalate (see § Escalation).
+**There is no step 9.** "Idle" is not a steady state. If the orchestrator believes there is no productive work, the orchestrator is wrong — it should consult the catalog (step 7) or expand the catalog (write a brainstorm note). The only legitimate exit from a tick is either (a) a productive action was taken, or (b) the orchestrator is genuinely blocked on something in `pm/blockers.md` AND the catalog has been examined, in which case write a single line to `pm/loop-log/YYYY-MM-DD.md` naming the blocker and exit. **Pure idle ticks ("no state change") are a setup failure.**
 
 ---
 
@@ -58,7 +69,7 @@ Defined in `.claude/agents/`. Each agent runs in its own git worktree where appl
 | **`pm`** | everything | `pm/briefs/`, `pm/research-log/`, `pm/signals/`, `pm/blockers.md`, `pm/backlog.md`, `pm/decisions/` (append-only) | code outside `pm/`. Writing a new ADR or amending `pm/PM_CLAUDE.md` / `pm/north-star.md` requires Vanyo sign-off via `pm/blockers.md`. |
 | **`dev`** | everything | code, tests, migrations, workflows on a stage or chore branch | pushing to `master` or `pivot/a-prime` directly. `--no-verify`, force-push, hook bypass. Editing `pm/` (except adding research notes via `pm` only). |
 | **`reviewer`** | the PR diff, brief acceptance criteria, CI logs | PR comments only | approving a PR whose author was itself. Approving anything in the auto-merge exclusion list (see gate). |
-| **`scout`** | everything | a single-purpose chore branch | scope creep beyond ~200 net-added lines. Touching schema, ingest, or auth. |
+| **`scout`** | everything | a single-purpose improvement branch (chore, refactor, test-coverage gap, doc fix, brainstorm note, audit finding, etc.) | scope creep beyond ~200 net-added lines per PR. Touching schema, ingest, or auth on the same branch as another concern. (Schema/ingest/auth changes are fine — just dedicated PRs, since they need careful review.) |
 | **`product-reviewer`** | strategy (`pm/north-star.md`, `pm/PM_CLAUDE.md`, `docs/SPEC-A-prime-v1.md`, `docs/pivot-architecture.md`), backlog, ADRs, recent merges, the actual code surface | one review file per dispatch in `pm/product-reviews/YYYY-MM-DD.md`; one-line entry to `pm/blockers.md` if findings are ADR-class | code, briefs, ADRs, PR diffs (that's `reviewer`). Recommending a contradiction of an existing ADR without explicit reason. Praise. Padding. |
 | **`cutover`** | everything | one-shot only — Phase 0 deletion + harness landing | running more than once. |
 
@@ -93,7 +104,7 @@ Append to `pm/blockers.md` (the canonical handoff queue) when any of:
 - `reviewer` rejects the same PR ≥2× with the same root cause.
 - An ADR-class decision arises per `pm/PM_CLAUDE.md` § "Escalation to Vanyo": candidate direction change, >1 week build effort, load-bearing assumption contradicted, new tool / API key required.
 - CI infrastructure is broken (workflow YAML invalid, secrets missing on the runner, runner unavailable — distinct from a failing test).
-- Three consecutive idle ticks logged in `pm/loop-log/`.
+- The orchestrator has examined the catalog and genuinely cannot find productive work for three consecutive ticks (signal that the catalog is impoverished and the harness needs a Vanyo-side refresh, not that the repo is done).
 - An auto-merge would have fired but the gate said `needs-human` for a reason that recurs across ≥3 PRs (signal that the gate needs tuning, not that each PR needs review).
 
 Vanyo unblocks by checking `[x]` items in `pm/blockers.md`. Step 4 of the heartbeat reconciles on the next tick.
