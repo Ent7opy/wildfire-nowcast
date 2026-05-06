@@ -70,7 +70,7 @@ describeIntegration("/api/aoi/poll → notify — PostGIS integration", () => {
     await handle!.pool.query(`DELETE FROM firms_detections`);
     await handle!.pool.query(`DELETE FROM aoi_rules`);
     await handle!.pool.query(`DELETE FROM aois`);
-    await handle!.pool.query(`DELETE FROM users WHERE id <> 'stub-user-1'`);
+    await handle!.pool.query(`DELETE FROM users`);
     await handle!.pool.query(`DELETE FROM job_runs`);
 
     await handle!.pool.query(

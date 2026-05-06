@@ -10,6 +10,7 @@ import { ZodError } from "zod";
 
 export type ApiErrorCode =
   | "validation_failed"
+  | "unauthenticated"
   | "not_found"
   | "conflict"
   | "service_unavailable"
@@ -25,6 +26,7 @@ export type ApiErrorBody = {
 
 const STATUS: Record<ApiErrorCode, number> = {
   validation_failed: 400,
+  unauthenticated: 401,
   not_found: 404,
   conflict: 409,
   service_unavailable: 503,
