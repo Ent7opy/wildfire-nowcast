@@ -30,15 +30,22 @@ Each tick, the orchestrator picks the **first** matching action and executes it.
 6. **Stage ready to start** (prior stage merged, all stage-N entries in `pm/blockers.md` checked, no in-progress stage).
    Spawn `pm` to write the next brief in `pm/briefs/` if missing, update `pm/backlog.md` status, then go to step 5.
 
-7. **Idle.** Spawn `scout` for one piece of standing work, in priority order:
+7. **Idle — scout chore.** Spawn `scout` for one piece of standing work, in priority order:
    - dead-code / unused-export audit on a single subtree
    - dependency upgrade (one package, patch/minor only)
    - doc drift (e.g. `pm/north-star.md` references a path that moved)
    - research-log entry for a topic in `pm/PM_CLAUDE.md` § "open questions"
    - typo / broken-link sweep
-   Cap: **one scout PR per UTC day.** If today's slot is used, write an idle tick log and exit.
+   Cap: **one scout PR per UTC day.** If today's slot is used, fall through to step 8.
 
-8. **Nothing to do.** Append a one-line entry to `pm/loop-log/YYYY-MM-DD.md` and exit. Three consecutive idle ticks → escalate (see § Escalation).
+8. **Idle — product review** (when due). Spawn `product-reviewer` if any of:
+   - Three or more stages have merged since the last product review.
+   - The most recent file in `pm/product-reviews/` is older than 7 UTC days (or none exists).
+   - A candidate-direction-change ADR is being drafted (i.e. `pm` is about to write to `pm/decisions/`).
+
+   The reviewer reads strategy + spec + recent merges + the actual code surface and writes one structured review to `pm/product-reviews/YYYY-MM-DD.md`. The orchestrator opens a chore PR for the review file (label `needs-review`); it is gate-eligible under ADR 0007. Cap: **one product review per UTC week.** If this week's slot is used, fall through to step 9.
+
+9. **Nothing to do.** Append a one-line entry to `pm/loop-log/YYYY-MM-DD.md` and exit. Three consecutive idle ticks → escalate (see § Escalation).
 
 ---
 
@@ -52,6 +59,7 @@ Defined in `.claude/agents/`. Each agent runs in its own git worktree where appl
 | **`dev`** | everything | code, tests, migrations, workflows on a stage or chore branch | pushing to `master` or `pivot/a-prime` directly. `--no-verify`, force-push, hook bypass. Editing `pm/` (except adding research notes via `pm` only). |
 | **`reviewer`** | the PR diff, brief acceptance criteria, CI logs | PR comments only | approving a PR whose author was itself. Approving anything in the auto-merge exclusion list (see gate). |
 | **`scout`** | everything | a single-purpose chore branch | scope creep beyond ~200 net-added lines. Touching schema, ingest, or auth. |
+| **`product-reviewer`** | strategy (`pm/north-star.md`, `pm/PM_CLAUDE.md`, `docs/SPEC-A-prime-v1.md`, `docs/pivot-architecture.md`), backlog, ADRs, recent merges, the actual code surface | one review file per dispatch in `pm/product-reviews/YYYY-MM-DD.md`; one-line entry to `pm/blockers.md` if findings are ADR-class | code, briefs, ADRs, PR diffs (that's `reviewer`). Recommending a contradiction of an existing ADR without explicit reason. Praise. Padding. |
 | **`cutover`** | everything | one-shot only — Phase 0 deletion + harness landing | running more than once. |
 
 All agents inherit the AGENTS.md hard rules (no fabricated data, no science-grade claims without evidence, push back on shortcuts).
@@ -106,6 +114,7 @@ Vanyo unblocks by checking `[x]` items in `pm/blockers.md`. Step 4 of the heartb
 | `pm/research-log/` | Condensed agent outputs (≤800 words). | `scout`, `pm`. |
 | `pm/signals/` | Raw evidence (quotes, links, screenshots). | `scout`, `pm`. |
 | `pm/loop-log/YYYY-MM-DD.md` | Per-tick decision log. | Orchestrator. |
+| `pm/product-reviews/YYYY-MM-DD.md` | High-level product critique. | `product-reviewer` agent. |
 
 ---
 
