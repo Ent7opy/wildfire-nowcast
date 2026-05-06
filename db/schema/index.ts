@@ -9,9 +9,8 @@
  *   - Stage 2: `firms_detections`, `aoi_events`, `industrial_mask_static`,
  *              `job_runs` — FIRMS poll + AOI matcher + cron observability.
  *   - Stage 3: `aoi_briefs` + `aoi_events.last_brief_at` — LLM situation briefs.
- *
- * DEFERRED to later stages (intentionally omitted here):
- *   - `notifications_log`    → Stage 4 (Resend + webhook delivery)
+ *   - Stage 4: `notifications_log` + `aoi_briefs.last_notified_at` +
+ *              `job_runs.notifications_sent` — Resend email dispatch.
  *
  * Single-user stub: until Clerk lands in Stage 5, every API call is attributed
  * to STUB_USER_ID = "stub-user-1". The migration seeds that single row.
@@ -250,7 +249,44 @@ export const aoiBriefs = pgTable("aoi_briefs", {
   latencyMs: integer("latency_ms"),
   shareToken: text("share_token"),
   shareExpiresAt: timestamp("share_expires_at", { withTimezone: true }),
+  /** Set when Stage 4's dispatcher records the first successful send. */
+  lastNotifiedAt: timestamp("last_notified_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
+ * Stage 4 — one row per send attempt produced by the notification dispatcher.
+ *
+ * Idempotency lives in the partial unique index on
+ * `(brief_id, channel, target_hash) WHERE status IN ('sent', 'skipped')` —
+ * declared in the SQL migration, not via Drizzle's index DSL (the partial
+ * `WHERE` clause syntax is hand-authored in `0003_stage4.sql`).
+ */
+export const notificationsLog = pgTable("notifications_log", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  aoiId: uuid("aoi_id")
+    .notNull()
+    .references(() => aois.id, { onDelete: "cascade" }),
+  briefId: uuid("brief_id")
+    .notNull()
+    .references(() => aoiBriefs.id, { onDelete: "cascade" }),
+  /** "email" for v1; "webhook" reserved (always recorded as skipped). */
+  channel: text("channel").notNull(),
+  /** Plaintext recipient (operator-readable). */
+  target: text("target").notNull(),
+  /** sha256(target) — rate-limit key per spec §3.7. */
+  targetHash: text("target_hash").notNull(),
+  /** "sent" | "failed" | "skipped" | "config_missing". */
+  status: text("status").notNull(),
+  providerMessageId: text("provider_message_id"),
+  error: text("error"),
+  /** "channel_not_implemented" | "paused" | "quiet_hours" | "duplicate". */
+  skipReason: text("skip_reason"),
+  sentAt: timestamp("sent_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
 });
@@ -287,6 +323,8 @@ export const jobRuns = pgTable("job_runs", {
   eventsCreated: integer("events_created").notNull().default(0),
   /** Stage 3: count of `aoi_briefs` rows produced by this run. */
   briefsGenerated: integer("briefs_generated").notNull().default(0),
+  /** Stage 4: count of notification rows with status='sent' from this run. */
+  notificationsSent: integer("notifications_sent").notNull().default(0),
   error: text("error"),
 });
 
@@ -294,3 +332,4 @@ export type FirmsDetectionRow = typeof firmsDetections.$inferSelect;
 export type AoiEventRow = typeof aoiEvents.$inferSelect;
 export type JobRunRow = typeof jobRuns.$inferSelect;
 export type AoiBriefRow = typeof aoiBriefs.$inferSelect;
+export type NotificationsLogRow = typeof notificationsLog.$inferSelect;
