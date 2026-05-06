@@ -157,6 +157,15 @@ Evidence: links to `research-log/` + `signals/` files.
 
 ---
 
+---
+
+## Stage status (post-pivot, A' implementation)
+
+- Stage 0–7: merged (see `CLAUDE.md` snapshot).
+- **Stage 8 — authority-perimeter LLM tool-call + data-freshness honesty + outreach plan v1:** brief landed (`pm/briefs/22-stage8-authority-perimeter-and-freshness.md`), `hypothesis → in-progress`. Bundles product-review 2026-05-07 §5 #5, #7, #11.
+
+---
+
 ## Rejected / not-brought-forward
 
 - **B (2026-04-21)** — Wildfire risk for insurance. Rejected under ADR 0003 (non-profit constraint). Insurance is commercial, regulated, licensed.
