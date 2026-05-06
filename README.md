@@ -6,7 +6,7 @@ Full thesis: [`pm/north-star.md`](pm/north-star.md). Pivot history: [`pm/decisio
 
 ## Status
 
-Mid-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis + Railway) has been removed. Active work is on the Next.js / Drizzle / Neon / Vercel-cron implementation.
+Mid-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis) has been removed. Active work is on the Next.js / Drizzle / Neon / Vercel-cron implementation.
 
 | Stage | Description | State |
 |---|---|---|
