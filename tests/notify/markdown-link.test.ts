@@ -36,4 +36,75 @@ describe("markdown link rendering", () => {
     expect(out).toContain('<a href="https://a">A</a>');
     expect(out).toContain('<a href="https://b">B</a>');
   });
+
+  describe("URL-scheme allow-list", () => {
+    it("allows http://", () => {
+      const out = renderMarkdownToHtml("Visit [site](http://example.com).");
+      expect(out).toContain('<a href="http://example.com">site</a>');
+    });
+
+    it("allows https://", () => {
+      const out = renderMarkdownToHtml("Visit [site](https://example.com).");
+      expect(out).toContain('<a href="https://example.com">site</a>');
+    });
+
+    it("allows mailto:", () => {
+      const out = renderMarkdownToHtml("Email [us](mailto:user@example.com).");
+      expect(out).toContain('<a href="mailto:user@example.com">us</a>');
+    });
+
+    it("allows site-relative URLs (footer build-without-blocking case)", () => {
+      const out = renderMarkdownToHtml("[Snooze](/api/notify/snooze/abc)");
+      expect(out).toContain('<a href="/api/notify/snooze/abc">Snooze</a>');
+    });
+
+    it("rejects javascript: and renders plain label text", () => {
+      const out = renderMarkdownToHtml("Click [me](javascript:alert(1)) now.");
+      expect(out).not.toContain("<a ");
+      expect(out).not.toContain("javascript:");
+      expect(out).toContain("me");
+    });
+
+    it("rejects data: URLs", () => {
+      const out = renderMarkdownToHtml(
+        "[x](data:text/html,<script>alert(1)</script>)",
+      );
+      expect(out).not.toContain("<a ");
+      expect(out).not.toContain("data:");
+    });
+
+    it("rejects file: URLs", () => {
+      const out = renderMarkdownToHtml("[x](file:///etc/passwd)");
+      expect(out).not.toContain("<a ");
+      expect(out).not.toContain("file:");
+    });
+
+    it("rejects upper-case JAVASCRIPT: scheme", () => {
+      // The allow-list uses the `i` flag, so case-folded variants of allowed
+      // schemes still match — but case-folded `javascript:` is not in the
+      // allow-list at all, so it degrades to label text.
+      const out = renderMarkdownToHtml("[x](JAVASCRIPT:alert(1))");
+      // Note: the closing `)` of `alert(1)` actually terminates the URL match
+      // at the first `)`, but even if extracted, `JAVASCRIPT:alert(1` would
+      // not match the allow-list and would degrade to label text.
+      expect(out).not.toContain("<a ");
+    });
+
+    it("rejects mixed-case JavaScript: scheme", () => {
+      const out = renderMarkdownToHtml("Click [me](JavaScript:alert(1)) now.");
+      expect(out).not.toContain("<a ");
+      expect(out).not.toContain("JavaScript:");
+      expect(out).toContain("me");
+    });
+
+    it("rejects protocol-relative //evil.com URLs", () => {
+      // `//evil.com/path` is resolved by browsers against the page scheme and
+      // navigates cross-origin. The `\/(?!\/)` lookahead in the allow-list
+      // prevents the relative-URL alternative from swallowing the first `/`.
+      const out = renderMarkdownToHtml("Visit [site](//evil.com/path) now.");
+      expect(out).not.toContain("<a ");
+      expect(out).not.toContain("//evil.com");
+      expect(out).toContain("site");
+    });
+  });
 });
