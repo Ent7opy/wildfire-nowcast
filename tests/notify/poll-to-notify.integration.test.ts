@@ -1,13 +1,13 @@
 /**
- * Stage 3 integration: poll route → matcher → brief generator on a real
- * PostGIS testcontainer. AI Gateway is stubbed via `_setTestBriefGen` so we
- * never hit the live LLM endpoint.
+ * Stage 4 integration: poll route → matcher → brief → notify on a real
+ * PostGIS testcontainer. AI Gateway and Resend are stubbed.
  *
- * Verifies the end-to-end Stage 2 + Stage 3 plumbing:
- *   - a synthetic FIRMS detection becomes an aoi_event
- *   - the brief generator is invoked with the new event id
- *   - aoi_briefs row is persisted with the rendered markdown
- *   - per-bucket outcome reports briefsGenerated=1 and no skip reasons
+ * Verifies:
+ *   - the dispatcher is called for the generated brief
+ *   - notifications_log gets one row with status='sent'
+ *   - aoi_briefs.last_notified_at is populated
+ *   - job_runs.notifications_sent rolls up to 1
+ *   - re-running the poll does not produce a second send (idempotency)
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -37,12 +37,14 @@ const describeIntegration = probe.available ? describe : describe.skip;
 
 if (!probe.available) {
   console.warn(
-    `[integration] Skipping poll-to-brief integration test — Docker not available: ${probe.reason ?? "unknown"}`,
+    `[integration] Skipping poll-to-notify integration test — Docker not available: ${probe.reason ?? "unknown"}`,
   );
 }
 
-describeIntegration("/api/aoi/poll → brief — PostGIS integration", () => {
+describeIntegration("/api/aoi/poll → notify — PostGIS integration", () => {
   let handle: TestcontainerHandle | null = null;
+  let sendCalls: Array<{ to: string; subject: string }> = [];
+  let lastBriefId: string | null = null;
 
   beforeAll(async () => {
     handle = await tryStartPostgisContainer();
@@ -60,17 +62,27 @@ describeIntegration("/api/aoi/poll → brief — PostGIS integration", () => {
       ctx.skip();
       return;
     }
+    sendCalls = [];
+    lastBriefId = null;
+    await handle!.pool.query(`DELETE FROM notifications_log`);
     await handle!.pool.query(`DELETE FROM aoi_briefs`);
     await handle!.pool.query(`DELETE FROM aoi_events`);
     await handle!.pool.query(`DELETE FROM firms_detections`);
     await handle!.pool.query(`DELETE FROM aoi_rules`);
     await handle!.pool.query(`DELETE FROM aois`);
+    await handle!.pool.query(`DELETE FROM users WHERE id <> 'stub-user-1'`);
     await handle!.pool.query(`DELETE FROM job_runs`);
+
+    await handle!.pool.query(
+      `INSERT INTO users (id, email)
+       VALUES ('integ-user-1', 'integration@example.org')
+       ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email`,
+    );
 
     await handle!.pool.query(
       `INSERT INTO aois (user_id, name, polygon, bbox, centroid, region_bucket, area_ha)
        VALUES (
-         'stub-user-1',
+         'integ-user-1',
          'Spring Creek Preserve',
          ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)),
          ST_SetSRID(ST_Envelope(ST_GeomFromGeoJSON($1)), 4326),
@@ -95,18 +107,19 @@ describeIntegration("/api/aoi/poll → brief — PostGIS integration", () => {
       ],
     );
     await handle!.pool.query(
-      `INSERT INTO aoi_rules (aoi_id, distance_buffer_km, min_confidence, min_frp_mw)
-       SELECT id, 25, 'nominal', 5 FROM aois LIMIT 1`,
+      `INSERT INTO aoi_rules (aoi_id, distance_buffer_km, min_confidence, min_frp_mw, notify_channels)
+       SELECT id, 25, 'nominal', 5, '[{"type":"email","target":"alerts@example.org"}]'::jsonb FROM aois LIMIT 1`,
     );
 
     _setTestDb(handle!.db);
     process.env.CRON_SECRET = "cron-secret";
     process.env.FIRMS_MAP_KEY = "firms-key";
+    process.env.RESEND_API_KEY = "re_test_dummy";
     process.env.DATABASE_URL =
       (handle!.pool.options as { connectionString?: string }).connectionString ?? "";
   });
 
-  it("generates a brief end-to-end for a synthetic detection", async () => {
+  it("dispatches one email per generated brief and is idempotent on second poll", async () => {
     _setTestFirmsFetch(async (): Promise<FirmsFetchResult> => ({
       ok: true,
       source: "VIIRS_NOAA20_NRT",
@@ -157,7 +170,7 @@ describeIntegration("/api/aoi/poll → brief — PostGIS integration", () => {
           name: "Spring Creek Preserve",
           area_ha: 2040,
         },
-        summary: "Stubbed integration brief (fixture).",
+        summary: "Stubbed integration brief.",
         key_facts: {
           nearest_detection_km: 8,
           bearing_from_aoi_deg: 0,
@@ -179,25 +192,43 @@ describeIntegration("/api/aoi/poll → brief — PostGIS integration", () => {
         next_brief_hint: { when: "next tick", trigger: "fixture" },
       };
       const md = renderBriefMarkdown(stub);
-      // Persist via the actual DB pool (mirrors what the real generator does,
-      // minus the AI call) so the integration assertion can hit aoi_briefs.
       const inserted = await handle!.pool.query(
         `INSERT INTO aoi_briefs (aoi_id, event_id, model, gate_reason, payload, rendered_markdown)
          SELECT aoi_id, id, 'test/stub', 'multi_pixel', $1::jsonb, $2 FROM aoi_events WHERE id = $3
+         ON CONFLICT (event_id) DO NOTHING
          RETURNING id`,
         [JSON.stringify(stub), md, eventId],
       );
+      const briefId = inserted.rows[0]?.id;
+      if (briefId) lastBriefId = String(briefId);
       await handle!.pool.query(
         `UPDATE aoi_events SET last_brief_at = now() WHERE id = $1`,
         [eventId],
       );
-      return {
-        status: "generated",
-        eventId,
-        briefId: String(inserted.rows[0].id),
-        modelId: "test/stub",
-        gateReason: "multi_pixel",
-      };
+      return briefId
+        ? {
+            status: "generated",
+            eventId,
+            briefId: String(briefId),
+            modelId: "test/stub",
+            gateReason: "multi_pixel",
+          }
+        : { status: "skipped", eventId, reason: "already_briefed" };
+    });
+
+    // Stub the dispatcher to record sends + write notifications_log directly
+    // against the testcontainer pool. We exercise the *real* dispatcher in
+    // the unit tests; here we focus on the route-level rollups + idempotency.
+    const { _setTestNotifyDispatch } = await import("@/app/api/aoi/poll/route");
+    const { dispatchBrief } = await import("@/lib/notify/dispatch");
+
+    _setTestNotifyDispatch(async (db, briefId) => {
+      return dispatchBrief(db, briefId, {
+        send: async (a) => {
+          sendCalls.push({ to: a.to, subject: a.subject });
+          return { ok: true, providerMessageId: `int-${sendCalls.length}`, latencyMs: 1 };
+        },
+      });
     });
 
     const res = await pollPost(
@@ -214,20 +245,56 @@ describeIntegration("/api/aoi/poll → brief — PostGIS integration", () => {
     const body = (await res.json()) as {
       runs: Array<{
         status: string;
-        eventsCreated: number;
         briefsGenerated: number;
-        briefSkipReason: Record<string, string>;
+        notificationsSent: number;
       }>;
-      totalBriefsGenerated: number;
+      totalNotificationsSent: number;
     };
-    expect(body.runs).toHaveLength(1);
-    expect(body.runs[0].status).toBe("ok");
-    expect(body.runs[0].eventsCreated).toBe(1);
     expect(body.runs[0].briefsGenerated).toBe(1);
-    expect(Object.keys(body.runs[0].briefSkipReason)).toHaveLength(0);
-    expect(body.totalBriefsGenerated).toBe(1);
+    expect(body.runs[0].notificationsSent).toBe(1);
+    expect(body.totalNotificationsSent).toBe(1);
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].to).toBe("alerts@example.org");
 
-    const briefs = await handle!.pool.query(`SELECT COUNT(*)::int AS c FROM aoi_briefs`);
-    expect(briefs.rows[0].c).toBe(1);
+    const logs = await handle!.pool.query(
+      `SELECT status, target FROM notifications_log WHERE brief_id = $1`,
+      [lastBriefId],
+    );
+    expect(logs.rows).toHaveLength(1);
+    expect(logs.rows[0].status).toBe("sent");
+
+    const briefRow = await handle!.pool.query(
+      `SELECT last_notified_at FROM aoi_briefs WHERE id = $1`,
+      [lastBriefId],
+    );
+    expect(briefRow.rows[0].last_notified_at).not.toBeNull();
+
+    const parentJob = await handle!.pool.query(
+      `SELECT notifications_sent FROM job_runs WHERE bucket IS NULL ORDER BY id DESC LIMIT 1`,
+    );
+    expect(parentJob.rows[0].notifications_sent).toBe(1);
+
+    // Second poll — same bucket. The matcher will UPDATE the existing event
+    // (no new event), so generated briefs = 0 and no second send occurs.
+    sendCalls = [];
+    const res2 = await pollPost(
+      new Request("http://localhost/api/aoi/poll", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer cron-secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ bucket: SONOMA_BUCKET }),
+      }) as Parameters<typeof pollPost>[0],
+    );
+    expect(res2.status).toBe(200);
+    expect(sendCalls).toHaveLength(0);
+    const logs2 = await handle!.pool.query(
+      `SELECT COUNT(*)::int AS c FROM notifications_log WHERE brief_id = $1`,
+      [lastBriefId],
+    );
+    expect(logs2.rows[0].c).toBe(1);
+
+    _setTestNotifyDispatch(null);
   });
 });

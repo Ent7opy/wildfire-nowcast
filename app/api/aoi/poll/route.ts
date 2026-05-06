@@ -37,6 +37,7 @@ import {
 import { bucketToBbox, getActiveBuckets } from "@/lib/firms/buckets";
 import { matchDetectionsToAois } from "@/lib/firms/matcher";
 import { generateBriefForEvent, type GenerateOutcome } from "@/lib/ai/generate";
+import { dispatchBrief, type DispatchOutcome } from "@/lib/notify/dispatch";
 
 // Test-only injection point: lets the integration suite bypass the live
 // FIRMS call without introducing a DI framework. Production leaves it null.
@@ -56,6 +57,14 @@ type BriefGenFn = typeof generateBriefForEvent;
 let testBriefGen: BriefGenFn | null = null;
 export function _setTestBriefGen(fn: BriefGenFn | null): void {
   testBriefGen = fn;
+}
+
+// Test-only injection point for the notification dispatcher. Production calls
+// the real `dispatchBrief` which dials Resend.
+type NotifyDispatchFn = typeof dispatchBrief;
+let testNotifyDispatch: NotifyDispatchFn | null = null;
+export function _setTestNotifyDispatch(fn: NotifyDispatchFn | null): void {
+  testNotifyDispatch = fn;
 }
 
 // Hobby max function duration is 60s; we configure to that ceiling so a slow
@@ -93,6 +102,12 @@ type BucketRunOutcome = {
    * either generated a brief or there were no events.
    */
   briefSkipReason: Record<string, string>;
+  /** Stage 4: count of `notifications_log` rows with status='sent' from this bucket. */
+  notificationsSent: number;
+  notificationsFailed: number;
+  notificationsSkipped: number;
+  /** True if any dispatch returned `config_missing` (RESEND_API_KEY unset). */
+  notificationConfigMissing: boolean;
   durationMs: number;
   status: "ok" | "partial" | "error";
   error?: string;
@@ -184,6 +199,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let totalEventsCreated = 0;
   let totalFirmsCalls = 0;
   let totalBriefsGenerated = 0;
+  let totalNotificationsSent = 0;
+  let anyConfigMissing = false;
 
   for (const bucket of buckets) {
     const outcome = await runOneBucket(db, bucket, source);
@@ -191,7 +208,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     totalDetectionsInserted += outcome.detectionsInserted;
     totalEventsCreated += outcome.eventsCreated;
     totalBriefsGenerated += outcome.briefsGenerated;
+    totalNotificationsSent += outcome.notificationsSent;
+    if (outcome.notificationConfigMissing) anyConfigMissing = true;
     totalFirmsCalls += 1;
+  }
+
+  if (anyConfigMissing) {
+    console.warn(
+      "[poll] RESEND_API_KEY unset; brief generation succeeded but no emails dispatched.",
+    );
   }
 
   const partial = runs.some((r) => r.status !== "ok");
@@ -206,6 +231,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     detectionsInserted: totalDetectionsInserted,
     eventsCreated: totalEventsCreated,
     briefsGenerated: totalBriefsGenerated,
+    notificationsSent: totalNotificationsSent,
     finishedAt: new Date(),
   });
 
@@ -215,6 +241,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     source,
     bucketCount: buckets.length,
     totalBriefsGenerated,
+    totalNotificationsSent,
   });
 }
 
@@ -249,6 +276,10 @@ async function runOneBucket(
         eventsUpdated: 0,
         briefsGenerated: 0,
         briefSkipReason: {},
+        notificationsSent: 0,
+        notificationsFailed: 0,
+        notificationsSkipped: 0,
+        notificationConfigMissing: false,
         durationMs: Date.now() - start,
         status: "error",
         error: `${fetchResult.code}: ${fetchResult.message}`,
@@ -264,6 +295,7 @@ async function runOneBucket(
     let briefsGenerated = 0;
     const briefSkipReason: Record<string, string> = {};
     let briefError: string | null = null;
+    const generatedBriefIds: string[] = [];
     const briefGen = testBriefGen ?? generateBriefForEvent;
     for (const eventId of matchOutcome.createdEventIds) {
       let outcome: GenerateOutcome;
@@ -278,11 +310,34 @@ async function runOneBucket(
       }
       if (outcome.status === "generated") {
         briefsGenerated += 1;
+        if (outcome.briefId) generatedBriefIds.push(outcome.briefId);
       } else if (outcome.status === "skipped") {
         briefSkipReason[eventId] = outcome.reason;
       } else {
         briefSkipReason[eventId] = `error: ${outcome.reason}`;
         briefError = outcome.reason;
+      }
+    }
+
+    let notificationsSent = 0;
+    let notificationsFailed = 0;
+    let notificationsSkipped = 0;
+    let notificationConfigMissing = false;
+    const dispatcher = testNotifyDispatch ?? dispatchBrief;
+    for (const briefId of generatedBriefIds) {
+      let outcome: DispatchOutcome;
+      try {
+        outcome = await dispatcher(db, briefId);
+      } catch (err) {
+        notificationsFailed += 1;
+        briefError = briefError ?? errMessage(err);
+        continue;
+      }
+      for (const a of outcome.attempts) {
+        if (a.status === "sent") notificationsSent += 1;
+        else if (a.status === "failed") notificationsFailed += 1;
+        else if (a.status === "config_missing") notificationConfigMissing = true;
+        else notificationsSkipped += 1;
       }
     }
 
@@ -295,6 +350,7 @@ async function runOneBucket(
       detectionsInserted: matchOutcome.detectionsInserted,
       eventsCreated: matchOutcome.eventsCreated,
       briefsGenerated,
+      notificationsSent,
       finishedAt: new Date(),
     });
 
@@ -308,6 +364,10 @@ async function runOneBucket(
       eventsUpdated: matchOutcome.eventsUpdated,
       briefsGenerated,
       briefSkipReason,
+      notificationsSent,
+      notificationsFailed,
+      notificationsSkipped,
+      notificationConfigMissing,
       durationMs: Date.now() - start,
       status,
       error: briefError ?? undefined,
@@ -329,6 +389,10 @@ async function runOneBucket(
       eventsUpdated: 0,
       briefsGenerated: 0,
       briefSkipReason: {},
+      notificationsSent: 0,
+      notificationsFailed: 0,
+      notificationsSkipped: 0,
+      notificationConfigMissing: false,
       durationMs: Date.now() - start,
       status: "error",
       error: errMessage(err),
@@ -365,6 +429,7 @@ type CloseArgs = {
   detectionsInserted?: number;
   eventsCreated?: number;
   briefsGenerated?: number;
+  notificationsSent?: number;
 };
 
 async function closeJobRun(
@@ -382,7 +447,8 @@ async function closeJobRun(
       "firms_request_count" = COALESCE("firms_request_count", 0) + ${args.firmsRequestCount ?? 0},
       "detections_inserted" = COALESCE("detections_inserted", 0) + ${args.detectionsInserted ?? 0},
       "events_created" = COALESCE("events_created", 0) + ${args.eventsCreated ?? 0},
-      "briefs_generated" = COALESCE("briefs_generated", 0) + ${args.briefsGenerated ?? 0}
+      "briefs_generated" = COALESCE("briefs_generated", 0) + ${args.briefsGenerated ?? 0},
+      "notifications_sent" = COALESCE("notifications_sent", 0) + ${args.notificationsSent ?? 0}
     WHERE "id" = ${id}
   `);
 }

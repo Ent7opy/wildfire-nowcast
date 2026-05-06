@@ -19,6 +19,7 @@ const MIGRATIONS = [
   "0000_init.test.sql",
   "0001_stage2.test.sql",
   "0002_stage3.test.sql",
+  "0003_stage4.test.sql",
 ] as const;
 
 let cachedDDL: string | null = null;
