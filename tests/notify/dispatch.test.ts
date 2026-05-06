@@ -269,6 +269,91 @@ describe("dispatchBrief — PGlite", () => {
     expect(await readBriefLastNotified(db, briefId)).toBeNull();
   });
 
+  it("user email is @pending.invalid placeholder → skipped/no_recipient_pending, send not called", async () => {
+    const { briefId } = await seed(db, {
+      notifyChannels: [],
+      userEmail: "clerk_user_xyz@pending.invalid",
+    });
+    let called = false;
+    const send = async (): Promise<SendResult> => {
+      called = true;
+      return { ok: true, providerMessageId: "x", latencyMs: 1 };
+    };
+    const outcome = await dispatchBrief(db, briefId, { send });
+    expect(called).toBe(false);
+    expect(outcome.attempts).toHaveLength(1);
+    expect(outcome.attempts[0].status).toBe("skipped");
+    if (outcome.attempts[0].status === "skipped") {
+      expect(outcome.attempts[0].reason).toBe("no_recipient_pending");
+    }
+    const rows = await readNotifications(db, briefId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("skipped");
+    expect(rows[0].skip_reason).toBe("no_recipient_pending");
+  });
+
+  it("missing user (deleted) → skipped/no_recipient row persisted", async () => {
+    const { briefId, aoiId } = await seed(db, {
+      notifyChannels: [],
+      userEmail: "owner@example.org",
+    });
+    // Detach the user so the LEFT JOIN yields null user_email. The aois.user_id
+    // FK has ON DELETE CASCADE; drop whichever auto-named FK is in place so we
+    // can dangle the reference without cascading away the AOI.
+    const fk = (await db.execute(sql`
+      SELECT conname FROM pg_constraint
+      WHERE conrelid = 'aois'::regclass AND contype = 'f'
+        AND pg_get_constraintdef(oid) LIKE '%REFERENCES%users%'
+    `)) as unknown as { rows?: Array<{ conname: string }> };
+    const fkRows = (fk.rows ?? (fk as unknown as Array<{ conname: string }>)) as Array<{
+      conname: string;
+    }>;
+    for (const r of fkRows) {
+      await db.execute(sql.raw(`ALTER TABLE "aois" DROP CONSTRAINT "${r.conname}"`));
+    }
+    await db.execute(sql`UPDATE "aois" SET "user_id" = ${"missing-user-" + Math.random().toString(36).slice(2, 8)} WHERE "id" = ${aoiId}`);
+    let called = false;
+    const send = async (): Promise<SendResult> => {
+      called = true;
+      return { ok: true, providerMessageId: "x", latencyMs: 1 };
+    };
+    const outcome = await dispatchBrief(db, briefId, { send });
+    expect(called).toBe(false);
+    expect(outcome.attempts).toHaveLength(1);
+    expect(outcome.attempts[0].status).toBe("skipped");
+    if (outcome.attempts[0].status === "skipped") {
+      expect(outcome.attempts[0].reason).toBe("no_recipient");
+    }
+    const rows = await readNotifications(db, briefId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("skipped");
+    expect(rows[0].skip_reason).toBe("no_recipient");
+  });
+
+  it("webhook channel re-dispatch → second call returns skipped/duplicate", async () => {
+    const { briefId } = await seed(db, {
+      notifyChannels: [{ type: "webhook", target: "https://example.org/hook" }],
+    });
+    const send = async (): Promise<SendResult> => ({
+      ok: true,
+      providerMessageId: "x",
+      latencyMs: 1,
+    });
+    const first = await dispatchBrief(db, briefId, { send });
+    expect(first.attempts[0].status).toBe("skipped");
+    if (first.attempts[0].status === "skipped") {
+      expect(first.attempts[0].reason).toBe("channel_not_implemented");
+    }
+    const second = await dispatchBrief(db, briefId, { send });
+    expect(second.attempts[0].status).toBe("skipped");
+    if (second.attempts[0].status === "skipped") {
+      expect(second.attempts[0].reason).toBe("duplicate");
+    }
+    const rows = await readNotifications(db, briefId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].skip_reason).toBe("channel_not_implemented");
+  });
+
   it("send returns provider_error → row written status=failed; dispatcher does not throw", async () => {
     const { briefId } = await seed(db, {
       notifyChannels: [{ type: "email", target: "x@example.org" }],

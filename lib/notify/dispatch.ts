@@ -73,13 +73,52 @@ export async function dispatchBrief(
   const attempts: DispatchAttempt[] = [];
   let firstSuccessRecorded = false;
 
+  if (channels.length === 0) {
+    const reason = isPendingPlaceholder(loaded.userEmail)
+      ? "no_recipient_pending"
+      : "no_recipient";
+    const target = loaded.userEmail ?? "";
+    await persistAttempt(db, {
+      aoiId: loaded.aoiId,
+      briefId,
+      channel: "email",
+      target,
+      status: "skipped",
+      skipReason: reason,
+    });
+    attempts.push({
+      status: "skipped",
+      channel: "email",
+      target,
+      reason,
+    });
+    return { briefId, attempts };
+  }
+
   for (const ch of channels) {
     if (ch.type === "webhook") {
+      const webhookHash = sha256(ch.target);
+      const existingWebhook = await findExistingTerminalRow(
+        db,
+        briefId,
+        "webhook",
+        webhookHash,
+      );
+      if (existingWebhook) {
+        attempts.push({
+          status: "skipped",
+          channel: "webhook",
+          target: ch.target,
+          reason: "duplicate",
+        });
+        continue;
+      }
       await persistAttempt(db, {
         aoiId: loaded.aoiId,
         briefId,
         channel: "webhook",
         target: ch.target,
+        targetHash: webhookHash,
         status: "skipped",
         skipReason: "channel_not_implemented",
       });
@@ -210,11 +249,19 @@ function resolveChannels(loaded: LoadedBrief): Array<
   | { type: "email"; target: string }
   | { type: "webhook"; target: string }
 > {
-  if (loaded.notifyChannels.length > 0) return loaded.notifyChannels;
-  if (loaded.userEmail) {
+  if (loaded.notifyChannels.length > 0) {
+    return loaded.notifyChannels.filter(
+      (c) => c.type !== "email" || !isPendingPlaceholder(c.target),
+    );
+  }
+  if (loaded.userEmail && !isPendingPlaceholder(loaded.userEmail)) {
     return [{ type: "email", target: loaded.userEmail }];
   }
   return [];
+}
+
+function isPendingPlaceholder(email: string | null | undefined): boolean {
+  return typeof email === "string" && /@pending\.invalid$/.test(email);
 }
 
 function buildSubject(summary: string): string {
