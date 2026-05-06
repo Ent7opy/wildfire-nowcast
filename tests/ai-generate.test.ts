@@ -130,6 +130,9 @@ describe("generateBriefForEvent — PGlite pipeline", () => {
       ok: true,
       brief: { ...STUB_BRIEF, aoi: { ...STUB_BRIEF.aoi, id: aoiId } },
       modelId: "test/stub-model",
+      promptVersion: "v1",
+      latencyMs: 12,
+      costUsdEst: null,
     });
 
     const outcome = await generateBriefForEvent(db, eventId, {
@@ -200,6 +203,9 @@ describe("generateBriefForEvent — PGlite pipeline", () => {
       // @ts-expect-error -- intentionally malformed payload to test re-validation
       brief: { schema_version: 1, aoi: { id: "not-a-uuid" } },
       modelId: "test/stub",
+      promptVersion: "v1",
+      latencyMs: 5,
+      costUsdEst: null,
     });
     const outcome = await generateBriefForEvent(db, eventId, { gateway: stub });
     expect(outcome.status).toBe("error");

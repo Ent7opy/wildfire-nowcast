@@ -23,13 +23,13 @@ export const BriefAoiSchema = z.object({
 
 export const BriefKeyFactsSchema = z.object({
   nearest_detection_km: z.number().nonnegative(),
-  bearing_from_aoi_deg: z.number().min(0).max(360),
+  bearing_from_aoi_deg: z.number().min(0).max(360).nullable(),
   wind_dir_deg: z.number().min(0).max(360).nullable(),
   wind_speed_kmh: z.number().nonnegative().nullable(),
   wind_toward_aoi: z.boolean().nullable(),
   detection_count_in_window: z.number().int().nonnegative(),
   max_frp_mw: z.number().nonnegative().nullable(),
-  satellites: z.array(z.string()).min(1),
+  satellites: z.array(z.string()),
   window_hours: z.number().int().nonnegative(),
 });
 

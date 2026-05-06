@@ -42,16 +42,20 @@ export function renderBriefMarkdown(brief: Brief): string {
   lines.push("## Key facts");
   const f = brief.key_facts;
   lines.push(
-    `- Nearest detection: ${formatKm(f.nearest_detection_km)} @ ${formatBearing(
-      f.bearing_from_aoi_deg,
-    )}`,
+    `- Nearest detection: ${formatKm(f.nearest_detection_km)}${
+      f.bearing_from_aoi_deg == null
+        ? ""
+        : ` @ ${formatBearing(f.bearing_from_aoi_deg)}`
+    }`,
   );
   lines.push(`- Wind: ${formatWind(f)}`);
   lines.push(
     `- Detections in ${f.window_hours} h window: ${f.detection_count_in_window}` +
       (f.max_frp_mw == null ? "" : ` (max FRP ${f.max_frp_mw.toFixed(1)} MW)`),
   );
-  lines.push(`- Satellites: ${f.satellites.join(", ")}`);
+  lines.push(
+    `- Satellites: ${f.satellites.length === 0 ? "unknown" : f.satellites.join(", ")}`,
+  );
   lines.push("");
 
   lines.push("## Context");

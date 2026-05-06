@@ -10,9 +10,12 @@ CREATE TABLE IF NOT EXISTS "aoi_briefs" (
     "event_id" UUID NOT NULL REFERENCES "aoi_events"("id") ON DELETE CASCADE,
     "schema_version" INTEGER NOT NULL DEFAULT 1,
     "model" TEXT NOT NULL,
+    "prompt_version" TEXT NOT NULL DEFAULT 'v1',
     "gate_reason" TEXT NOT NULL,
     "payload" JSONB NOT NULL,
     "rendered_markdown" TEXT NOT NULL,
+    "cost_usd_est" NUMERIC(10,6),
+    "latency_ms" INTEGER,
     "share_token" TEXT,
     "share_expires_at" TIMESTAMPTZ,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -30,3 +33,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS "aoi_briefs_share_token_uniq"
 
 ALTER TABLE "aoi_events"
     ADD COLUMN IF NOT EXISTS "last_brief_at" TIMESTAMPTZ;
+
+ALTER TABLE "job_runs"
+    ADD COLUMN IF NOT EXISTS "briefs_generated" INTEGER NOT NULL DEFAULT 0;

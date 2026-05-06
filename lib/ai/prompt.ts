@@ -20,7 +20,12 @@ export type BriefContext = {
   };
   event: {
     nearestDistanceKm: number;
-    bearingFromAoiDeg: number;
+    /**
+     * Great-circle bearing from AOI centroid to the nearest detection, deg
+     * (0=N, 90=E, …). Null when no detection lat/lon is available to derive
+     * it — we never inject a hardcoded value (AGENTS.md no-fabrication).
+     */
+    bearingFromAoiDeg: number | null;
     detectionCount: number;
     peakFrpMw: number | null;
     windowHours: number;
@@ -73,7 +78,9 @@ export function buildUserPrompt(ctx: BriefContext): string {
   lines.push("");
   lines.push("Event:");
   lines.push(`  nearest_detection_km: ${event.nearestDistanceKm}`);
-  lines.push(`  bearing_from_aoi_deg: ${event.bearingFromAoiDeg}`);
+  lines.push(
+    `  bearing_from_aoi_deg: ${event.bearingFromAoiDeg ?? "null"}`,
+  );
   lines.push(`  detection_count_in_window: ${event.detectionCount}`);
   lines.push(`  max_frp_mw: ${event.peakFrpMw ?? "null"}`);
   lines.push(`  window_hours: ${event.windowHours}`);
@@ -98,7 +105,7 @@ export function buildUserPrompt(ctx: BriefContext): string {
   }
   lines.push("");
   lines.push(
-    "Produce the JSON brief. wind_dir_deg / wind_speed_kmh / wind_toward_aoi must be null unless wind data is provided above (currently they are not).",
+    "Produce the JSON brief. wind_dir_deg / wind_speed_kmh / wind_toward_aoi must be null unless wind data is provided above (currently they are not). bearing_from_aoi_deg must be null if the value above is null — do not invent a direction.",
   );
   return lines.join("\n");
 }

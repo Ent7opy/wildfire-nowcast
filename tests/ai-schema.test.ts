@@ -73,12 +73,12 @@ describe("BriefSchema round-trip", () => {
     expect(r.success).toBe(false);
   });
 
-  it("rejects an empty satellites list", () => {
+  it("accepts an empty satellites list (no fabrication when DB has none)", () => {
     const r = BriefSchema.safeParse({
       ...FIXTURE,
       key_facts: { ...FIXTURE.key_facts, satellites: [] },
     });
-    expect(r.success).toBe(false);
+    expect(r.success).toBe(true);
   });
 
   it("rejects a malformed prior_events.date", () => {

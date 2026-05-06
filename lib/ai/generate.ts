@@ -81,7 +81,7 @@ export async function generateBriefForEvent(
     aoi: { id: loaded.aoiId, name: loaded.aoiName, areaHa: loaded.aoiAreaHa },
     event: {
       nearestDistanceKm: loaded.nearestDistanceKm,
-      bearingFromAoiDeg: loaded.bearingFromAoiDeg ?? 0,
+      bearingFromAoiDeg: loaded.bearingFromAoiDeg,
       detectionCount: loaded.detectionCount,
       peakFrpMw: loaded.peakFrpMw,
       windowHours: WINDOW_HOURS_DEFAULT,
@@ -127,9 +127,12 @@ export async function generateBriefForEvent(
     aoiId: loaded.aoiId,
     eventId,
     model: result.modelId,
+    promptVersion: result.promptVersion,
     gateReason: gate.reason,
     payload: brief,
     rendered: markdown,
+    latencyMs: result.latencyMs,
+    costUsdEst: result.costUsdEst,
   });
 
   return {
@@ -167,6 +170,12 @@ async function loadEventContext(
   db: AppDb,
   eventId: string,
 ): Promise<LoadedContext | null> {
+  // Centroid is `geometry(Point,4326)` on Neon and a GeoJSON TEXT column on
+  // PGlite — branch on the backend flag the same way `lib/firms/matcher.ts`
+  // does so the bearing math has lon/lat in both worlds.
+  const centroidExpr = db.usePostGIS
+    ? sql`ST_X(a."centroid"::geometry) AS centroid_lon, ST_Y(a."centroid"::geometry) AS centroid_lat`
+    : sql`a."centroid" AS centroid_geojson`;
   const result = (await db.execute(sql`
     SELECT
       e."id"                    AS event_id,
@@ -179,6 +188,8 @@ async function loadEventContext(
       e."last_brief_at"         AS last_brief_at,
       a."name"                  AS aoi_name,
       a."area_ha"               AS aoi_area_ha,
+      a."region_bucket"         AS region_bucket,
+      ${centroidExpr},
       r."distance_buffer_km"    AS alert_distance_km,
       r."min_frp_mw"            AS min_frp_mw,
       r."paused_until"          AS paused_until
@@ -194,12 +205,57 @@ async function loadEventContext(
   const row = rows[0];
   if (!row) return null;
 
-  const lastAoiBrief = await fetchLastAoiBriefedAt(db, String(row.aoi_id), eventId);
-  const satellites = await fetchEventSatellites(db, String(row.aoi_id));
-  const priorEvents = await fetchPriorEvents(db, String(row.aoi_id), eventId);
+  const aoiId = String(row.aoi_id);
+  const regionBucket = String(row.region_bucket ?? "");
+  const firstSeenAt = toDate(row.first_seen_at) ?? new Date(0);
+  const lastSeenAt = toDate(row.last_seen_at) ?? new Date(0);
+
+  let centroidLon: number | null = null;
+  let centroidLat: number | null = null;
+  if (db.usePostGIS) {
+    centroidLon = toNumber(row.centroid_lon);
+    centroidLat = toNumber(row.centroid_lat);
+  } else {
+    const raw = row.centroid_geojson;
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw) as { type: string; coordinates: [number, number] };
+        if (parsed?.type === "Point" && Array.isArray(parsed.coordinates)) {
+          centroidLon = Number(parsed.coordinates[0]);
+          centroidLat = Number(parsed.coordinates[1]);
+          if (!Number.isFinite(centroidLon) || !Number.isFinite(centroidLat)) {
+            centroidLon = null;
+            centroidLat = null;
+          }
+        }
+      } catch {
+        // Centroid unparseable — leave null; bearing stays null (no fabrication).
+      }
+    }
+  }
+
+  const lastAoiBrief = await fetchLastAoiBriefedAt(db, aoiId, eventId);
+  const nearestDetection = await fetchNearestDetection(db, {
+    regionBucket,
+    firstSeenAt,
+    lastSeenAt,
+    centroidLon,
+    centroidLat,
+  });
+  const satellites = await fetchEventSatellites(db, {
+    regionBucket,
+    firstSeenAt,
+    lastSeenAt,
+  });
+  const priorEvents = await fetchPriorEvents(db, aoiId, eventId);
+
+  const bearing =
+    centroidLon != null && centroidLat != null && nearestDetection
+      ? bearingDeg(centroidLat, centroidLon, nearestDetection.lat, nearestDetection.lon)
+      : null;
 
   return {
-    aoiId: String(row.aoi_id),
+    aoiId,
     aoiName: String(row.aoi_name),
     aoiAreaHa: toNumber(row.aoi_area_ha) ?? 0,
     pausedUntil: toDate(row.paused_until),
@@ -208,9 +264,9 @@ async function loadEventContext(
     detectionCount: Number(row.detection_count ?? 0),
     peakFrpMw: toNumber(row.peak_frp_mw),
     nearestDistanceKm: toNumber(row.nearest_distance_km) ?? 0,
-    bearingFromAoiDeg: null,
-    firstSeenAt: toDate(row.first_seen_at) ?? new Date(0),
-    lastSeenAt: toDate(row.last_seen_at) ?? new Date(0),
+    bearingFromAoiDeg: bearing,
+    firstSeenAt,
+    lastSeenAt,
     lastBriefAt: toDate(row.last_brief_at),
     lastAoiEventBriefedAt: lastAoiBrief,
     satellites,
@@ -237,23 +293,62 @@ async function fetchLastAoiBriefedAt(
   return toDate(v);
 }
 
-async function fetchEventSatellites(db: AppDb, aoiId: string): Promise<string[]> {
-  // Distinct satellite sources observed in this AOI's recent (24h) detections.
-  // Used as the `satellites` list on the brief. We pick from the AOI's region
-  // bucket so the query stays cheap.
+async function fetchEventSatellites(
+  db: AppDb,
+  args: { regionBucket: string; firstSeenAt: Date; lastSeenAt: Date },
+): Promise<string[]> {
+  // Distinct satellite sources for detections that fall inside this event's
+  // own time window in the AOI's region bucket. Detections are not directly
+  // joined to events, so window+bucket is the tightest scope we have without
+  // a spatial filter (the AOI bucket is 5°×5°; same bucket is the matcher's
+  // unit of work). No 24h fallback — we never invent satellites.
   const result = (await db.execute(sql`
     SELECT DISTINCT d."source" AS source
     FROM "firms_detections" d
-    JOIN "aois" a ON a."region_bucket" = d."bucket"
-    WHERE a."id" = ${aoiId}
-      AND d."detected_at" >= now() - INTERVAL '24 hours'
+    WHERE d."bucket" = ${args.regionBucket}
+      AND d."detected_at" >= ${args.firstSeenAt.toISOString()}::timestamptz
+      AND d."detected_at" <= ${args.lastSeenAt.toISOString()}::timestamptz
     ORDER BY 1
   `)) as unknown as { rows?: Array<{ source: string }> };
   const rows = (result.rows ?? (result as unknown as Array<{ source: string }>)) as Array<{
     source: string;
   }>;
-  const out = rows.map((r) => r.source).filter(Boolean);
-  return out.length > 0 ? out : ["VIIRS_NOAA20_NRT"];
+  return rows.map((r) => r.source).filter(Boolean);
+}
+
+async function fetchNearestDetection(
+  db: AppDb,
+  args: {
+    regionBucket: string;
+    firstSeenAt: Date;
+    lastSeenAt: Date;
+    centroidLon: number | null;
+    centroidLat: number | null;
+  },
+): Promise<{ lat: number; lon: number } | null> {
+  if (args.centroidLon == null || args.centroidLat == null) return null;
+  if (!args.regionBucket) return null;
+  const result = (await db.execute(sql`
+    SELECT d."lat" AS lat, d."lon" AS lon
+    FROM "firms_detections" d
+    WHERE d."bucket" = ${args.regionBucket}
+      AND d."detected_at" >= ${args.firstSeenAt.toISOString()}::timestamptz
+      AND d."detected_at" <= ${args.lastSeenAt.toISOString()}::timestamptz
+      AND (d."is_industrial_static" IS NULL OR d."is_industrial_static" = FALSE)
+  `)) as unknown as { rows?: Array<{ lat: number | string; lon: number | string }> };
+  const rows = (result.rows ?? (result as unknown as Array<{ lat: number | string; lon: number | string }>)) as Array<{
+    lat: number | string;
+    lon: number | string;
+  }>;
+  let best: { lat: number; lon: number; d: number } | null = null;
+  for (const r of rows) {
+    const lat = Number(r.lat);
+    const lon = Number(r.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const d = haversineKm(args.centroidLat, args.centroidLon, lat, lon);
+    if (!best || d < best.d) best = { lat, lon, d };
+  }
+  return best ? { lat: best.lat, lon: best.lon } : null;
 }
 
 async function fetchPriorEvents(
@@ -271,7 +366,7 @@ async function fetchPriorEvents(
     WHERE e."aoi_id" = ${aoiId}
       AND e."id" <> ${excludingEventId}
     ORDER BY e."first_seen_at" DESC
-    LIMIT 5
+    LIMIT 3
   `)) as unknown as {
     rows?: Array<{
       first_seen_at: Date | string;
@@ -308,52 +403,96 @@ type PersistArgs = {
   aoiId: string;
   eventId: string;
   model: string;
+  promptVersion: string;
   gateReason: GateReason;
   payload: Brief;
   rendered: string;
+  latencyMs: number | null;
+  costUsdEst: number | null;
 };
 
 async function persistBrief(db: AppDb, args: PersistArgs): Promise<string> {
-  // Single statement INSERT with conflict guard, then UPDATE the parent
-  // event's `last_brief_at`. The unique index on `aoi_briefs.event_id` makes
-  // the INSERT idempotent if the same eventId is processed twice.
-  const inserted = (await db.execute(sql`
-    INSERT INTO "aoi_briefs" (
-      "aoi_id", "event_id", "schema_version", "model", "gate_reason",
-      "payload", "rendered_markdown"
-    ) VALUES (
-      ${args.aoiId},
-      ${args.eventId},
-      ${args.payload.schema_version},
-      ${args.model},
-      ${args.gateReason},
-      ${JSON.stringify(args.payload)}::jsonb,
-      ${args.rendered}
-    )
-    ON CONFLICT ("event_id") DO NOTHING
-    RETURNING "id"
-  `)) as unknown as { rows?: Array<{ id: string }> };
-  const rows = (inserted.rows ?? (inserted as unknown as Array<{ id: string }>)) as Array<{
-    id: string;
-  }>;
-  const id = rows[0]?.id;
-  if (!id) {
-    // Already inserted by a parallel run — fetch it.
-    const existing = (await db.execute(sql`
-      SELECT "id" FROM "aoi_briefs" WHERE "event_id" = ${args.eventId} LIMIT 1
+  // Brief 17 §"Brief-generation pipeline" step 7: INSERT into aoi_briefs +
+  // UPDATE aoi_events.last_brief_at must be atomic. Both Drizzle backends
+  // (node-postgres and PGlite) expose `db.transaction(tx => ...)` with the
+  // same shape, so the same code runs on Neon and the unit-test PGlite.
+  // The unique index on aoi_briefs.event_id keeps INSERT idempotent across
+  // parallel runs.
+  return await db.transaction(async (tx) => {
+    const inserted = (await tx.execute(sql`
+      INSERT INTO "aoi_briefs" (
+        "aoi_id", "event_id", "schema_version", "model", "prompt_version",
+        "gate_reason", "payload", "rendered_markdown",
+        "cost_usd_est", "latency_ms"
+      ) VALUES (
+        ${args.aoiId},
+        ${args.eventId},
+        ${args.payload.schema_version},
+        ${args.model},
+        ${args.promptVersion},
+        ${args.gateReason},
+        ${JSON.stringify(args.payload)}::jsonb,
+        ${args.rendered},
+        ${args.costUsdEst},
+        ${args.latencyMs}
+      )
+      ON CONFLICT ("event_id") DO NOTHING
+      RETURNING "id"
     `)) as unknown as { rows?: Array<{ id: string }> };
-    const erows = (existing.rows ?? (existing as unknown as Array<{ id: string }>)) as Array<{
+    const rows = (inserted.rows ?? (inserted as unknown as Array<{ id: string }>)) as Array<{
       id: string;
     }>;
-    return erows[0]?.id ?? "";
-  }
+    const id = rows[0]?.id;
+    if (!id) {
+      const existing = (await tx.execute(sql`
+        SELECT "id" FROM "aoi_briefs" WHERE "event_id" = ${args.eventId} LIMIT 1
+      `)) as unknown as { rows?: Array<{ id: string }> };
+      const erows = (existing.rows ?? (existing as unknown as Array<{ id: string }>)) as Array<{
+        id: string;
+      }>;
+      return erows[0]?.id ?? "";
+    }
 
-  await db.execute(sql`
-    UPDATE "aoi_events"
-    SET "last_brief_at" = COALESCE("last_brief_at", now())
-    WHERE "id" = ${args.eventId}
-  `);
-  return id;
+    await tx.execute(sql`
+      UPDATE "aoi_events"
+      SET "last_brief_at" = COALESCE("last_brief_at", now())
+      WHERE "id" = ${args.eventId}
+    `);
+    return id;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Geometry helpers — kept local to avoid pulling turf for two formulas.
+
+function toRad(deg: number): number {
+  return (deg * Math.PI) / 180;
+}
+
+function toDeg(rad: number): number {
+  return (rad * 180) / Math.PI;
+}
+
+function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // mean Earth radius in km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const phi1 = toRad(lat1);
+  const phi2 = toRad(lat2);
+  const dLambda = toRad(lon2 - lon1);
+  const y = Math.sin(dLambda) * Math.cos(phi2);
+  const x =
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLambda);
+  const theta = Math.atan2(y, x);
+  return (toDeg(theta) + 360) % 360;
 }
 
 // ---------------------------------------------------------------------------

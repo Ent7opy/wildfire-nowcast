@@ -205,6 +205,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     firmsRequestCount: totalFirmsCalls,
     detectionsInserted: totalDetectionsInserted,
     eventsCreated: totalEventsCreated,
+    briefsGenerated: totalBriefsGenerated,
     finishedAt: new Date(),
   });
 
@@ -293,6 +294,7 @@ async function runOneBucket(
       firmsRequestCount: 1,
       detectionsInserted: matchOutcome.detectionsInserted,
       eventsCreated: matchOutcome.eventsCreated,
+      briefsGenerated,
       finishedAt: new Date(),
     });
 
@@ -362,6 +364,7 @@ type CloseArgs = {
   firmsRequestCount?: number;
   detectionsInserted?: number;
   eventsCreated?: number;
+  briefsGenerated?: number;
 };
 
 async function closeJobRun(
@@ -378,7 +381,8 @@ async function closeJobRun(
       "error" = ${args.error},
       "firms_request_count" = COALESCE("firms_request_count", 0) + ${args.firmsRequestCount ?? 0},
       "detections_inserted" = COALESCE("detections_inserted", 0) + ${args.detectionsInserted ?? 0},
-      "events_created" = COALESCE("events_created", 0) + ${args.eventsCreated ?? 0}
+      "events_created" = COALESCE("events_created", 0) + ${args.eventsCreated ?? 0},
+      "briefs_generated" = COALESCE("briefs_generated", 0) + ${args.briefsGenerated ?? 0}
     WHERE "id" = ${id}
   `);
 }

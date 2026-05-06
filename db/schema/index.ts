@@ -23,6 +23,7 @@ import {
   doublePrecision,
   integer,
   jsonb,
+  numeric,
   pgTable,
   real,
   serial,
@@ -237,10 +238,16 @@ export const aoiBriefs = pgTable("aoi_briefs", {
   schemaVersion: integer("schema_version").notNull().default(1),
   /** Model id used for the generation, e.g. "google/gemini-2.5-flash-lite". */
   model: text("model").notNull(),
+  /** Prompt template version pinned in `lib/ai/prompt.ts`, e.g. "v1". */
+  promptVersion: text("prompt_version").notNull().default("v1"),
   /** Gate condition that triggered this brief: see lib/ai/gate.ts GateReason. */
   gateReason: text("gate_reason").notNull(),
   payload: jsonb("payload").notNull(),
   renderedMarkdown: text("rendered_markdown").notNull(),
+  /** Estimated USD cost reported by the AI Gateway response, if available. */
+  costUsdEst: numeric("cost_usd_est", { precision: 10, scale: 6 }),
+  /** Wall-clock latency of the gateway call in milliseconds. */
+  latencyMs: integer("latency_ms"),
   shareToken: text("share_token"),
   shareExpiresAt: timestamp("share_expires_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
@@ -278,6 +285,8 @@ export const jobRuns = pgTable("job_runs", {
   firmsRequestCount: integer("firms_request_count").notNull().default(0),
   detectionsInserted: integer("detections_inserted").notNull().default(0),
   eventsCreated: integer("events_created").notNull().default(0),
+  /** Stage 3: count of `aoi_briefs` rows produced by this run. */
+  briefsGenerated: integer("briefs_generated").notNull().default(0),
   error: text("error"),
 });
 

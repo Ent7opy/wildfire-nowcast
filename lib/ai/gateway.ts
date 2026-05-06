@@ -26,8 +26,18 @@ export type GatewayErrCode =
   | "no_object_generated";
 
 export type GatewayResult =
-  | { ok: true; brief: Brief; modelId: string }
+  | {
+      ok: true;
+      brief: Brief;
+      modelId: string;
+      promptVersion: string;
+      latencyMs: number;
+      /** Provider-reported USD cost estimate, if surfaced. Null when unknown. */
+      costUsdEst: number | null;
+    }
   | { ok: false; code: GatewayErrCode; message: string };
+
+export const PROMPT_VERSION = "v1";
 
 export type GenerateBriefArgs = {
   systemPrompt: string;
@@ -64,6 +74,7 @@ export async function generateBriefViaGateway(
     model = gateway(modelId);
   }
 
+  const startedAt = Date.now();
   try {
     const result = await generateObject({
       model,
@@ -89,7 +100,26 @@ export async function generateBriefViaGateway(
           .join("; ")}`,
       };
     }
-    return { ok: true, brief: reparsed.data, modelId };
+    const latencyMs = Date.now() - startedAt;
+    const provider = (result as unknown as {
+      providerMetadata?: { gateway?: { cost?: string | number } };
+    }).providerMetadata;
+    const costRaw = provider?.gateway?.cost;
+    const costUsdEst =
+      typeof costRaw === "number"
+        ? costRaw
+        : typeof costRaw === "string" && costRaw.trim().length > 0
+          ? Number(costRaw)
+          : null;
+    return {
+      ok: true,
+      brief: reparsed.data,
+      modelId,
+      promptVersion: PROMPT_VERSION,
+      latencyMs,
+      costUsdEst:
+        costUsdEst != null && Number.isFinite(costUsdEst) ? costUsdEst : null,
+    };
   } catch (err) {
     if (NoObjectGeneratedError.isInstance(err)) {
       return {
