@@ -1,12 +1,5 @@
 name: FIRMS poll
 
-# IMPORTANT (Vanyo): the `schedule:` trigger below is intentionally commented
-# out at merge time. Per pm/blockers.md "Stage 2 — CRON_SECRET", flip the
-# toggle by un-commenting the two `cron:` lines once these are both set:
-#   1. `CRON_SECRET` on the Vercel `wildfire-nowcast` project (Preview + Prod)
-#   2. `CRON_SECRET` as a GitHub Actions repo secret
-# Until then, leaving `schedule:` active would generate a 503 (CRON_SECRET
-# unset) every 15 minutes and pollute job_runs with noise.
 on:
   workflow_dispatch:
     inputs:
@@ -14,8 +7,8 @@ on:
         description: "Optional 5x5:E### or 5x5:W### bucket key"
         required: false
         type: string
-  # schedule:
-  #   - cron: "*/15 * * * *"
+  schedule:
+    - cron: "*/15 * * * *"
 
 # Don't pre-empt a slow run with a fresh tick. If a poll genuinely takes longer
 # than 15 minutes, we want to see it finish and then let the next tick start.
