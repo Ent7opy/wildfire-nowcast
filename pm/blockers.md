@@ -8,9 +8,28 @@ Update mode: PM_CLAUDE adds entries; Vanyo marks `[x]` when done; PM_CLAUDE remo
 
 ## Active
 
-No active blockers. Stage 3 (brief generation) is unblocked — see
-`pm/briefs/17-stage3-brief-generation.md`. New Stage 3+ blockers will land
-here as PM_CLAUDE discovers them while drafting the next stage's brief.
+### Vercel project Framework Preset misconfigured
+
+- [ ] **Set Vercel project Framework Preset to "Next.js"** (currently auto-detect / Vite-era setting from before cutover)
+  - Symptom: every preview deploy fails with `No Output Directory named "dist" found after the Build completed.` and earlier with `The specified Root Directory "ui" does not exist`. The repo has no `vercel.json` and `next.config.ts` exists at the root, so Vercel should auto-pick Next.js — but the project setting is sticky from the legacy Vite/`ui/` stack.
+  - Two fix paths:
+    - **Dashboard:** Vercel → wildfire-nowcast → Settings → Build & Development Settings → Framework Preset → Next.js. Clear Root Directory or set to repo root.
+    - **In-code (preferred, survives mis-clicks):** add a `vercel.ts` per the platform's current recommendation and commit it. Loop can do this autonomously if greenlit.
+  - **Currently blocking three PRs:** [#388](https://github.com/Ent7opy/wildfire-nowcast/pull/388) (Stage 3, LGTM'd), [#389](https://github.com/Ent7opy/wildfire-nowcast/pull/389) (this PR, pm chore), [#390](https://github.com/Ent7opy/wildfire-nowcast/pull/390) (dead-export cleanup, LGTM'd). Branch protection requires the Vercel check, so none can merge until the preset is fixed.
+
+**When:** As soon as possible — loop is idle until this clears.
+
+### Autonomy proposal awaiting decision
+
+- [ ] **Decide on the autonomy package** proposed by the orchestrator at 15:36 UTC 2026-05-06 (in chat, not on a PR):
+  - Fix Vercel preset via CLI / commit `vercel.ts`
+  - Flip `allow_auto_merge=true` on the GitHub repo (currently off, so auto-merge can't even queue)
+  - Amend ADR 0006 to scope "stage PRs require Vanyo" more narrowly
+  - Narrow the auto-merge gate's exclusion list in `loop.md`
+
+**Why:** Loop hit three consecutive idle ticks today (15:00 → 15:55 UTC) entirely because every productive PR funnels back to Vanyo by design. Without a decision on this package, the loop will continue idling whenever it produces work.
+
+**When:** Whenever Vanyo is ready. Until then, expect more idle ticks.
 
 ---
 
