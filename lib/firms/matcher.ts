@@ -37,6 +37,27 @@ const MIN_CONFIDENCE_RANK: Record<string, number> = {
   h: 2,
 };
 
+/**
+ * Confidence gate for FIRMS detections.
+ *
+ * Today FIRMS confidence is one of two vocabularies: VIIRS letters
+ * ("l"/"n"/"h") or MODIS integers (0..100). Anything outside that dichotomy
+ * hits the unknown-token branch below.
+ *
+ * **Intentional fail-open contract**: unknown tokens are treated as
+ * "nominal", not dropped. Reasoning — for a stewardship product, silently
+ * dropping detections because NASA shipped a new vocabulary string is worse
+ * than admitting a marginal row past the `nominal` gate. The user can see
+ * and dismiss a borderline event; they cannot see one we never told them
+ * about.
+ *
+ * **Test contract**: `tests/firms-matcher-internals.test.ts` pins this
+ * behavior. If FIRMS introduces a new vocabulary that breaks the
+ * digit/letter dichotomy (e.g. mixed alphanumeric codes, new categorical
+ * labels), update BOTH this function AND that test together — extending
+ * the parser is the correct fix; making the test pass against the existing
+ * fail-open path is not.
+ */
 function confidencePassesGate(
   raw: string | null,
   aoiMin: string,
@@ -51,7 +72,8 @@ function confidencePassesGate(
   }
   const rank = MIN_CONFIDENCE_RANK[norm];
   if (rank == null) {
-    // Unknown token — fail open (count as "nominal") to avoid dropping data.
+    // Unknown token — fail open (count as "nominal"). See JSDoc above:
+    // changing this also requires updating firms-matcher-internals.test.ts.
     return (MIN_CONFIDENCE_RANK["nominal"] ?? 1) >= (MIN_CONFIDENCE_RANK[aoiMin] ?? 0);
   }
   return rank >= (MIN_CONFIDENCE_RANK[aoiMin] ?? 0);
