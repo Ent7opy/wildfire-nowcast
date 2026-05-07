@@ -73,6 +73,14 @@ export function _setTestNotifyDispatch(fn: NotifyDispatchFn | null): void {
   testNotifyDispatch = fn;
 }
 
+// Test-only re-export — keeps closeJobRun module-private for runtime callers
+// while letting unit tests exercise the COALESCE guards directly.
+export const _closeJobRunForTest = (
+  db: AppDb,
+  id: string,
+  args: CloseArgs,
+): Promise<void> => closeJobRun(db, id, args);
+
 // Hobby max function duration is 60s; we configure to that ceiling so a slow
 // FIRMS endpoint doesn't truncate mid-bucket.
 export const maxDuration = 60;
@@ -476,10 +484,14 @@ async function closeJobRun(
 ): Promise<void> {
   if (!id) return;
   // outcome / retry_pending only set on per-bucket child rows (the parent
-  // doesn't pass them); use COALESCE so the parent UPDATE leaves them at
-  // their column defaults (NULL / false).
+  // doesn't pass them); use COALESCE so an unspecified arg leaves the
+  // existing column value untouched. Today the freshness LATERAL filters
+  // on bucket = aoi.region_bucket and parent rows have bucket IS NULL, so
+  // a parent overwrite of a child's retry_pending could not be observed —
+  // but guarding here means future changes to that filter can't silently
+  // clobber a child retry signal.
   const outcome = args.outcome ?? null;
-  const retryPending = args.retryPending ?? false;
+  const retryPending = args.retryPending ?? null;
   await db.execute(sql`
     UPDATE "job_runs"
     SET
@@ -493,7 +505,7 @@ async function closeJobRun(
       "notifications_sent" = COALESCE("notifications_sent", 0) + ${args.notificationsSent ?? 0},
       "detections_pruned" = COALESCE("detections_pruned", 0) + ${args.detectionsPruned ?? 0},
       "outcome" = COALESCE(${outcome}, "outcome"),
-      "retry_pending" = ${retryPending}
+      "retry_pending" = COALESCE(${retryPending}, "retry_pending")
     WHERE "id" = ${id}
   `);
 }
