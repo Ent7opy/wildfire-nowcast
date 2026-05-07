@@ -113,6 +113,15 @@ export async function startPostgisContainer(): Promise<TestcontainerHandle> {
 
   const url = container.getConnectionUri();
   const pool = new Pool({ connectionString: url, max: 4 });
+  // Swallow pool-level 'error' events so a connection torn down by the
+  // container shutdown does not surface as a vitest unhandled error. The
+  // `pg` Pool emits 'error' on idle clients whose sockets die — when the
+  // postgres process inside the container stops, every still-open socket
+  // gets a 57P01 FATAL. We always drain the pool first (see `stop()`), but
+  // node-postgres can fire one last 'error' between `end()` resolving and
+  // the kernel closing the FD, which vitest then reports as an unhandled
+  // rejection. A no-op listener is the documented escape hatch.
+  pool.on("error", () => {});
   const migrations = await loadMigrations();
   await pool.query(migrations);
 
@@ -121,11 +130,26 @@ export async function startPostgisContainer(): Promise<TestcontainerHandle> {
   (db as { __backend: string }).__backend = "neon";
   (db as { usePostGIS: boolean }).usePostGIS = true;
 
+  let stopped = false;
   return {
     db,
     pool,
     stop: async () => {
-      await pool.end();
+      if (stopped) return;
+      stopped = true;
+      // Order matters: drain the pool *before* stopping the container so
+      // pg sends a clean termination per connection. If `pool.end()` itself
+      // throws (e.g. a query in flight), still try to stop the container so
+      // we don't leak Docker resources between test files.
+      try {
+        await pool.end();
+      } catch (err) {
+        console.warn(
+          `[integration] pool.end() failed during teardown: ${
+            err instanceof Error ? err.message.split("\n")[0] : String(err)
+          }`,
+        );
+      }
       await container.stop();
     },
   };
