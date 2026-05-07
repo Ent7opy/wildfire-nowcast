@@ -12,6 +12,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { AppDb } from "./client";
+import { decodeRows } from "./decode-rows";
 import type { FreshnessOutcome } from "@/lib/firms/freshness";
 
 export type AoiFreshness = {
@@ -29,7 +30,7 @@ export async function getAoiFreshness(
   db: AppDb,
   args: { aoiId: string; userId: string; now?: Date },
 ): Promise<AoiFreshness | null> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT
       a."region_bucket"     AS bucket,
       j."started_at"        AS started_at,
@@ -48,29 +49,14 @@ export async function getAoiFreshness(
     WHERE a."id" = ${args.aoiId}
       AND a."user_id" = ${args.userId}
     LIMIT 1
-  `)) as unknown as {
-    rows?: Array<{
-      bucket: string;
-      started_at: Date | string | null;
-      finished_at: Date | string | null;
-      outcome: string | null;
-      retry_pending: boolean | null;
-    }>;
-  };
-  const rows = (result.rows ??
-    (result as unknown as Array<{
-      bucket: string;
-      started_at: Date | string | null;
-      finished_at: Date | string | null;
-      outcome: string | null;
-      retry_pending: boolean | null;
-    }>)) as Array<{
+  `);
+  const rows = decodeRows<{
     bucket: string;
     started_at: Date | string | null;
     finished_at: Date | string | null;
     outcome: string | null;
     retry_pending: boolean | null;
-  }>;
+  }>(result);
   const row = rows[0];
   if (!row) return null;
 

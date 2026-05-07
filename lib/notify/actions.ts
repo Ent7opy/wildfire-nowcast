@@ -9,6 +9,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
+import { decodeRows } from "@/lib/db/decode-rows";
 import type { LoadedToken } from "./action-tokens";
 
 const SNOOZE_HOURS = 24;
@@ -22,25 +23,16 @@ async function readRules(
   db: AppDb,
   aoiId: string,
 ): Promise<{ pausedUntil: Date | null; channels: ChannelEntry[] } | null> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT "paused_until", "notify_channels"
     FROM "aoi_rules"
     WHERE "aoi_id" = ${aoiId}
     LIMIT 1
-  `)) as unknown as {
-    rows?: Array<{
-      paused_until: Date | string | null;
-      notify_channels: unknown;
-    }>;
-  };
-  const rows = (result.rows ??
-    (result as unknown as Array<{
-      paused_until: Date | string | null;
-      notify_channels: unknown;
-    }>)) as Array<{
+  `);
+  const rows = decodeRows<{
     paused_until: Date | string | null;
     notify_channels: unknown;
-  }>;
+  }>(result);
   const row = rows[0];
   if (!row) return null;
   const pausedUntil =

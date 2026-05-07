@@ -14,6 +14,7 @@
 import { randomBytes } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
+import { decodeRows } from "@/lib/db/decode-rows";
 
 export type ActionKind = "snooze" | "pause" | "unsubscribe" | "feedback";
 
@@ -96,18 +97,15 @@ export async function loadActionToken(
   token: string,
 ): Promise<LoadedToken | null> {
   if (!token) return null;
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT
       "token", "aoi_id", "brief_id", "action", "channel", "target",
       "expires_at", "redeemed_at", "redeemed_value"
     FROM "notify_action_tokens"
     WHERE "token" = ${token}
     LIMIT 1
-  `)) as unknown as { rows?: Array<Record<string, unknown>> };
-  const rows = (result.rows ??
-    (result as unknown as Array<Record<string, unknown>>)) as Array<
-    Record<string, unknown>
-  >;
+  `);
+  const rows = decodeRows<Record<string, unknown>>(result);
   const row = rows[0];
   if (!row) return null;
   const expiresAt = toDate(row.expires_at);
