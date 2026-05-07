@@ -27,6 +27,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 import { tryGetDb, type AppDb } from "@/lib/db/client";
+import { decodeRows } from "@/lib/db/decode-rows";
 import { apiError, dbUnavailableResponse } from "@/lib/api/errors";
 import {
   fetchAreaCsv,
@@ -450,14 +451,12 @@ async function openJobRun(
   startedAtMs: number,
 ): Promise<string> {
   const startedAt = new Date(startedAtMs).toISOString();
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     INSERT INTO "job_runs" ("job_name", "bucket", "started_at", "status")
     VALUES (${jobName}, ${bucket}, ${startedAt}, 'running')
     RETURNING "id"
-  `)) as unknown as { rows?: Array<{ id: string | number | bigint }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ id: string | number | bigint }>)) as Array<{
-    id: string | number | bigint;
-  }>;
+  `);
+  const rows = decodeRows<{ id: string | number | bigint }>(result);
   return String(rows[0]?.id ?? "");
 }
 
