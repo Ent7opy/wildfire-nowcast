@@ -59,6 +59,13 @@ export type MatchArgs = {
   bucket: string;
   source: FirmsSource;
   detections: FirmsDetection[];
+  /**
+   * Stage 9: when set, restrict matching to ONLY these AOIs in the bucket.
+   * Used by the first-AOI backfill to avoid creating events for other AOIs
+   * that happen to share the bucket. When undefined/null, matches against
+   * all active AOIs in the bucket (cron-poll behaviour, unchanged).
+   */
+  aoiIds?: string[];
 };
 
 export type MatchResult = {
@@ -100,7 +107,7 @@ export async function matchDetectionsToAois(
 
   // 2. For each AOI in the bucket, find matching non-industrial detections
   //    *from this poll* and UPSERT events.
-  const matches = await findAoiMatches(db, args.bucket, pollStart);
+  const matches = await findAoiMatches(db, args.bucket, pollStart, args.aoiIds);
   for (const match of matches) {
     const outcome = await upsertEvent(db, args.bucket, args.source, match);
     if (outcome.kind === "created") {
@@ -238,6 +245,7 @@ async function findAoiMatches(
   db: AppDb,
   bucket: string,
   pollStart: Date,
+  aoiIds?: string[],
 ): Promise<PerAoiMatch[]> {
   if (!db.usePostGIS) {
     // PGlite does not expose ST_DWithin; the non-spatial tests cover the
@@ -246,6 +254,18 @@ async function findAoiMatches(
     // shaped API; spatial correctness is covered by the testcontainer tests.
     return [];
   }
+
+  // Build an OR-of-equals filter rather than ANY($1::uuid[]) — node-postgres
+  // serializes a JS array as a comma-joined string by default, which Postgres
+  // rejects as a malformed array literal. The OR form is parameterized cleanly
+  // for any reasonable aoiIds.length (single-AOI backfill is the only caller).
+  const aoiFilter =
+    aoiIds && aoiIds.length > 0
+      ? sql` AND a."id" IN (${sql.join(
+          aoiIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})`
+      : sql``;
 
   const result = (await db.execute(sql`
     WITH active_detections AS (
@@ -264,6 +284,7 @@ async function findAoiMatches(
       LEFT JOIN "aoi_rules" r ON r."aoi_id" = a."id"
       WHERE a."archived_at" IS NULL
         AND a."region_bucket" = ${bucket}
+        ${aoiFilter}
     ),
     matches AS (
       SELECT

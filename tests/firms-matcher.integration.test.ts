@@ -272,4 +272,104 @@ describeIntegration("FIRMS matcher — PostGIS integration", () => {
     expect(Number(events.rows[0].peak_frp_mw)).toBeCloseTo(18.5, 1);
   });
 
+  it("Stage 9 — aoiIds scopes matching to a single AOI in the bucket", async () => {
+    // Add a second AOI in the same bucket. A detection that matches both
+    // (same buffer, same bucket) should only create an event for the AOI we
+    // restrict to via aoiIds.
+    const otherPoly = {
+      type: "Polygon",
+      coordinates: [
+        [
+          [SONOMA_LON + 0.20, SONOMA_LAT - 0.04],
+          [SONOMA_LON + 0.30, SONOMA_LAT - 0.04],
+          [SONOMA_LON + 0.30, SONOMA_LAT + 0.04],
+          [SONOMA_LON + 0.20, SONOMA_LAT + 0.04],
+          [SONOMA_LON + 0.20, SONOMA_LAT - 0.04],
+        ],
+      ],
+    };
+    await handle!.pool.query(
+      `INSERT INTO aois (user_id, name, polygon, bbox, centroid, region_bucket, area_ha)
+       VALUES (
+         'user_2matcherIntegOwner',
+         'Other AOI',
+         ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)),
+         ST_SetSRID(ST_Envelope(ST_GeomFromGeoJSON($1)), 4326),
+         ST_SetSRID(ST_Centroid(ST_GeomFromGeoJSON($1)), 4326),
+         $2,
+         500
+       )`,
+      [JSON.stringify(otherPoly), SONOMA_BUCKET],
+    );
+    await handle!.pool.query(
+      `INSERT INTO aoi_rules (aoi_id, distance_buffer_km, min_confidence, min_frp_mw)
+       SELECT id, 25, 'nominal', 5 FROM aois WHERE name = 'Other AOI'`,
+    );
+    const ids = await handle!.pool.query(
+      `SELECT id FROM aois WHERE name = 'Spring Creek Preserve'`,
+    );
+    const targetAoiId = ids.rows[0].id as string;
+
+    const det = makeDet(SONOMA_LAT + 0.08, SONOMA_LON + 0.10);
+    const scoped = await matchDetectionsToAois(handle!.db, {
+      bucket: SONOMA_BUCKET,
+      source: "VIIRS_NOAA20_NRT",
+      detections: [det],
+      aoiIds: [targetAoiId],
+    });
+    expect(scoped.eventsCreated).toBe(1);
+    const eventsForOther = await handle!.pool.query(
+      `SELECT COUNT(*)::int AS c FROM aoi_events
+       WHERE aoi_id IN (SELECT id FROM aois WHERE name = 'Other AOI')`,
+    );
+    expect(eventsForOther.rows[0].c).toBe(0);
+    const eventsForTarget = await handle!.pool.query(
+      `SELECT COUNT(*)::int AS c FROM aoi_events WHERE aoi_id = $1`,
+      [targetAoiId],
+    );
+    expect(eventsForTarget.rows[0].c).toBe(1);
+  });
+
+  it("Stage 9 — aoiIds undefined preserves original full-bucket behaviour", async () => {
+    // Two AOIs in the same bucket; without aoiIds, both should match a
+    // detection that's near both polygons.
+    const otherPoly = {
+      type: "Polygon",
+      coordinates: [
+        [
+          [SONOMA_LON + 0.20, SONOMA_LAT - 0.04],
+          [SONOMA_LON + 0.30, SONOMA_LAT - 0.04],
+          [SONOMA_LON + 0.30, SONOMA_LAT + 0.04],
+          [SONOMA_LON + 0.20, SONOMA_LAT + 0.04],
+          [SONOMA_LON + 0.20, SONOMA_LAT - 0.04],
+        ],
+      ],
+    };
+    await handle!.pool.query(
+      `INSERT INTO aois (user_id, name, polygon, bbox, centroid, region_bucket, area_ha)
+       VALUES (
+         'user_2matcherIntegOwner',
+         'Other AOI',
+         ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)),
+         ST_SetSRID(ST_Envelope(ST_GeomFromGeoJSON($1)), 4326),
+         ST_SetSRID(ST_Centroid(ST_GeomFromGeoJSON($1)), 4326),
+         $2,
+         500
+       )`,
+      [JSON.stringify(otherPoly), SONOMA_BUCKET],
+    );
+    await handle!.pool.query(
+      `INSERT INTO aoi_rules (aoi_id, distance_buffer_km, min_confidence, min_frp_mw)
+       SELECT id, 25, 'nominal', 5 FROM aois WHERE name = 'Other AOI'`,
+    );
+    // Detection between both polygons — within 25 km of each.
+    const det = makeDet(SONOMA_LAT, SONOMA_LON + 0.13);
+    const result = await matchDetectionsToAois(handle!.db, {
+      bucket: SONOMA_BUCKET,
+      source: "VIIRS_NOAA20_NRT",
+      detections: [det],
+    });
+    expect(result.eventsCreated).toBe(2);
+  });
+
 });
