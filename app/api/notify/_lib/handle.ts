@@ -36,6 +36,18 @@ export async function handleAction(
   opts: { feedbackValue?: FeedbackValue } = {},
 ): Promise<NextResponse> {
   const { token } = await ctx.params;
+
+  // Validate feedback `?v=` BEFORE touching the token row, so a missing /
+  // invalid value never marks the token consumed. (Reviewer feedback on PR
+  // #406: the next click with a real value did recover via the flip path,
+  // but reordering is cleaner.)
+  if (action === "feedback" && !opts.feedbackValue) {
+    return htmlResponse(
+      400,
+      renderError("Missing value", "Feedback link is missing the ?v=yes|no parameter."),
+    );
+  }
+
   const db = tryGetDb();
   if (!db) {
     return htmlResponse(
