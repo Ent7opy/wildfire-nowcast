@@ -16,7 +16,7 @@ export default function DashboardLayout({
         <Link href="/dashboard" className="font-medium">
           Wildfire Nowcast
         </Link>
-        <nav className="flex items-center gap-4 text-sm">
+        <nav aria-label="Primary" className="flex items-center gap-4 text-sm">
           <Link href="/dashboard/aoi/new" className="underline">
             New AOI
           </Link>

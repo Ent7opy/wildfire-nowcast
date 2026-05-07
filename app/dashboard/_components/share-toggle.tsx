@@ -59,7 +59,13 @@ export function ShareToggle({
         <>
           <p className="mt-1">
             Public URL:{" "}
-            <a className="underline" href={url!} target="_blank" rel="noreferrer">
+            <a
+              className="underline"
+              href={url!}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={`Open public brief link in a new tab: ${url}`}
+            >
               {url}
             </a>
           </p>
@@ -85,7 +91,7 @@ export function ShareToggle({
           Create public link
         </button>
       )}
-      {error ? <p className="mt-2 text-red-700">{error}</p> : null}
+      {error ? <p role="alert" className="mt-2 text-red-700">{error}</p> : null}
     </div>
   );
 }
