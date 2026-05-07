@@ -668,29 +668,6 @@ export async function clearBriefShareToken(
   return true;
 }
 
-export async function listAllBriefsForUser(
-  db: AppDb,
-  args: { userId: string; since?: Date; limit?: number },
-): Promise<BriefSummaryRow[]> {
-  const since = args.since ?? new Date(Date.now() - 365 * 86400_000);
-  const limit = args.limit ?? 5000;
-  const result = await db.execute(sql`
-    SELECT b."id", b."aoi_id", a."name" AS aoi_name, b."created_at",
-           b."gate_reason", b."model", b."prompt_version",
-           b."latency_ms", b."cost_usd_est", b."last_notified_at",
-           b."payload"
-    FROM "aoi_briefs" b
-    JOIN ${aois} a ON a."id" = b."aoi_id"
-    WHERE a."user_id" = ${args.userId}
-      AND a."archived_at" IS NULL
-      AND b."created_at" >= ${since.toISOString()}
-    ORDER BY b."created_at" DESC
-    LIMIT ${limit}
-  `);
-  const rows = decodeRows<RawBriefSummary & { payload: unknown }>(result);
-  return rows.map(mapBriefSummary);
-}
-
 export async function listAllBriefsWithPayloadForUser(
   db: AppDb,
   args: { userId: string; since?: Date; limit?: number },
