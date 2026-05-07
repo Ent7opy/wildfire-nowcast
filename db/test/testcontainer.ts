@@ -15,6 +15,7 @@
  * without Docker still passes — spatial tests skip with a visible notice.
  */
 import { execFile } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -76,13 +77,16 @@ export type TestcontainerHandle = {
 
 async function loadMigrations(): Promise<string> {
   const dir = join(process.cwd(), "db", "migrations");
-  const stage1 = await readFile(join(dir, "0000_init.sql"), "utf8");
-  const stage2 = await readFile(join(dir, "0001_stage2.sql"), "utf8");
-  const stage3 = await readFile(join(dir, "0002_stage3.sql"), "utf8");
-  const stage4 = await readFile(join(dir, "0003_stage4.sql"), "utf8");
-  const stage5 = await readFile(join(dir, "0004_stage5.sql"), "utf8");
-  const stage7 = await readFile(join(dir, "0005_stage7.sql"), "utf8");
-  return [stage1, stage2, stage3, stage4, stage5, stage7].join("\n");
+  // Enumerate production migrations dynamically. Filename pattern is
+  // `NNNN_*.sql` (zero-padded, lexicographic == numeric). The PGlite-only
+  // `*.test.sql` variants are excluded so PostGIS DDL runs as-authored.
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(".sql") && !f.endsWith(".test.sql"))
+    .sort();
+  const parts = await Promise.all(
+    files.map((f) => readFile(join(dir, f), "utf8")),
+  );
+  return parts.join("\n");
 }
 
 /**

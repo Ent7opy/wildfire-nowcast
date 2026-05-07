@@ -29,6 +29,11 @@ import {
 } from "./gateway";
 import { renderBriefMarkdown } from "./render";
 import { BriefSchema, type Brief } from "./schema";
+import {
+  fetchAuthorityPerimeter,
+  type AuthorityPerimeter,
+  type FetchPerimeterArgs,
+} from "./authority/fetch";
 
 export type GenerateOutcome =
   | { status: "generated"; eventId: string; briefId: string; modelId: string; gateReason: GateReason }
@@ -47,6 +52,12 @@ type GeneratorDeps = {
   }) => Promise<GatewayResult>;
   /** Override clock for deterministic testing of the gate window. */
   now?: Date;
+  /**
+   * Override the authority-perimeter fetch (Stage 8). Production injects null
+   * and the orchestrator calls the real `fetchAuthorityPerimeter`. Tests can
+   * stub a happy or rejecting impl; the brief still ships either way.
+   */
+  fetchPerimeter?: (args: FetchPerimeterArgs) => Promise<AuthorityPerimeter | null>;
 };
 
 const WINDOW_HOURS_DEFAULT = 24;
@@ -90,7 +101,7 @@ export async function generateBriefForEvent(
       lastSeenAt: loaded.lastSeenAt.toISOString(),
     },
     weather: null,
-    authorityPerimeter: null,
+    authorityPerimeter: await gatherAuthorityPerimeter(loaded, deps),
     priorEvents: loaded.priorEvents,
   };
 
@@ -145,6 +156,40 @@ export async function generateBriefForEvent(
 }
 
 // ---------------------------------------------------------------------------
+// Stage 8 — authority perimeter gather (Path A: orchestrator pre-fetch).
+
+async function gatherAuthorityPerimeter(
+  loaded: LoadedContext,
+  deps: GeneratorDeps,
+): Promise<{
+  source: string | null;
+  postedTs: string | null;
+  containsDetection: boolean | null;
+} | null> {
+  if (!loaded.nearestDetection || !loaded.regionBucket) return null;
+  const fetcher = deps.fetchPerimeter ?? fetchAuthorityPerimeter;
+  let r: AuthorityPerimeter | null;
+  try {
+    r = await fetcher({
+      lat: loaded.nearestDetection.lat,
+      lon: loaded.nearestDetection.lon,
+      regionBucket: loaded.regionBucket,
+    });
+  } catch (err) {
+    // Build-without-blocking — never let an authority fetch failure abort
+    // brief generation. Logged; the brief ships with all-null perimeter.
+    console.warn(`[authority] fetcher threw: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  if (!r) return null;
+  return {
+    source: r.source,
+    postedTs: r.postedTs,
+    containsDetection: r.containsDetection,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // DB load / persist
 
 type LoadedContext = {
@@ -164,6 +209,9 @@ type LoadedContext = {
   lastAoiEventBriefedAt: Date | null;
   satellites: string[];
   priorEvents: Array<{ date: string; description: string; outcome: string | null }>;
+  regionBucket: string;
+  /** Lat/lon of the nearest non-industrial detection in the event window, when known. */
+  nearestDetection: { lat: number; lon: number } | null;
 };
 
 async function loadEventContext(
@@ -271,6 +319,8 @@ async function loadEventContext(
     lastAoiEventBriefedAt: lastAoiBrief,
     satellites,
     priorEvents,
+    regionBucket,
+    nearestDetection,
   };
 }
 

@@ -13,6 +13,7 @@ import {
 } from "@/lib/db/aoi-repository";
 import { RulesForm } from "../../_components/rules-form";
 import { AoiMapClient } from "../../_components/aoi-map-client";
+import { FreshnessBanner } from "../../_components/freshness-banner";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -60,6 +61,9 @@ export default async function AoiPage({ params }: Params) {
         <div className="mt-3 text-xs text-[color:var(--muted)]">
           BBox: [{bbox[0][0].toFixed(2)}, {bbox[0][1].toFixed(2)}] →{" "}
           [{bbox[2][0].toFixed(2)}, {bbox[2][1].toFixed(2)}]
+        </div>
+        <div className="mt-3">
+          <FreshnessBanner db={db} aoiId={aoi.id} userId={auth.userId} />
         </div>
         <div className="mt-4">
           <AoiMapClient
