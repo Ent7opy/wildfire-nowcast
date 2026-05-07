@@ -20,7 +20,7 @@ Evidence: links to `research-log/` + `signals/` files.
 - Stage 6 — Rules UI / export ✅ merged.
 - Stage 7 — Launch-readiness UI (map, snooze tokens, footer cleanup, feedback link, prune) ✅ merged (PR #406).
 - Stage 8 — Authority-perimeter fetch + data-freshness honesty + second-archetype outreach plan ✅ merged (PR #411). NIFC + CWFIS shipped; ICNF deferred (active blocker).
-- Stage 9 — Watch-confirmed email + first-AOI backfill — **proposed**, brief 23 (`pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`). Closes SPEC Flow 1 steps 5–6; flips launch-acceptance #2 from `partial` (unmeasurable) to measurable. Surfaced by `pm/research-log/2026-05-07-v1-stop-line.md` §6.
+- Stage 9 — Watch-confirmed email + first-AOI backfill ✅ merged (PR #422, commit `86e34e2`). Brief 23 (`pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`). Closes SPEC Flow 1 steps 5–6; flips launch-acceptance #2 from `partial` (unmeasurable) to measurable. Surfaced by `pm/research-log/2026-05-07-v1-stop-line.md` §6.
 - Cutover (legacy stack removal) ✅ merged (PR #386).
 
 
@@ -177,7 +177,7 @@ Evidence: links to `research-log/` + `signals/` files.
 ## Stage status (post-pivot, A' implementation)
 
 - Stage 0–8: merged (see `CLAUDE.md` snapshot; Stage 8 merged via PR #411 on 2026-05-07).
-- **Stage 9 — watch-confirmed email + first-AOI backfill:** brief landed (`pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`), `proposed → hypothesis`. Closes SPEC Flow 1 steps 5–6 so launch-acceptance #2 (cold-start ≤ 5 min) is measurable on a clean browser. Surfaced by `pm/research-log/2026-05-07-v1-stop-line.md` §6.
+- **Stage 9 — watch-confirmed email + first-AOI backfill:** ✅ merged (PR #422, commit `86e34e2`). Brief: `pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`. Closes SPEC Flow 1 steps 5–6 so launch-acceptance #2 (cold-start ≤ 5 min) is measurable on a clean browser. Surfaced by `pm/research-log/2026-05-07-v1-stop-line.md` §6.
 
 ---
 
