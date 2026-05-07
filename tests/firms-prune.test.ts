@@ -78,6 +78,40 @@ describe("pruneOldDetections — PGlite", () => {
     expect(removed).toBe(0);
   });
 
+  it("honours custom retentionDays override", async () => {
+    // Pins the retentionDays knob: if a future caller wants a tighter window
+    // (e.g. for a free-tier emergency squeeze) the parameter must work, not
+    // be silently ignored in favour of the 14-day default.
+    const now = new Date("2026-04-21T00:00:00Z");
+    await insertDetection(db, {
+      detectedAt: new Date(now.getTime() - 10 * 86400_000).toISOString(),
+      lat: 1, lon: 1,
+    });
+    await insertDetection(db, {
+      detectedAt: new Date(now.getTime() - 3 * 86400_000).toISOString(),
+      lat: 2, lon: 2,
+    });
+    expect(await countDetections(db)).toBe(2);
+    const removed = await pruneOldDetections(db, { now, retentionDays: 7 });
+    expect(removed).toBe(1);
+    expect(await countDetections(db)).toBe(1);
+  });
+
+  it("uses strict `<` cutoff: a row exactly at the boundary is kept", async () => {
+    // Pins the boundary behaviour. The SQL says `detected_at < cutoff`, so a
+    // row whose detected_at equals (now - 14d) to the millisecond must NOT be
+    // deleted. If anyone flips this to `<=` they'll fail this test.
+    const now = new Date("2026-04-21T00:00:00Z");
+    const exactCutoff = new Date(now.getTime() - 14 * 86400_000);
+    await insertDetection(db, {
+      detectedAt: exactCutoff.toISOString(),
+      lat: 1, lon: 1,
+    });
+    const removed = await pruneOldDetections(db, { now });
+    expect(removed).toBe(0);
+    expect(await countDetections(db)).toBe(1);
+  });
+
   it("does not touch aoi_events or aoi_briefs", async () => {
     const userId = "u-prune";
     await db.execute(sql`INSERT INTO "users" (id, email) VALUES (${userId}, 'x@x')`);
