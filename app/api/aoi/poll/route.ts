@@ -39,6 +39,11 @@ import { matchDetectionsToAois } from "@/lib/firms/matcher";
 import { generateBriefForEvent, type GenerateOutcome } from "@/lib/ai/generate";
 import { dispatchBrief, type DispatchOutcome } from "@/lib/notify/dispatch";
 import { pruneOldDetections } from "@/lib/firms/prune";
+import {
+  firmsErrorToOutcome,
+  runStatusToOutcome,
+  type FreshnessOutcome,
+} from "@/lib/firms/freshness";
 
 // Test-only injection point: lets the integration suite bypass the live
 // FIRMS call without introducing a DI framework. Production leaves it null.
@@ -278,10 +283,13 @@ async function runOneBucket(
       dayRange: 1,
     });
     if (!fetchResult.ok) {
+      const mapped = firmsErrorToOutcome(fetchResult.code);
       await closeJobRun(db, childRunId, {
         status: "error",
         error: `${fetchResult.code}: ${fetchResult.message}`,
         firmsRequestCount: 1,
+        outcome: mapped.outcome,
+        retryPending: mapped.retryPending,
         finishedAt: new Date(),
       });
       return {
@@ -360,6 +368,7 @@ async function runOneBucket(
     }
 
     const status: "ok" | "partial" = briefError ? "partial" : "ok";
+    const mapped = runStatusToOutcome({ status, error: briefError });
 
     await closeJobRun(db, childRunId, {
       status,
@@ -369,6 +378,8 @@ async function runOneBucket(
       eventsCreated: matchOutcome.eventsCreated,
       briefsGenerated,
       notificationsSent,
+      outcome: mapped.outcome,
+      retryPending: mapped.retryPending,
       finishedAt: new Date(),
     });
 
@@ -391,10 +402,13 @@ async function runOneBucket(
       error: briefError ?? undefined,
     };
   } catch (err) {
+    const mapped = runStatusToOutcome({ status: "error", error: errMessage(err) });
     await closeJobRun(db, childRunId, {
       status: "error",
       error: errMessage(err),
       firmsRequestCount: 1,
+      outcome: mapped.outcome,
+      retryPending: mapped.retryPending,
       finishedAt: new Date(),
     });
     return {
@@ -449,6 +463,10 @@ type CloseArgs = {
   briefsGenerated?: number;
   notificationsSent?: number;
   detectionsPruned?: number;
+  /** Stage 8: user-facing taxonomy. Only set on per-bucket child rows. */
+  outcome?: FreshnessOutcome;
+  /** Stage 8: signals "(retrying)" in the AOI freshness banner. */
+  retryPending?: boolean;
 };
 
 async function closeJobRun(
@@ -457,6 +475,11 @@ async function closeJobRun(
   args: CloseArgs,
 ): Promise<void> {
   if (!id) return;
+  // outcome / retry_pending only set on per-bucket child rows (the parent
+  // doesn't pass them); use COALESCE so the parent UPDATE leaves them at
+  // their column defaults (NULL / false).
+  const outcome = args.outcome ?? null;
+  const retryPending = args.retryPending ?? false;
   await db.execute(sql`
     UPDATE "job_runs"
     SET
@@ -468,7 +491,9 @@ async function closeJobRun(
       "events_created" = COALESCE("events_created", 0) + ${args.eventsCreated ?? 0},
       "briefs_generated" = COALESCE("briefs_generated", 0) + ${args.briefsGenerated ?? 0},
       "notifications_sent" = COALESCE("notifications_sent", 0) + ${args.notificationsSent ?? 0},
-      "detections_pruned" = COALESCE("detections_pruned", 0) + ${args.detectionsPruned ?? 0}
+      "detections_pruned" = COALESCE("detections_pruned", 0) + ${args.detectionsPruned ?? 0},
+      "outcome" = COALESCE(${outcome}, "outcome"),
+      "retry_pending" = ${retryPending}
     WHERE "id" = ${id}
   `);
 }

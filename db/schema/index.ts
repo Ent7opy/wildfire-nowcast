@@ -326,6 +326,14 @@ export const jobRuns = pgTable("job_runs", {
   notificationsSent: integer("notifications_sent").notNull().default(0),
   /** Stage 7: count of `firms_detections` rows pruned by this run's retention sweep. */
   detectionsPruned: integer("detections_pruned"),
+  /**
+   * Stage 8: user-facing taxonomy distinct from operator-facing `status`.
+   *   "success" | "rate_limited" | "network_error" | "timeout" | "partial"
+   * Mapping from FIRMS errors lives in `lib/firms/freshness.ts`.
+   */
+  outcome: text("outcome"),
+  /** Stage 8: signal (not promise) — UI shows "(retrying)" until the next tick. */
+  retryPending: boolean("retry_pending").notNull().default(false),
   error: text("error"),
 });
 
