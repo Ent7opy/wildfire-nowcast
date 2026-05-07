@@ -211,11 +211,12 @@ export async function fetchAreaCsv(
     }
     if (!response.ok) {
       const text = await safeText(response);
+      const safeBody = redactKey(text, key).slice(0, 200);
       return {
         ok: false,
         code: "upstream_error",
         status: response.status,
-        message: `FIRMS responded ${response.status}: ${text.slice(0, 200)}`,
+        message: `FIRMS responded ${response.status}: ${safeBody}`,
       };
     }
     const csv = await safeText(response);
@@ -226,6 +227,14 @@ export async function fetchAreaCsv(
     code: "upstream_error",
     message: "FIRMS request failed after 3 attempts",
   };
+}
+
+function redactKey(body: string, key: string): string {
+  if (!key) return body;
+  const encoded = encodeURIComponent(key);
+  let out = body.split(key).join("[REDACTED]");
+  if (encoded !== key) out = out.split(encoded).join("[REDACTED]");
+  return out;
 }
 
 async function safeText(res: Response): Promise<string> {
