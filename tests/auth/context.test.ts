@@ -120,3 +120,29 @@ describe("ensureUserExists", () => {
     expect(rows[0].c).toBe(1);
   });
 });
+
+describe("ensureUserExists JIT INSERT satisfies users NOT-NULL constraints", () => {
+  it("populates every NOT-NULL column without a DB default", async () => {
+    const { db, pglite } = await makeFreshTestDb();
+    try {
+      await ensureUserExists(db, "user_2abcSchemaDriven");
+      const colsRes = (await db.execute(sql`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'users' AND is_nullable = 'NO' AND column_default IS NULL
+      `)) as unknown as { rows?: Array<{ column_name: string }> };
+      const required = (colsRes.rows ?? (colsRes as unknown as Array<{ column_name: string }>))
+        .map((r) => r.column_name);
+      expect(required.length).toBeGreaterThan(0);
+      const rowRes = (await db.execute(
+        sql`SELECT * FROM users WHERE id = 'user_2abcSchemaDriven'`,
+      )) as unknown as { rows?: Array<Record<string, unknown>> };
+      const row = (rowRes.rows ?? (rowRes as unknown as Array<Record<string, unknown>>))[0];
+      expect(row).toBeDefined();
+      for (const col of required) {
+        expect(row[col], `JIT INSERT did not populate NOT-NULL column "${col}"`).not.toBeNull();
+      }
+    } finally {
+      await pglite.close();
+    }
+  });
+});
