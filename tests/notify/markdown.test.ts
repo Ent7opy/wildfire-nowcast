@@ -46,11 +46,12 @@ describe("renderMarkdownToHtml — structure", () => {
     expect(out).toBe("<p>This is <em>emphasised</em> inline.</p>");
   });
 
-  it("treats ### h3 as a paragraph (renderer only knows h1/h2)", () => {
+  it("doesn't crash on out-of-spec ### h3 input and preserves the text", () => {
     // `lib/ai/render.ts` only emits `#` and `## `, so deeper headings are
-    // out-of-spec input. Pin current behavior: `### foo` becomes a paragraph
-    // containing the literal `### foo` text.
+    // out-of-spec input. Assert the heading text survives the render without
+    // pinning the specific fallthrough markup — a future contributor adding
+    // real h3 support shouldn't have to delete this test.
     const out = renderMarkdownToHtml("### Subsection");
-    expect(out).toBe("<p>### Subsection</p>");
+    expect(out).toContain("Subsection");
   });
 });
