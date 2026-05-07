@@ -271,10 +271,10 @@ export const aoiBriefs = pgTable("aoi_briefs", {
   /** Prompt template version pinned in `lib/ai/prompt.ts`, e.g. "v1". */
   promptVersion: text("prompt_version").notNull().default("v1"),
   /**
-   * Which of the four SPEC §Flow 6 gate conditions fired (or the rejection
-   * reason if a brief was generated for audit but suppressed). One of:
-   * `new_event` | `escalation` | `state_change` | `daily_digest` |
-   * `rejected_*`. See `lib/ai/gate.ts#GateReason`. Drives gate pass-rate
+   * Which SPEC §Flow 6 gate condition fired (pass) or why the brief was
+   * suppressed (reject). One of: `prior_absence` | `multi_pixel` | `high_frp`
+   * | `close_proximity` (pass) or `paused` | `already_briefed` | `no_signal`
+   * (reject). See `lib/ai/gate.ts` GateReason. Drives gate pass-rate
    * dashboards post-launch.
    */
   gateReason: text("gate_reason").notNull(),
