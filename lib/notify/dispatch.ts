@@ -20,6 +20,9 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
 import { sendEmail, type SendResult } from "./resend";
+import { mintActionToken } from "./action-tokens";
+import { appendFooter, type FooterUrls } from "./footer";
+import { notifyActionUrl } from "@/lib/share/url";
 
 export type DispatchAttempt =
   | { status: "sent"; channel: string; target: string; providerMessageId: string }
@@ -185,11 +188,21 @@ export async function dispatchBrief(
       continue;
     }
 
+    // Stage 7: mint a fresh quartet of action tokens for THIS outbound email.
+    // One quartet per (brief, channel, target) — never reused across emails so
+    // forwarding cannot grant the recipient permission to mutate the AOI.
+    const footerUrls = await mintFooterUrls(db, {
+      aoiId: loaded.aoiId,
+      briefId: briefId,
+      target,
+      now,
+    });
+    const markdownWithFooter = appendFooter(loaded.renderedMarkdown, footerUrls);
     const subject = buildSubject(loaded.summary);
     const result = await send({
       to: target,
       subject,
-      markdown: loaded.renderedMarkdown,
+      markdown: markdownWithFooter,
     });
 
     if (!result.ok && result.code === "config_missing") {
@@ -243,6 +256,52 @@ export async function dispatchBrief(
   }
 
   return { briefId, attempts };
+}
+
+async function mintFooterUrls(
+  db: AppDb,
+  args: { aoiId: string; briefId: string; target: string; now: Date },
+): Promise<FooterUrls> {
+  const channel = "email";
+  const snooze = await mintActionToken(db, {
+    aoiId: args.aoiId,
+    briefId: args.briefId,
+    action: "snooze",
+    channel,
+    target: args.target,
+    now: args.now,
+  });
+  const pause = await mintActionToken(db, {
+    aoiId: args.aoiId,
+    briefId: args.briefId,
+    action: "pause",
+    channel,
+    target: args.target,
+    now: args.now,
+  });
+  const unsub = await mintActionToken(db, {
+    aoiId: args.aoiId,
+    briefId: args.briefId,
+    action: "unsubscribe",
+    channel,
+    target: args.target,
+    now: args.now,
+  });
+  const feedback = await mintActionToken(db, {
+    aoiId: args.aoiId,
+    briefId: args.briefId,
+    action: "feedback",
+    channel,
+    target: args.target,
+    now: args.now,
+  });
+  return {
+    snoozeUrl: notifyActionUrl("snooze", snooze.token),
+    pauseUrl: notifyActionUrl("pause", pause.token),
+    unsubscribeUrl: notifyActionUrl("unsubscribe", unsub.token),
+    feedbackYesUrl: notifyActionUrl("feedback", feedback.token, { v: "yes" }),
+    feedbackNoUrl: notifyActionUrl("feedback", feedback.token, { v: "no" }),
+  };
 }
 
 function resolveChannels(loaded: LoadedBrief): Array<

@@ -40,11 +40,6 @@ export default async function BriefPage({ params }: Params) {
       />
 
       <footer className="border-t pt-4 text-xs text-[color:var(--muted)]">
-        <p>Model: {brief.model} · prompt {brief.promptVersion}</p>
-        <p>
-          Gate reason: {brief.gateReason} · latency:{" "}
-          {brief.latencyMs ?? "–"} ms · cost-est: ${brief.costUsdEst ?? "–"}
-        </p>
         <p>Posted: {brief.createdAt.toISOString()}</p>
       </footer>
     </article>

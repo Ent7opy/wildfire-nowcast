@@ -4,9 +4,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import { useState } from "react";
 
-type Tab = "upload" | "paste";
+const AoiMap = dynamic(
+  () => import("../../_components/aoi-map").then((m) => m.AoiMap),
+  { ssr: false, loading: () => <div className="h-[420px] w-full rounded border" /> },
+);
+
+type Tab = "upload" | "paste" | "draw";
 
 export default function NewAoiPage() {
   const router = useRouter();
@@ -26,6 +32,10 @@ export default function NewAoiPage() {
       setError(err instanceof Error ? err.message : "Invalid GeoJSON");
       return;
     }
+    await postAoi(geometry);
+  }
+
+  async function postAoi(geometry: unknown) {
     setBusy(true);
     try {
       const res = await fetch("/api/aoi", {
@@ -46,6 +56,15 @@ export default function NewAoiPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function submitDrawn(polygon: { type: "Polygon"; coordinates: number[][][] }) {
+    setError(null);
+    if (!name.trim()) {
+      setError("Name is required before saving the drawn polygon");
+      return;
+    }
+    await postAoi(polygon);
   }
 
   async function onFile(file: File) {
@@ -71,60 +90,94 @@ export default function NewAoiPage() {
         >
           Upload .geojson
         </button>
+        <button
+          type="button"
+          onClick={() => setTab("draw")}
+          className={`rounded px-3 py-1 ${tab === "draw" ? "bg-[color:var(--accent)] text-white" : "border"}`}
+        >
+          Draw on map
+        </button>
       </div>
 
-      <form className="mt-6 flex flex-col gap-4" onSubmit={submit}>
-        <label className="flex flex-col gap-1 text-sm">
-          <span>Name</span>
-          <input
-            type="text"
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="rounded border px-2 py-1"
-          />
-        </label>
-
-        {tab === "upload" ? (
+      {tab === "draw" ? (
+        <div className="mt-6 flex flex-col gap-4">
           <label className="flex flex-col gap-1 text-sm">
-            <span>GeoJSON file</span>
+            <span>Name</span>
             <input
-              type="file"
-              accept=".geojson,application/geo+json,application/json"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void onFile(f);
-              }}
+              type="text"
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="rounded border px-2 py-1"
             />
           </label>
-        ) : null}
-
-        <label className="flex flex-col gap-1 text-sm">
-          <span>GeoJSON</span>
-          <textarea
-            required
-            rows={10}
-            value={json}
-            onChange={(e) => setJson(e.target.value)}
-            className="rounded border p-2 font-mono text-xs"
-            placeholder='{"type":"Polygon","coordinates":[[[...]]]}'
-          />
-        </label>
-
-        {error ? (
-          <p className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
-            {error}
+          <p className="text-xs text-[color:var(--muted)]">
+            Click on the map to add vertices. Double-click to close the polygon
+            and save. The drawn polygon is sent to the same /api/aoi endpoint
+            used by the Paste and Upload tabs.
           </p>
-        ) : null}
+          <AoiMap mode="draw" onPolygon={(p) => void submitDrawn(p)} />
+          {error ? (
+            <p className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+              {error}
+            </p>
+          ) : null}
+          {busy ? <p className="text-sm">Creating…</p> : null}
+        </div>
+      ) : (
+        <form className="mt-6 flex flex-col gap-4" onSubmit={submit}>
+          <label className="flex flex-col gap-1 text-sm">
+            <span>Name</span>
+            <input
+              type="text"
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="rounded border px-2 py-1"
+            />
+          </label>
 
-        <button
-          type="submit"
-          disabled={busy}
-          className="self-start rounded bg-[color:var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >
-          {busy ? "Creating…" : "Create AOI"}
-        </button>
-      </form>
+          {tab === "upload" ? (
+            <label className="flex flex-col gap-1 text-sm">
+              <span>GeoJSON file</span>
+              <input
+                type="file"
+                accept=".geojson,application/geo+json,application/json"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void onFile(f);
+                }}
+              />
+            </label>
+          ) : null}
+
+          <label className="flex flex-col gap-1 text-sm">
+            <span>GeoJSON</span>
+            <textarea
+              required
+              rows={10}
+              value={json}
+              onChange={(e) => setJson(e.target.value)}
+              className="rounded border p-2 font-mono text-xs"
+              placeholder='{"type":"Polygon","coordinates":[[[...]]]}'
+            />
+          </label>
+
+          {error ? (
+            <p className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+              {error}
+            </p>
+          ) : null}
+
+          <button
+            type="submit"
+            disabled={busy}
+            className="self-start rounded bg-[color:var(--accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {busy ? "Creating…" : "Create AOI"}
+          </button>
+        </form>
+      )}
     </div>
   );
 }

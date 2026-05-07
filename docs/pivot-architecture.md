@@ -1,7 +1,13 @@
 # Wildfire Nowcast — Pivot Architecture & Code Plan
 
+> **HISTORICAL — DO NOT TREAT AS CURRENT STATE.**
+>
+> This document was the build-ready execution plan for the A' pivot (Stages 0–7). Stage 7 (cutover) merged on `master` and the legacy Python / Docker / Railway stack has been deleted from the repo. References below to "the current Railway/Docker stack", `apps/nextjs/`, `pivot/a-prime`, "old Railway services", `Dockerfile.*`, `docker-compose.yml`, `railway.toml`, `nixpacks.toml`, etc. describe the FROM side of the now-completed migration. They are preserved for historical context only.
+>
+> For current architecture see `CLAUDE.md` (stack section), `README.md`, and `docs/SPEC-A-prime-v1.md`. The Next.js app lives at the repo root, not under `apps/nextjs/`.
+
 **Date:** 2026-04-21
-**Status:** Build-ready plan for the A' (Fire Stewardship Agent) pivot
+**Status:** Historical — plan executed; superseded by current root-level Next.js app
 **Authority:** ADR 0005, PM_CLAUDE, research-log `2026-04-21-free-tier-architecture.md` (cut list is BINDING), research-log `2026-04-21-repo.md`
 
 > **Amendment 2026-04-21 — Vercel project reuse + root layout.**

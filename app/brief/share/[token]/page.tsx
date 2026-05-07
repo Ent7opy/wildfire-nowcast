@@ -28,10 +28,7 @@ export default async function PublicSharePage({ params }: Params) {
         dangerouslySetInnerHTML={{ __html: html }}
       />
       <footer className="mt-10 border-t pt-4 text-xs text-gray-500">
-        <p>
-          Model: <code>{brief.model}</code> · prompt {brief.promptVersion} ·
-          posted {brief.createdAt.toISOString()}
-        </p>
+        <p>Posted: {brief.createdAt.toISOString()}</p>
         <p className="mt-2">
           {POSITIONING_LINE}{" "}
           <a className="underline" href={REPO_URL} target="_blank" rel="noreferrer">

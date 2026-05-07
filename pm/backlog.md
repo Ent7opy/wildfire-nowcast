@@ -9,6 +9,20 @@ Evidence: links to `research-log/` + `signals/` files.
 
 **Status:** proposed — awaiting Vanyo sign-off per ADR 0005
 
+### Pivot stage status (snapshot — confirm against `CLAUDE.md` and `pm/launch-readiness.md`)
+
+- Stage 0 — Next.js scaffold ✅ merged.
+- Stage 1 — AOI CRUD + Drizzle schema + PGlite tests ✅ merged.
+- Stage 2 — FIRMS poll + AOI matcher + GitHub Actions cron ✅ merged.
+- Stage 3 — Brief generation (AI Gateway, structured output) ✅ merged.
+- Stage 4 — Notification dispatch (Resend) ✅ merged.
+- Stage 5 — Auth (Clerk) + per-user AOIs ✅ merged.
+- Stage 6 — Rules UI / export ✅ merged.
+- Stage 7 — Launch-readiness UI (map, snooze tokens, footer cleanup, feedback link, prune) — **proposed**, brief 21. Surfaced by product review 2026-05-07 §5 #1, #2, #4, #6, #8.
+- Stage 8 — Authority-perimeter fetch + data-freshness honesty + second-archetype outreach plan — **proposed**, no brief yet. Surfaced by product review 2026-05-07 §5 #5, #7, #11. Note: #11 (second-archetype outreach plan) is pm-only docs (`pm/`-scoped, no code) — bundled under Stage 8 because it should land before launch but does not need its own stage PR; the perimeter-fetch and freshness-honesty pieces are dev work.
+- Cutover (legacy stack removal) ✅ merged (PR #386).
+
+
 **Thesis:** a free, open, AI-native fire intelligence agent for stewardship-motivated users (conservation trusts, Natura 2000 site managers, Firewise communities, Indigenous fire crews, LTER field scientists, journalists) that watches their specific polygons and explains what is happening to their place, in context. Value is multi-source situation briefs (L2) — not threshold alerts (L1, which Watch Duty owns).
 
 **Why this survives Phase 2 critique:** agent 07's WD-is-in-every-lane attack applies to *B2B utility / consumer-alert* framing. WD's DNA does not reach stewardship users in conservation / academic / sovereignty networks (agent 10 evidence). Agent 09 proves the free-tier architecture works at ~$0/mo target scale.

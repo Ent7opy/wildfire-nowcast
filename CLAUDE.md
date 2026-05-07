@@ -10,7 +10,7 @@ The full thesis lives in `pm/north-star.md`. Read it before making product decis
 
 ## What changed and why (read this before exploring)
 
-The repo is mid-pivot. Q2 2026 re-scope from an IDC-demo system (detection + spread + weather + chatbot, FastAPI + Vite + PostGIS + Redis + Railway) to a narrow stewardship agent on free-tier infra (Next.js 16 + Drizzle + Neon + Vercel cron + AI Gateway). The legacy stack has been removed; only the A' implementation remains on `master`.
+The repo is mid-pivot. Q2 2026 re-scope from an IDC-demo system (detection + spread + weather + chatbot, FastAPI + Vite + PostGIS + Redis) to a narrow stewardship agent on free-tier infra (Next.js 16 + Drizzle + Neon + Vercel cron + AI Gateway). The legacy stack has been removed; only the A' implementation remains on `master`.
 
 History:
 - `pm/decisions/0001`–`0005` — research and pivot synthesis.
