@@ -16,6 +16,7 @@
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
 import type { FirmsBbox } from "./client";
+import { decodeRows } from "./decode-rows";
 
 const TILE_DEG = 5;
 
@@ -27,19 +28,14 @@ export type ActiveBucket = {
 };
 
 export async function getActiveBuckets(db: AppDb): Promise<ActiveBucket[]> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT "region_bucket" AS bucket, COUNT(*)::int AS aoi_count
     FROM "aois"
     WHERE "archived_at" IS NULL
     GROUP BY "region_bucket"
     ORDER BY aoi_count DESC, bucket ASC
-  `)) as unknown as {
-    rows?: Array<{ bucket: string; aoi_count: number }>;
-  };
-  const rows = (result.rows ?? (result as unknown as Array<{ bucket: string; aoi_count: number }>)) as Array<{
-    bucket: string;
-    aoi_count: number;
-  }>;
+  `);
+  const rows = decodeRows<{ bucket: string; aoi_count: number }>(result);
   return rows.map((r) => ({ bucket: r.bucket, aoiCount: Number(r.aoi_count) }));
 }
 

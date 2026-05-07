@@ -31,6 +31,7 @@ import {
   type GenerateOutcome,
 } from "@/lib/ai/generate";
 import { dispatchBrief, type DispatchOutcome } from "@/lib/notify/dispatch";
+import { decodeRows } from "./decode-rows";
 
 export type BackfillOutcome = {
   aoiId: string;
@@ -204,14 +205,12 @@ async function openJobRun(
   startedAtMs: number,
 ): Promise<string> {
   const startedAt = new Date(startedAtMs).toISOString();
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     INSERT INTO "job_runs" ("job_name", "bucket", "started_at", "status")
     VALUES ('aoi-backfill', ${bucket}, ${startedAt}, 'running')
     RETURNING "id"
-  `)) as unknown as { rows?: Array<{ id: string | number | bigint }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ id: string | number | bigint }>)) as Array<{
-    id: string | number | bigint;
-  }>;
+  `);
+  const rows = decodeRows<{ id: string | number | bigint }>(result);
   return String(rows[0]?.id ?? "");
 }
 

@@ -9,7 +9,8 @@
  *   1. Load the per-bucket AOI list (id, rules) once.
  *   2. Insert detections into `firms_detections` with ON CONFLICT DO NOTHING;
  *      `is_industrial_static` computed inline via ST_Intersects (PostGIS) or
- *      turf-style point-in-polygon (PGlite).
+ *      a point-in-bbox scan over the seed table (PGlite). The PGlite path is
+ *      exact for the seed (axis-aligned boxes); see `pgliteIndustrialHit`.
  *   3. For each (AOI × non-industrial detection) within `distance_buffer_km`:
  *      compute the dedupe hash, UPSERT the event row — extend `last_seen_at`,
  *      bump `detection_count`, update `peak_frp_mw` if higher.
@@ -25,6 +26,7 @@ import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
 import { computeDedupeHash } from "./dedupe";
 import type { FirmsDetection, FirmsSource } from "./client";
+import { decodeRows } from "./decode-rows";
 
 const MIN_CONFIDENCE_RANK: Record<string, number> = {
   low: 0,
@@ -156,7 +158,7 @@ async function insertDetections(
       ? sql`ST_SetSRID(ST_GeomFromGeoJSON(${JSON.stringify(geomJson)}), 4326)`
       : sql`${JSON.stringify(geomJson)}`;
 
-    const insertResult = (await db.execute(sql`
+    const insertResult = await db.execute(sql`
       INSERT INTO "firms_detections" (
         "source", "detected_at", "geom", "lat", "lon",
         "frp_mw", "confidence", "daynight",
@@ -172,10 +174,8 @@ async function insertDetections(
       )
       ON CONFLICT ("source", "acq_date", "acq_time", "lat", "lon") DO NOTHING
       RETURNING "is_industrial_static"
-    `)) as unknown as { rows?: Array<{ is_industrial_static: boolean | null }> };
-    const rows = (insertResult.rows ?? (insertResult as unknown as Array<{ is_industrial_static: boolean | null }>)) as Array<{
-      is_industrial_static: boolean | null;
-    }>;
+    `);
+    const rows = decodeRows<{ is_industrial_static: boolean | null }>(insertResult);
     if (rows.length > 0) {
       inserted += 1;
       if (rows[0].is_industrial_static === true) industrial += 1;
@@ -192,12 +192,10 @@ async function pgliteIndustrialHit(
   // PGlite fallback: iterate the (small) mask table and do point-in-bbox.
   // The seed polygons are axis-aligned boxes, so a bbox test is exact for
   // them; for the production path, ST_Intersects handles arbitrary polygons.
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT "geom" FROM "industrial_mask_static"
-  `)) as unknown as { rows?: Array<{ geom: string }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ geom: string }>)) as Array<{
-    geom: string;
-  }>;
+  `);
+  const rows = decodeRows<{ geom: string }>(result);
   for (const r of rows) {
     try {
       const g = JSON.parse(r.geom) as {
@@ -267,7 +265,7 @@ async function findAoiMatches(
         )})`
       : sql``;
 
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     WITH active_detections AS (
       SELECT d."id", d."lat", d."lon", d."detected_at", d."frp_mw", d."confidence", d."geom"
       FROM "firms_detections" d
@@ -331,20 +329,8 @@ async function findAoiMatches(
       confidence
     FROM ranked r
     WHERE rn = 1
-  `)) as unknown as {
-    rows?: Array<{
-      aoi_id: string;
-      min_confidence: string | null;
-      nearest_m: number | string | null;
-      peak_frp: number | string | null;
-      first_seen: string | Date;
-      last_seen: string | Date;
-      det_lat: number | string;
-      det_lon: number | string;
-      confidence: string | null;
-    }>;
-  };
-  const rows = (result.rows ?? []) as Array<{
+  `);
+  const rows = decodeRows<{
     aoi_id: string;
     min_confidence: string | null;
     nearest_m: number | string | null;
@@ -354,7 +340,7 @@ async function findAoiMatches(
     det_lat: number | string;
     det_lon: number | string;
     confidence: string | null;
-  }>;
+  }>(result);
 
   const out: PerAoiMatch[] = [];
   for (const r of rows) {
@@ -393,33 +379,19 @@ async function upsertEvent(
   // Try UPDATE first — if a "new"/"open" event with this hash exists, extend
   // it. Otherwise INSERT a new "new" event. Doing it as two statements keeps
   // the logic readable and avoids ON CONFLICT surprises between drivers.
-  const existing = (await db.execute(sql`
+  const existing = await db.execute(sql`
     SELECT "id", "detection_count", "peak_frp_mw", "first_seen_at", "last_seen_at"
     FROM "aoi_events"
     WHERE "aoi_id" = ${match.aoiId} AND "dedupe_hash" = ${hash}
     LIMIT 1
-  `)) as unknown as {
-    rows?: Array<{
-      id: string;
-      detection_count: number;
-      peak_frp_mw: number | null;
-      first_seen_at: Date | string;
-      last_seen_at: Date | string;
-    }>;
-  };
-  const existingRows = (existing.rows ?? (existing as unknown as Array<{
+  `);
+  const existingRows = decodeRows<{
     id: string;
     detection_count: number;
     peak_frp_mw: number | null;
     first_seen_at: Date | string;
     last_seen_at: Date | string;
-  }>)) as Array<{
-    id: string;
-    detection_count: number;
-    peak_frp_mw: number | null;
-    first_seen_at: Date | string;
-    last_seen_at: Date | string;
-  }>;
+  }>(existing);
 
   if (existingRows.length > 0) {
     const row = existingRows[0];
@@ -441,7 +413,7 @@ async function upsertEvent(
     return { kind: "updated" };
   }
 
-  const insertResult = (await db.execute(sql`
+  const insertResult = await db.execute(sql`
     INSERT INTO "aoi_events" (
       "aoi_id", "first_seen_at", "last_seen_at",
       "nearest_distance_km", "detection_count", "peak_frp_mw",
@@ -458,10 +430,8 @@ async function upsertEvent(
     )
     ON CONFLICT ("aoi_id", "dedupe_hash") DO NOTHING
     RETURNING "id"
-  `)) as unknown as { rows?: Array<{ id: string }> };
-  const insertRows = (insertResult.rows ?? (insertResult as unknown as Array<{ id: string }>)) as Array<{
-    id: string;
-  }>;
+  `);
+  const insertRows = decodeRows<{ id: string }>(insertResult);
   return { kind: "created", eventId: insertRows[0]?.id };
 }
 
@@ -481,12 +451,8 @@ function detectionTimestamp(d: FirmsDetection): Date | null {
 }
 
 async function dbNow(db: AppDb): Promise<Date> {
-  const result = (await db.execute(sql`SELECT now() AS now`)) as unknown as {
-    rows?: Array<{ now: Date | string }>;
-  };
-  const rows = (result.rows ?? (result as unknown as Array<{ now: Date | string }>)) as Array<{
-    now: Date | string;
-  }>;
+  const result = await db.execute(sql`SELECT now() AS now`);
+  const rows = decodeRows<{ now: Date | string }>(result);
   const raw = rows[0]?.now;
   if (!raw) return new Date();
   const t = raw instanceof Date ? raw : new Date(raw);

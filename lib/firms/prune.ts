@@ -9,6 +9,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
+import { decodeRowCount } from "./decode-rows";
 
 export type PruneArgs = {
   /** Override clock for tests. Defaults to `new Date()`. */
@@ -24,9 +25,9 @@ export async function pruneOldDetections(
   const now = args.now ?? new Date();
   const days = args.retentionDays ?? 14;
   const cutoff = new Date(now.getTime() - days * 86400_000);
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     DELETE FROM "firms_detections"
     WHERE "detected_at" < ${cutoff.toISOString()}::timestamptz
-  `)) as unknown as { rowCount?: number; affectedRows?: number };
-  return result.rowCount ?? result.affectedRows ?? 0;
+  `);
+  return decodeRowCount(result);
 }
