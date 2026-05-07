@@ -192,6 +192,70 @@ describe("notify actions — PGlite", () => {
     expect(rows[0].helpful).toBe(false);
   });
 
+  it("unsubscribe target match is case-sensitive (no false-positive removal)", async () => {
+    const { aoiId, briefId } = await seedAoiWithRules(db, [
+      { type: "email", target: "Keep@X.org" },
+    ]);
+    const out = await applyUnsubscribe(
+      db,
+      makeLoaded({ aoiId, briefId, action: "unsubscribe", target: "keep@x.org" }),
+      new Date(),
+    );
+    expect(out.autoPaused).toBe(false);
+    expect(out.remainingChannels).toHaveLength(1);
+    expect(out.remainingChannels[0]).toMatchObject({ target: "Keep@X.org" });
+  });
+
+  it("unsubscribe leaves a webhook with same target untouched", async () => {
+    const { aoiId, briefId } = await seedAoiWithRules(db, [
+      { type: "webhook", target: "user@x.org" },
+    ]);
+    const out = await applyUnsubscribe(
+      db,
+      makeLoaded({ aoiId, briefId, action: "unsubscribe", target: "user@x.org" }),
+      new Date(),
+    );
+    expect(out.autoPaused).toBe(false);
+    expect(out.remainingChannels).toHaveLength(1);
+    expect(out.remainingChannels[0]).toMatchObject({ type: "webhook" });
+  });
+
+  it("unsubscribe on already-empty channel list still auto-pauses", async () => {
+    const { aoiId, briefId } = await seedAoiWithRules(db, []);
+    const out = await applyUnsubscribe(
+      db,
+      makeLoaded({ aoiId, briefId, action: "unsubscribe", target: "any@x.org" }),
+      new Date(),
+    );
+    expect(out.autoPaused).toBe(true);
+    expect(out.remainingChannels).toEqual([]);
+    const stored = await readPaused(db, aoiId);
+    expect(stored).not.toBeNull();
+  });
+
+  it("feedback throws when token has no associated brief", async () => {
+    const { aoiId, briefId } = await seedAoiWithRules(db);
+    const loaded = makeLoaded({ aoiId, briefId, action: "feedback", target: "x@x.org" });
+    loaded.briefId = null;
+    await expect(applyFeedback(db, loaded, "yes", new Date())).rejects.toThrow(
+      /no associated brief/,
+    );
+  });
+
+  it("rapid yes/no/yes flips converge to last value", async () => {
+    const { aoiId, briefId } = await seedAoiWithRules(db);
+    const loaded = makeLoaded({ aoiId, briefId, action: "feedback", target: "x@x.org" });
+    await applyFeedback(db, loaded, "yes", new Date());
+    await applyFeedback(db, loaded, "no", new Date());
+    await applyFeedback(db, loaded, "yes", new Date());
+    const r = (await db.execute(sql`
+      SELECT helpful FROM "brief_feedback" WHERE "brief_id" = ${briefId}
+    `)) as unknown as { rows?: Array<{ helpful: boolean }> };
+    const rows = ((r.rows ?? r) as Array<{ helpful: boolean }>);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].helpful).toBe(true);
+  });
+
   it("double-yes is idempotent (no duplicate row)", async () => {
     const { aoiId, briefId } = await seedAoiWithRules(db);
     const loaded = makeLoaded({ aoiId, briefId, action: "feedback", target: "x@x.org" });
