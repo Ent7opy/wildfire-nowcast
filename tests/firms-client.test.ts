@@ -231,6 +231,23 @@ describe("fetchAreaCsv", () => {
     expect(r.detections.length).toBeGreaterThan(0);
   });
 
+  it("redacts FIRMS_MAP_KEY from 4xx error messages", async () => {
+    const key = "super-secret-map-key-abc123";
+    process.env.FIRMS_MAP_KEY = key;
+    const stubFetch = async (url: string): Promise<Response> =>
+      new Response(`Forbidden for url ${String(url)}`, { status: 403 });
+    const r = await fetchAreaCsv({
+      source: "VIIRS_NOAA20_NRT",
+      bbox: SONOMA_BBOX,
+      fetchImpl: stubFetch as unknown as typeof fetch,
+      sleepMs: async () => {},
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).not.toContain(key);
+    expect(r.message).toContain("[REDACTED]");
+  });
+
   it("throttles locally when the token bucket is exhausted", async () => {
     const stubFetch = async (): Promise<Response> =>
       new Response("", { status: 200 });
