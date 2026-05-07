@@ -54,4 +54,33 @@ describe("runStatusToOutcome", () => {
       retryPending: true,
     });
   });
+  it("status=error with null/undefined/empty error → network_error, retry (defensive default)", () => {
+    // The matcher writes `error: null` when status='error' came from a path that
+    // didn't capture an Error.message (e.g. a thrown non-Error object). The
+    // banner must still show *something* actionable rather than crashing.
+    expect(runStatusToOutcome({ status: "error", error: null })).toEqual({
+      outcome: "network_error",
+      retryPending: true,
+    });
+    expect(runStatusToOutcome({ status: "error", error: undefined })).toEqual({
+      outcome: "network_error",
+      retryPending: true,
+    });
+    expect(runStatusToOutcome({ status: "error" })).toEqual({
+      outcome: "network_error",
+      retryPending: true,
+    });
+    expect(runStatusToOutcome({ status: "error", error: "" })).toEqual({
+      outcome: "network_error",
+      retryPending: true,
+    });
+  });
+  it("status=error with case-variant timeout strings → timeout (regex /i flag)", () => {
+    // Documents that the AbortError|timeout match is case-insensitive — the
+    // matcher captures `error.name + ': ' + error.message`, and casing varies
+    // across runtime polyfills (Node vs undici vs Vercel edge).
+    expect(runStatusToOutcome({ status: "error", error: "aborterror" }).outcome).toBe("timeout");
+    expect(runStatusToOutcome({ status: "error", error: "Request TIMEOUT after 30s" }).outcome).toBe("timeout");
+    expect(runStatusToOutcome({ status: "error", error: "fetch timeout" }).outcome).toBe("timeout");
+  });
 });
