@@ -112,6 +112,12 @@ export function AoiMap(props: AoiMapProps): React.ReactElement {
       <div
         ref={containerRef}
         data-testid="aoi-map-container"
+        role="img"
+        aria-label={
+          props.mode === "view"
+            ? "Map of the area of interest with matched FIRMS detections"
+            : "Interactive map for drawing the area-of-interest polygon (mouse-required)"
+        }
         className="h-[420px] w-full rounded border border-[color:var(--muted)]"
         style={{ minHeight: 320 }}
       />

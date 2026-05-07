@@ -75,9 +75,11 @@ export default function NewAoiPage() {
   return (
     <div className="max-w-2xl">
       <h1 className="text-xl font-medium">Create AOI</h1>
-      <div className="mt-4 flex gap-2 text-sm">
+      <div role="tablist" aria-label="AOI input method" className="mt-4 flex gap-2 text-sm">
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === "paste"}
           onClick={() => setTab("paste")}
           className={`rounded px-3 py-1 ${tab === "paste" ? "bg-[color:var(--accent)] text-white" : "border"}`}
         >
@@ -85,6 +87,8 @@ export default function NewAoiPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === "upload"}
           onClick={() => setTab("upload")}
           className={`rounded px-3 py-1 ${tab === "upload" ? "bg-[color:var(--accent)] text-white" : "border"}`}
         >
@@ -92,6 +96,8 @@ export default function NewAoiPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === "draw"}
           onClick={() => setTab("draw")}
           className={`rounded px-3 py-1 ${tab === "draw" ? "bg-[color:var(--accent)] text-white" : "border"}`}
         >
@@ -118,7 +124,7 @@ export default function NewAoiPage() {
           </p>
           <AoiMap mode="draw" onPolygon={(p) => void submitDrawn(p)} />
           {error ? (
-            <p className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+            <p role="alert" className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
               {error}
             </p>
           ) : null}
@@ -164,7 +170,7 @@ export default function NewAoiPage() {
           </label>
 
           {error ? (
-            <p className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+            <p role="alert" className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
               {error}
             </p>
           ) : null}
