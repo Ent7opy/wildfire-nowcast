@@ -9,7 +9,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
-import { decodeRowCount } from "./decode-rows";
+import { decodeRowCount } from "@/lib/db/decode-rows";
 
 export type PruneArgs = {
   /** Override clock for tests. Defaults to `new Date()`. */

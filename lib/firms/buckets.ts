@@ -16,7 +16,7 @@
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
 import type { FirmsBbox } from "./client";
-import { decodeRows } from "./decode-rows";
+import { decodeRows } from "@/lib/db/decode-rows";
 
 const TILE_DEG = 5;
 

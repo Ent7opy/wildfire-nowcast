@@ -17,6 +17,7 @@ import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
 import { sendEmail, type SendResult } from "./resend";
 import { renderWatchConfirmedEmail } from "./watch-confirmed-template";
+import { decodeRows } from "@/lib/db/decode-rows";
 
 export type WatchConfirmedOutcome =
   | { status: "sent"; providerMessageId: string }
@@ -157,27 +158,23 @@ async function findPriorRow(
   aoiId: string,
   targetHash: string,
 ): Promise<boolean> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT 1 AS one FROM "notifications_log"
     WHERE "aoi_id" = ${aoiId}
       AND "kind" = 'watch_confirmed'
       AND "target_hash" = ${targetHash}
       AND "status" IN ('sent', 'skipped', 'config_missing')
     LIMIT 1
-  `)) as unknown as { rows?: Array<{ one: number }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ one: number }>)) as Array<{
-    one: number;
-  }>;
+  `);
+  const rows = decodeRows<{ one: number }>(result);
   return rows.length > 0;
 }
 
 async function loadUserEmail(db: AppDb, userId: string): Promise<string | null> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT "email" FROM "users" WHERE "id" = ${userId} LIMIT 1
-  `)) as unknown as { rows?: Array<{ email: string | null }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ email: string | null }>)) as Array<{
-    email: string | null;
-  }>;
+  `);
+  const rows = decodeRows<{ email: string | null }>(result);
   const email = rows[0]?.email;
   return typeof email === "string" && email.length > 0 ? email : null;
 }

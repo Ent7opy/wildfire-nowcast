@@ -20,6 +20,7 @@
  */
 import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
+import { decodeRows } from "@/lib/db/decode-rows";
 import { evaluateGate, type GateInputs, type GateReason } from "./gate";
 import { buildUserPrompt, SYSTEM_PROMPT, type BriefContext } from "./prompt";
 import {
@@ -224,7 +225,7 @@ async function loadEventContext(
   const centroidExpr = db.usePostGIS
     ? sql`ST_X(a."centroid"::geometry) AS centroid_lon, ST_Y(a."centroid"::geometry) AS centroid_lat`
     : sql`a."centroid" AS centroid_geojson`;
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT
       e."id"                    AS event_id,
       e."aoi_id"                AS aoi_id,
@@ -246,10 +247,8 @@ async function loadEventContext(
     LEFT JOIN "aoi_rules" r ON r."aoi_id" = e."aoi_id"
     WHERE e."id" = ${eventId}
     LIMIT 1
-  `)) as unknown as {
-    rows?: Array<Record<string, unknown>>;
-  };
-  const rows = (result.rows ?? (result as unknown as Array<Record<string, unknown>>)) as Array<Record<string, unknown>>;
+  `);
+  const rows = decodeRows<Record<string, unknown>>(result);
   const row = rows[0];
   if (!row) return null;
 
@@ -329,16 +328,14 @@ async function fetchLastAoiBriefedAt(
   aoiId: string,
   excludingEventId: string,
 ): Promise<Date | null> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT MAX(e."last_brief_at") AS t
     FROM "aoi_events" e
     WHERE e."aoi_id" = ${aoiId}
       AND e."id" <> ${excludingEventId}
       AND e."last_brief_at" IS NOT NULL
-  `)) as unknown as { rows?: Array<{ t: Date | string | null }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ t: Date | string | null }>)) as Array<{
-    t: Date | string | null;
-  }>;
+  `);
+  const rows = decodeRows<{ t: Date | string | null }>(result);
   const v = rows[0]?.t ?? null;
   return toDate(v);
 }
@@ -352,17 +349,15 @@ async function fetchEventSatellites(
   // joined to events, so window+bucket is the tightest scope we have without
   // a spatial filter (the AOI bucket is 5°×5°; same bucket is the matcher's
   // unit of work). No 24h fallback — we never invent satellites.
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT DISTINCT d."source" AS source
     FROM "firms_detections" d
     WHERE d."bucket" = ${args.regionBucket}
       AND d."detected_at" >= ${args.firstSeenAt.toISOString()}::timestamptz
       AND d."detected_at" <= ${args.lastSeenAt.toISOString()}::timestamptz
     ORDER BY 1
-  `)) as unknown as { rows?: Array<{ source: string }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ source: string }>)) as Array<{
-    source: string;
-  }>;
+  `);
+  const rows = decodeRows<{ source: string }>(result);
   return rows.map((r) => r.source).filter(Boolean);
 }
 
@@ -378,18 +373,15 @@ async function fetchNearestDetection(
 ): Promise<{ lat: number; lon: number } | null> {
   if (args.centroidLon == null || args.centroidLat == null) return null;
   if (!args.regionBucket) return null;
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT d."lat" AS lat, d."lon" AS lon
     FROM "firms_detections" d
     WHERE d."bucket" = ${args.regionBucket}
       AND d."detected_at" >= ${args.firstSeenAt.toISOString()}::timestamptz
       AND d."detected_at" <= ${args.lastSeenAt.toISOString()}::timestamptz
       AND (d."is_industrial_static" IS NULL OR d."is_industrial_static" = FALSE)
-  `)) as unknown as { rows?: Array<{ lat: number | string; lon: number | string }> };
-  const rows = (result.rows ?? (result as unknown as Array<{ lat: number | string; lon: number | string }>)) as Array<{
-    lat: number | string;
-    lon: number | string;
-  }>;
+  `);
+  const rows = decodeRows<{ lat: number | string; lon: number | string }>(result);
   let best: { lat: number; lon: number; d: number } | null = null;
   for (const r of rows) {
     const lat = Number(r.lat);
@@ -406,7 +398,7 @@ async function fetchPriorEvents(
   aoiId: string,
   excludingEventId: string,
 ): Promise<Array<{ date: string; description: string; outcome: string | null }>> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT
       e."first_seen_at" AS first_seen_at,
       e."detection_count" AS detection_count,
@@ -417,25 +409,13 @@ async function fetchPriorEvents(
       AND e."id" <> ${excludingEventId}
     ORDER BY e."first_seen_at" DESC
     LIMIT 3
-  `)) as unknown as {
-    rows?: Array<{
-      first_seen_at: Date | string;
-      detection_count: number;
-      peak_frp_mw: number | null;
-      nearest_distance_km: number;
-    }>;
-  };
-  const rows = (result.rows ?? (result as unknown as Array<{
+  `);
+  const rows = decodeRows<{
     first_seen_at: Date | string;
     detection_count: number;
     peak_frp_mw: number | null;
     nearest_distance_km: number;
-  }>)) as Array<{
-    first_seen_at: Date | string;
-    detection_count: number;
-    peak_frp_mw: number | null;
-    nearest_distance_km: number;
-  }>;
+  }>(result);
   return rows.map((r) => {
     const d = r.first_seen_at instanceof Date ? r.first_seen_at : new Date(r.first_seen_at);
     const date = d.toISOString().slice(0, 10);

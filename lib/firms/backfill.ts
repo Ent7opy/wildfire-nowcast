@@ -31,7 +31,7 @@ import {
   type GenerateOutcome,
 } from "@/lib/ai/generate";
 import { dispatchBrief, type DispatchOutcome } from "@/lib/notify/dispatch";
-import { decodeRows } from "./decode-rows";
+import { decodeRows } from "@/lib/db/decode-rows";
 
 export type BackfillOutcome = {
   aoiId: string;

@@ -26,7 +26,7 @@ import { sql } from "drizzle-orm";
 import type { AppDb } from "@/lib/db/client";
 import { computeDedupeHash } from "./dedupe";
 import type { FirmsDetection, FirmsSource } from "./client";
-import { decodeRows } from "./decode-rows";
+import { decodeRows } from "@/lib/db/decode-rows";
 
 const MIN_CONFIDENCE_RANK: Record<string, number> = {
   low: 0,
