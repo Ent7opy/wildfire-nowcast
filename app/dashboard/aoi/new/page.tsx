@@ -5,7 +5,7 @@
 
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 const AoiMap = dynamic(
   () => import("../../_components/aoi-map").then((m) => m.AoiMap),
@@ -14,9 +14,28 @@ const AoiMap = dynamic(
 
 type Tab = "upload" | "paste" | "draw";
 
+const TAB_ORDER: Tab[] = ["paste", "upload", "draw"];
+
 export default function NewAoiPage() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>("paste");
+  const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({
+    paste: null,
+    upload: null,
+    draw: null,
+  });
+
+  function onTabKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    e.preventDefault();
+    const idx = TAB_ORDER.indexOf(tab);
+    const next =
+      e.key === "ArrowRight"
+        ? TAB_ORDER[(idx + 1) % TAB_ORDER.length]
+        : TAB_ORDER[(idx - 1 + TAB_ORDER.length) % TAB_ORDER.length];
+    setTab(next);
+    tabRefs.current[next]?.focus();
+  }
   const [name, setName] = useState("");
   const [json, setJson] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -75,9 +94,22 @@ export default function NewAoiPage() {
   return (
     <div className="max-w-2xl">
       <h1 className="text-xl font-medium">Create AOI</h1>
-      <div className="mt-4 flex gap-2 text-sm">
+      <div
+        role="tablist"
+        aria-label="AOI input method"
+        onKeyDown={onTabKeyDown}
+        className="mt-4 flex gap-2 text-sm"
+      >
         <button
           type="button"
+          role="tab"
+          id="tab-paste"
+          aria-controls="panel-paste"
+          aria-selected={tab === "paste"}
+          tabIndex={tab === "paste" ? 0 : -1}
+          ref={(el) => {
+            tabRefs.current.paste = el;
+          }}
           onClick={() => setTab("paste")}
           className={`rounded px-3 py-1 ${tab === "paste" ? "bg-[color:var(--accent)] text-white" : "border"}`}
         >
@@ -85,6 +117,14 @@ export default function NewAoiPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          id="tab-upload"
+          aria-controls="panel-upload"
+          aria-selected={tab === "upload"}
+          tabIndex={tab === "upload" ? 0 : -1}
+          ref={(el) => {
+            tabRefs.current.upload = el;
+          }}
           onClick={() => setTab("upload")}
           className={`rounded px-3 py-1 ${tab === "upload" ? "bg-[color:var(--accent)] text-white" : "border"}`}
         >
@@ -92,6 +132,14 @@ export default function NewAoiPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          id="tab-draw"
+          aria-controls="panel-draw"
+          aria-selected={tab === "draw"}
+          tabIndex={tab === "draw" ? 0 : -1}
+          ref={(el) => {
+            tabRefs.current.draw = el;
+          }}
           onClick={() => setTab("draw")}
           className={`rounded px-3 py-1 ${tab === "draw" ? "bg-[color:var(--accent)] text-white" : "border"}`}
         >
@@ -100,7 +148,12 @@ export default function NewAoiPage() {
       </div>
 
       {tab === "draw" ? (
-        <div className="mt-6 flex flex-col gap-4">
+        <div
+          role="tabpanel"
+          id="panel-draw"
+          aria-labelledby="tab-draw"
+          className="mt-6 flex flex-col gap-4"
+        >
           <label className="flex flex-col gap-1 text-sm">
             <span>Name</span>
             <input
@@ -125,7 +178,13 @@ export default function NewAoiPage() {
           {busy ? <p className="text-sm">Creating…</p> : null}
         </div>
       ) : (
-        <form className="mt-6 flex flex-col gap-4" onSubmit={submit}>
+        <form
+          role="tabpanel"
+          id={tab === "paste" ? "panel-paste" : "panel-upload"}
+          aria-labelledby={tab === "paste" ? "tab-paste" : "tab-upload"}
+          className="mt-6 flex flex-col gap-4"
+          onSubmit={submit}
+        >
           <label className="flex flex-col gap-1 text-sm">
             <span>Name</span>
             <input
