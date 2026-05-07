@@ -115,10 +115,8 @@ function pickBestFeature(
     if (!f || !f.geometry) continue;
     const polys = toPolygonRings(f.geometry);
     if (polys.length === 0) continue;
-    const centroid = polygonsCentroid(polys);
-    if (!centroid) continue;
-    const d = haversineKm(lat, lon, centroid.lat, centroid.lon);
-    if (d > radiusKm) continue;
+    const d = nearestPolygonDistanceKm(polys, lat, lon);
+    if (d === null || d > radiusKm) continue;
     const postedTs = source.extractPostedTs((f.properties ?? {}) as Record<string, unknown>);
     if (!postedTs) continue;
     const tsMs = new Date(postedTs).getTime();
@@ -140,26 +138,34 @@ function toPolygonRings(geom: GeoJsonGeometry): number[][][][] {
   return [];
 }
 
-function polygonsCentroid(polys: number[][][][]): { lat: number; lon: number } | null {
-  // Mean of the outer-ring vertices across all polygons. Good enough for the
-  // radius filter — we don't need the exact area centroid.
-  let sumLon = 0;
-  let sumLat = 0;
-  let count = 0;
+function nearestPolygonDistanceKm(
+  polys: number[][][][],
+  lat: number,
+  lon: number,
+): number | null {
+  // For MultiPolygon, take the min distance over per-polygon centroids so
+  // wide-spread parts don't average into a centroid that lies between them.
+  // Mean-of-outer-ring-vertices is good enough as the per-polygon centroid.
+  let best: number | null = null;
   for (const poly of polys) {
     const outer = poly[0];
     if (!Array.isArray(outer)) continue;
+    let sumLon = 0;
+    let sumLat = 0;
+    let count = 0;
     for (const pt of outer) {
-      const lon = Number(pt[0]);
-      const lat = Number(pt[1]);
-      if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
-      sumLon += lon;
-      sumLat += lat;
+      const x = Number(pt[0]);
+      const y = Number(pt[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      sumLon += x;
+      sumLat += y;
       count += 1;
     }
+    if (count === 0) continue;
+    const d = haversineKm(lat, lon, sumLat / count, sumLon / count);
+    if (best === null || d < best) best = d;
   }
-  if (count === 0) return null;
-  return { lon: sumLon / count, lat: sumLat / count };
+  return best;
 }
 
 function pointInAnyPolygon(lat: number, lon: number, polys: number[][][][]): boolean {
