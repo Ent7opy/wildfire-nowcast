@@ -172,6 +172,65 @@ describe("fetchAreaCsv", () => {
     expect(r.code).toBe("rate_limited");
   });
 
+  it("returns network_error when fetch throws on every attempt", async () => {
+    let calls = 0;
+    const stubFetch = async (): Promise<Response> => {
+      calls += 1;
+      throw new Error("ECONNRESET");
+    };
+    const r = await fetchAreaCsv({
+      source: "VIIRS_NOAA20_NRT",
+      bbox: SONOMA_BBOX,
+      fetchImpl: stubFetch as unknown as typeof fetch,
+      sleepMs: async () => {},
+    });
+    expect(calls).toBe(3);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("network_error");
+    expect(r.message).toContain("ECONNRESET");
+  });
+
+  it("returns upstream_error immediately on 4xx without retrying", async () => {
+    let calls = 0;
+    const stubFetch = async (): Promise<Response> => {
+      calls += 1;
+      return new Response("invalid map key", { status: 403 });
+    };
+    const r = await fetchAreaCsv({
+      source: "VIIRS_NOAA20_NRT",
+      bbox: SONOMA_BBOX,
+      fetchImpl: stubFetch as unknown as typeof fetch,
+      sleepMs: async () => {},
+    });
+    expect(calls).toBe(1);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("upstream_error");
+    expect(r.status).toBe(403);
+    expect(r.message).toContain("invalid map key");
+  });
+
+  it("recovers when a 5xx is followed by a 200", async () => {
+    const csv = await loadFixture();
+    let calls = 0;
+    const stubFetch = async (): Promise<Response> => {
+      calls += 1;
+      if (calls === 1) return new Response("bad gateway", { status: 502 });
+      return new Response(csv, { status: 200 });
+    };
+    const r = await fetchAreaCsv({
+      source: "VIIRS_NOAA20_NRT",
+      bbox: SONOMA_BBOX,
+      fetchImpl: stubFetch as unknown as typeof fetch,
+      sleepMs: async () => {},
+    });
+    expect(calls).toBe(2);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.detections.length).toBeGreaterThan(0);
+  });
+
   it("throttles locally when the token bucket is exhausted", async () => {
     const stubFetch = async (): Promise<Response> =>
       new Response("", { status: 200 });
