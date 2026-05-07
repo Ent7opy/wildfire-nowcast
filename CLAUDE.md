@@ -53,7 +53,9 @@ History:
 - Stage 4 — Notification dispatch (Resend) ✅ merged.
 - Stage 5 — Auth (Clerk) + per-user AOIs ✅ merged.
 - Stage 6 — Rules UI / export ✅ merged.
-- Stage 7 — Cutover ✅ merged.
+- Stage 7 — Launch readiness UI ✅ merged.
+- Stage 8 — Authority perimeter + freshness ✅ merged.
+- Stage 9 — Watch-confirmed email + first-AOI backfill ✅ merged.
 
 ## Commands
 
