@@ -157,6 +157,106 @@ describe("fetchAuthorityPerimeter", () => {
     expect(r).toBeNull();
   });
 
+  it("returns null when the FeatureCollection has an empty features array", async () => {
+    // Reviewer flagged: pin that an empty upstream result returns null (not throw,
+    // not a fabricated record). This is the build-without-blocking path.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ type: "FeatureCollection", features: [] }));
+    const r = await fetchAuthorityPerimeter({
+      lat: 38.5,
+      lon: -122.7,
+      regionBucket: NIFC_BUCKET,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(r).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("picks the most recent perimeter when several features are in radius", async () => {
+    // Reviewer flagged: pin the timestamp tie-break independent of distance.
+    // All three features share the same centroid (and are within radius); only
+    // the timestamp differs. The newest must win.
+    const detLat = 38.5;
+    const detLon = -122.7;
+    const t1 = 1_770_000_000_000;
+    const t2 = 1_775_000_000_000;
+    const t3 = 1_772_000_000_000;
+    const collection = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: "older",
+          geometry: { type: "Polygon", coordinates: squarePolygon(detLon, detLat) },
+          properties: { poly_PolygonDateTime: t1 },
+        },
+        {
+          type: "Feature",
+          id: "newest",
+          geometry: { type: "Polygon", coordinates: squarePolygon(detLon, detLat) },
+          properties: { poly_PolygonDateTime: t2 },
+        },
+        {
+          type: "Feature",
+          id: "middle",
+          geometry: { type: "Polygon", coordinates: squarePolygon(detLon, detLat) },
+          properties: { poly_PolygonDateTime: t3 },
+        },
+      ],
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(collection));
+    const r = await fetchAuthorityPerimeter({
+      lat: detLat,
+      lon: detLon,
+      regionBucket: NIFC_BUCKET,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    expect(r).not.toBeNull();
+    expect(r!.rawFeatureId).toBe("newest");
+    expect(r!.postedTs).toBe(new Date(t2).toISOString());
+  });
+
+  it("supports MultiPolygon geometry", async () => {
+    // Code branches on geometry.type; pin that MultiPolygon is iterated and PIP
+    // is evaluated against any constituent polygon.
+    const detLat = 38.5;
+    const detLon = -122.7;
+    const ts = 1_775_000_000_000;
+    const collection = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          id: 42,
+          geometry: {
+            type: "MultiPolygon",
+            coordinates: [
+              // First polygon: ~500 km offset (centroid out of radius if alone).
+              squarePolygon(detLon + 5, detLat + 5),
+              // Second polygon: contains the detection.
+              squarePolygon(detLon, detLat),
+            ],
+          },
+          properties: { poly_PolygonDateTime: ts },
+        },
+      ],
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(collection));
+    const r = await fetchAuthorityPerimeter({
+      lat: detLat,
+      lon: detLon,
+      regionBucket: NIFC_BUCKET,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    // Min-distance over per-polygon centroids: the polygon centered on the
+    // detection wins, so the feature passes the default-radius filter and PIP
+    // confirms containment.
+    expect(r).not.toBeNull();
+    expect(r!.containsDetection).toBe(true);
+    expect(r!.rawFeatureId).toBe("42");
+  });
+
   it("returns null when no features are in radius", async () => {
     const collection = {
       type: "FeatureCollection",
