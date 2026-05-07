@@ -145,3 +145,84 @@ describe("evaluateGate — no-signal", () => {
     expect(r).toEqual({ pass: false, reason: "no_signal" });
   });
 });
+
+// FIRMS occasionally returns detections with NULL FRP. Lock in how each
+// pass-condition branch behaves when peakFrpMw is null, so a future refactor
+// that removes the null guard fails loudly here.
+describe("evaluateGate — peakFrpMw null branches", () => {
+  it("passes multi_pixel when peakFrpMw is null (pixel count, not FRP)", () => {
+    const r = evaluateGate(
+      inputs({
+        lastAoiEventBriefedAt: new Date("2026-04-21T03:00:00Z"), // recent brief, skip prior_absence
+        detectionCountInEvent: 2,
+        peakFrpMw: null,
+      }),
+    );
+    expect(r).toEqual({ pass: true, reason: "multi_pixel" });
+  });
+
+  it("does NOT pass high_frp when peakFrpMw is null", () => {
+    const r = evaluateGate(
+      inputs({
+        lastAoiEventBriefedAt: new Date("2026-04-21T03:00:00Z"),
+        detectionCountInEvent: 1,
+        peakFrpMw: null,
+        minFrpMw: 5,
+        nearestDistanceKm: 24, // > 12.5 km half-buffer, skip close_proximity
+        alertDistanceKm: 25,
+      }),
+    );
+    expect(r).toEqual({ pass: false, reason: "no_signal" });
+  });
+
+  it("passes prior_absence when peakFrpMw is null and no prior brief", () => {
+    const r = evaluateGate(
+      inputs({
+        lastAoiEventBriefedAt: null,
+        detectionCountInEvent: 1,
+        peakFrpMw: null,
+        nearestDistanceKm: 24,
+      }),
+    );
+    expect(r).toEqual({ pass: true, reason: "prior_absence" });
+  });
+
+  it("passes prior_absence when peakFrpMw is null and last brief > 72h ago", () => {
+    const r = evaluateGate(
+      inputs({
+        lastAoiEventBriefedAt: new Date("2026-04-17T05:00:00Z"), // 96h ago
+        detectionCountInEvent: 1,
+        peakFrpMw: null,
+        nearestDistanceKm: 24,
+      }),
+    );
+    expect(r).toEqual({ pass: true, reason: "prior_absence" });
+  });
+
+  it("passes close_proximity when peakFrpMw is null (distance-based)", () => {
+    const r = evaluateGate(
+      inputs({
+        lastAoiEventBriefedAt: new Date("2026-04-21T03:00:00Z"),
+        detectionCountInEvent: 1,
+        peakFrpMw: null,
+        nearestDistanceKm: 12, // 0.5 × 25 = 12.5
+        alertDistanceKm: 25,
+      }),
+    );
+    expect(r).toEqual({ pass: true, reason: "close_proximity" });
+  });
+
+  it("rejects with no_signal when peakFrpMw is null and no other condition fires", () => {
+    const r = evaluateGate(
+      inputs({
+        lastAoiEventBriefedAt: new Date("2026-04-21T03:00:00Z"), // recent
+        detectionCountInEvent: 1,
+        peakFrpMw: null,
+        minFrpMw: 5,
+        nearestDistanceKm: 24, // > half-buffer
+        alertDistanceKm: 25,
+      }),
+    );
+    expect(r).toEqual({ pass: false, reason: "no_signal" });
+  });
+});
