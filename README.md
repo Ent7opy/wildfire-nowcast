@@ -6,7 +6,7 @@ Full thesis: [`pm/north-star.md`](pm/north-star.md). Pivot history: [`pm/decisio
 
 ## Status
 
-Post-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis) has been removed. The A' implementation — AOI CRUD, FIRMS polling, AI-Gateway brief generation, Resend dispatch, Clerk auth, rules UI / export — is on `master`. Creating an AOI sends a "now watching" confirmation email and immediately backfills the last 24h of FIRMS for that polygon, so users get a brief right away if there's already active fire near their site instead of waiting for the next 15-minute cron tick.
+Post-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis) has been removed. The A' implementation — AOI CRUD, FIRMS polling, AI-Gateway brief generation with authority-perimeter (NIFC / CWFIS) context, Resend dispatch, Clerk auth, rules UI / export, and a MapLibre-based dashboard view of AOIs with detection overlay — is on `master`. Creating an AOI sends a "now watching" confirmation email and immediately backfills the last 24h of FIRMS for that polygon, so users get a brief right away if there's already active fire near their site instead of waiting for the next 15-minute cron tick.
 
 Authoritative stage / backlog status: [`pm/backlog.md`](pm/backlog.md).
 
@@ -37,7 +37,16 @@ pnpm db:migrate
 
 ## How the project is run
 
-Solo-operated, with a Claude Code agent harness driving day-to-day work. The harness reads [`loop.md`](loop.md) each tick and dispatches to subagents in [`.claude/agents/`](.claude/agents/) (`pm`, `dev`, `reviewer`, `scout`). Stage PRs always require Vanyo's review; chores can auto-merge under the gate in `loop.md`.
+Solo-operated, with a Claude Code agent harness driving day-to-day work. The harness reads [`loop.md`](loop.md) each tick and dispatches to subagents in [`.claude/agents/`](.claude/agents/):
+
+- `pm` — owns the `pm/` workspace (briefs, backlog, blockers, ADR drafts, research-log condensation).
+- `dev` — implements one stage or chore per run on a dedicated branch.
+- `reviewer` — adversarial PR review against brief acceptance criteria; posts LGTM or BLOCKER.
+- `scout` — background chores (dead-code audit, dependency bumps, doc drift, link sweeps); capped at one PR per UTC day.
+- `cutover` — one-shot Phase 0 agent that landed the A' pivot on master; retired post-merge.
+- `product-reviewer` — high-level product critic on thesis fit, flow coherence, and feature scope.
+
+Stage PRs always require Vanyo's review; chores can auto-merge under the gate in `loop.md`.
 
 Doctrine for human + AI agents: [`AGENTS.md`](AGENTS.md), [`pm/PM_CLAUDE.md`](pm/PM_CLAUDE.md).
 
