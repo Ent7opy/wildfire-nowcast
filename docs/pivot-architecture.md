@@ -109,6 +109,10 @@ GH Actions cron
     ▼
 app/api/aoi/poll/route.ts
     │
+    ├── pruneOldDetections(db, retentionDays=14)  ← runs first, so retention
+    │                                               failures surface on the
+    │                                               parent job_runs row
+    │
     ├── getActiveBuckets(db)                    → ["5x5:W125_N35", ...]
     │
     ├── for each bucket:
@@ -135,7 +139,7 @@ app/api/aoi/poll/route.ts
     │     │
     │     └── job_runs UPDATE (status, outcome, retry_pending, counters)
     │
-    └── pruneOldDetections(db, retentionDays=14)
+    └── parent job_runs UPDATE (rolled-up counters, terminal status)
 ```
 
 Everything is idempotent at every persistence boundary: `firms_detections` deduped on `(source, acq_date, acq_time, lat, lon)`; `aoi_events` UPSERT on `dedupe_hash`; `notifications_log` partial unique index on `(brief_id, channel, target_hash) WHERE status IN ('sent','skipped')`; action tokens bound to `(brief, channel, target, action)`. A retried cron tick produces no double-sends.
