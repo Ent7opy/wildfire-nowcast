@@ -11,6 +11,7 @@
  */
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { AppDb } from "./client";
+import { decodeRows } from "./decode-rows";
 import { aois, aoiRules } from "@/db/schema";
 import {
   areaHaOfMultiPolygon,
@@ -173,10 +174,8 @@ export async function createAoi(
     )
     RETURNING "id"
   `;
-  const insertResult = (await db.execute(insertSql)) as unknown as {
-    rows?: Array<{ id: string }>;
-  };
-  const rows = (insertResult.rows ?? (insertResult as unknown as Array<{ id: string }>)) as Array<{ id: string }>;
+  const insertResult = await db.execute(insertSql);
+  const rows = decodeRows<{ id: string }>(insertResult);
   const newId = rows[0].id;
 
   // Default rules row.
@@ -193,7 +192,7 @@ export async function listAois(
   db: AppDb,
   userId: string,
 ): Promise<AoiRow[]> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT
       "id", "user_id", "name",
       ${projGeom(db, "polygon")},
@@ -203,8 +202,8 @@ export async function listAois(
     FROM ${aois}
     WHERE "user_id" = ${userId} AND "archived_at" IS NULL
     ORDER BY "created_at" DESC
-  `)) as unknown as { rows?: RawAoiRow[] };
-  const rows = (result.rows ?? (result as unknown as RawAoiRow[])) as RawAoiRow[];
+  `);
+  const rows = decodeRows<RawAoiRow>(result);
   return rows.map((r) => mapAoiRow(db, r));
 }
 
@@ -213,7 +212,7 @@ export async function getAoiById(
   userId: string,
   aoiId: string,
 ): Promise<AoiRow | null> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT
       "id", "user_id", "name",
       ${projGeom(db, "polygon")},
@@ -223,8 +222,8 @@ export async function getAoiById(
     FROM ${aois}
     WHERE "id" = ${aoiId} AND "user_id" = ${userId} AND "archived_at" IS NULL
     LIMIT 1
-  `)) as unknown as { rows?: RawAoiRow[] };
-  const rows = (result.rows ?? (result as unknown as RawAoiRow[])) as RawAoiRow[];
+  `);
+  const rows = decodeRows<RawAoiRow>(result);
   if (rows.length === 0) return null;
   return mapAoiRow(db, rows[0]);
 }
@@ -416,7 +415,7 @@ export async function listAoisWithLatestBrief(
 ): Promise<AoiListRow[]> {
   // LEFT JOIN LATERAL works on Postgres 16 and PGlite. The join picks the
   // most-recent brief per AOI without dragging the full briefs table.
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT
       a."id", a."user_id", a."name",
       ${projGeom(db, "polygon")},
@@ -435,16 +434,11 @@ export async function listAoisWithLatestBrief(
     LEFT JOIN "aoi_rules" r ON r."aoi_id" = a."id"
     WHERE a."user_id" = ${userId} AND a."archived_at" IS NULL
     ORDER BY a."created_at" DESC
-  `)) as unknown as {
-    rows?: Array<RawAoiRow & {
-      last_brief_at: Date | string | null;
-      paused_until: Date | string | null;
-    }>;
-  };
-  const rows = (result.rows ?? (result as unknown as Array<RawAoiRow & {
+  `);
+  const rows = decodeRows<RawAoiRow & {
     last_brief_at: Date | string | null;
     paused_until: Date | string | null;
-  }>));
+  }>(result);
   return rows.map((r) => ({
     ...mapAoiRow(db, r),
     lastBriefAt: toDate(r.last_brief_at),
@@ -470,7 +464,7 @@ export async function listBriefsForAoi(
   args: { userId: string; aoiId: string; limit?: number },
 ): Promise<BriefSummaryRow[]> {
   const limit = args.limit ?? 20;
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT b."id", b."aoi_id", a."name" AS aoi_name, b."created_at",
            b."gate_reason", b."model", b."prompt_version",
            b."latency_ms", b."cost_usd_est", b."last_notified_at"
@@ -481,8 +475,8 @@ export async function listBriefsForAoi(
       AND a."archived_at" IS NULL
     ORDER BY b."created_at" DESC
     LIMIT ${limit}
-  `)) as unknown as { rows?: RawBriefSummary[] };
-  const rows = (result.rows ?? (result as unknown as RawBriefSummary[]));
+  `);
+  const rows = decodeRows<RawBriefSummary>(result);
   return rows.map(mapBriefSummary);
 }
 
@@ -577,7 +571,7 @@ export async function getBriefByIdForUser(
   db: AppDb,
   args: { userId: string; briefId: string },
 ): Promise<BriefRow | null> {
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT b."id", b."aoi_id", a."name" AS aoi_name, b."event_id",
            b."schema_version", b."model", b."prompt_version", b."gate_reason",
            b."payload", b."rendered_markdown", b."cost_usd_est", b."latency_ms",
@@ -589,8 +583,8 @@ export async function getBriefByIdForUser(
       AND a."user_id" = ${args.userId}
       AND a."archived_at" IS NULL
     LIMIT 1
-  `)) as unknown as { rows?: RawBrief[] };
-  const rows = (result.rows ?? (result as unknown as RawBrief[]));
+  `);
+  const rows = decodeRows<RawBrief>(result);
   if (rows.length === 0) return null;
   return mapBrief(rows[0]);
 }
@@ -602,7 +596,7 @@ export async function getBriefByShareToken(
 ): Promise<BriefRow | null> {
   if (!token) return null;
   const now = opts?.now ?? new Date();
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT b."id", b."aoi_id", a."name" AS aoi_name, b."event_id",
            b."schema_version", b."model", b."prompt_version", b."gate_reason",
            b."payload", b."rendered_markdown", b."cost_usd_est", b."latency_ms",
@@ -615,8 +609,8 @@ export async function getBriefByShareToken(
       AND b."share_expires_at" > ${now.toISOString()}
       AND a."archived_at" IS NULL
     LIMIT 1
-  `)) as unknown as { rows?: RawBrief[] };
-  const rows = (result.rows ?? (result as unknown as RawBrief[]));
+  `);
+  const rows = decodeRows<RawBrief>(result);
   if (rows.length === 0) return null;
   return mapBrief(rows[0]);
 }
@@ -680,7 +674,7 @@ export async function listAllBriefsForUser(
 ): Promise<BriefSummaryRow[]> {
   const since = args.since ?? new Date(Date.now() - 365 * 86400_000);
   const limit = args.limit ?? 5000;
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT b."id", b."aoi_id", a."name" AS aoi_name, b."created_at",
            b."gate_reason", b."model", b."prompt_version",
            b."latency_ms", b."cost_usd_est", b."last_notified_at",
@@ -692,8 +686,8 @@ export async function listAllBriefsForUser(
       AND b."created_at" >= ${since.toISOString()}
     ORDER BY b."created_at" DESC
     LIMIT ${limit}
-  `)) as unknown as { rows?: Array<RawBriefSummary & { payload: unknown }> };
-  const rows = (result.rows ?? (result as unknown as Array<RawBriefSummary & { payload: unknown }>));
+  `);
+  const rows = decodeRows<RawBriefSummary & { payload: unknown }>(result);
   return rows.map(mapBriefSummary);
 }
 
@@ -703,7 +697,7 @@ export async function listAllBriefsWithPayloadForUser(
 ): Promise<Array<BriefSummaryRow & { payload: unknown }>> {
   const since = args.since ?? new Date(Date.now() - 365 * 86400_000);
   const limit = args.limit ?? 5000;
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT b."id", b."aoi_id", a."name" AS aoi_name, b."created_at",
            b."gate_reason", b."model", b."prompt_version",
            b."latency_ms", b."cost_usd_est", b."last_notified_at",
@@ -715,8 +709,8 @@ export async function listAllBriefsWithPayloadForUser(
       AND b."created_at" >= ${since.toISOString()}
     ORDER BY b."created_at" DESC
     LIMIT ${limit}
-  `)) as unknown as { rows?: Array<RawBriefSummary & { payload: unknown }> };
-  const rows = (result.rows ?? (result as unknown as Array<RawBriefSummary & { payload: unknown }>));
+  `);
+  const rows = decodeRows<RawBriefSummary & { payload: unknown }>(result);
   return rows.map((r) => ({
     ...mapBriefSummary(r),
     payload: typeof r.payload === "string" ? JSON.parse(r.payload) : r.payload,
@@ -753,7 +747,7 @@ export async function listMatchedDetectionsForAoi(
   const since = new Date(now.getTime() - sinceDays * 86400_000);
   const aoi = await getAoiById(db, args.userId, args.aoiId);
   if (!aoi) return [];
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT DISTINCT
       d."lat" AS lat,
       d."lon" AS lon,
@@ -772,22 +766,14 @@ export async function listMatchedDetectionsForAoi(
       )
     ORDER BY d."detected_at" DESC
     LIMIT 5000
-  `)) as unknown as {
-    rows?: Array<{
-      lat: number | string;
-      lon: number | string;
-      frp_mw: number | string | null;
-      detected_at: Date | string;
-      source: string;
-    }>;
-  };
-  const rows = (result.rows ?? (result as unknown as Array<{
+  `);
+  const rows = decodeRows<{
     lat: number | string;
     lon: number | string;
     frp_mw: number | string | null;
     detected_at: Date | string;
     source: string;
-  }>));
+  }>(result);
   return rows
     .map((r) => ({
       lat: Number(r.lat),
@@ -807,7 +793,7 @@ export async function listBriefsForAoiWithPayload(
   args: { userId: string; aoiId: string; limit?: number },
 ): Promise<Array<BriefSummaryRow & { renderedMarkdown: string }>> {
   const limit = args.limit ?? 500;
-  const result = (await db.execute(sql`
+  const result = await db.execute(sql`
     SELECT b."id", b."aoi_id", a."name" AS aoi_name, b."created_at",
            b."gate_reason", b."model", b."prompt_version",
            b."latency_ms", b."cost_usd_est", b."last_notified_at",
@@ -819,8 +805,8 @@ export async function listBriefsForAoiWithPayload(
       AND a."archived_at" IS NULL
     ORDER BY b."created_at" DESC
     LIMIT ${limit}
-  `)) as unknown as { rows?: Array<RawBriefSummary & { rendered_markdown: string }> };
-  const rows = (result.rows ?? (result as unknown as Array<RawBriefSummary & { rendered_markdown: string }>));
+  `);
+  const rows = decodeRows<RawBriefSummary & { rendered_markdown: string }>(result);
   return rows.map((r) => ({
     ...mapBriefSummary(r),
     renderedMarkdown: r.rendered_markdown,
