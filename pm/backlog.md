@@ -18,8 +18,9 @@ Evidence: links to `research-log/` + `signals/` files.
 - Stage 4 — Notification dispatch (Resend) ✅ merged.
 - Stage 5 — Auth (Clerk) + per-user AOIs ✅ merged.
 - Stage 6 — Rules UI / export ✅ merged.
-- Stage 7 — Launch-readiness UI (map, snooze tokens, footer cleanup, feedback link, prune) — **proposed**, brief 21. Surfaced by product review 2026-05-07 §5 #1, #2, #4, #6, #8.
-- Stage 8 — Authority-perimeter fetch + data-freshness honesty + second-archetype outreach plan — **proposed**, no brief yet. Surfaced by product review 2026-05-07 §5 #5, #7, #11. Note: #11 (second-archetype outreach plan) is pm-only docs (`pm/`-scoped, no code) — bundled under Stage 8 because it should land before launch but does not need its own stage PR; the perimeter-fetch and freshness-honesty pieces are dev work.
+- Stage 7 — Launch-readiness UI (map, snooze tokens, footer cleanup, feedback link, prune) ✅ merged (PR #406).
+- Stage 8 — Authority-perimeter fetch + data-freshness honesty + second-archetype outreach plan ✅ merged (PR #411). NIFC + CWFIS shipped; ICNF deferred (active blocker).
+- Stage 9 — Watch-confirmed email + first-AOI backfill — **proposed**, brief 23 (`pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`). Closes SPEC Flow 1 steps 5–6; flips launch-acceptance #2 from `partial` (unmeasurable) to measurable. Surfaced by `pm/research-log/2026-05-07-v1-stop-line.md` §6.
 - Cutover (legacy stack removal) ✅ merged (PR #386).
 
 
@@ -175,8 +176,8 @@ Evidence: links to `research-log/` + `signals/` files.
 
 ## Stage status (post-pivot, A' implementation)
 
-- Stage 0–7: merged (see `CLAUDE.md` snapshot).
-- **Stage 8 — authority-perimeter LLM tool-call + data-freshness honesty + outreach plan v1:** brief landed (`pm/briefs/22-stage8-authority-perimeter-and-freshness.md`), `hypothesis → in-progress`. Bundles product-review 2026-05-07 §5 #5, #7, #11.
+- Stage 0–8: merged (see `CLAUDE.md` snapshot; Stage 8 merged via PR #411 on 2026-05-07).
+- **Stage 9 — watch-confirmed email + first-AOI backfill:** brief landed (`pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`), `proposed → hypothesis`. Closes SPEC Flow 1 steps 5–6 so launch-acceptance #2 (cold-start ≤ 5 min) is measurable on a clean browser. Surfaced by `pm/research-log/2026-05-07-v1-stop-line.md` §6.
 
 ---
 

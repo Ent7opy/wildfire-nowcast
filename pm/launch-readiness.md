@@ -1,6 +1,6 @@
 # Launch readiness — A' v1
 
-Last updated: 2026-05-07
+Last updated: 2026-05-07 (Stage 9 brief landed)
 Maintained by: pm (per `pm/product-reviews/2026-05-07.md` §5 #10)
 
 This file is the single source of truth for whether v1 is shippable.
@@ -19,7 +19,7 @@ Status legend:
 | # | Acceptance item (from SPEC) | Status | Evidence | Gating |
 |---|---|---|---|---|
 | 1 | Land trust archetype served end-to-end. ≥1 LTA-member land trust has created ≥1 AOI with a real preserve polygon and received ≥1 brief from a real FIRMS detection. | not started | No outreach has happened (per `pm/PM_CLAUDE.md` no-fabricated-users constraint and review §4). The full backend supports it. | Stage 7 (so a non-Vanyo user can complete the loop), then launch acceptance #9 (newsletter post) — and a named LTA contact, currently absent. |
-| 2 | Cold start to first watch ≤ 5 min, measured on a clean browser. | partial | Sign-in (Clerk) → `/dashboard/aoi/new` (paste/upload) → `POST /api/aoi` → AOI persisted is in place. **No "watch confirmed" email is sent on AOI creation** (Flow 1 step 5). The 5-min SLA cannot be measured because the terminal event of the SLA does not fire. The polygon-input UX also still lacks the draw-on-map option that the LTA archetype is most likely to use. | Stage 7 (draw-on-map) + a small follow-up chore for the confirmation email (out of Stage 7 scope per brief 21). Then run a measured cold-start. |
+| 2 | Cold start to first watch ≤ 5 min, measured on a clean browser. | partial | Stage 7 (PR #406) shipped draw-on-map + paste/upload, so the polygon-input UX is no longer the gap. Sign-in (Clerk) → `/dashboard/aoi/new` → `POST /api/aoi` → AOI persisted is in place. **The terminal event of the SLA — a "watch confirmed" email (Flow 1 step 5) — still does not fire**, and there is no first-AOI backfill (Flow 1 step 6). Until both ship, the 5-min SLA is structurally unmeasurable. | Stage 9 (`pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`) is the gating stage. Once Stage 9 ships, run a measured cold-start in a clean browser; if the email arrives within 5 min, this row flips to `passing`. |
 | 3 | Infra cost claim holds. 7 consecutive days at ≥ 10 AOIs cost ≤ $1 across Vercel + Neon + AI Gateway. | not started | Cannot be measured until a real user load exists. Architecture target ($0 at 50u/100 AOIs) is documented in `docs/pivot-architecture.md`. | Post-launch observation. Also gated on the Vercel-Hobby blocker being resolved (the legal status of the hosting tier affects whether this metric is even measurable on the chosen infra). |
 | 4 | Brief schema conformance = 100%. Every persisted brief validates against the v1 Zod schema; failures logged as gate misses. | passing | Stage 3 plumbing in `lib/ai/generate.ts` calls Gemini in structured-output mode with the Zod schema in `lib/ai/schema.ts`. Validation failure paths are tested. Persistence only happens after schema-validation success. | None — passing. |
 | 5 | P95 end-to-end latency ≤ 18 min from FIRMS detection to brief send. | not started | Latency telemetry exists per-brief (`aoi_briefs.latency_ms` is the AI gateway call, not end-to-end). End-to-end measurement requires real FIRMS-poll → brief-send timestamps from production runs. | Post-launch observation. Stage 8 may add a `data_freshness` surface that lights this up for the user as well. |
@@ -43,13 +43,13 @@ launch-week metrics. The actually-blocking gaps are #1, #2, #8, #9, #10.
 
 ## What needs to happen, in order
 
-1. **Stage 7 (`pm/briefs/21-stage7-launch-readiness-ui.md`)** flips
-   #2 from `partial` to a measurable state by adding the draw-on-map
-   path and the snooze/pause/unsubscribe links a non-Vanyo user
-   needs. Stage 7 alone does not flip #2 to `passing` because the
-   "watch confirmed" email of Flow 1 step 5 is explicitly out of
-   Stage 7 scope; that's a separate tiny chore PM will queue after
-   Stage 7 lands.
+1. **Stage 9 (`pm/briefs/23-stage9-watch-confirmed-and-first-poll-backfill.md`)**
+   flips #2 from `partial` (unmeasurable) to measurable by shipping
+   the watch-confirmed email (Flow 1 step 5) and first-AOI backfill
+   (Flow 1 step 6). Stage 7 (PR #406) already shipped the draw-on-map
+   path; Stage 9 closes the remaining cold-start gap. Once Stage 9
+   merges and a clean-browser cold-start is timed, #2 flips to
+   `passing`.
 2. **License chore** — one-line PR adding a top-level `LICENSE` file
    flips #8 from `partial` to `passing` (assuming the repo is already
    public on GitHub).
@@ -58,10 +58,10 @@ launch-week metrics. The actually-blocking gaps are #1, #2, #8, #9, #10.
    (positive confirmation) or to a small docs PR writing the rollback
    runbook (negative confirmation).
 4. **Stage 8** (perimeter fetch + data-freshness honesty + outreach
-   plan) addresses the "thesis adherence pending data fan-out" point
-   from the review §1 — not strictly required for launch acceptance
-   but materially improves the brief depth that #1's eventual real
-   user will judge the tool on.
+   plan) ✅ merged (PR #411). NIFC + CWFIS perimeters shipped; ICNF
+   deferred to v1.1 (active blocker). The thesis-adherence improvement
+   for the brief depth that #1's eventual real user will judge the
+   tool on is now in `master` for North American AOIs.
 5. **Real LTA contact** (Vanyo-actionable — review §6 calls this
    out): walk one named user through cold-start → first brief.
    Without this step #1 cannot pass and #9 should not post.
