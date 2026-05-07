@@ -6,23 +6,13 @@ Full thesis: [`pm/north-star.md`](pm/north-star.md). Pivot history: [`pm/decisio
 
 ## Status
 
-Mid-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis) has been removed. Active work is on the Next.js / Drizzle / Neon / Vercel-cron implementation.
+Post-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis) has been removed. The A' implementation — AOI CRUD, FIRMS polling, AI-Gateway brief generation, Resend dispatch, Clerk auth, rules UI / export — is on `master`.
 
-| Stage | Description | State |
-|---|---|---|
-| 0 | Next.js 16 scaffold | merged |
-| 1 | AOI CRUD + Drizzle schema | merged |
-| 2 | FIRMS poll + AOI matcher + Actions cron | merged |
-| 3 | Brief generation (AI Gateway) | next |
-| 4 | Notification dispatch (Resend) | pending |
-| 5 | Auth (Clerk) | pending |
-| 6 | Rules UI / export | pending |
-
-Authoritative status: [`pm/backlog.md`](pm/backlog.md).
+Authoritative stage / backlog status: [`pm/backlog.md`](pm/backlog.md).
 
 ## Stack
 
-Next.js 16 · Drizzle ORM · Neon (Postgres 16 + PostGIS 3.5) · Vercel · GitHub Actions cron · TypeScript 5 · vitest · pnpm 10.
+Next.js 16 · React 19 · Drizzle ORM · Neon (Postgres 16 + PostGIS 3.5) · Clerk auth (Svix-verified webhooks) · Vercel AI Gateway (`@ai-sdk/gateway`) · Resend · MapLibre GL · Tailwind 4 · GitHub Actions cron · TypeScript 5 · vitest · pnpm 10.
 
 ## Quick start
 
@@ -53,4 +43,4 @@ Doctrine for human + AI agents: [`AGENTS.md`](AGENTS.md), [`pm/PM_CLAUDE.md`](pm
 
 ## License
 
-TBD — non-profit / donations-compatible. See ADR 0003 for the constraint.
+Apache-2.0 — see [`LICENSE`](LICENSE). Donations-compatible; see ADR 0003 for the constraint that drove the choice.
