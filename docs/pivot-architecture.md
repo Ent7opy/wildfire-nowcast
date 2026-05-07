@@ -15,17 +15,17 @@ The pipeline:
 ```
 GitHub Actions cron (*/15 min)
     └─→ POST /api/aoi/poll  (CRON_SECRET bearer)
+          ├─→ pruneOldDetections() — 14-day retention sweep (runs first so failures surface on the parent job_runs row)
           ├─→ enumerate active 5°×5° buckets from `aois.region_bucket`
-          ├─→ per bucket:
-          │     1. fetchAreaCsv()   — NASA FIRMS area-CSV API
-          │     2. matchDetectionsToAois()  — PostGIS ST_DWithin + dedupe
-          │     3. for each new event: generateBriefForEvent()
-          │           ├─→ evaluateGate()              — pure-TS pre-LLM filter
-          │           ├─→ pre-fetch authority perimeter (NIFC/CWFIS)
-          │           ├─→ generateBriefViaGateway()   — Vercel AI Gateway → Gemini
-          │           └─→ INSERT aoi_briefs, UPDATE aoi_events.last_brief_at
-          │     4. dispatchBrief() → Resend email + signed action tokens
-          └─→ pruneOldDetections() — 14-day retention sweep
+          └─→ per bucket:
+                1. fetchAreaCsv()   — NASA FIRMS area-CSV API
+                2. matchDetectionsToAois()  — PostGIS ST_DWithin + dedupe
+                3. for each new event: generateBriefForEvent()
+                      ├─→ evaluateGate()              — pure-TS pre-LLM filter
+                      ├─→ pre-fetch authority perimeter (NIFC/CWFIS)
+                      ├─→ generateBriefViaGateway()   — Vercel AI Gateway → Gemini
+                      └─→ INSERT aoi_briefs, UPDATE aoi_events.last_brief_at
+                4. dispatchBrief() → Resend email + signed action tokens
 ```
 
 Everything else — dashboard, AOI editor, brief view, share links, exports, sign-in — is Next.js App Router pages and API routes on the same Vercel deployment. Per-user authentication via Clerk; AOIs are scoped by `users.id` (Clerk user id is the PK).
@@ -170,7 +170,7 @@ Migrations are hand-authored SQL in `db/migrations/0000_init.sql` … `0006_stag
 | R2 | **GitHub Actions cron drift** during a GH incident → AOIs go silent. | Detected by `job_runs` gap query (Stage 8 freshness). | Per-bucket `outcome` + `retry_pending` surfaced in the dashboard freshness banner so users see staleness rather than silently degraded results. |
 | R3 | **FIRMS rate limit** (5,000 tx / 10 min) breached during a major event with many overlapping buckets. | Bucket coalescing already in place; `job_runs.outcome='rate_limited'` recorded. | Per-bucket circuit-breaker skips one cycle and retries next tick; users see one stale 15-min window, not an outage. |
 | R4 | **LLM cost blow-up** if the gate is too permissive. | Gate enforced in `lib/ai/gate.ts` with branch tests; `aoi_briefs.cost_usd_est` telemetered. | Kill-switch via missing `AI_GATEWAY_API_KEY` (briefs degrade to threshold-only notifications via `lib/notify/` fallback path). Per-AOI rebrief suppression in the gate caps fan-out. |
-| R5 | **Neon Free 0.5 GB exceeded** as `firms_detections` grows. | 14-day prune sweep runs at the end of every poll (`pruneOldDetections`); `job_runs.detections_pruned` recorded. | Storage envelope at 500 users / 1,000 AOIs ≈ 45 MB — well inside Free. Neon Launch $19/mo is the documented escalation. |
+| R5 | **Neon Free 0.5 GB exceeded** as `firms_detections` grows. | 14-day prune sweep runs at the start of every poll, before the per-bucket loop, so retention failures surface on the parent `job_runs` row (`pruneOldDetections`); `job_runs.detections_pruned` recorded. | Storage envelope at 500 users / 1,000 AOIs ≈ 45 MB — well inside Free. Neon Launch $19/mo is the documented escalation. |
 | R6 | **Mediterranean briefs lack authority context.** Stage 8 ships NIFC + CWFIS only; ICNF / fogos.pt has no public polygon feed. | Unresolved — `pm/blockers.md` 2026-05-07. | Vanyo to ask ICNF directly, or accept ICNF deferral to v1.1. Briefs still ship without authority context for non-US/CA AOIs; the renderer omits the section cleanly. |
 
 ---
