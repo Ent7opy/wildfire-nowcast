@@ -43,17 +43,33 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => "bytea",
 });
 
+/**
+ * Stewardship users (Clerk-backed). Stage 1 baseline; Stage 5 adopted Clerk
+ * user_ids verbatim as the PK (no separate internal id). Rows arrive via the
+ * Clerk webhook + JIT path in `withDb` — never via a stub seed in production.
+ */
 export const users = pgTable("users", {
   id: text("id").primaryKey(), // Clerk user_id (e.g. "user_2abc...")
-  email: text("email").notNull(),
+  email: text("email").notNull(), // mirrors Clerk primary_email; updated by webhook
   displayName: text("display_name"),
+  /**
+   * BYO Gemini key, deferred from v1 (ADR 0005). Encrypted at write time and
+   * never returned to clients. Modeled now so Stage 5+ migrations are stable;
+   * currently unused — brief generation uses the platform AI Gateway key.
+   */
   geminiApiKeyEnc: bytea("gemini_api_key_enc"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
+  /** Soft-delete marker. AOIs cascade-delete on hard removal; this column is
+   * reserved for the GDPR-style soft-delete flow and is currently unused. */
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
 });
 
+/**
+ * Per-user "place I care about" polygon — the load-bearing entity of the A'
+ * pivot. One AOI = one watch target = one cron fan-out unit. Stage 1.
+ */
 export const aois = pgTable(
   "aois",
   {
@@ -63,9 +79,14 @@ export const aois = pgTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    name: text("name").notNull(),
+    name: text("name").notNull(), // user-visible label; unique per active AOI per user
+    /** MultiPolygon (SRID 4326) — the watched geometry. Even single-ring AOIs
+     * are stored as MultiPolygon so the matcher can treat all rows uniformly. */
     polygon: geometry("polygon", { srid: 4326, subtype: "MultiPolygon" }).notNull(),
+    /** Denormalized envelope for cheap pre-filter joins against FIRMS points
+     * before the matcher does the precise polygon distance check. */
     bbox: geometry("bbox", { srid: 4326, subtype: "Polygon" }).notNull(),
+    /** Cached centroid; drives `regionBucket` derivation and "near me" sort. */
     centroid: geometry("centroid", { srid: 4326, subtype: "Point" }).notNull(),
     /**
      * Coarse 5°×5° tile key, derived from the centroid by floor() at create
@@ -82,6 +103,9 @@ export const aois = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    /** Soft-archive marker. Archived AOIs are excluded from the cron fan-out
+     * and the `(user_id, name)` uniqueness check, but their event/brief
+     * history is preserved. */
     archivedAt: timestamp("archived_at", { withTimezone: true }),
   },
   (table) => [
@@ -94,6 +118,11 @@ export const aois = pgTable(
   ],
 );
 
+/**
+ * Per-AOI alerting policy — gate thresholds, quiet hours, channels. 1:1 with
+ * `aois` via PK = aoi_id. Stage 1 (baseline columns); Stage 4 added
+ * `notifyChannels`; Stage 6 powers the rules UI.
+ */
 export const aoiRules = pgTable("aoi_rules", {
   aoiId: uuid("aoi_id")
     .primaryKey()
@@ -120,7 +149,10 @@ export const aoiRules = pgTable("aoi_rules", {
    */
   pausedUntil: timestamp("paused_until", { withTimezone: true }),
   /**
-   * Notification channels.
+   * Notification channels — Stage 4. JSON array consumed by the dispatcher
+   * to fan out to each `{type, target}` pair. Empty array = no delivery
+   * (history still accumulates). Webhook entries are recorded as `skipped`
+   * with `skip_reason='channel_not_implemented'` until a future stage.
    *   [{ type: "email", target: "..." }, { type: "webhook", target: "https://..." }]
    */
   notifyChannels: jsonb("notify_channels")
@@ -152,7 +184,7 @@ export const aoiRules = pgTable("aoi_rules", {
  */
 export const firmsDetections = pgTable("firms_detections", {
   id: bigserial("id", { mode: "bigint" }).primaryKey(),
-  source: text("source").notNull(),
+  source: text("source").notNull(), // part of the dedupe key (see table doc)
   detectedAt: timestamp("detected_at", { withTimezone: true }).notNull(),
   geom: geometry("geom", { srid: 4326, subtype: "Point" }).notNull(),
   lat: doublePrecision("lat").notNull(),
@@ -238,7 +270,13 @@ export const aoiBriefs = pgTable("aoi_briefs", {
   model: text("model").notNull(),
   /** Prompt template version pinned in `lib/ai/prompt.ts`, e.g. "v1". */
   promptVersion: text("prompt_version").notNull().default("v1"),
-  /** Gate condition that triggered this brief: see lib/ai/gate.ts GateReason. */
+  /**
+   * Which of the four SPEC §Flow 6 gate conditions fired (or the rejection
+   * reason if a brief was generated for audit but suppressed). One of:
+   * `new_event` | `escalation` | `state_change` | `daily_digest` |
+   * `rejected_*`. See `lib/ai/gate.ts#GateReason`. Drives gate pass-rate
+   * dashboards post-launch.
+   */
   gateReason: text("gate_reason").notNull(),
   payload: jsonb("payload").notNull(),
   renderedMarkdown: text("rendered_markdown").notNull(),
@@ -246,7 +284,13 @@ export const aoiBriefs = pgTable("aoi_briefs", {
   costUsdEst: numeric("cost_usd_est", { precision: 10, scale: 6 }),
   /** Wall-clock latency of the gateway call in milliseconds. */
   latencyMs: integer("latency_ms"),
+  /**
+   * Stage 6 — opaque random token granting unauthenticated read access to
+   * this brief at `/share/<token>`. NULL until the owner explicitly enables
+   * sharing; rotated by re-issuing.
+   */
   shareToken: text("share_token"),
+  /** Stage 6 — hard expiry for the share link; route returns 404 past it. */
   shareExpiresAt: timestamp("share_expires_at", { withTimezone: true }),
   /** Set when Stage 4's dispatcher records the first successful send. */
   lastNotifiedAt: timestamp("last_notified_at", { withTimezone: true }),
@@ -370,11 +414,16 @@ export const notifyActionTokens = pgTable(
     briefId: uuid("brief_id").references(() => aoiBriefs.id, {
       onDelete: "set null",
     }),
+    /** Stage 7 — `snooze` | `pause` | `unsubscribe` | `feedback`. The action
+     * the recipient is authorized to perform when this token is redeemed. */
     action: text("action").notNull(),
     channel: text("channel").notNull(),
     target: text("target").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** Set on first successful redemption. Subsequent redemptions are 404'd
+     * (see `chore(security): collapse notify-action failure modes`). */
     redeemedAt: timestamp("redeemed_at", { withTimezone: true }),
+    /** Only used by `action='feedback'` — `"yes"` | `"no"`. */
     redeemedValue: text("redeemed_value"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -382,6 +431,11 @@ export const notifyActionTokens = pgTable(
   },
 );
 
+/**
+ * Stage 7 — thumbs up/down on a brief, captured by redeeming a feedback
+ * `notify_action_tokens` row. One vote per (brief, recipient_token) — the
+ * unique index prevents ballot-stuffing if a recipient clicks twice.
+ */
 export const briefFeedback = pgTable(
   "brief_feedback",
   {
