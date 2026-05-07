@@ -283,7 +283,11 @@ export function RulesForm({
         >
           {busy ? "Saving…" : "Save rules"}
         </button>
-        {msg ? <span className="text-sm">{msg}</span> : null}
+        {msg ? (
+          <span role="status" aria-live="polite" className="text-sm">
+            {msg}
+          </span>
+        ) : null}
       </div>
     </div>
   );

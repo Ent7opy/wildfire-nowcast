@@ -61,29 +61,22 @@ export async function handleAction(
 
   const now = new Date();
 
-  // Pre-load so we can render specific failure messages.
+  // Collapse all redemption-failure modes (missing token, wrong action, expired)
+  // to a single 404 with an opaque message. Distinguishing them in the response
+  // would let an attacker who guessed a valid token use the four endpoints as an
+  // oracle for which (action, channel, target) it is bound to. With 256-bit
+  // entropy the practical attack is moot, but the principle costs us nothing.
   const loaded = await loadActionToken(db, token);
-  if (!loaded) {
+  const invalid =
+    !loaded ||
+    loaded.action !== action ||
+    loaded.expiresAt.getTime() <= now.getTime();
+  if (invalid) {
     return htmlResponse(
       404,
-      renderError("Link not found", "This action link is invalid or has been deleted."),
-    );
-  }
-  if (loaded.action !== action) {
-    return htmlResponse(
-      400,
       renderError(
-        "Wrong action",
-        "This link does not match the requested action.",
-      ),
-    );
-  }
-  if (loaded.expiresAt.getTime() <= now.getTime()) {
-    return htmlResponse(
-      410,
-      renderError(
-        "Link expired",
-        "This link has expired. You can adjust this AOI from the dashboard.",
+        "Link not found",
+        "This link is invalid or has expired. You can adjust this AOI from the dashboard.",
       ),
     );
   }
@@ -96,8 +89,11 @@ export async function handleAction(
   });
   if (!result.ok) {
     return htmlResponse(
-      400,
-      renderError("Could not redeem", `Redemption failed: ${result.reason}`),
+      404,
+      renderError(
+        "Link not found",
+        "This link is invalid or has expired. You can adjust this AOI from the dashboard.",
+      ),
     );
   }
 

@@ -23,6 +23,7 @@ Each segment is timed independently so the slowest leg is identifiable.
   - The Nature Conservancy preserve outlines — TNC operates a public ArcGIS portal; locate a preserve feature service and export one preserve as GeoJSON.
   - Natura 2000 site polygons — the European Environment Agency publishes the Natura 2000 dataset; download a single SCI/SPA polygon.
   - Fallback: a hand-drawn polygon over a known active-fire region, captured in geojson.io.
+- **Polygon area cap**: AOI creation enforces a 100,000 hectare (1,000 km²) maximum (see `lib/db/aoi-repository.ts` `MAX_AREA_HA`). Many TNC preserves and Natura 2000 SCI/SPA polygons exceed this — sometimes substantially. Choose a polygon under 1,000 km² OR pre-clip to a representative sub-region. The 400 you get on oversized polygons is the AOI repo's area cap, not a runbook bug.
 - **Region**: Pick an AOI overlapping a region with current or recent fire activity (e.g. summer Mediterranean, dry-season tropics, late-summer western US). For backfill testing specifically, use a polygon over a region known to have had detections in the last 24 h. Cross-check with the FIRMS public map before starting.
 - **Resend**: Production mode, with a real inbox you can monitor in real time (have it open in another tab).
 - **Server state**: `master` HEAD with Stage 9 deployed to Vercel. Confirm the deploy is green before T₀.

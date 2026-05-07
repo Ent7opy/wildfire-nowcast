@@ -27,12 +27,12 @@ export function AoiList({ rows }: { rows: AoiListRow[] }) {
       <table className="min-w-full text-sm">
         <thead>
           <tr className="border-b text-left">
-            <th className="py-2 pr-4">Name</th>
-            <th className="py-2 pr-4">Area (ha)</th>
-            <th className="py-2 pr-4">Region</th>
-            <th className="py-2 pr-4">Created</th>
-            <th className="py-2 pr-4">Last brief</th>
-            <th className="py-2 pr-4">Status</th>
+            <th scope="col" className="py-2 pr-4">Name</th>
+            <th scope="col" className="py-2 pr-4">Area (ha)</th>
+            <th scope="col" className="py-2 pr-4">Region</th>
+            <th scope="col" className="py-2 pr-4">Created</th>
+            <th scope="col" className="py-2 pr-4">Last brief</th>
+            <th scope="col" className="py-2 pr-4">Status</th>
           </tr>
         </thead>
         <tbody>

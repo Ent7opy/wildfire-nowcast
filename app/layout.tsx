@@ -10,7 +10,10 @@ export const metadata: Metadata = {
 
 function ClerkConfigBanner() {
   return (
-    <div className="bg-yellow-100 px-4 py-2 text-center text-sm text-yellow-900">
+    <div
+      role="status"
+      className="bg-yellow-100 px-4 py-2 text-center text-sm text-yellow-900"
+    >
       Auth not configured — running in read-only public mode.
     </div>
   );
