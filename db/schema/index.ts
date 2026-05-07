@@ -270,9 +270,18 @@ export const notificationsLog = pgTable("notifications_log", {
   aoiId: uuid("aoi_id")
     .notNull()
     .references(() => aois.id, { onDelete: "cascade" }),
-  briefId: uuid("brief_id")
-    .notNull()
-    .references(() => aoiBriefs.id, { onDelete: "cascade" }),
+  /**
+   * Stage 9: nullable so watch-confirmed rows (no brief) can be persisted.
+   * Stage 4 brief-dispatch rows still set this to a non-null aoi_briefs.id.
+   */
+  briefId: uuid("brief_id").references(() => aoiBriefs.id, {
+    onDelete: "cascade",
+  }),
+  /**
+   * Stage 9: "brief" (Stage 4 dispatch) | "watch_confirmed" (Stage 9 one-shot
+   * AOI-creation email). Defaulted to 'brief' so historical rows are honest.
+   */
+  kind: text("kind").notNull().default("brief"),
   /** "email" for v1; "webhook" reserved (always recorded as skipped). */
   channel: text("channel").notNull(),
   /** Plaintext recipient (operator-readable). */

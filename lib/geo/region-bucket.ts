@@ -30,3 +30,18 @@ export function regionBucketFromLonLat(lon: number, lat: number): string {
   const latHemi = swLat < 0 ? "S" : "N";
   return `5x5:${lonHemi}${lonAbs}_${latHemi}${latAbs}`;
 }
+
+const BUCKET_RE = /^5x5:([EW])(\d{3})_([NS])(\d{2})$/;
+
+/**
+ * Human-readable rendering of a region-bucket key for email/UI copy.
+ * Produces a short string like "5°×5° tile, SW corner 125°W 35°N".
+ */
+export function humanizeRegionBucket(bucket: string): string {
+  const m = BUCKET_RE.exec(bucket);
+  if (!m) return bucket;
+  const [, lonHemi, lonAbs, latHemi, latAbs] = m;
+  const lon = `${parseInt(lonAbs, 10)}°${lonHemi}`;
+  const lat = `${parseInt(latAbs, 10)}°${latHemi}`;
+  return `5°×5° tile, SW corner ${lon} ${lat}`;
+}
