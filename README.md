@@ -6,7 +6,7 @@ Full thesis: [`pm/north-star.md`](pm/north-star.md). Pivot history: [`pm/decisio
 
 ## Status
 
-Post-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis) has been removed. The A' implementation — AOI CRUD, FIRMS polling, AI-Gateway brief generation, Resend dispatch, Clerk auth, rules UI / export — is on `master`.
+Post-pivot (Q2 2026). The pre-pivot stack (FastAPI + Vite + Redis) has been removed. The A' implementation — AOI CRUD, FIRMS polling, AI-Gateway brief generation, Resend dispatch, Clerk auth, rules UI / export — is on `master`. Creating an AOI sends a "now watching" confirmation email and immediately backfills the last 24h of FIRMS for that polygon, so users get a brief right away if there's already active fire near their site instead of waiting for the next 15-minute cron tick.
 
 Authoritative stage / backlog status: [`pm/backlog.md`](pm/backlog.md).
 
