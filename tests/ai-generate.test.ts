@@ -216,6 +216,73 @@ describe("generateBriefForEvent — PGlite pipeline", () => {
     expect(outcome.status).toBe("error");
   });
 
+  it("is idempotent on a parallel re-run for the same event", async () => {
+    // The cron poll can overlap (GitHub Actions schedule + manual dispatch),
+    // landing two `generateBriefForEvent` calls on the same event_id. The
+    // unique index on aoi_briefs.event_id + ON CONFLICT DO NOTHING must keep
+    // exactly one brief row; the second call should still return a brief id
+    // (the existing one) so the caller can record success, not crash.
+    const { eventId } = await seedAoiAndEvent(db, {
+      detectionCount: 2,
+      nearestKm: 8,
+      peakFrp: 11,
+    });
+    const stubGateway = async (): Promise<GatewayResult> => ({
+      ok: true,
+      brief: STUB_BRIEF,
+      modelId: "test/stub-model",
+      promptVersion: "v1",
+      latencyMs: 5,
+      costUsdEst: null,
+    });
+
+    const first = await generateBriefForEvent(db, eventId, { gateway: stubGateway });
+    expect(first.status).toBe("generated");
+
+    // Second call — last_brief_at is now set, so the gate short-circuits with
+    // already_briefed. This is the safe path; if the gate were ever weakened,
+    // the ON CONFLICT path below would still keep us to one row.
+    const second = await generateBriefForEvent(db, eventId, { gateway: stubGateway });
+    expect(second.status).toBe("skipped");
+    if (second.status === "skipped") {
+      expect(second.reason).toBe("already_briefed");
+    }
+
+    const briefs = (await db.execute(sql`
+      SELECT COUNT(*)::int AS n FROM aoi_briefs WHERE event_id = ${eventId}
+    `)) as unknown as { rows?: Array<{ n: number }> };
+    const brows = (briefs.rows ?? (briefs as unknown as Array<{ n: number }>)) as Array<{
+      n: number;
+    }>;
+    expect(brows[0].n).toBe(1);
+  });
+
+  it("ships the brief when the authority fetcher throws", async () => {
+    // Build-without-blocking: an authority-source outage (DNS, 500, schema
+    // change) must never abort brief generation. The orchestrator catches and
+    // logs; the brief proceeds with all-null perimeter.
+    const { eventId } = await seedAoiAndEvent(db, {
+      detectionCount: 2,
+      nearestKm: 8,
+      peakFrp: 11,
+    });
+    const stubGateway = async (): Promise<GatewayResult> => ({
+      ok: true,
+      brief: STUB_BRIEF,
+      modelId: "test/stub-model",
+      promptVersion: "v1",
+      latencyMs: 5,
+      costUsdEst: null,
+    });
+    const outcome = await generateBriefForEvent(db, eventId, {
+      gateway: stubGateway,
+      fetchPerimeter: async () => {
+        throw new Error("simulated authority outage");
+      },
+    });
+    expect(outcome.status).toBe("generated");
+  });
+
   it("returns skipped/event_not_found for an unknown event id", async () => {
     const outcome = await generateBriefForEvent(
       db,

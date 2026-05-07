@@ -126,6 +126,58 @@ describe("renderBriefMarkdown — snapshot of the worked example", () => {
     `);
   });
 
+  it("renders authority perimeter with source and contains_detection=true", () => {
+    // Stewardship users read this line literally — it's the headline answer to
+    // "is the official perimeter inside my polygon?" — so lock the exact string.
+    const withPerim: Brief = {
+      ...FIXTURE,
+      context: {
+        ...FIXTURE.context,
+        authority_perimeter: {
+          source: "PT-ICNF",
+          posted_ts: "2026-04-21T04:00:00Z",
+          contains_detection: true,
+        },
+      },
+    };
+    const md = renderBriefMarkdown(withPerim);
+    expect(md).toContain(
+      "Authority perimeter: PT-ICNF (posted 2026-04-21T04:00:00Z), contains detection.",
+    );
+  });
+
+  it("renders perimeter source without posted_ts and contains_detection=false", () => {
+    const partial: Brief = {
+      ...FIXTURE,
+      context: {
+        ...FIXTURE.context,
+        authority_perimeter: {
+          source: "CAL FIRE",
+          posted_ts: null,
+          contains_detection: false,
+        },
+      },
+    };
+    const md = renderBriefMarkdown(partial);
+    expect(md).toContain(
+      "Authority perimeter: CAL FIRE, does not contain detection.",
+    );
+  });
+
+  it("omits the bearing suffix when bearing_from_aoi_deg is null", () => {
+    // No-fabrication path: when the orchestrator can't derive a bearing
+    // (centroid or detection lat/lon missing), the renderer must NOT print a
+    // direction. Currently the only test of bearing-null also nulls wind, so
+    // verify the bearing branch in isolation.
+    const noBearing: Brief = {
+      ...FIXTURE,
+      key_facts: { ...FIXTURE.key_facts, bearing_from_aoi_deg: null },
+    };
+    const md = renderBriefMarkdown(noBearing);
+    expect(md).toContain("- Nearest detection: 14.0 km\n");
+    expect(md).not.toMatch(/Nearest detection:.*@/);
+  });
+
   it("falls back gracefully when wind / perimeter / prior_events are absent", () => {
     const minimal: Brief = {
       ...FIXTURE,
