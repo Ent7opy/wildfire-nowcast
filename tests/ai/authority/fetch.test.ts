@@ -249,23 +249,12 @@ describe("fetchAuthorityPerimeter", () => {
       regionBucket: NIFC_BUCKET,
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    // The mean-of-vertices centroid sits between the two polygons; with two
-    // 0.05° squares centered ~5° apart it's ~2.5° from the detection — outside
-    // the 25 km default radius. Bump radius to confirm MultiPolygon iteration
-    // and PIP both work end-to-end.
-    expect(r).toBeNull();
-
-    const fetchImpl2 = vi.fn().mockResolvedValue(jsonResponse(collection));
-    const r2 = await fetchAuthorityPerimeter({
-      lat: detLat,
-      lon: detLon,
-      regionBucket: NIFC_BUCKET,
-      radiusKm: 1000,
-      fetchImpl: fetchImpl2 as unknown as typeof fetch,
-    });
-    expect(r2).not.toBeNull();
-    expect(r2!.containsDetection).toBe(true);
-    expect(r2!.rawFeatureId).toBe("42");
+    // Min-distance over per-polygon centroids: the polygon centered on the
+    // detection wins, so the feature passes the default-radius filter and PIP
+    // confirms containment.
+    expect(r).not.toBeNull();
+    expect(r!.containsDetection).toBe(true);
+    expect(r!.rawFeatureId).toBe("42");
   });
 
   it("returns null when no features are in radius", async () => {
