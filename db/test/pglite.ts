@@ -10,30 +10,24 @@
  * @testcontainers/postgresql harness instead — see `db/test/testcontainer.ts`.
  */
 import { PGlite } from "@electric-sql/pglite";
+import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makePgliteDb, type AppDb } from "@/lib/db/client";
-
-/** Order matters — Stage N depends on Stage N-1. */
-const MIGRATIONS = [
-  "0000_init.test.sql",
-  "0001_stage2.test.sql",
-  "0002_stage3.test.sql",
-  "0003_stage4.test.sql",
-  "0004_stage5.test.sql",
-  "0005_stage7.test.sql",
-  "0006_stage8.test.sql",
-] as const;
 
 let cachedDDL: string | null = null;
 
 async function loadDDL(): Promise<string> {
   if (cachedDDL) return cachedDDL;
-  const parts: string[] = [];
-  for (const file of MIGRATIONS) {
-    const path = join(process.cwd(), "db", "migrations", file);
-    parts.push(await readFile(path, "utf8"));
-  }
+  const dir = join(process.cwd(), "db", "migrations");
+  // Enumerate PGlite-compatible migration variants dynamically. Filename
+  // pattern `NNNN_*.test.sql` is zero-padded so lexicographic sort == numeric.
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(".test.sql"))
+    .sort();
+  const parts = await Promise.all(
+    files.map((f) => readFile(join(dir, f), "utf8")),
+  );
   cachedDDL = parts.join("\n");
   return cachedDDL;
 }
