@@ -68,6 +68,7 @@ export default async function AoiPage({ params }: Params) {
         <div className="mt-4">
           <AoiMapClient
             mode="view"
+            name={aoi.name}
             polygon={aoi.polygon}
             bbox={aoi.bbox}
             centroid={aoi.centroid}

@@ -38,6 +38,7 @@ type DetectionPoint = {
 export type AoiMapProps =
   | {
       mode: "view";
+      name?: string;
       polygon: GeoJSONPolygon | GeoJSONMultiPolygon;
       bbox: GeoJSONPolygon;
       centroid: GeoJSONPoint;
@@ -107,17 +108,18 @@ export function AoiMap(props: AoiMapProps): React.ReactElement {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const ariaLabel =
+    props.mode === "view"
+      ? `Map of AOI ${props.name ?? "(unnamed)"}, polygon outlined, recent fire detections plotted`
+      : "Map for drawing an AOI polygon; click to add vertices, double-click to finish";
+
   return (
     <div className="w-full">
       <div
         ref={containerRef}
         data-testid="aoi-map-container"
         role="img"
-        aria-label={
-          props.mode === "view"
-            ? "Map of the area of interest with matched FIRMS detections"
-            : "Interactive map for drawing the area-of-interest polygon (mouse-required)"
-        }
+        aria-label={ariaLabel}
         className="h-[420px] w-full rounded border border-[color:var(--muted)]"
         style={{ minHeight: 320 }}
       />
